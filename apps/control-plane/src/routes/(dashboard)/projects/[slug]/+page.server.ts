@@ -286,6 +286,8 @@ export const load: PageServerLoad = async ({ locals, params, url }) => {
 			gitSource,
 			workload,
 			workloadSpec,
+			scaling: project.runtime === 'static' ? null : safely(() => core.scaling.view(principal, row), null),
+			relocation: project.runtime === 'static' ? null : safely(() => core.relocations.latest(principal, row), null),
 			registryImages,
 			runnerPool,
 			secrets,
@@ -1094,7 +1096,8 @@ export const actions: Actions = {
 		const input: Record<string, unknown> = {
 			...existing,
 			ingress,
-			replicas: ingress === 'none' ? numberField(data, 'replicas', existing.replicas) : 1
+			// An HTTP app's copies are set on the Scaling tab; this form leaves them alone.
+			replicas: ingress === 'none' ? numberField(data, 'replicas', existing.replicas) : existing.replicas
 		};
 		// A worker has no requests to wake it, so becoming one turns scale to zero off (D121).
 		if (ingress === 'none') delete input.idleStopSeconds;
@@ -1122,6 +1125,88 @@ export const actions: Actions = {
 					? `Worker settings saved: ${parsed.data.replicas} ${parsed.data.replicas === 1 ? 'copy' : 'copies'}, no public route.`
 					: 'Worker settings saved. The app gets its route back on the next reconcile.'
 		};
+	},
+
+	// --- Scaling (docs/SCALING.md) --------------------------------------------
+
+	scale: async ({ request, locals, params }) => {
+		const principal = locals.principal!;
+		const data = await request.formData();
+		try {
+			const project = core.projects.requireRow(principal, params.slug);
+			const result = core.scaling.scale(principal, project, { replicas: Number(formString(data, 'replicas')) });
+			if (result.from === result.to) return { success: `Already running ${result.to} ${result.to === 1 ? 'copy' : 'copies'}.` };
+			const where = result.added.map((copy) => copy.nodeName).join(', ');
+			return {
+				success:
+					result.to > result.from
+						? `Scaling to ${result.to} copies${where ? `: starting on ${where}` : ''}.`
+						: `Scaled down to ${result.to} ${result.to === 1 ? 'copy' : 'copies'}.`
+			};
+		} catch (caught) {
+			return fail(failStatus(caught), toFormFailure(caught));
+		}
+	},
+
+	saveAutoscale: async ({ request, locals, params }) => {
+		const principal = locals.principal!;
+		const data = await request.formData();
+		try {
+			const project = core.projects.requireRow(principal, params.slug);
+			const enabled = formBoolean(data, 'enabled');
+			core.scaling.setPolicy(principal, project, {
+				enabled,
+				min: Number(formString(data, 'min')),
+				max: Number(formString(data, 'max')),
+				metric: formString(data, 'metric'),
+				target: Number(formString(data, 'target')),
+				scaleDownMinutes: Number(formString(data, 'scaleDownMinutes'))
+			});
+			return { success: enabled ? 'Autoscaling is on.' : 'Autoscaling is off. The app keeps the copies it has.' };
+		} catch (caught) {
+			return fail(failStatus(caught), toFormFailure(caught));
+		}
+	},
+
+	moveNode: async ({ request, locals, params }) => {
+		const principal = locals.principal!;
+		const data = await request.formData();
+		const node = formString(data, 'node');
+		try {
+			if (formBoolean(data, 'withData')) {
+				const started = core.relocations.start(principal, params.slug, node ? { node } : {});
+				return { success: `Moving to ${started.to.name} with its data. The app is stopped while the volumes are copied.` };
+			}
+			const moved = core.scheduling.move(principal, params.slug, node ? { node } : {});
+			return {
+				success:
+					moved.mode === 'surge'
+						? `Moving to ${moved.to.name}. The current copy keeps serving until the new one is up.`
+						: `Moving to ${moved.to.name}: it stops here and starts there.`
+			};
+		} catch (caught) {
+			return fail(failStatus(caught), toFormFailure(caught));
+		}
+	},
+
+	cancelMove: async ({ locals, params }) => {
+		const principal = locals.principal!;
+		try {
+			core.relocations.cancel(principal, params.slug);
+			return { success: 'Move cancelled. The app is starting again where it was.' };
+		} catch (caught) {
+			return fail(failStatus(caught), toFormFailure(caught));
+		}
+	},
+
+	resumeRollout: async ({ locals, params }) => {
+		const principal = locals.principal!;
+		try {
+			core.workloads.resumeRollout(principal, core.projects.requireRow(principal, params.slug));
+			return { success: 'Rollout resumed.' };
+		} catch (caught) {
+			return fail(failStatus(caught), toFormFailure(caught));
+		}
 	},
 
 	saveWorkload: async ({ request, locals, params }) => {

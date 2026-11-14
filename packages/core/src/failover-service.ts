@@ -26,7 +26,7 @@ import { ControlPlaneLease, SqliteLeaseStore, type LeaseDecision } from './lease
 import { OFFLINE_AFTER_MS } from './nodes.ts';
 import { buildSystemPrincipal } from './iam/system.ts';
 import { newId, parseJson, randomToken } from './util.ts';
-import type { ReplicaCopy } from './workloads.ts';
+import type { MoveReason, ReplicaCopy } from './workloads.ts';
 
 /**
  * The failover controller (docs/CLUSTERING.md §8.3, §9.3, §11; phase C8).
@@ -129,7 +129,7 @@ interface RotationState {
 }
 
 type EventRow = typeof failoverEvents.$inferSelect;
-type Alert = { key: string; title: string; detail: string; severity: 'info' | 'warning' | 'critical' };
+type Alert = { key: string; title: string; detail: string; severity: 'info' | 'warning' | 'critical'; status?: 'firing' | 'resolved' };
 
 class FencedError extends Error {
 	constructor() {
@@ -218,6 +218,13 @@ export class FailoverService {
 			const facts = this.#nodeFacts(now, config);
 			try {
 				this.#replicaTick(now, config, fence, facts, report, alerts);
+				// Rollouts and autoscaling are this controller's too: one holder, so two control
+				// planes never restart or scale the same app (SCALING §4, §5).
+				alerts.push(...this.ctx.workloads.rolloutTick(now));
+				alerts.push(...(await this.ctx.scaling.autoscaleTick(now)));
+				alerts.push(...this.ctx.links.alerts(now));
+				alerts.push(...this.ctx.relocations.tick(now));
+				this.ctx.scheduling.autoTick(now, config, [...facts.values()].some((fact) => fact.unreachable || fact.status !== 'online'));
 				this.#ingressTick(now, fence, facts, report, alerts);
 				await this.#databaseTick(config, fence, facts, report, alerts);
 			} catch (error) {
@@ -298,6 +305,49 @@ export class FailoverService {
 
 	// ------------------------------------------------------------------ replica copies (§8.3)
 
+	/**
+	 * Record a move another service applied (a rebalance, an operator's move), so it shares this
+	 * controller's history and its completion, timeout and rollback handling. The move counts
+	 * towards the same per-minute limits as a failover.
+	 */
+	trackMove(copy: ReplicaCopy, toNodeId: string, toNodeName: string, why: MoveReason, detail: string): void {
+		const now = this.ctx.now();
+		this.#insertEvent({
+			kind: 'replica',
+			status: 'in-progress',
+			stage: walkFailoverStages('detect', 'promote'),
+			subjectId: copy.id,
+			subjectName: copyLabel(copy),
+			orgId: copy.orgId,
+			fromNodeId: copy.nodeId,
+			toNodeId,
+			reason: `${detail} Moving to ${toNodeName}.`,
+			epoch: this.#lastLease?.epoch ?? 0,
+			detectedAt: now,
+			appliedAt: now,
+		});
+		this.ctx.audit.record({
+			principal: systemPrincipal(copy.orgId),
+			action: why === 'rebalance' ? 'ha.rebalance' : 'ha.move',
+			resource: copy.single ? 'workload' : 'workload_replica',
+			resourceId: copy.id,
+			args: { project: copy.projectSlug, from: copy.nodeId, to: toNodeId, reason: why },
+			result: 'ok',
+		});
+	}
+
+	/** Copies with a move queued or in flight; nothing else should move them meanwhile. */
+	movingCopyIds(): Set<string> {
+		return new Set(
+			this.ctx.db
+				.select({ subjectId: failoverEvents.subjectId })
+				.from(failoverEvents)
+				.where(and(eq(failoverEvents.kind, 'replica'), inArray(failoverEvents.status, OPEN_REPLICA)))
+				.all()
+				.map((row) => row.subjectId),
+		);
+	}
+
 	#replicaTick(
 		now: number,
 		config: ClusterConfig,
@@ -328,10 +378,18 @@ export class FailoverService {
 					copy.status === 'failed'
 						? `The copy failed on ${this.#nodeName(facts, copy.nodeId)}.`
 						: `The copy did not report running on ${this.#nodeName(facts, copy.nodeId)} within 10 minutes.`;
-				this.#finish(fence, event, 'failed', now, reason);
+				// A surge move still has its old copy running: put the workload back on it.
+				const restored = copy.single ? this.ctx.workloads.rollbackMove(copy.id) : false;
+				this.#finish(
+					fence,
+					event,
+					'failed',
+					now,
+					restored ? `${reason} It keeps running on ${this.#nodeName(facts, event.fromNodeId ?? '')}.` : reason,
+				);
 				alerts.push({
 					key: `failover:replica:${copy.id}`,
-					title: `Failover of ${copy.projectSlug} [r${copy.replicaIndex}] failed`,
+					title: `Failover of ${copyLabel(copy)} failed`,
 					detail: reason,
 					severity: 'warning',
 				});
@@ -343,7 +401,9 @@ export class FailoverService {
 		for (const copy of copies) {
 			const node = facts.get(copy.nodeId);
 			if (node?.status === 'draining') needs.set(copy.id, 'drain');
-			else if (config.failover.enabled && (!node || node.replicaLost)) needs.set(copy.id, 'failover');
+			// A copy that may not run twice (a lone worker) waits for a human or a drain (§8.4).
+			else if (config.failover.enabled && copy.autoFailover !== false && (!node || node.replicaLost))
+				needs.set(copy.id, 'failover');
 		}
 
 		// 3. Waiting moves the fleet no longer needs are cancelled; old ones expire and alert.
@@ -367,7 +427,7 @@ export class FailoverService {
 				report.expired += 1;
 				alerts.push({
 					key: `failover:replica:${copy.id}`,
-					title: `Failover of ${copy.projectSlug} [r${copy.replicaIndex}] expired`,
+					title: `Failover of ${copyLabel(copy)} expired`,
 					detail: `The move off ${this.#nodeName(facts, copy.nodeId)} waited 10 minutes and was dropped: ${event.reason}`,
 					severity: 'warning',
 				});
@@ -388,7 +448,7 @@ export class FailoverService {
 				status: 'queued',
 				stage: 'detect',
 				subjectId: copy.id,
-				subjectName: `${copy.projectSlug} [r${copy.replicaIndex}]`,
+				subjectName: `${copyLabel(copy)}`,
 				orgId: copy.orgId,
 				fromNodeId: copy.nodeId,
 				reason,
@@ -450,7 +510,7 @@ export class FailoverService {
 				if (event.status !== 'blocked')
 					alerts.push({
 						key: `failover:replica:${copy.id}`,
-						title: `No node can take ${copy.projectSlug} [r${copy.replicaIndex}]`,
+						title: `No node can take ${copyLabel(copy)}`,
 						detail: `${detection(copy)} ${plan.message}`,
 						severity: 'warning',
 					});
@@ -499,7 +559,7 @@ export class FailoverService {
 			inFlight.add(copy.workloadId);
 			alerts.push({
 				key: `failover:replica:${copy.id}`,
-				title: `Moved ${copy.projectSlug} [r${copy.replicaIndex}] to ${plan.nodeName}`,
+				title: `Moved ${copyLabel(copy)} to ${plan.nodeName}`,
 				detail: `${detection(copy)} The failover controller re-placed the copy on ${plan.nodeName} (lease epoch ${fence.epoch}).`,
 				severity: 'info',
 			});
@@ -1190,6 +1250,14 @@ export class FailoverService {
 				'SELECT last_fired_at, last_value FROM alert_state WHERE key = ?',
 			)
 			.get(alert.key);
+		// A recovery is news only if the problem was reported; it clears the state so the next
+		// occurrence fires again at once.
+		if (alert.status === 'resolved') {
+			if (!last) return;
+			this.ctx.sqlite.run('DELETE FROM alert_state WHERE key = ?', [alert.key]);
+			await this.ctx.alerts.deliverSystem(alert);
+			return;
+		}
 		const cooldown = this.ctx.policies.get().systemAlertRepeatMinutes * 60_000;
 		// The same message inside the cooldown is a repeat; a new outcome for the same subject is not.
 		if (last?.last_fired_at && this.ctx.now() - last.last_fired_at < cooldown && last.last_value === alert.detail) return;
@@ -1242,6 +1310,11 @@ export function startFailoverLoop(service: FailoverService, options: FailoverLoo
 }
 
 /** HTTP copies first, then workers (§8.3 step 3). */
+/** `shop` for a single copy, `shop [r1]` for one copy of a spread set. */
+function copyLabel(copy: Pick<ReplicaCopy, 'projectSlug' | 'replicaIndex' | 'single'>): string {
+	return copy.single ? copy.projectSlug : `${copy.projectSlug} [r${copy.replicaIndex}]`;
+}
+
 function rank(copy: ReplicaCopy): number {
 	return copy.ingress === 'http' ? 0 : 1;
 }

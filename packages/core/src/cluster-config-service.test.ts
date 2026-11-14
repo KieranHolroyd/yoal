@@ -56,6 +56,15 @@ describe('cluster configuration', () => {
 		expect(core.cluster.get().overlay.cidr).toBe('10.99.0.0/22');
 	});
 
+	test('a patch changes only the keys it names, not their neighbours', () => {
+		core.cluster.update(owner, { failover: { graceSeconds: 300, maxPerMinute: 2 } });
+		const updated = core.cluster.update(owner, { failover: { enabled: true } });
+		expect(updated.failover).toEqual({ enabled: true, graceSeconds: 300, maxPerMinute: 2 });
+		core.cluster.update(owner, { failover: { enabled: false, graceSeconds: 120, maxPerMinute: 6 } });
+		// A single bound is checked against the stored other bound.
+		expect(() => core.cluster.update(owner, { endpoints: { portMax: 20000 } })).toThrow(/min < max/);
+	});
+
 	test('refuses an inverted endpoint range', () => {
 		expect(() => core.cluster.update(owner, { endpoints: { portMin: 22000, portMax: 21000 } })).toThrow(/min < max/);
 	});
@@ -66,6 +75,8 @@ describe('cluster configuration', () => {
 		const adminKey = buildPrincipal({ kind: 'apiKey', userId: 'user_1', orgId: 'org_1', role: 'owner', platformAdmin: true, keyId: 'key_1' });
 		const adminMcp = buildPrincipal({ kind: 'mcp', userId: 'user_1', orgId: 'org_1', role: 'owner', platformAdmin: true, clientId: 'client_1' });
 		const before = core.cluster.get();
+		const audited = () => core.audit.list({ orgId: 'org_1' }).filter((entry) => entry.action === 'platform.cluster_config').length;
+		const auditedBefore = audited();
 		for (const principal of [member, orgOwner, adminKey, adminMcp])
 			expect(() => core.cluster.update(principal, { replicas: { max: 2 } })).toThrow(/platform admin/);
 		expect(core.cluster.get()).toEqual(before);
@@ -73,6 +84,7 @@ describe('cluster configuration', () => {
 		expect(() => core.cluster.view(orgOwner)).toThrow(/platform admin/);
 		expect(core.cluster.view(adminKey)).toEqual(before);
 		expect(core.cluster.view(owner)).toEqual(before);
-		expect(core.audit.list({ orgId: 'org_1' }).filter((entry) => entry.action === 'platform.cluster_config')).toHaveLength(1);
+		// Refused changes are not audited as changes.
+		expect(audited()).toBe(auditedBefore);
 	});
 });

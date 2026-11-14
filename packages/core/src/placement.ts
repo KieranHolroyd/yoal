@@ -1,4 +1,4 @@
-import type { NodeRole, PlacementSpec, Runtime } from '@yoal/contracts';
+import type { NodeRole, PackingStrategy, PlacementSpec, Runtime } from '@yoal/contracts';
 import { diskAdmissionProblem } from './app-volumes.ts';
 
 /**
@@ -63,6 +63,11 @@ export interface PlacementRequest {
 	replicaZones?: string[];
 	/** Resolved nodes for `spec.near` (a database or storage instance's node). */
 	nearNodeIds?: string[];
+	/**
+	 * How `auto` orders the nodes that fit (D214): `spread` takes the emptiest, `pack` the fullest
+	 * that still has room, so small apps fill a node before the next one is opened. Unset is `spread`.
+	 */
+	strategy?: PackingStrategy;
 }
 
 export interface PlacementRefusal {
@@ -181,6 +186,11 @@ function locality(node: PlacementCandidate, request: PlacementRequest): number {
 	return request.nearNodeIds?.includes(node.id) ? 1 : 0;
 }
 
+/** The candidates a placement spec's hard filters keep (node, zone, roles, labels, disk). */
+export function matchingPlacementSpec(candidates: PlacementCandidate[], spec: PlacementSpec): PlacementCandidate[] {
+	return filterBySpec(candidates, spec, {} as PlacementRequest).kept;
+}
+
 export function resolvePlacement(request: PlacementRequest): PlacementDecision {
 	const spec = request.spec ?? null;
 	let candidates = request.candidates;
@@ -275,12 +285,19 @@ export function resolvePlacement(request: PlacementRequest): PlacementDecision {
 	}
 
 	// `auto`: prefer a worker with room. Locality is a soft hint; budget still breaks ties.
+	const byFree = request.strategy === 'pack' ? -1 : 1;
 	const workers = healthy
-		.filter((node) => !isEdge(node, edgeNodeId) && canAdmit(node, memoryMb, request.diskMb, request.cpuMillis))
+		.filter(
+			(node) =>
+				!isEdge(node, edgeNodeId) &&
+				// A node whose roles are known and exclude `compute` (a data-only box) takes no apps.
+				(node.roles === undefined || node.roles.includes('compute')) &&
+				canAdmit(node, memoryMb, request.diskMb, request.cpuMillis),
+		)
 		.sort(
 			(a, b) =>
 				locality(b, request) - locality(a, request) ||
-				freeMemory(b) - freeMemory(a) ||
+				byFree * (freeMemory(b) - freeMemory(a)) ||
 				a.name.localeCompare(b.name),
 		);
 	const worker = workers[0];

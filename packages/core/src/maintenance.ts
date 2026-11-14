@@ -86,6 +86,13 @@ export class MaintenanceService {
 		// Abandon a replica promotion whose fence the old primary's node never confirmed (C7).
 		this.ctx.databaseReplicas.tick();
 		this.ctx.databaseStudio.tick();
+		// Fleet node updates (CLUSTERING §3.11): start the automatic rollout after the control plane
+		// updated itself, and fail a rollout whose flow is gone.
+		try {
+			this.ctx.nodeRollouts.tick();
+		} catch (error) {
+			console.error('[maintenance] node rollouts:', error);
+		}
 		await this.ctx.databases.pruneBackups();
 		this.ctx.storage.requestExpiredPurges();
 		// Replication rules from before migration 0059 get their scoped key (OBJECT-STORAGE.md §12).

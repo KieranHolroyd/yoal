@@ -55,6 +55,8 @@ yoal deploy ./dist --project my-site --json
 | `export [--out <file>\|-] [--format yaml\|json] [--project <slug>]` | Write the org's configuration (projects, services, IAM, drains, pipelines, …) to one file; no data, secrets by name only |
 | `db [list\|create\|info\|attach\|detach\|delete\|restore\|purge\|credentials]` | Managed PostgreSQL databases (see below) |
 | `storage [list\|create\|info\|update\|buckets\|attach\|grants\|detach\|delete\|restore\|purge\|credentials\|metrics]` | Managed S3-compatible object storage (see below) |
+| `nodes update <node>` | Install the control plane's release on one node (id or name; platform admin) |
+| `nodes rollout [plan\|start\|status\|list\|resume\|cancel]` | Update the fleet in waves (`availability`, `rolling`, `parallel`) with drain, canary, soak and a failure budget; `start --wait` follows it and exits 1 unless every node updated |
 
 Every command accepts `--help`, and most accept `--json` for scripting. Errors in `--json` mode
 are printed to stderr as `{ "error": { "code", "message", "suggestions" } }`.

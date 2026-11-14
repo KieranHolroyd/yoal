@@ -81,6 +81,7 @@ export async function runHelper(): Promise<void> {
 	const nodeUpdate = new NodeUpdater({
 		paths: config.nodeUpdate,
 		currentVersion: config.version,
+		systemctlPath: config.systemctlPath,
 		log: (level, message) => log(level, `node update: ${message}`),
 	});
 	const wireguard = new WireguardManager({ firewall: new NetworkManager() });

@@ -39,6 +39,8 @@ export class ClusterConfigService {
 			storage: {},
 			controlPlane: {},
 			failover: {},
+			scheduling: {},
+			updates: {},
 			shares: {},
 			...(raw && typeof raw === 'object' ? raw : {}),
 		});
@@ -62,24 +64,33 @@ export class ClusterConfigService {
 		const patch = clusterConfigUpdateSchema.safeParse(input);
 		if (!patch.success) throw new ValidationError('Invalid cluster configuration.', patch.error.issues);
 		const current = this.get();
-		if (
-			(patch.data.endpoints?.portMin ?? current.endpoints.portMin) >=
-			(patch.data.endpoints?.portMax ?? current.endpoints.portMax)
-		)
-			throw new ValidationError('The endpoint port range must have min < max.');
+		// Zod fills a section's defaults even under `.partial()`, so `{ failover: { enabled: true } }`
+		// parses with every other failover key at its default. Merge only the keys the caller sent,
+		// or saving one setting would silently reset its neighbours.
+		const raw = input as Record<string, Record<string, unknown> | undefined>;
+		const sent = <K extends keyof ClusterConfig>(section: K): Partial<ClusterConfig[K]> => {
+			const parsed = (patch.data[section] ?? {}) as Record<string, unknown>;
+			const keys = Object.keys(raw[section] ?? {});
+			return Object.fromEntries(keys.filter((key) => key in parsed).map((key) => [key, parsed[key]])) as Partial<
+				ClusterConfig[K]
+			>;
+		};
 		const merged = clusterConfigSchema.safeParse({
 			...current,
-			...patch.data,
-			overlay: { ...current.overlay, ...patch.data.overlay },
-			endpoints: { ...current.endpoints, ...patch.data.endpoints },
-			replicas: { ...current.replicas, ...patch.data.replicas },
-			database: { ...current.database, ...patch.data.database },
-			storage: { ...current.storage, ...patch.data.storage },
-			controlPlane: { ...current.controlPlane, ...patch.data.controlPlane },
-			failover: { ...current.failover, ...patch.data.failover },
-			shares: { ...current.shares, ...patch.data.shares },
+			overlay: { ...current.overlay, ...sent('overlay') },
+			endpoints: { ...current.endpoints, ...sent('endpoints') },
+			replicas: { ...current.replicas, ...sent('replicas') },
+			database: { ...current.database, ...sent('database') },
+			storage: { ...current.storage, ...sent('storage') },
+			controlPlane: { ...current.controlPlane, ...sent('controlPlane') },
+			failover: { ...current.failover, ...sent('failover') },
+			scheduling: { ...current.scheduling, ...sent('scheduling') },
+			updates: { ...current.updates, ...sent('updates') },
+			shares: { ...current.shares, ...sent('shares') },
 		});
 		if (!merged.success) throw new ValidationError('Invalid cluster configuration.', merged.error.issues);
+		if (merged.data.endpoints.portMin >= merged.data.endpoints.portMax)
+			throw new ValidationError('The endpoint port range must have min < max.');
 		this.ctx.sqlite.run(
 			'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
 			[CLUSTER_CONFIG_KEY, JSON.stringify(merged.data), this.ctx.now()],

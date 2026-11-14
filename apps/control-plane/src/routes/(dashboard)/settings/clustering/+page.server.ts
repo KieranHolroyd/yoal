@@ -1,6 +1,6 @@
 import { fail } from '@sveltejs/kit';
 import { core } from '#lib/server/core.js';
-import { failStatus, toFormFailure } from '../../_lib/errors.js';
+import { failStatus, formBoolean, formString, toFormFailure } from '../../_lib/errors.js';
 import { requireOwnerPage } from '../_platform.server.js';
 import type { Actions, PageServerLoad } from './$types';
 
@@ -27,5 +27,34 @@ export const actions: Actions = {
 			return fail(failStatus(caught), toFormFailure(caught));
 		}
 		return { success: 'Cluster configuration saved.' };
+	},
+
+	/** Fleet node updates (CLUSTERING §3.11, D217): rollout defaults and `autoRollout`. */
+	updates: async ({ request, locals }) => {
+		const principal = requireOwnerPage(locals);
+		const data = await request.formData();
+		const number = (key: string) => {
+			const raw = formString(data, key);
+			const value = Number(raw);
+			return raw && Number.isFinite(value) ? value : raw;
+		};
+		const canary = formString(data, 'canary');
+		try {
+			core.cluster.update(principal, {
+				updates: {
+					autoRollout: formBoolean(data, 'autoRollout'),
+					strategy: formString(data, 'strategy'),
+					batchSize: number('batchSize'),
+					drain: formBoolean(data, 'drain'),
+					soakSeconds: number('soakSeconds'),
+					maxFailures: number('maxFailures'),
+					// Blank follows the strategy (on, except for parallel); undefined clears a saved choice.
+					canary: canary === 'true' ? true : canary === 'false' ? false : undefined
+				}
+			});
+		} catch (caught) {
+			return fail(failStatus(caught), { ...toFormFailure(caught), section: 'updates' });
+		}
+		return { success: 'Node update settings saved.', section: 'updates' };
 	}
 };

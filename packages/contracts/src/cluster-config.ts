@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { nodeRolloutOptionsSchema } from './node-rollout.ts';
 import { replicaSpreads } from './replica.ts';
 
 /**
@@ -72,6 +73,50 @@ const failover = z.object({
 	maxPerMinute: int(1, 60).default(6),
 });
 
+/**
+ * How the fleet's capacity is used (docs/CLUSTERING.md §3.10, D214). Placement is still decided by
+ * the control plane and recorded; these settings shape the choice and let it be revisited.
+ */
+export const packingStrategies = ['spread', 'pack'] as const;
+export type PackingStrategy = (typeof packingStrategies)[number];
+const scheduling = z.object({
+	/** `spread` picks the emptiest node (headroom everywhere); `pack` fills nodes before opening the next. */
+	strategy: z.enum(packingStrategies).default('spread'),
+	/**
+	 * Admission ceiling as a percentage of each node's workload memory budget. Above 100 the fleet
+	 * admits more reservations than the slice holds, on the bet that apps rarely use their limit at
+	 * once; the slice's own limit still protects the host.
+	 */
+	memoryOvercommitPercent: int(100, 300).default(100),
+	/** The same for a node's CPU budget. CPU is compressible, so this is the safer one to raise. */
+	cpuOvercommitPercent: int(100, 800).default(100),
+	/** Move workloads on the controller's own initiative when the fleet drifts out of balance. */
+	autoRebalance: z.boolean().default(false),
+	/** Gap between the fullest and emptiest node, in points of memory reserved, that counts as drift. */
+	rebalanceThresholdPercent: int(5, 90).default(25),
+	/** Minutes between automatic moves; one move per interval keeps the fleet calm. */
+	rebalanceIntervalMinutes: int(1, 1_440).default(10),
+	/** Moves a single manual Rebalance may apply. */
+	maxMovesPerRebalance: int(1, 50).default(5),
+	/** Re-place single-copy HTTP apps off a lost node when failover is enabled (§8.3). */
+	failoverSingleCopies: z.boolean().default(true),
+	/** Update a set of copies one at a time on deploy, waiting for each to be healthy (SCALING §4). */
+	rollingDeploys: z.boolean().default(true),
+	/** Seconds a copy may take to come up on a new release before the rollout pauses. */
+	rolloutTimeoutSeconds: int(30, 3_600).default(300),
+	/** Seconds between autoscaler evaluations. */
+	autoscaleIntervalSeconds: int(10, 600).default(30),
+});
+
+/**
+ * Fleet node updates (docs/CLUSTERING.md §3.11, D217): the defaults a manual rollout starts from,
+ * and whether the control plane rolls the fleet forward on its own after it updates itself.
+ */
+const updates = nodeRolloutOptionsSchema.extend({
+	/** Start a rollout with these options once the control plane runs a release the nodes lack. */
+	autoRollout: z.boolean().default(false),
+});
+
 const shares = z.object({
 	mountRoot: z.string().trim().regex(/^\/(?:[A-Za-z0-9._-]+\/?)*$/).default('/run/yoal-shares'),
 });
@@ -84,6 +129,8 @@ export const clusterConfigSchema = z.object({
 	storage,
 	controlPlane,
 	failover,
+	scheduling,
+	updates,
 	shares,
 });
 export type ClusterConfig = z.infer<typeof clusterConfigSchema>;
@@ -96,6 +143,8 @@ const sectionUpdates = {
 	storage: storage.partial().optional(),
 	controlPlane: controlPlane.partial().optional(),
 	failover: failover.partial().optional(),
+	scheduling: scheduling.partial().optional(),
+	updates: updates.partial().optional(),
 	shares: shares.partial().optional(),
 };
 

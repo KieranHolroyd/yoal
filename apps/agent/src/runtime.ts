@@ -51,6 +51,8 @@ export interface WorkloadRuntimeReport {
 	status: WorkloadStatus;
 	restarts: number;
 	memoryBytes?: number;
+	/** Cumulative CPU time the unit has used, in nanoseconds; the control plane turns it into a rate. */
+	cpuNanos?: number;
 	/** Managed databases only: TLS state from the helper (the CA PEM is public material). */
 	tls?: { enabled: boolean; caPem: string | null; error: string | null };
 }
@@ -144,6 +146,8 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 
 	private readonly applied = new Map<string, AppliedWorkload>();
 	private readonly reports = new Map<string, WorkloadRuntimeReport>();
+	/** Workloads whose last health probe failed: systemd may call them active, they are not serving yet. */
+	private readonly unhealthy = new Set<string>();
 	/** Memory only (D57): database monitor credentials from the last activation fetch. */
 	private readonly monitors = new Map<string, HeldMonitor>();
 	/** Desired database workloads from the last converge. */
@@ -202,6 +206,12 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	}
 
 	/** Reports for the heartbeat, in stable id order. */
+	/** Remember whether a workload's last health probe passed; `refreshReports` re-probes the ones that did not. */
+	private noteHealth(id: string, healthy: boolean): void {
+		if (healthy) this.unhealthy.delete(id);
+		else this.unhealthy.add(id);
+	}
+
 	currentReports(): WorkloadRuntimeReport[] {
 		return [...this.reports.values()].sort((a, b) => a.id.localeCompare(b.id));
 	}
@@ -226,6 +236,16 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 					if (actual.status === 'stopped' && this.desiredById.get(id)?.runner) {
 						this.reports.set(id, { ...reportFromStatus(actual), status: 'starting' });
 						if (Date.now() - (this.runnerAppliedAt.get(id) ?? 0) >= this.runnerSettleMs) this.recycleDue.add(id);
+						return;
+					}
+					// systemd says the unit is up; that is not the app answering. A copy whose health check
+					// has not passed yet stays `starting` until it does, so a rolling deploy or a surge
+					// move never counts an app that is up but not serving (SCALING §4).
+					const desired = this.desiredById.get(id);
+					if (actual.status === 'running' && desired && desired.ingress !== 'none' && !desired.runner && this.unhealthy.has(id)) {
+						const healthy = await this.probeHealth(desired, new AbortController().signal).catch(() => false);
+						this.noteHealth(id, healthy);
+						this.reports.set(id, healthy ? reportFromStatus(actual) : { ...reportFromStatus(actual), status: 'starting' });
 						return;
 					}
 					this.reports.set(id, reportFromStatus(actual));
@@ -446,6 +466,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 				await this.helper.remove(id);
 				this.applied.delete(id);
 				this.reports.delete(id);
+				this.unhealthy.delete(id);
 				this.dirty = true;
 				this.log('info', `Removed workload ${id}`);
 			} catch (error) {
@@ -531,6 +552,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 				pending.add(id);
 				if (this.applied.delete(id)) this.dirty = true;
 				this.reports.delete(id);
+				this.unhealthy.delete(id);
 				this.monitors.delete(id);
 				this.storageAdmins.delete(id);
 				this.log('info', `Purged ${kind} ${id}`);
@@ -649,11 +671,13 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 				restarts = status.restarts;
 				if (status.status === 'running') {
 					const healthy = await this.probeHealth(workload, signal);
+					this.noteHealth(id, healthy);
 					this.reports.set(id, {
 						id,
 						status: healthy ? 'running' : 'starting',
 						restarts: status.restarts,
 						...(status.memoryBytes !== undefined ? { memoryBytes: status.memoryBytes } : {}),
+						...(status.cpuNanos !== undefined ? { cpuNanos: status.cpuNanos } : {}),
 						...(status.tls ? { tls: status.tls } : {}),
 					});
 					return;
@@ -717,11 +741,13 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 			const healthy =
 				workload.ingress === 'none' ? applied.status === 'running' : await this.waitForHealth(workload, signal);
 			const status: WorkloadStatus = healthy ? 'running' : 'starting';
+			this.noteHealth(id, healthy);
 			this.reports.set(id, {
 				id,
 				status,
 				restarts: applied.restarts,
 				...(applied.memoryBytes !== undefined ? { memoryBytes: applied.memoryBytes } : {}),
+				...(applied.cpuNanos !== undefined ? { cpuNanos: applied.cpuNanos } : {}),
 				...(applied.tls ? { tls: applied.tls } : {}),
 			});
 			if (healthy) {
@@ -870,12 +896,14 @@ export function workloadHeartbeat(reports: WorkloadRuntimeReport[]): Array<{
 	status: WorkloadStatus;
 	restarts: number;
 	memoryBytes?: number;
+	cpuNanos?: number;
 }> {
 	return reports.map((report) => ({
 		id: report.id,
 		status: report.status,
 		restarts: report.restarts,
 		...(report.memoryBytes !== undefined ? { memoryBytes: report.memoryBytes } : {}),
+		...(report.cpuNanos !== undefined ? { cpuNanos: report.cpuNanos } : {}),
 	}));
 }
 
@@ -1099,6 +1127,7 @@ function reportFromStatus(status: HelperWorkloadStatus): WorkloadRuntimeReport {
 		status: status.status,
 		restarts: status.restarts,
 		...(status.memoryBytes !== undefined ? { memoryBytes: status.memoryBytes } : {}),
+		...(status.cpuNanos !== undefined ? { cpuNanos: status.cpuNanos } : {}),
 		...(status.tls ? { tls: status.tls } : {}),
 	};
 }

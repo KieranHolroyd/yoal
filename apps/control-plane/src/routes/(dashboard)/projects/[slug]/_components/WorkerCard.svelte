@@ -161,7 +161,7 @@
 						<Field.Description>
 							{ingress === 'none'
 								? `Reserves ${(spec.memoryMb * replicas).toLocaleString()} MB on the node.`
-								: 'HTTP apps run one copy.'}
+								: 'Set on the Scaling tab: an HTTP app runs one copy per node.'}
 						</Field.Description>
 					</Field.Field>
 					{#if runner}

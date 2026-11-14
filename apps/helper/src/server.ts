@@ -25,7 +25,14 @@ import type { HelperPitrStatus } from './pitr.ts';
 import type { ReplicationSlotStatus } from './replication.ts';
 import { parseStudioPrincipalRequest, STUDIO_PRINCIPAL_USER } from './studio-principal.ts';
 import type { HelperInventory, VerifyResult } from './volumes.ts';
-import { NodeUpdateError, parseNodeUpdateRequest, type NodeUpdateRequest, type NodeUpdateResult } from './node-update.ts';
+import {
+	NodeUpdateError,
+	parseNodeUpdateConfirm,
+	parseNodeUpdateRequest,
+	type NodeUpdateGuardStatus,
+	type NodeUpdateRequest,
+	type NodeUpdateResult,
+} from './node-update.ts';
 import type { WireguardStatus } from './wireguard.ts';
 import type { ShareMount, ShareMountStatus } from './shares.ts';
 import type { DiskMountRequest, DiskMountStatus } from './disks.ts';
@@ -139,7 +146,13 @@ export interface HandlerOptions {
 	version: string;
 	maxBodyBytes?: number;
 	/** The signed-release installer behind `POST /v1/node/update` (D99); absent = 404. */
-	nodeUpdate?: { update(request: NodeUpdateRequest): Promise<NodeUpdateResult> };
+	nodeUpdate?: {
+		update(request: NodeUpdateRequest): Promise<NodeUpdateResult>;
+		/** Disarm the rollback guard for `version`; absent = 404 (a helper without the guard). */
+		confirm?(version: string): Promise<{ confirmed: boolean }>;
+		/** The armed guard and the last rollback marker. */
+		guardStatus?(): Promise<NodeUpdateGuardStatus>;
+	};
 	/** Managed overlay verbs (C1); absent on a helper that predates the overlay. */
 	wireguard?: WireguardApi;
 	/** Profiling of a registered disk (docs/STORAGE.md §5.1); absent = 404. */
@@ -221,6 +234,18 @@ export function createHandler(
 				if (url.search) throw new ValidationError('node update takes no query parameters');
 				const input = parseNodeUpdateRequest(await readJson(request, maxBodyBytes));
 				return json({ ok: true, ...(await options.nodeUpdate.update(input)) });
+			}
+			// The new agent's confirm after its first accepted heartbeat; idempotent, never an error.
+			if (path === '/v1/node/update/confirm' && options.nodeUpdate?.confirm) {
+				if (method !== 'POST') return methodNotAllowed('POST');
+				if (url.search) throw new ValidationError('node update confirm takes no query parameters');
+				const { version } = parseNodeUpdateConfirm(await readJson(request, maxBodyBytes));
+				return json({ ok: true, ...(await options.nodeUpdate.confirm(version)) });
+			}
+			if (path === '/v1/node/update/guard' && options.nodeUpdate?.guardStatus) {
+				if (method !== 'GET') return methodNotAllowed('GET');
+				if (url.search) throw new ValidationError('node update guard takes no query parameters');
+				return json({ ok: true, ...(await options.nodeUpdate.guardStatus()) });
 			}
 
 			// --- managed overlay (C1): keygen, apply, status; no shell and no passthrough ----

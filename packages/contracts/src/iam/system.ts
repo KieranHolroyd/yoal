@@ -29,6 +29,11 @@ export const systemPrincipals = {
 		// the database and workload resources it inspects.
 		permissions: ['database:read', 'deployment:read'],
 	},
+	'system:relocation': {
+		name: 'system:relocation',
+		description: 'Moves an app to another node together with its app volumes: snapshots them, restores them on the target and re-points the app.',
+		permissions: ['project:read', 'project:update', 'deployment:read'],
+	},
 	'system:registry-autodeploy': {
 		name: 'system:registry-autodeploy',
 		description: 'Deploys a project when its linked registry tag is pushed.',

@@ -188,6 +188,7 @@ class FakeReleases {
 }
 
 interface Fixture {
+	health: { healthy: boolean };
 	runtime: WorkloadRuntime;
 	helper: FakeHelper;
 	releases: FakeReleases;
@@ -202,6 +203,7 @@ function fixture(options: { healthy?: boolean } = {}): Fixture {
 	const activations = new Map<string, WorkloadActivation>();
 	const activationCalls: string[] = [];
 	const errors: string[] = [];
+	const health = { healthy: options.healthy ?? true };
 	const runtime = new WorkloadRuntime({
 		helper,
 		releases,
@@ -213,13 +215,13 @@ function fixture(options: { healthy?: boolean } = {}): Fixture {
 		},
 		sliceMemoryMb: 1024,
 		healthTimeoutMs: 5,
-		probeHealth: async () => options.healthy ?? true,
+		probeHealth: async () => health.healthy,
 		sleep: async () => undefined,
 		log: (level, message) => {
 			if (level === 'error') errors.push(message);
 		},
 	});
-	return { runtime, helper, releases, activations, activationCalls, errors };
+	return { runtime, helper, releases, activations, activationCalls, errors, health };
 }
 
 function activationFor(workloadId: string, version = ACTIVATION): WorkloadActivation {
@@ -351,6 +353,19 @@ describe('WorkloadRuntime.converge', () => {
 
 		expect(f.runtime.currentReports()).toEqual([{ id: 'app', status: 'starting', restarts: 0 }]);
 		expect(f.errors).toEqual([]);
+	});
+
+	test('a heartbeat keeps an app that is up but not answering as starting, until its health check passes', async () => {
+		const f = fixture({ healthy: false });
+		f.activations.set('app', activationFor('app'));
+		await f.runtime.converge(state([workload('app')]));
+		f.helper.statuses.set('app', { id: 'app', status: 'running', restarts: 0, cpuNanos: 5_000_000 });
+
+		// systemd calls the unit active; the app still refuses the probe.
+		expect(await f.runtime.refreshReports()).toEqual([{ id: 'app', status: 'starting', restarts: 0, cpuNanos: 5_000_000 }]);
+
+		f.health.healthy = true;
+		expect(await f.runtime.refreshReports()).toEqual([{ id: 'app', status: 'running', restarts: 0, cpuNanos: 5_000_000 }]);
 	});
 
 	test('reports actual systemd state when an unchanged unit keeps failing', async () => {

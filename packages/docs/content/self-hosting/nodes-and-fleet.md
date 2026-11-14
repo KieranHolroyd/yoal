@@ -1,6 +1,6 @@
 ---
 title: Nodes and fleet
-description: Add machines to your Yoal install, connect them over WireGuard, place workloads, drain or remove nodes, and read the Topology page.
+description: Add machines to your Yoal install, connect them over WireGuard, place and rebalance workloads, test the links between nodes, and drain or remove them.
 ---
 
 A Yoal install is one or more **nodes**: machines running `yoal-agent` and `yoal-helper`. The first node is the **edge**. It terminates public traffic for every site. Any later node is a **worker**, which runs apps, functions, databases and other workloads that you place on it. This page covers adding nodes, how they stay in step with the control plane, where workloads run, and how to drain or remove a machine. For a single machine, you can skip most of it.
@@ -248,7 +248,7 @@ The node mounts the share at `/mnt/yoal-shares/<share name>`. About a minute lat
 
 Every action on a node is in the **Actions** menu on the **Nodes** page. Each one needs a platform admin.
 
-- **Drain node** stops new placements on the node, but existing sites and workloads keep serving. Draining is an operator decision: the agent's heartbeats do not clear it. **Resume placements** undoes it.
+- **Drain node** stops new placements on the node and moves what can move to other nodes: copies of multi-copy apps, single-copy HTTP apps (with no downtime) and workers. Static sites, databases, and apps pinned by their data stay and keep serving; a pinned app is reported as blocked. On a one-node install there is nowhere to move anything, so a drain only stops new placements. Draining is an operator decision: the agent's heartbeats do not clear it. **Resume placements** undoes it; nothing moves back on its own.
 - **Edit node** changes the name, the address the edge proxies to, the zone, roles, labels, slice budget and storage paths.
 - **Make this the edge** moves ingress to another online node. The new edge takes over every static site and the old edge becomes a worker that keeps what it hosts. Yoal does not move your DNS records or TLS for you, so point DNS at the new address yourself. Yoal refuses the change when `YOAL_EDGE_NODE_ID` pins the edge in the control plane's environment.
 - **Rotate token** issues a new node token and shows it once. Put it in `YOAL_NODE_TOKEN` in `/etc/yoal/agent.env` and restart `yoal-agent`. The old token stops working at once.
@@ -267,6 +267,49 @@ Any node can be a Builder, which gives it the `build` role. Its `yoal-builder.se
 - **Blast radius** counts what an outage of that node would take down: apps, databases, storage instances and disks. The counts come from current placement, so they change when workloads move.
 
 Topology is read-only. To change roles, zones or labels, use **Edit node** on the **Nodes** page.
+
+## Fleet: capacity, rebalancing and links
+
+**Fleet** shows how the nodes are used and how well they are connected. It is for platform admins.
+
+### Capacity and rebalancing
+
+Each node has a bar for the memory reserved by what is placed on it, against the most it will admit, with the memory the host reports in use underneath. Below the bars, **Rebalance** lists the moves that would even the fleet out and applies them when you ask.
+
+```sh
+yoal fleet status
+yoal fleet rebalance           # preview
+yoal fleet rebalance --apply
+```
+
+Two strategies decide where new work goes and what a rebalance aims for:
+
+- **Spread** (the default) places on the emptiest node, which keeps headroom everywhere.
+- **Pack** fills one node before opening the next, so a node can be emptied and switched off.
+
+An HTTP app with nothing attached moves without downtime. An app whose data lives on its node is not moved by a rebalance; `yoal fleet status --pinned` lists those and why. To move one with its volumes, see [scaling](/compute/scaling#move-an-app-to-another-node).
+
+**Settings → Clustering** has the rest under `scheduling`: `autoRebalance` moves one copy at a time on its own when the fleet drifts, and `memoryOvercommitPercent` lets a node admit more reservations than its budget.
+
+> [!WARNING]
+> Memory overcommit above 100 is a bet that apps do not all reach their limit at once. The limit on the host itself does not change, so if they do, the kernel kills something.
+
+### Private networks
+
+Nodes that share a private network (a provider VPC, a vSwitch, a home LAN) can use it between themselves instead of their public addresses. Under **Edit node**, give each of them the same **Private network** name and its own **LAN endpoint** (its address and WireGuard port on that network). Traffic is still encrypted by WireGuard; it travels over the faster link. Nodes that are not on the network keep reaching the others through the hub.
+
+### Links
+
+The map on **Fleet** draws every pair of nodes. A thick line is a private network, a thin line a public endpoint, and a dashed line a pair that talks through a hub. Each link shows its latency, sampled about twice a minute, and selecting one shows the last hour.
+
+**Test every link** measures throughput as well: for a few seconds in each direction one node pushes data to the other. A test loads the link while it runs, and each node takes part in one test at a time.
+
+```sh
+yoal fleet links
+yoal fleet link-test --from edge --to edge-b --seconds 10
+```
+
+A link that stays silent for three minutes while both nodes are reporting raises an alert, and another when it answers again.
 
 ## Single-node installs
 

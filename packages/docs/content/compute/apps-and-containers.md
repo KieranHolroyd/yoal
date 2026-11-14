@@ -170,7 +170,7 @@ These fields make up the workload spec. Send them as the JSON body of `PUT /api/
 | `socketActivation` | `true` | Process only. Set to `false` for apps that cannot adopt fd 3 |
 | `idleStopSeconds` | off | 0 to 86,400. See [scale to zero](#scale-to-zero) |
 | `ingress` | `http` | `http` for a web app, or `none` for a [worker](#workers) |
-| `replicas` | `1` | 1 to 20. Identical copies. Each one reserves `memoryMb` |
+| `replicas` | `1` | 1 to 20. Identical copies. Each one reserves `memoryMb`. Change it without a deploy; see [scaling](/compute/scaling) |
 | `env` | `{}` | Plain variables. Names match `[A-Za-z_][A-Za-z0-9_]*`. Values up to 16,384 characters |
 | `secrets` | `[]` | Up to 128 secret references. See [secrets](#environment-variables-and-secrets) |
 | `volumes` | none | Mount [app volumes](/compute/volumes) into the workload |
@@ -237,7 +237,7 @@ For finer control, a project can also carry a `placementSpec`. It can pin a node
 
 Placement is decided at deploy time, and a running app does not move between nodes by itself. Redeploy to move it.
 
-Admission checks the node's workload slice before a deploy starts. Yoal reserves `memoryMb` multiplied by `replicas`, and it checks CPU and disk when the node reports them. Copies are spread across nodes, one per node, so a deploy with more replicas than eligible nodes is refused. Process apps are not spread while the `SERVICE_ENDPOINTS` flag is on. Your organisation's memory quota also applies. See [quotas and limits](/self-hosting/quotas-and-limits).
+Admission checks the node's workload slice before a deploy starts. Yoal reserves `memoryMb` multiplied by `replicas`, and it checks CPU and disk when the node reports them. An HTTP app runs one copy per node, so more replicas than nodes with room is refused; a worker's copies spread and then share nodes. Copies that already run keep their node across deploys. See [scaling](/compute/scaling). Your organisation's memory quota also applies. See [quotas and limits](/self-hosting/quotas-and-limits).
 
 The diagram shows the path from a deploy to a running app:
 
@@ -257,7 +257,7 @@ flowchart TD
 
 ## Workers
 
-Set `ingress` to `none` for a process that does not serve HTTP, such as a queue consumer or a bot. A worker gets no route and no published port. Yoal does not probe it, and it counts as healthy while its unit is active. A worker can run several replicas.
+Set `ingress` to `none` for a process that does not serve HTTP, such as a queue consumer or a bot. A worker gets no route and no published port. Yoal does not probe it, and it counts as healthy while its unit is active. A worker can run several replicas, on one node or across several.
 
 For work on a schedule, or a one-off command such as a migration (`yoal run my-api -- bun run migrate`), see [app jobs](/compute/scheduled-jobs#app-jobs).
 

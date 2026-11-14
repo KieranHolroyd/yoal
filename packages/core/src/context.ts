@@ -57,6 +57,11 @@ import type { DatabaseReplicaService } from './database-replica-service.ts';
 import type { StorageReplicationService } from './storage-replication-service.ts';
 import type { IngressHaService } from './ingress-ha.ts';
 import type { FailoverService } from './failover-service.ts';
+import type { SchedulingService } from './scheduling-service.ts';
+import type { NodeRolloutService } from './node-rollouts.ts';
+import type { NodeLinkService } from './link-service.ts';
+import type { ScalingService } from './scaling-service.ts';
+import type { RelocationService } from './relocation-service.ts';
 import type { ClusterConfigService } from './cluster-config-service.ts';
 import type { IamService } from './iam/service.ts';
 import type { GovernanceService } from './iam/governance.ts';
@@ -171,6 +176,16 @@ export interface CoreContext {
 	failover: FailoverService;
 	/** Cluster tunables (CLUSTERING). */
 	cluster: ClusterConfigService;
+	/** Fleet scheduling: utilisation, rebalance and workload moves (CLUSTERING §3.10). */
+	scheduling: SchedulingService;
+	/** Fleet node updates in waves (CLUSTERING §3.11, D217). */
+	nodeRollouts: NodeRolloutService;
+	/** Measured links between nodes: passive samples and link tests (CLUSTERING §4.6). */
+	links: NodeLinkService;
+	/** Horizontal scaling per app: copies, autoscaling policy, usage and history (SCALING.md). */
+	scaling: ScalingService;
+	/** Moving an app together with its app volumes (SCALING §7). */
+	relocations: RelocationService;
 	/** Identity and access management: bindings, roles, groups and the decision cache (IAM.md I1). */
 	iam: IamService;
 	/** Guardrails and just-in-time access (IAM.md I11/I22, §9.2–§9.4). */

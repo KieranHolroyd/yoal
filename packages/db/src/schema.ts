@@ -48,6 +48,8 @@ export const nodes = sqliteTable(
 		hardwareError: text('hardware_error'),
 		/** LAN address for direct peering inside one zone (C1). */
 		lanEndpoint: text('lan_endpoint'),
+		/** A named private network; nodes sharing one peer directly on `lanEndpoint` (D215). */
+		privateNetwork: text('private_network'),
 		/** CPU reservation budget in millis; null means no explicit cap (CLUSTERING §3.4). */
 		cpuBudgetMillis: integer('cpu_budget_millis'),
 		/** Managed overlay address (C1); null on external and pre-C1 nodes. */
@@ -96,6 +98,175 @@ export const nodeCertificates = sqliteTable('node_certificates', {
 	expiresAt: integer('expires_at').notNull(),
 	revokedAt: integer('revoked_at'),
 });
+
+/** One measured link between two nodes: the passive round trip and the last throughput test (D216). */
+export const nodeLinks = sqliteTable(
+	'node_links',
+	{
+		fromNodeId: text('from_node_id').notNull(),
+		toNodeId: text('to_node_id').notNull(),
+		/** `private` (shared private network), `direct` (public endpoint) or `relayed` (through a hub). */
+		path: text('path').notNull().default('overlay'),
+		rttMs: real('rtt_ms'),
+		rttMinMs: real('rtt_min_ms'),
+		rttMaxMs: real('rtt_max_ms'),
+		lossPercent: real('loss_percent'),
+		sampledAt: integer('sampled_at'),
+		testId: text('test_id'),
+		testStatus: text('test_status'),
+		testError: text('test_error'),
+		testStartedAt: integer('test_started_at'),
+		testFinishedAt: integer('test_finished_at'),
+		uploadBps: real('upload_bps'),
+		downloadBps: real('download_bps'),
+		testRttMs: real('test_rtt_ms'),
+		testJitterMs: real('test_jitter_ms'),
+		testBytes: integer('test_bytes'),
+		testSeconds: real('test_seconds'),
+		/** The running test's shared secret, listener port and shape; cleared when it ends. */
+		testToken: text('test_token'),
+		testPort: integer('test_port'),
+		testStreams: integer('test_streams'),
+		testRequestedSeconds: integer('test_requested_seconds'),
+		testExpiresAt: integer('test_expires_at'),
+		/** When the link first stopped answering; null while it answers. */
+		downSince: integer('down_since'),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+	},
+	(t) => [primaryKey({ columns: [t.fromNodeId, t.toNodeId] })],
+);
+
+/** A day of round-trip samples per ordered pair, one a minute, for the Fleet sparkline (D221). */
+export const nodeLinkHistory = sqliteTable(
+	'node_link_history',
+	{
+		fromNodeId: text('from_node_id').notNull(),
+		toNodeId: text('to_node_id').notNull(),
+		at: integer('at').notNull(),
+		rttMs: real('rtt_ms'),
+		lossPercent: real('loss_percent'),
+	},
+	(t) => [primaryKey({ columns: [t.fromNodeId, t.toNodeId, t.at] })],
+);
+
+/** The latest usage sample per copy, with the smoothed values the autoscaler reads (D219). */
+export const workloadUsage = sqliteTable(
+	'workload_usage',
+	{
+		copyId: text('copy_id').primaryKey(),
+		workloadId: text('workload_id').notNull(),
+		nodeId: text('node_id').notNull(),
+		memoryBytes: integer('memory_bytes'),
+		memoryBytesAvg: real('memory_bytes_avg'),
+		/** Cumulative CPU time the unit has used, as systemd counts it. */
+		cpuNanos: integer('cpu_nanos'),
+		/** CPU in use between the last two samples, in millis (1000 = one core). */
+		cpuMillis: real('cpu_millis'),
+		cpuMillisAvg: real('cpu_millis_avg'),
+		sampledAt: integer('sampled_at').notNull(),
+	},
+	(t) => [index('workload_usage_workload_idx').on(t.workloadId)],
+);
+
+/** An app moving to another node together with its app volumes (SCALING §7). */
+export const projectRelocations = sqliteTable(
+	'project_relocations',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		projectId: text('project_id').notNull(),
+		workloadId: text('workload_id').notNull(),
+		fromNodeId: text('from_node_id').notNull(),
+		toNodeId: text('to_node_id').notNull(),
+		/** stopping, snapshotting, restoring, done, failed or cancelled. */
+		phase: text('phase').notNull(),
+		detail: text('detail'),
+		error: text('error'),
+		/** `[{ volumeId, name, snapshotId, newVolumeId }]`. */
+		volumesJson: text('volumes_json').notNull().default('[]'),
+		/** The desired-state version that told the source node to stop the app. */
+		quiesceVersion: integer('quiesce_version').notNull().default(0),
+		stoppedAt: integer('stopped_at'),
+		phaseStartedAt: integer('phase_started_at').notNull(),
+		createdBy: text('created_by'),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+		finishedAt: integer('finished_at'),
+	},
+	(t) => [index('project_relocations_project_idx').on(t.projectId, t.createdAt)],
+);
+
+/** One autoscaling policy per project (D220). */
+export const workloadScaling = sqliteTable('workload_scaling', {
+	projectId: text('project_id').primaryKey(),
+	orgId: text('org_id').notNull(),
+	enabled: integer('enabled', { mode: 'boolean' }).notNull().default(false),
+	minReplicas: integer('min_replicas').notNull().default(1),
+	maxReplicas: integer('max_replicas').notNull().default(3),
+	metric: text('metric').notNull().default('cpu'),
+	target: real('target').notNull().default(70),
+	scaleDownMinutes: integer('scale_down_minutes').notNull().default(5),
+	lastScaledAt: integer('last_scaled_at'),
+	lastEvaluatedAt: integer('last_evaluated_at'),
+	lastObserved: real('last_observed'),
+	lastDesired: integer('last_desired'),
+	lastReason: text('last_reason'),
+	belowSince: integer('below_since'),
+	updatedAt: integer('updated_at').notNull().$defaultFn(now),
+});
+
+export const workloadScaleEvents = sqliteTable(
+	'workload_scale_events',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		projectId: text('project_id').notNull(),
+		fromReplicas: integer('from_replicas').notNull(),
+		toReplicas: integer('to_replicas').notNull(),
+		/** manual, autoscale or deploy. */
+		reason: text('reason').notNull(),
+		detail: text('detail'),
+		actor: text('actor'),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+	},
+	(t) => [index('workload_scale_events_project_idx').on(t.projectId, t.createdAt)],
+);
+
+/**
+ * A fleet node update (CLUSTERING.md §3.11, D217): the control plane's signed release installed on
+ * many nodes in waves. A `node.rollout` flow run drives it; this row is what every reader uses.
+ */
+export const nodeRollouts = sqliteTable(
+	'node_rollouts',
+	{
+		id: text('id').primaryKey(),
+		flowId: text('flow_id'),
+		status: text('status', { enum: ['running', 'paused', 'succeeded', 'failed', 'cancelled'] })
+			.notNull()
+			.default('running'),
+		phase: text('phase'),
+		detail: text('detail'),
+		targetVersion: text('target_version').notNull(),
+		trigger: text('trigger', { enum: ['manual', 'auto'] }).notNull().default('manual'),
+		optionsJson: text('options_json').notNull(),
+		/** The waves: an array of arrays of node ids. A resume may append a retry wave. */
+		planJson: text('plan_json').notNull(),
+		/** Each node's progress (`RolloutNodeRecord[]` in core). */
+		nodesJson: text('nodes_json').notNull(),
+		currentWave: integer('current_wave').notNull().default(0),
+		failures: integer('failures').notNull().default(0),
+		waveStartedAt: integer('wave_started_at'),
+		soakUntil: integer('soak_until'),
+		error: text('error'),
+		createdBy: text('created_by'),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+		finishedAt: integer('finished_at'),
+	},
+	(t) => [
+		index('node_rollouts_status_idx').on(t.status, t.createdAt),
+		index('node_rollouts_target_idx').on(t.targetVersion, t.trigger),
+	],
+);
 
 /** A consumer-side loopback port for one remote database or storage instance (C2). */
 export const serviceEndpoints = sqliteTable(
@@ -189,6 +360,11 @@ export const workloadReplicas = sqliteTable(
 			.notNull()
 			.default('pending'),
 		placementReason: text('placement_reason'),
+		/** The deployment this copy still runs during a rollout; null means the workload's own. */
+		deploymentId: text('deployment_id'),
+		/** Desired-state version the copy must converge to before its `running` report counts. */
+		appliedVersion: integer('applied_version'),
+		rolledAt: integer('rolled_at'),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
 		updatedAt: integer('updated_at').notNull().$defaultFn(now),
 	},
@@ -952,6 +1128,15 @@ export const workloads = sqliteTable(
 		message: text('message'),
 		/** Bumped by a console restart (D127); folded into the activation version. */
 		restartGeneration: integer('restart_generation').notNull().default(0),
+		/** Set while a surge move is in flight: the old node still runs and serves its copy. */
+		movingFromNodeId: text('moving_from_node_id'),
+		movedAt: integer('moved_at'),
+		/** Why the workload is on this node: deploy, drain, failover, rebalance or manual. */
+		placementReason: text('placement_reason'),
+		/** `rolling` while copies move to a new deployment one by one, `paused` when one failed. */
+		rolloutStatus: text('rollout_status'),
+		rolloutMessage: text('rollout_message'),
+		rolloutStartedAt: integer('rollout_started_at'),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
 		updatedAt: integer('updated_at').notNull().$defaultFn(now),
 	},

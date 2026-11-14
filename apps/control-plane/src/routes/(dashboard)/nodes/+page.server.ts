@@ -1,7 +1,8 @@
 import { fail } from '@sveltejs/kit';
 import type { NodeView } from '@yoal/core';
-import type { DiskView, NodeCapacityView, NodeRole } from '@yoal/contracts';
+import type { DiskView, NodeCapacityView, NodeRole, NodeRolloutView } from '@yoal/contracts';
 import { core } from '#lib/server/core.js';
+import { rolloutInput } from './_rollout.server.js';
 import {
 	failStatus,
 	formBoolean,
@@ -33,6 +34,19 @@ export const load: PageServerLoad = ({ locals }) => {
 		}
 	}
 
+	// Fleet node updates (CLUSTERING §3.11, D217): the running or paused rollout, the last few, and
+	// the defaults the Update fleet dialog starts from.
+	let activeRollout: NodeRolloutView | null = null;
+	let recentRollouts: NodeRolloutView[] = [];
+	if (!denied) {
+		try {
+			activeRollout = core.nodeRollouts.active(principal);
+			recentRollouts = core.nodeRollouts.list(principal, 6);
+		} catch {
+			// Viewers without platform:read keep the rest of the page.
+		}
+	}
+
 	return {
 		nodes,
 		capacity,
@@ -40,7 +54,12 @@ export const load: PageServerLoad = ({ locals }) => {
 		disksByNode,
 		platformOrigin: core.ctx.config.platformOrigin,
 		/** The release nodes should run: the control plane's own version (D99). */
-		targetVersion: core.ctx.config.desiredAgentVersion ?? null
+		targetVersion: core.ctx.config.desiredAgentVersion ?? null,
+		activeRollout,
+		recentRollouts,
+		rolloutDefaults: core.cluster.get().updates,
+		/** Starting, resuming and cancelling need `platform:updates` from a dashboard session. */
+		canUpdateFleet: !denied && core.ctx.platformIam.allows(principal, 'platform:updates')
 	};
 };
 
@@ -127,6 +146,7 @@ export const actions: Actions = {
 				roles,
 				labels,
 				lanEndpoint: formString(data, 'lanEndpoint') || null,
+				privateNetwork: formString(data, 'privateNetwork') || null,
 				cpuBudgetMillis,
 				// Blank restores the install default.
 				dataDir: formString(data, 'dataDir') || null,
@@ -204,6 +224,59 @@ export const actions: Actions = {
 			const node = core.nodes.requestUpdate(principal, nodeId);
 			return {
 				success: `${node.name} will install ${node.update?.version ?? 'the new release'} on its next check. Its agent restarts when it is done.`
+			};
+		} catch (error) {
+			return fail(failStatus(error), toFormFailure(error));
+		}
+	},
+
+	startRollout: async ({ request, locals }) => {
+		const principal = locals.principal!;
+		const data = await request.formData();
+		try {
+			const rollout = core.nodeRollouts.start(
+				principal,
+				rolloutInput(
+					(key) => formString(data, key) || null,
+					data.getAll('nodeId').map(String)
+				)
+			);
+			const nodes = rollout.nodes.length;
+			return {
+				success: `Fleet update to ${rollout.targetVersion} started: ${nodes} node${nodes === 1 ? '' : 's'} in ${rollout.waves} wave${rollout.waves === 1 ? '' : 's'}.`
+			};
+		} catch (error) {
+			return fail(failStatus(error), toFormFailure(error));
+		}
+	},
+
+	resumeRollout: async ({ request, locals }) => {
+		const principal = locals.principal!;
+		const data = await request.formData();
+		const rolloutId = formString(data, 'rolloutId');
+		if (!rolloutId) return fail(400, { message: 'Missing rollout id.' });
+		const retryFailed = formBoolean(data, 'retryFailed');
+		try {
+			core.nodeRollouts.resume(principal, rolloutId, { retryFailed });
+			return {
+				success: retryFailed
+					? 'Rollout resumed: the failed nodes are tried again first.'
+					: 'Rollout resumed: the failed nodes are left as they are.'
+			};
+		} catch (error) {
+			return fail(failStatus(error), toFormFailure(error));
+		}
+	},
+
+	cancelRollout: async ({ request, locals }) => {
+		const principal = locals.principal!;
+		const data = await request.formData();
+		const rolloutId = formString(data, 'rolloutId');
+		if (!rolloutId) return fail(400, { message: 'Missing rollout id.' });
+		try {
+			core.nodeRollouts.cancel(principal, rolloutId);
+			return {
+				success: 'Rollout cancelled. No further waves start; a node already installing finishes on its own.'
 			};
 		} catch (error) {
 			return fail(failStatus(error), toFormFailure(error));

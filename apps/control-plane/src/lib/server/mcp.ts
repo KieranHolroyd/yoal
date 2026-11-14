@@ -187,6 +187,8 @@ export const TOOL_PERMISSIONS: Record<string, Permission> = {
 	rollback: 'deployment:rollback',
 	create_environment: 'project:update',
 	set_workload: 'project:update',
+	scale_project: 'project:update',
+	set_autoscaling: 'project:update',
 	set_access: 'project:update',
 	create_share_link: 'shareLink:create',
 	revoke_share_link: 'shareLink:revoke',
@@ -2347,6 +2349,67 @@ function buildServer(
 		},
 		async ({ project, ...input }) =>
 			run(() => core.workloads.setSpec(principal, core.projects.requireRow(principal, project), input)),
+	);
+
+	tool(
+		'get_scaling',
+		{
+			title: 'Get scaling',
+			description:
+				'Read how an app is scaled (read-only): how many copies run and on which nodes, each copy\'s status, release, memory and CPU, ' +
+				'how many copies this fleet has room for and what stops the app scaling across nodes if anything does, a rollout in progress or paused, ' +
+				'the autoscaling policy with its last measurement and decision, and recent scaling events (docs/SCALING.md).',
+			inputSchema: z.object({ project: z.string() }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async ({ project }) => run(() => core.scaling.view(principal, core.projects.requireRow(principal, project))),
+	);
+
+	tool(
+		'scale_project',
+		{
+			title: 'Scale project',
+			description:
+				'Set how many copies of an app run. Takes effect at once with no deploy, and running copies are not restarted. ' +
+				'An HTTP app runs one copy per node, so the count cannot exceed the nodes with room; a worker spreads across nodes and then shares them. ' +
+				'Refused, with the reason, when the app must stay on one node (a data directory, an app volume, a pinned placement) or the fleet has no room. ' +
+				'While autoscaling is on the count must stay inside its bounds.',
+			inputSchema: z.object({ project: z.string(), replicas: z.number().int().min(1).max(20) }),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:update'),
+		},
+		async ({ project, replicas }) => run(() => core.scaling.scale(principal, core.projects.requireRow(principal, project), { replicas })),
+	);
+
+	tool(
+		'set_autoscaling',
+		{
+			title: 'Set autoscaling',
+			description:
+				'Turn autoscaling on or off for an app and set its policy: the bounds on the number of copies (min, max), the signal (cpu or memory as a percentage of each copy\'s limit, ' +
+				'or requests per second per copy, which needs telemetry), its target, and how many minutes the load must stay low before a copy is removed. ' +
+				'Scaling up is immediate; scaling down removes one copy at a time. Turning it on brings the app inside its bounds straight away.',
+			inputSchema: z.object({
+				project: z.string(),
+				enabled: z.boolean(),
+				min: z.number().int().min(1).max(20).optional(),
+				max: z.number().int().min(1).max(20).optional(),
+				metric: z.enum(['cpu', 'memory', 'requests']).optional(),
+				target: z.number().positive().optional(),
+				scaleDownMinutes: z.number().int().min(1).max(120).optional(),
+			}),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:update'),
+		},
+		async ({ project, ...input }) =>
+			run(() => {
+				const row = core.projects.requireRow(principal, project);
+				// Unset fields keep what the policy already has.
+				const current = core.scaling.policy(principal, row);
+				const defined = Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+				return core.scaling.setPolicy(principal, row, { ...current, ...defined });
+			}),
 	);
 
 	tool(
@@ -5476,6 +5539,34 @@ function buildServer(
 			scopeChallenge: requires('project:read'),
 		},
 		async () => run(() => core.failover.status(principal)),
+	);
+
+	tool(
+		'get_fleet',
+		{
+			title: 'Get fleet',
+			description:
+				'Read how the fleet\'s capacity is used (read-only): per node the admission ceiling, memory reserved and in use, CPU, how many copies it holds and how many may move; ' +
+				'every copy with the reason it is pinned to its node, if any; and the moves a rebalance would make with the gap before and after. ' +
+				'Requires a platform admin role. MCP never moves a workload (CLUSTERING §12.4).',
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async () => run(() => core.scheduling.view(principal)),
+	);
+
+	tool(
+		'get_node_links',
+		{
+			title: 'Get node links',
+			description:
+				'Read the links between nodes (read-only): for every pair, the path traffic takes (a private network, a public endpoint, or relayed through a hub), ' +
+				'the latest round trip and loss, the last hour of round trips, since when a link has been down, and the last throughput test in each direction. ' +
+				'Requires a platform admin role. Starting a link test needs the dashboard or CLI.',
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async () => run(() => core.links.view(principal)),
 	);
 
 	// --- email (docs/EMAIL.md §9; no credential, settings or org-state tools: D58, platform admin only) ----

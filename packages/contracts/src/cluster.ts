@@ -118,6 +118,9 @@ export const placementSpecSchema = z
 	.strict();
 export type PlacementSpec = z.infer<typeof placementSpecSchema>;
 
+/** A private network's name: a provider VPC, a vSwitch or a home LAN that some nodes share (D215). */
+export const privateNetworkNameSchema = nodeZoneSchema;
+
 export const nodeClusterSettingsSchema = z
 	.object({
 		zone: nodeZoneSchema.optional(),
@@ -131,6 +134,8 @@ export const nodeClusterSettingsSchema = z
 			.regex(/^[A-Za-z0-9.\-[\]:]+$/, 'Use a host or host:port, without a scheme or path.')
 			.nullable()
 			.optional(),
+		/** The private network this node sits on; nodes sharing one peer directly on `lanEndpoint` (D215). */
+		privateNetwork: privateNetworkNameSchema.nullable().optional(),
 		/** CPU reservation budget in millis; null removes the cap. */
 		cpuBudgetMillis: z.number().int().min(100).max(1_000_000).nullable().optional(),
 	})
@@ -149,6 +154,7 @@ export interface TopologyNodeView {
 	publicAddress: string | null;
 	privateAddress: string | null;
 	lanEndpoint: string | null;
+	privateNetwork: string | null;
 	hardware: NodeHardware | null;
 	/** Derived labels (yoal.io/*) plus operator labels. */
 	derivedLabels: Record<string, string>;

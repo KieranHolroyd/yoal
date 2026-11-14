@@ -18,6 +18,7 @@
 	import MailIcon from '@lucide/svelte/icons/mail';
 	import LayoutDashboardIcon from '@lucide/svelte/icons/layout-dashboard';
 	import NetworkIcon from '@lucide/svelte/icons/network';
+	import ActivityIcon from '@lucide/svelte/icons/activity';
 	import PackageIcon from '@lucide/svelte/icons/package';
 	import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
 	import LogOutIcon from '@lucide/svelte/icons/log-out';
@@ -76,6 +77,7 @@
 		href:
 			| '/(dashboard)/overview'
 			| '/(dashboard)/topology'
+			| '/(dashboard)/fleet'
 			| '/(dashboard)/dashboards'
 			| '/(dashboard)/alerts'
 			| '/(dashboard)/errors'
@@ -189,7 +191,8 @@
 			label: 'Infrastructure',
 			items: [
 				{ label: 'Nodes', href: '/(dashboard)/nodes', path: '/nodes', icon: ServerIcon },
-				{ label: 'Topology', href: '/(dashboard)/topology', path: '/topology', icon: NetworkIcon }
+				{ label: 'Topology', href: '/(dashboard)/topology', path: '/topology', icon: NetworkIcon },
+				{ label: 'Fleet', href: '/(dashboard)/fleet', path: '/fleet', icon: ActivityIcon }
 			]
 		},
 		{

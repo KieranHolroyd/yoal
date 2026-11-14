@@ -34,6 +34,8 @@ export interface ProjectSubnavData {
 	databaseAttachments: unknown[];
 	storageAttachments: unknown[];
 	workloadSpec: { env: Record<string, unknown>; secrets: unknown[] } | null;
+	/** Horizontal scaling (docs/SCALING.md); null for a static site. */
+	scaling?: { replicas: number } | null;
 	shareLinks: Parameters<typeof shareState>[0][];
 	/** YOAL_FEATURE_JOBS (plan 09). */
 	jobsEnabled?: boolean;
@@ -131,6 +133,7 @@ export function projectSubnav(data: ProjectSubnavData, url: RouteUrl): Subnav {
 							: undefined
 					),
 					item('runtime', 'Runtime', CpuIcon),
+					...(data.scaling ? [item('scaling', 'Scaling', LayersIcon, data.scaling.replicas > 1 ? data.scaling.replicas : undefined)] : []),
 					item(
 						'shares',
 						'Share links',

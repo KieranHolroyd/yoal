@@ -28,6 +28,23 @@ export interface OverlayNode {
 	/** Underlay endpoint the hub dials (`host:port`), or null for a NATed node. */
 	wgEndpoint: string | null;
 	lanEndpoint: string | null;
+	/** A named private network (D215); optional so callers that predate it keep the zone rule. */
+	privateNetwork?: string | null;
+}
+
+/** How traffic between two overlay nodes travels underneath WireGuard. */
+export type OverlayPath = 'private' | 'direct' | 'relayed' | 'none';
+
+/**
+ * Can `self` dial `peer` on its LAN endpoint? Two nodes that name the same private network can,
+ * whatever their zone: a provider's private network often spans its regions, and it is usually
+ * faster and unmetered. Nodes that name no network keep the older rule: one zone is one LAN.
+ * A node that names a network is not assumed to reach a same-zone node that names another.
+ */
+export function sharesPrivateNetwork(self: OverlayNode, peer: OverlayNode): boolean {
+	if (!peer.lanEndpoint) return false;
+	if (self.privateNetwork || peer.privateNetwork) return Boolean(self.privateNetwork) && self.privateNetwork === peer.privateNetwork;
+	return self.zone === peer.zone;
 }
 
 /** `10.47.1.1` and up by default: the first /24 of a /22 is reserved for gateways. */
@@ -72,8 +89,12 @@ export function buildWireguardState(
 			node.wgPublicKey,
 	);
 	const hubs = managed.filter((node) => node.wgEndpoint && node.roles.includes('ingress'));
+	// Same-zone spokes mesh over the LAN (the older rule, which never dialled a hub that way); a
+	// shared private network (D215) reaches spokes and hubs alike, in any zone.
 	const direct = managed.filter(
-		(node) => node.zone === self.zone && node.lanEndpoint && !node.roles.includes('ingress'),
+		(node) =>
+			sharesPrivateNetwork(self, node) &&
+			(!node.roles.includes('ingress') || Boolean(self.privateNetwork)),
 	);
 	const directIds = new Set(direct.map((node) => node.id));
 	const peers: WireguardPeer[] = [];
@@ -81,7 +102,7 @@ export function buildWireguardState(
 	if (hubs.length === 0 || self.roles.includes('ingress')) {
 		// A hub dials every node; a spoke with no hub can still reach same-zone LAN peers.
 		for (const node of managed) {
-			const endpoint = node.lanEndpoint && node.zone === self.zone ? node.lanEndpoint : node.wgEndpoint;
+			const endpoint = sharesPrivateNetwork(self, node) ? node.lanEndpoint : node.wgEndpoint;
 			peers.push({
 				nodeId: node.id,
 				publicKey: node.wgPublicKey!,
@@ -103,12 +124,14 @@ export function buildWireguardState(
 			peers.push({
 				nodeId: hub.id,
 				publicKey: hub.wgPublicKey!,
-				endpoint: hub.wgEndpoint ?? null,
+				// A hub on this node's private network is dialled there; it still relays the rest.
+				endpoint: (directIds.has(hub.id) ? hub.lanEndpoint : hub.wgEndpoint) ?? null,
 				allowedIps: [hub.privateAddress!, ...relayed.map((node) => node.privateAddress!)].map((ip) => `${ip}/32`),
 				persistentKeepalive: options.keepaliveSeconds ?? WG_KEEPALIVE_SECONDS,
 			});
 		}
 		for (const node of direct) {
+			if (hubIds.has(node.id)) continue;
 			peers.push({
 				nodeId: node.id,
 				publicKey: node.wgPublicKey!,
@@ -127,6 +150,23 @@ export function buildWireguardState(
 		listenPort: options.listenPort ?? DEFAULT_WG_PORT,
 		peers: dedupePeers(peers),
 	};
+}
+
+/**
+ * The underlay path between two managed nodes, as the peer graph above builds it: `private` over a
+ * shared LAN or private network, `direct` to a public WireGuard endpoint, `relayed` through a hub.
+ */
+export function overlayPath(fromId: string, toId: string, nodes: OverlayNode[]): OverlayPath {
+	const from = nodes.find((node) => node.id === fromId);
+	const to = nodes.find((node) => node.id === toId);
+	if (!from || !to || from.id === to.id || !to.privateAddress) return 'none';
+	// Read the answer off the graph itself, so this can never disagree with what the node applies.
+	const peers = buildWireguardState(from.id, nodes).peers;
+	const target = `${to.privateAddress}/32`;
+	const own = peers.find((peer) => peer.nodeId === to.id);
+	// A LAN hop is one this node dials on the peer's LAN endpoint.
+	if (own) return own.endpoint !== null && own.endpoint === to.lanEndpoint ? 'private' : 'direct';
+	return peers.some((peer) => peer.allowedIps.includes(target)) ? 'relayed' : 'none';
 }
 
 function dedupePeers(peers: WireguardPeer[]): WireguardPeer[] {

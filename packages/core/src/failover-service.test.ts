@@ -65,6 +65,9 @@ function harness(workers = ['w1', 'w2', 'w3', 'w4'], failover: Record<string, un
 		core.nodes.join({ token: core.nodes.createJoinToken(principal, name).token, name });
 		node[name] = opened.sqlite.query<{ id: string }, [string]>('SELECT id FROM nodes WHERE name = ?').get(name)!.id;
 	}
+	// The edge here only terminates ingress: with the `compute` role it would be a (last-choice)
+	// target for a copy, and these tests are about the workers.
+	opened.sqlite.run('UPDATE nodes SET roles_json = ? WHERE id = ?', [JSON.stringify(['ingress', 'control']), node.edge!]);
 	core.cluster.update(principal, { failover });
 	const h: Harness = {
 		core,

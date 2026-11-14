@@ -6,7 +6,7 @@ D-number when its spike (§15) passes and it is built; phases are **C0–C10** (
 the target design in the present tense; the phase named in each section says when it lands. "Today"
 means verified here, "the plan" means unbuilt.
 
-**Implemented so far (2026-11-06):** C0's backend — migration 0040, the `hardware` heartbeat block, node zone/roles/labels/CPU budget, derived volume classes (disk tiers since D169), constraint-aware placement and the `GET /topology` + `GET /topology/blast-radius` API with its read-only dashboard page. C1's control-plane model and helper/agent apply path are in too (migration 0041, address allocation, peer graph, managed join fields, the desired-state `wireguard` block, root `wireguard/keygen|apply|status` verbs and peer health on the heartbeat); the served installer still requires the signed agent bundle, and real-host verification has not run. C2's data model, forwarding path, pinned self-signed mTLS and cross-node attachments for process apps are in as well (migration 0043, `node_certificates`, `service_endpoints`, the endpoint planner, desired-state endpoints/providers, the agent's Bun TCP/TLS forwarder with fingerprint pinning, and the `SERVICE_ENDPOINTS` flag covering database and private-storage attachments); the per-install CA, Caddy L4 proxy and cross-node container attachments are not. C3's share registry and dashboard page (migration 0044, CRUD, org grants), the helper's fixed NFS/SMB mount/unmount/status verbs and desired-state mounting are in (migration 0067, D143): a share mounts on chosen nodes at `/mnt/yoal-shares/<share>` with sealed SMB credentials and a read-write mount becomes a `bulk`, network disk ([STORAGE.md](./STORAGE.md) §3, D169); `backing: share` attachments, transport probes and blast-radius inheritance are not. C4's replica table, spread planner, deploy-time row population, per-node desired state and route fan-out are in behind `MULTI_NODE_REPLICAS` (migration 0045, `workload_replicas`, `planReplicas`, `RouteSpec.upstreams`); Caddy active health checks (interval `replicas.healthIntervalSeconds`) and least-conn balancing are in; rolling deploys, surge and drain are not. C8's failover controller is in as of 2026-11-07 (migration 0060 `failover_events`, `packages/core/src/failover-service.ts`): a controller lease in the control plane's own SQLite with the epoch checked inside every write, replica re-placement off a lost (`failover.enabled`) or draining node under the §8.3 rate limits, flap protection and queue expiry, ingress record-set tracking for the DNS drivers as `manual` events, and the database `decide` stage with a pluggable promotion handler; `GET /api/v1/ha/status`, `get_ha_status`, `yoal ha status` and the Settings → High availability panels read it. Three-signal detection, the object-store lease, DNS writes and drills are not. C7's Postgres streaming read replicas are in as of 2026-11-07 (migration 0069): `pg_basebackup` bootstrap and streaming through an agent-served unix-socket link (local port or the primary node's pinned-mTLS provider listener), helper-managed `yoal_repl` role, `pg_hba` block and `yoal_*` slots, 30-second slot sampling for status/lag, `<P>_READ_*` env, removal with two-sided confirmation, and fenced manual promotion (`database_failovers`) that the C8 controller can drive behind `YOAL_FEATURE_DB_AUTO_PROMOTE`; see [DATABASES.md](./DATABASES.md) §18. The rest of this document remains the plan.
+**Implemented so far (2026-11-06):** C0's backend — migration 0040, the `hardware` heartbeat block, node zone/roles/labels/CPU budget, derived volume classes (disk tiers since D169), constraint-aware placement and the `GET /topology` + `GET /topology/blast-radius` API with its read-only dashboard page. C1's control-plane model and helper/agent apply path are in too (migration 0041, address allocation, peer graph, managed join fields, the desired-state `wireguard` block, root `wireguard/keygen|apply|status` verbs and peer health on the heartbeat); the served installer still requires the signed agent bundle, and real-host verification has not run. C2's data model, forwarding path, pinned self-signed mTLS and cross-node attachments for process apps are in as well (migration 0043, `node_certificates`, `service_endpoints`, the endpoint planner, desired-state endpoints/providers, the agent's Bun TCP/TLS forwarder with fingerprint pinning, and the `SERVICE_ENDPOINTS` flag covering database and private-storage attachments); the per-install CA, Caddy L4 proxy and cross-node container attachments are not. C3's share registry and dashboard page (migration 0044, CRUD, org grants), the helper's fixed NFS/SMB mount/unmount/status verbs and desired-state mounting are in (migration 0067, D143): a share mounts on chosen nodes at `/mnt/yoal-shares/<share>` with sealed SMB credentials and a read-write mount becomes a `bulk`, network disk ([STORAGE.md](./STORAGE.md) §3, D169); `backing: share` attachments, transport probes and blast-radius inheritance are not. C4's replica table, spread planner, deploy-time row population, per-node desired state and route fan-out are in behind `MULTI_NODE_REPLICAS` (migration 0045, `workload_replicas`, `planReplicas`, `RouteSpec.upstreams`); Caddy active health checks (interval `replicas.healthIntervalSeconds`) and least-conn balancing are in; rolling deploys, surge and drain are not. C8's failover controller is in as of 2026-11-07 (migration 0060 `failover_events`, `packages/core/src/failover-service.ts`): a controller lease in the control plane's own SQLite with the epoch checked inside every write, replica re-placement off a lost (`failover.enabled`) or draining node under the §8.3 rate limits, flap protection and queue expiry, ingress record-set tracking for the DNS drivers as `manual` events, and the database `decide` stage with a pluggable promotion handler; `GET /api/v1/ha/status`, `get_ha_status`, `yoal ha status` and the Settings → High availability panels read it. Three-signal detection, the object-store lease, DNS writes and drills are not. C7's Postgres streaming read replicas are in as of 2026-11-07 (migration 0069): `pg_basebackup` bootstrap and streaming through an agent-served unix-socket link (local port or the primary node's pinned-mTLS provider listener), helper-managed `yoal_repl` role, `pg_hba` block and `yoal_*` slots, 30-second slot sampling for status/lag, `<P>_READ_*` env, removal with two-sided confirmation, and fenced manual promotion (`database_failovers`) that the C8 controller can drive behind `YOAL_FEATURE_DB_AUTO_PROMOTE`; see [DATABASES.md](./DATABASES.md) §18. As of 2026-11-14 fleet scheduling is in (§3.10, D214): every copy's node serves it and is charged for it, single-copy workloads move on drain, failover and rebalance (HTTP apps with a surge), with `spread`/`pack`, overcommit and an opt-in automatic rebalance; so are named private networks (D215) and measured links with on-demand throughput tests (§4.6, D216). Fleet node updates are in too (§3.11, D217): rollouts in `availability`/`rolling`/`parallel` waves with drain, soak, failure budget, pause/resume and an opt-in automatic rollout after a control-plane update, plus an on-node guard that restores the previous agent and helper when the new ones never confirm a healthy heartbeat. The rest of this document remains the plan.
 
 Related: [DESIGN.md](./DESIGN.md) §3 and §9, [VOLUMES.md](./VOLUMES.md),
 [DATABASES.md](./DATABASES.md), [OBJECT-STORAGE.md](./OBJECT-STORAGE.md), [OPS.md](./OPS.md),
@@ -23,7 +23,7 @@ Related: [DESIGN.md](./DESIGN.md) §3 and §9, [VOLUMES.md](./VOLUMES.md),
 | C1 | Managed overlay, hubs/LAN mesh, join, installer, helper keygen/apply/status, ufw/firewalld/nftables, peer health; `install.sh --join` worker installs; `POST /nodes/:id/overlay` adopts an existing node. **Verified on two hosts 2026-11-12** (Scaleway `par1` edge + Hetzner `hel1` worker, 41 ms RTT): ingress → overlay → worker app serves | MTU probe, hub loss with a second hub, LAN mesh on real hardware |
 | C2 | Cross-node DB/private storage for process apps, TCP/TLS forwarder, pinned self-signed mTLS, endpoint status plumbing | Per-install CA, Caddy L4, container apps, endpoint failover UI |
 | C3 | Share registry/API/dashboard, helper NFS/SMB mount verbs | Desired-state mounts, `backing: share`, quotas/uid-gid, blast radius |
-| C4 | Replica table/planner, deploy population, per-node state, route fan-out, health checks (configurable interval) | Rolling/surge, operator drain workflow, move-back |
+| C4 | Replica table/planner, deploy population, per-node state, route fan-out to every copy's node, per-copy accounting, health checks (configurable interval), drain and Rebalance for spread and single copies, surge for unattached single HTTP apps (§3.10) | Rolling deploys across a set, singletons and run leases, UPS drain deadline |
 | C5 | Driver/policy contracts, `IngressHealth`, status API, Settings page | Probing, Cloudflare writes, full route tables, certificate distribution |
 | C6 | Lease decision logic and CAS interface | Standby, Litestream follow, epoch propagation, promotion |
 | C7 | Postgres async streaming replicas: `pg_basebackup` + streaming over the agent link, slots/WAL retention, 30 s lag sampling, `<P>_READ_*` URLs, two-sided removal, fenced manual promotion (dashboard/CLI/REST, `If-Match`), rebuild of the other replicas; overlay firewall opens the provider ranges | `sync` mode and its downgrade, `db_replica_metrics_1m` and lag alerts, the stable 22000–22999 read port, `_READ_POOL_URL`, `pg_rewind` healing (the old primary is purged instead), PITR databases, switchover, live multi-node verification |
@@ -91,8 +91,9 @@ footprint; leave the single-node install untouched. `L2`/`L3` **data** keeps an 
 | I6 | No acknowledged write is lost beyond the stated RPO | `durability` per database; Litestream interval; no silent downgrade |
 | I7 | Only the lease holder replicates SQLite | The Litestream unit is gated by lease ownership (§6.2) |
 
-**Non-goals, with the trade-off each accepts.** No continuous scheduler or autoscaling: capacity is
-planned, so a hot node can sit beside a cold one until **Rebalance**. No multi-writer control plane:
+**Non-goals, with the trade-off each accepts.** No autoscaling and no per-request scheduling:
+capacity is planned, and a hot node sits beside a cold one until **Rebalance** runs, by hand or
+automatically when `scheduling.autoRebalance` is on (§3.10, D214). No multi-writer control plane:
 failover costs a TTL plus promotion and the standby idles, but SQLite stays the writer without
 consensus per write. No distributed block or file storage: a single-writer volume is pinned and
 capped at `L1` (or `L2` with an explicit replicated-copy protocol). No geo-routing, Kubernetes API
@@ -429,6 +430,146 @@ Every step is idempotent and resumable; a rebuilt machine is a new node with a n
 certificate that must not inherit the old one's roles, replicas or sync slot. The decommission
 checklist is a runbook (§18).
 
+### 3.10 Scheduling, moves and rebalancing (D214)
+
+Built 2026-11-14. Placement is still one recorded node per copy, decided by the control plane, but
+it is no longer final. `packages/core/src/{rebalance,scheduling-service}.ts` and the move methods in
+`workloads.ts` carry it; migration 0112 adds the columns.
+
+**What was wrong before.** Three faults made multi-node replicas unusable in practice: only the node
+holding copy 0 received the project's route and release, so every other copy could not serve; a
+spread workload's whole reservation was charged to copy 0's node, which starved that node and left
+the others looking empty; and logs from a copy on any other node were refused. A redeploy was also
+charged for its own running copy, so an app using more than half a node could not be redeployed.
+All four are fixed, and `workload-moves.test.ts` holds them.
+
+**Settings** (`scheduling` in the cluster configuration, Settings → Clustering):
+
+| Key | Default | Effect |
+|---|---|---|
+| `strategy` | `spread` | `spread` places on the emptiest node that fits; `pack` on the fullest that fits, so nodes fill one at a time |
+| `memoryOvercommitPercent` | 100 | Admission ceiling as a percentage of the node's workload memory budget. The slice limit on the host does not change, so above 100 the fleet is betting apps do not all reach their limit at once |
+| `cpuOvercommitPercent` | 100 | The same for a node's CPU budget; CPU is compressible, so this is the safer one to raise |
+| `autoRebalance` | off | The controller moves one copy per `rebalanceIntervalMinutes` while the gap exceeds `rebalanceThresholdPercent`, and only when every node is online and nothing else is moving |
+| `maxMovesPerRebalance` | 5 | Moves one manual Rebalance may start |
+| `failoverSingleCopies` | on | With `failover.enabled`, re-place single-copy HTTP apps off a lost node |
+
+**What moves, and how.** A drain, a failover, a rebalance and an operator's move share one path:
+`planReplicaMove` admits the copy on a target, `moveReplica` writes it, and the failover controller
+tracks the move as a `failover_events` row until the copy reports `running`, times out or fails.
+
+| Copy | Drain | Lost node (`failover.enabled`) | How it moves |
+|---|---|---|---|
+| One copy of a spread set | Moves | Moves | Stops there, starts here; the other copies keep serving |
+| Single HTTP app, nothing attached | Moves | Moves | **Surge**: the new node starts its copy while the old one serves; the route follows when the new copy reports `running`. If it never does, the workload goes back to the copy still running. A failover has no old copy, so it is a plain start |
+| Single process app with a database or storage attached over endpoints | Moves | Moves | Stops, then starts; its loopback endpoints are planned on the new node and freed on the old |
+| Single app with app volumes | Stays | Stays | Only a person moves it, with its data and with downtime ([SCALING.md](./SCALING.md) §7) |
+| Single worker (`ingress: none`) | Moves | **Stays** | A silent node may still be running it; a second copy would do its work twice (§8.4) |
+| Data directory, app volume, compose stack, same-node attachment, pinned placement | Stays | Stays | The move is `blocked` with the reason, and the Fleet page lists it under "cannot move" |
+
+A one-node install has nowhere to move anything, so it records nothing and behaves as before.
+
+**Rebalance.** `planRebalance` is pure. `spread` repeatedly takes the single move that most narrows
+the gap between the fullest and emptiest node, never a move that only swaps which node is full.
+`pack` empties the lightest node onto the fullest that fit, whole or not at all. Sibling copies stay
+apart, capacity and CPU ceilings hold, and a copy that is already moving is not planned again.
+
+**Surfaces.** Dashboard → Fleet; `GET /scheduling`, `POST /scheduling/rebalance`,
+`POST /projects/:slug/reschedule`; `yoal fleet status|rebalance|move`. `WORKLOAD_MOVES` (on by
+default) gates single-copy moves.
+
+**Since built** ([SCALING.md](./SCALING.md)): scaling without a deploy, process apps and workers
+across nodes, rolling deploys with a health gate, autoscaling from per-copy CPU and memory, and moves
+that carry app volumes. **Not built:** surge for a single-copy deploy, and placement by measured
+usage rather than reservations.
+
+
+### 3.11 Fleet node updates (D217)
+
+Built 2026-11-14. The control plane's host updates itself (`yoal-update-self`, OPS §4.1: a standby
+on the same host takes over, so the API never drops). Every other node installs the same signed
+release through its helper (D99). A **rollout** does that for many nodes at once, in waves, and
+keeps the fleet serving while it does. Code: `packages/core/src/node-rollouts.ts` (service and the
+`node.rollout` flow), `node-rollout-plan.ts` (pure wave planner), `apps/helper/src/node-update.ts`
+(the rollback guard); migration 0113 adds `node_rollouts`.
+
+**Order.** Update the control plane first (Settings → Updates); the rollout's target is always the
+control plane's own version, so it is the newest thing in the fleet and agents only ever talk to a
+control plane at least as new as themselves. With `updates.autoRollout` on, the maintenance sweep
+starts one rollout per control-plane version by itself, with the defaults in `updates`.
+
+**Strategies.**
+
+| Strategy | Waves | Use it when |
+|---|---|---|
+| `availability` (default) | A canary on its own, then the largest waves that leave at least one online member of every redundant group outside the wave, capped at half the online fleet | Always, unless you have a reason not to |
+| `rolling` | `batchSize` nodes at a time (default 1), after a canary when `batchSize > 1` | You want one node at a time, or a fixed pace |
+| `parallel` | Every node in one wave (a canary first only if asked) | A small fleet, a maintenance window, or a fix that must land everywhere now |
+
+A **redundant group** is the set of nodes that together keep one thing up: every `ingress` node,
+every `control` node, the nodes holding copies of one multi-copy workload (§8.2), and a database's
+primary with its streaming replicas (§9.2). Nodes not in the rollout count too: the control-plane
+host keeps an ingress group served while the other ingress node updates. The planner orders nodes
+by responsibility, least first, so the canary is the node whose trouble costs least and ingress
+nodes go last, after the rest of the fleet has run the release. `parallel` ignores groups but lists
+each one it would take down together as a warning.
+
+**Each wave.**
+
+| Step | What happens | Ends when | On timeout |
+|---|---|---|---|
+| Check | For `availability` and `rolling`, a group whose other members are offline holds the wave (phase `blocked`) | The group has an online member outside the wave | 10 min, then the rollout pauses |
+| Drain (opt-in) | Cordon the wave's nodes (`draining`); the failover controller moves movable copies off, as for a manual drain (§3.10) | Nothing movable is left or moving | 15 min, then the wave updates anyway |
+| Update | `NodeService.scheduleUpdate` records the release in each node's desired state (a new generation) | Every node reports the version or a failure in its heartbeat | 20 min per node: failed, "no answer" |
+| Soak | Nothing; the wave runs on the new version for `soakSeconds` (default 60) | The time passes | — |
+| Verify | Each node must be online, still on the new version, and still running every unit that ran there before the update. Cordons the rollout set are lifted | — | — |
+
+A node that fails (a reported error, no answer, offline after the update, back on the old version,
+or a unit that stopped) counts against `maxFailures` (default 0). Past it the rollout **pauses**:
+the operator resumes with the failed nodes as a retry wave, resumes leaving them failed, or
+cancels. A paused rollout fails after 7 days. Cancel stops further waves and lifts the rollout's
+cordons; a node already installing finishes on its own, because the control plane only ever
+records desired state (D23).
+
+**What an agent update interrupts.** Workloads keep running: process apps, containers and Caddy
+are their own units. Restarting `yoal-agent` closes its cross-node endpoint forwarders (§4.3) and
+Postgres replication links (§9.2) for a few seconds, the identity and console fronts, and
+`try-restart`s `yoal-builder`, `yoal-studio` and `yoal-mail`, which cuts a build in progress. That
+is why `drain` is opt-in: turn it on when single-copy apps depend on cross-node attachments, or when
+builds must not be cut.
+
+**The rollback guard (on the node).** Before the helper swaps `yoal-agent` and `yoal-helper`, it
+arms a transient systemd timer (`yoal-node-update-guard`, 10 minutes). The timer's command is a
+`/bin/sh` script built from fixed paths, so it works even if both new binaries crash: unless a
+confirm marker exists, it restores the `.previous` pair, writes `node-update-rollback.json` and
+restarts the services. The new agent disarms it (`POST /v1/node/update/confirm`) after the control
+plane accepts its first heartbeat on the new version, which proves the agent, the helper socket and
+the path to the control plane all work. The rolled-back agent reports the failure with the
+rollback's reason, and the rollout's verify step catches a node that reported the new version and
+then came back on the old one. Nodes declare `node-update-guard`; the plan warns about nodes
+without it, which is every node until it has been updated once to a release that has the guard.
+
+| Failure | What the operator sees | The fleet |
+|---|---|---|
+| No signed release, bad checksum, no route to GitHub | The node fails with the helper's reason; rollout pauses | That node keeps its old binaries |
+| New agent crash-loops, or cannot reach the control plane | "No answer" or the rollback reason within ~12 min; rollout pauses | The guard restores the old pair at 10 min |
+| Node reports the new version, then falls over during the soak | Verify fails it ("stopped heartbeating" or "came back on the old version") | Next wave never starts |
+| A unit stopped after the restart | Verify names it | Next wave never starts |
+| The control plane restarts mid-rollout | Nothing: the flow resumes at its step | Nodes keep converging on their desired state |
+| The control plane is unreachable for 10 minutes after a wave updates | Those nodes roll back and report it | Retry once the control plane is back |
+
+**Surfaces.** Dashboard → Nodes (**Update fleet**, plan preview, live progress, resume/cancel) and
+Settings → Clustering → Node updates (`updates`: defaults and `autoRollout`); REST
+`/nodes/rollouts` (API.md); `yoal nodes rollout plan|start|status|list|resume|cancel` and
+`yoal nodes update <node>`; the run is also `/operations/flw_…` with its step log. Every start,
+resume, cancel and finish is audited (`node.rollout.*`), and each node request as
+`node.update_agent` with the rollout id.
+
+**Not built:** the control-plane standby (§6.5) joining the rollout so a control-plane release and
+its fleet roll as one; worker host convergence (a node update still swaps only the two binaries,
+OPS §4.1.2); MCP tools; and health beyond heartbeat and unit status (per-app readiness probes
+during the soak).
+
 ---
 
 ## 4. Network
@@ -629,6 +770,42 @@ rotation do (§17). A compromised object store can forge the lease and choose th
 listeners exist only on loopback, on `wg0` and — on an ingress node — on 80/443, which is the job; a
 hub also accepts UDP 51820. The control plane never dials a public node interface: a port scan of a
 worker's address finds nothing.
+
+### 4.6 Private networks and measured links (D215, D216)
+
+Built 2026-11-14 (`overlay.ts`, `link-service.ts`, `apps/agent/src/link-tests.ts`, migration 0112).
+
+**Private networks.** A node may name the private network it sits on (`private_network`: a provider
+VPC, a vSwitch, a home LAN) beside its `lan_endpoint`. Two nodes that name the same network dial each
+other there, in any zone and whether or not one is a hub; the hub keeps relaying to nodes outside
+it. WireGuard still wraps the hop, so the trust boundary of §4.5 is unchanged and the gain is the
+underlay: usually lower latency, more bandwidth and no egress charge. Nodes that name no network
+keep the rule of §4.1 (one zone is one LAN), and a named network is never assumed from a shared
+zone. Set it on Nodes → Edit, or `PATCH /nodes/:id { privateNetwork, lanEndpoint }`.
+
+**Passive samples.** An agent with the `link-tests` capability times a TCP connect to every other
+overlay node's port 8080 about twice a minute, three attempts each. A reset is an answer, so a node
+whose Caddy is down still measures; only silence is loss. The heartbeat carries the samples and
+`node_links` keeps the latest per ordered pair with its path: `private`, `direct` (a public
+endpoint) or `relayed` (through a hub), read off the same peer graph the nodes apply.
+
+**Link tests.** A signed-in platform admin queues a test for one pair, one node against the rest, or
+every pair once. Both nodes receive it in desired state: one listens on its overlay address on a port
+from 19900–19999 that no provider uses, the other measures 20 echo round trips on the quiet link and
+then pushes and pulls for `seconds` (5 by default, 30 at most) over `streams` connections (4 by
+default). The listener exists for one test, drops any connection that does not open with that test's
+token, and closes at the deadline. A node takes part in one test at a time, so a fleet-wide run
+measures the links rather than the tests competing; a test nobody finishes fails after its deadline
+and frees the queue. Throughput is measured by the agents in userspace, so on a very fast link it
+reports what a Bun process can move, which is also what an app would get.
+
+**Surfaces.** Dashboard → Fleet draws the map (line weight and dash are the path, colour is only
+loss or unreachable) with a table of the same links; `GET /links`, `POST /links/test`;
+`yoal fleet links|link-test`.
+
+**History and alerts** ([SCALING.md](./SCALING.md) §6): a point a minute is kept for a day, and a
+link silent for three minutes between two reporting nodes raises an alert. **Not built:** an MTU
+probe, and an unencrypted mode for a trusted private network.
 
 ---
 
@@ -1383,7 +1560,10 @@ are in §12. Health, policy and retries are §8.6.
 - **Stages.** A copy's event walks the §9.3 stage machine (`detect` → … `promote` while it starts →
   `complete`) one allowed step at a time, so no stage is skipped. Audit action `ha.failover`, actor
   `system`, with from, to and epoch; alerts are the `failover` system-alert kind.
-- **Not built:** singleton ordering, the Rebalance action, the UPS drain deadline and the dry run.
+- **Single copies (2026-11-14, D214).** The same controller now moves single-copy workloads too
+  (§3.10): on drain always, on a lost node when `scheduling.failoverSingleCopies` is on and the copy
+  is an HTTP app. Rebalance and operator moves are recorded here as `in-progress` events.
+- **Not built:** singleton ordering, the UPS drain deadline and the dry run.
 
 **No automatic move back.** The returned node holds nothing of this workload, because desired state no
 longer assigns it. The resource shows `degraded spread` and a **Rebalance** action; an operator

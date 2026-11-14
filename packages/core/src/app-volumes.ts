@@ -179,7 +179,15 @@ export class AppVolumeService {
 		principal: Principal,
 		project: ProjectRow,
 		raw: AppVolumeCreate,
-		options: { restoreFrom?: { snapshotId: string; sourceName: string; diskId: string | null } } = {},
+		options: {
+			restoreFrom?: {
+				snapshotId: string;
+				sourceName: string;
+				diskId: string | null;
+				/** Restore onto this node instead of the project's own: a move takes the data there first (SCALING §7). */
+				nodeId?: string;
+			};
+		} = {},
 	): AppVolumeView {
 		this.assertEnabled();
 		this.ctx.iam.require(principal, 'project:update', { type: 'project', id: project.id });
@@ -211,7 +219,17 @@ export class AppVolumeService {
 		let reservedBytes: number;
 		const workloadNode = this.workloadNode(project);
 		let disk: DiskRow | null;
-		if (options.restoreFrom) {
+		const elsewhere = options.restoreFrom?.nodeId;
+		if (elsewhere) {
+			// The target node's own storage: its default app-volume disk when it has one, else its
+			// system disk. The source's disk is on the node being left.
+			const plan = this.ctx.disks.plan('app-volumes', undefined, elsewhere);
+			try {
+				disk = plan.target === 'disk' && plan.disk!.nodeId !== elsewhere ? null : this.ctx.disks.pick(plan, elsewhere, input.sizeMb);
+			} catch {
+				disk = null;
+			}
+		} else if (options.restoreFrom) {
 			disk = this.ctx.disks.byId(options.restoreFrom.diskId);
 			if (options.restoreFrom.diskId && !disk)
 				throw new ConflictError('The disk that held the source volume was removed, so its snapshot cannot be restored onto it.');
@@ -230,7 +248,7 @@ export class AppVolumeService {
 			freeBytes = disk.freeBytes;
 			reservedBytes = this.reservedBytesForDisk(disk.id);
 		} else {
-			nodeId = this.workloadNode(project) ?? this.requiredEdgeNode();
+			nodeId = elsewhere ?? this.workloadNode(project) ?? this.requiredEdgeNode();
 			freeBytes = this.diskFreeForNode(nodeId);
 			reservedBytes = this.reservedBytesForStateDir(nodeId);
 		}

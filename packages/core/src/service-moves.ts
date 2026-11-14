@@ -316,7 +316,8 @@ export class ServiceMoveService {
 
 	/** Projects stopped while a database they use moves. */
 	quiescedProjectIds(): Set<string> {
-		const ids = new Set<string>();
+		// An app moving with its own data (SCALING §7) is stopped for the copy in the same way.
+		const ids = new Set<string>(this.ctx.relocations.quiescedProjectIds());
 		for (const row of this.activeMoves()) for (const id of parseJson<string[]>(row.projectIdsJson, [])) ids.add(id);
 		return ids;
 	}

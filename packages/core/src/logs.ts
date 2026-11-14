@@ -103,7 +103,8 @@ export class LogService {
 		// an empty, successful drain instead of failing the agent's loop. Managed services are not
 		// in `workloads`; their ids (`st_…`, `db_…`) resolve to their own table.
 		if (!workload) return this.appendServiceRuntime(nodeId, batch);
-		if (workload.nodeId !== nodeId)
+		// A spread copy (C4) or a copy mid-move runs on a node other than `workloads.node_id`.
+		if (!this.ctx.workloads.runsOnNode(workload, replica, nodeId))
 			throw new CoreError(
 				'forbidden',
 				'This workload is placed on another node.',

@@ -62,6 +62,7 @@ export class TopologyService {
 				publicAddress: facts.publicAddress,
 				privateAddress: facts.privateAddress,
 				lanEndpoint: facts.lanEndpoint,
+				privateNetwork: facts.privateNetwork,
 				hardware: facts.hardware,
 				derivedLabels: facts.derivedLabels,
 				disks: nodeDisks,

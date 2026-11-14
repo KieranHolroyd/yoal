@@ -47,6 +47,7 @@ export const SECTIONS: DocsSection[] = [
 		pages: [
 			'compute/functions',
 			'compute/apps-and-containers',
+			'compute/scaling',
 			'compute/volumes',
 			'compute/scheduled-jobs'
 		]

@@ -114,7 +114,7 @@ describe('compileSiteRoute', () => {
 		expect(json).toContain('"dial":"10.47.1.3:8080"');
 		// Caddy's JSON field names; the Caddyfile spellings (`lb_policy`, `health_uri`) are refused
 		// as unknown fields and fail the whole config load.
-		expect(json).toContain('"load_balancing":{"selection_policy":{"policy":"least_conn"}}');
+		expect(json).toContain('"load_balancing":{"selection_policy":{"policy":"least_conn"},"try_duration":"3s","try_interval":"250ms"}');
 		expect(json).toContain('"health_checks":{"active":{"uri":"/health","interval":"5s"},"passive":{"fail_duration":"30s"}}');
 		expect(json).not.toContain('lb_policy');
 		expect(json).not.toContain('health_uri');

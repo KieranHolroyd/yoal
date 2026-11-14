@@ -79,6 +79,13 @@ project's public DSN key (`X-Sentry-Auth` or `?sentry_key=`), never a session co
 | POST | `/nodes/:id/builder` | platform admin **session** | `{ builder: boolean }`; lets the node claim git builds |
 | POST | `/nodes/join-token` | platform admin **session** | single-use, 1 h; 403 for API keys / OAuth tokens |
 | POST | `/nodes/:id/drain` \| `/resume` | platform admin **session** | |
+| POST | `/nodes/:id/update` | platform admin **session** | asks one node to install the control plane's signed release (D99). 409 when it already runs it or its agent predates dashboard updates |
+| GET | `/nodes/rollouts` | platform admin | `{ active, rollouts }`: the running or paused fleet update and the newest rollouts (`?limit`, default 20) as `NodeRolloutView` (CLUSTERING §3.11, D217) |
+| POST | `/nodes/rollouts/plan` | platform admin | body as below; previews the waves (`NodeRolloutPlanView`: waves with each node's groups, skipped nodes with reasons, nodes already current, warnings). Changes nothing |
+| POST | `/nodes/rollouts` | platform admin **session** | starts a fleet update to the control plane's version. Body `{ strategy?: "availability"\|"rolling"\|"parallel", batchSize?, canary?, drain?, soakSeconds?, maxFailures?, nodeIds? }`; defaults from `updates` in the cluster configuration. 201 with the view; 409 when a rollout is already active or no node can be updated |
+| GET | `/nodes/rollouts/:id` | platform admin | one `NodeRolloutView`; `flowId` is also readable at `/operations/flw_…` with its step log |
+| POST | `/nodes/rollouts/:id/resume` | platform admin **session** | a paused rollout continues. Body `{ retryFailed?: boolean }` (default true: the failed nodes run again as the next wave; false leaves them failed). 409 unless paused |
+| POST | `/nodes/rollouts/:id/cancel` | platform admin **session** | stops further waves and lifts the cordons the rollout set. Nodes already installing finish on their own. 409 once finished |
 | POST | `/nodes/:id/rotate-token` | platform admin **session** | |
 | POST | `/nodes/:id/edge` | platform admin **session** | makes this online node the edge; the old edge becomes a worker (D98). 409 while `YOAL_EDGE_NODE_ID` is set, for a node that is not online, or when the old edge hosts apps or data but has no public address |
 | POST | `/nodes/:id/overlay` | platform admin **session** | moves a node that joined with host networking onto the managed WireGuard overlay (CLUSTERING §4.1, C1). Body `{ endpoint?: "host[:port]" }` is the underlay address other nodes dial (port defaults to the overlay listen port). Allocates an overlay address; the node's helper creates its key pair on the next reconcile and the heartbeat stores the public key. 409 when already on the overlay or the CIDR is full |
@@ -110,6 +117,18 @@ project's public DSN key (`X-Sentry-Auth` or `?sentry_key=`), never a session co
 | PATCH | `/cluster/config` | platform admin **session** | section patches; unknown keys rejected; endpoint port range must have min < max |
 | GET | `/ingress/status` | platform admin | ingress driver, hold-down policy and ingress-node readiness (C5) |
 | GET | `/ha/status` | platform admin | the failover controller (`FailoverStatusView`): switch, lease epoch/holder, policy, per-node silence and copies, ingress record set, database promotion candidates, last 50 `failover_events` (C8) |
+| GET | `/scheduling` | platform admin | fleet capacity (`SchedulingView`): per node the admission ceiling, reserved and live memory, CPU, copies and how many may move; every copy with the reason it is pinned, if any; and the moves a rebalance would make (D214) |
+| POST | `/scheduling/rebalance` | platform admin; `apply: true` needs a dashboard session | body `{ apply?, strategy? }`. Previews by default; with `apply` it starts the moves and returns `{ applied, plan, moved, skipped }` |
+| POST | `/projects/:slug/reschedule` | `project:update` | body `{ node? }`. Moves a single-copy app to the named node or the scheduler's choice, without pinning its placement; returns `{ project, from, to, mode: surge \| restart }`. `409` names what pins the app |
+| GET | `/projects/:slug/scaling` | `deployment:read` | how the app is scaled (`ScalingView`): copies with node, status, release and usage, mode and what blocks scaling out, room on the fleet, a rollout, the autoscaling policy with its last decision, and scale events ([SCALING.md](./SCALING.md)) |
+| POST | `/projects/:slug/scale` | `project:update` | body `{ replicas }`. Places or removes copies at once, with no deploy; returns `{ project, from, to, added, removed }`. `422` names each node and why it cannot take a copy |
+| PUT | `/projects/:slug/scaling` | `project:update` | the autoscaling policy `{ enabled, min, max, metric: cpu \| memory \| requests, target, scaleDownMinutes }`; returns the `ScalingView` |
+| POST | `/projects/:slug/rollout/resume` | `deployment:create` | retry a paused rollout |
+| POST | `/projects/:slug/relocate` | `project:update` | body `{ node? }`. Move a single-copy app with its app volumes; the app is stopped for the copy. `202` with a `RelocationView` |
+| GET | `/projects/:slug/relocation` | `deployment:read` | `{ relocation }`: the latest move with data, or null |
+| POST | `/projects/:slug/relocation/cancel` | `project:update` | stop a move before its switch; the app starts again where it was |
+| GET | `/links` | platform admin | every ordered pair of overlay nodes (`LinkMapView`): path, latest round trip and loss, and the last link test (D216) |
+| POST | `/links/test` | platform admin, dashboard session | body `{ from?, to?, seconds?, streams? }`: one pair, one node against the rest, or every pair once. `202` with `{ queued, skipped }` |
 | GET | `/topology` | platform admin | zones, nodes, roles, labels, hardware, disks (`{ id, name, tier, mountPath, sizeBytes, freeBytes, remote }`) and placement counts (C0) |
 | GET | `/topology/blast-radius?node=<id>` or `?zone=<name>` | platform admin | what an outage of that node or zone would take down: items and summary counts (C0) |
 | GET | `/audit` | `project:read` | `?limit&action&resource&from&to&cursor` → `{ entries, nextCursor }`; `from`/`to` are a date, ISO time or epoch ms (a date as `to` covers the whole UTC day); `cursor` is the previous `nextCursor`; ≤ 200 a page |

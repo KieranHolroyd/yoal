@@ -128,15 +128,17 @@ export class ServiceEndpointService {
 		for (const nodeId of consumerNodes) this.reconcile(null, nodeId);
 	}
 
-	/** Live projects whose workload is placed on a node. */
+	/** Live projects with a copy on a node: the workload's own node, a spread copy, or a copy mid-move. */
 	private projectsOnNode(nodeId: string): string[] {
-		return this.ctx.db
-			.select({ projectId: workloads.projectId })
-			.from(workloads)
-			.innerJoin(projects, eq(projects.id, workloads.projectId))
-			.where(and(eq(workloads.nodeId, nodeId), isNull(projects.deletedAt)))
-			.all()
-			.map((row) => row.projectId);
+		const rows = this.ctx.sqlite
+			.query<{ projectId: string }, [string, string, string]>(
+				`SELECT DISTINCT w.project_id AS projectId FROM workloads w
+				 JOIN projects p ON p.id = w.project_id AND p.deleted_at IS NULL
+				 WHERE w.node_id = ? OR w.moving_from_node_id = ?
+				    OR EXISTS (SELECT 1 FROM workload_replicas r WHERE r.workload_id = w.id AND r.node_id = ?)`,
+			)
+			.all(nodeId, nodeId, nodeId);
+		return rows.map((row) => row.projectId);
 	}
 
 	/** Live remote attachments that need an endpoint. Same-node services are excluded by the planner. */

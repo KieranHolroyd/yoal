@@ -126,6 +126,12 @@ export const FEATURE_FLAGS = {
 		area: 'workloads',
 		description: 'Spread HTTP workload replicas across nodes with a load-balanced route (CLUSTERING C4).'
 	},
+	WORKLOAD_MOVES: {
+		name: 'WORKLOAD_MOVES',
+		default: true,
+		area: 'workloads',
+		description: 'Move single-copy workloads between nodes on drain, failover and rebalance (CLUSTERING §3.10).'
+	},
 	SERVICE_ENDPOINTS: {
 		name: 'SERVICE_ENDPOINTS',
 		default: true,

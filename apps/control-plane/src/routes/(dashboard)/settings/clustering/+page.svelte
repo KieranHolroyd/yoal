@@ -1,11 +1,18 @@
 <script lang="ts">
+	import CircleArrowUpIcon from '@lucide/svelte/icons/circle-arrow-up';
 	import NetworkIcon from '@lucide/svelte/icons/network';
 	import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
+	import { untrack } from 'svelte';
+	import { enhance } from '$app/forms';
 	import { resolve } from '$app/paths';
+	import { nodeRolloutLimits, nodeRolloutStrategies } from '@yoal/contracts';
 	import StatusBadge from '#lib/components/yoal/StatusBadge.svelte';
 	import { Badge } from '#lib/components/ui/badge/index.js';
 	import { Button } from '#lib/components/ui/button/index.js';
 	import * as Field from '#lib/components/ui/field/index.js';
+	import { Input } from '#lib/components/ui/input/index.js';
+	import * as NativeSelect from '#lib/components/ui/native-select/index.js';
+	import { Switch } from '#lib/components/ui/switch/index.js';
 	import { Textarea } from '#lib/components/ui/textarea/index.js';
 	import Panel from '../../_lib/Panel.svelte';
 	import { formatRelative } from '../../_lib/format.js';
@@ -15,7 +22,34 @@
 	let { data, form }: PageProps = $props();
 	// svelte-ignore state_referenced_locally -- the page intentionally seeds the editor once
 	let text = $state(JSON.stringify(data.config, null, 2));
-	const result = $derived(form as { success?: string; message?: string } | null);
+	const result = $derived(form as { success?: string; message?: string; section?: string } | null);
+
+	// Saving a section refreshes `data.config`: refresh the JSON too unless it has unsaved edits,
+	// so a later JSON save does not put the old values back.
+	// svelte-ignore state_referenced_locally -- the seed is compared, not rendered
+	let seeded = text;
+	$effect(() => {
+		const next = JSON.stringify(data.config, null, 2);
+		untrack(() => {
+			if (text === seeded) text = next;
+			seeded = next;
+		});
+	});
+
+	// Fleet node updates (docs/CLUSTERING.md §3.11): the defaults the Update fleet dialog and the
+	// automatic rollout use.
+	// svelte-ignore state_referenced_locally -- seeded once; the form saves the whole section
+	const updates = data.config.updates;
+	let autoRollout = $state(updates.autoRollout);
+	let rolloutStrategy = $state<string>(updates.strategy);
+	let rolloutDrain = $state(updates.drain);
+	let rolloutCanary = $state(updates.canary === undefined ? '' : String(updates.canary));
+	let updatesPending = $state(false);
+	const strategyLabels: Record<string, string> = {
+		availability: 'Availability (recommended): canary, then waves that keep every redundant group up',
+		rolling: 'Rolling: a fixed number of nodes at a time',
+		parallel: 'Parallel: every node at once'
+	};
 </script>
 
 <SettingsHeader
@@ -60,17 +94,127 @@
 	{/if}
 </Panel>
 
+<form
+	method="POST"
+	action="?/updates"
+	class="mb-5"
+	use:enhance={() => {
+		updatesPending = true;
+		return async ({ update }) => {
+			await update({ reset: false });
+			updatesPending = false;
+		};
+	}}
+>
+	<Panel
+		title="Node updates"
+		icon={CircleArrowUpIcon}
+		description="How the fleet follows the control plane to a new release (Nodes → Update fleet). The target is always the control plane's own version."
+	>
+		<Field.Group>
+			<Field.Field orientation="horizontal" class="gap-2">
+				<input type="hidden" name="autoRollout" value={autoRollout ? 'true' : ''} />
+				<Switch id="updates-auto" bind:checked={autoRollout} />
+				<Field.Content>
+					<Field.Label for="updates-auto" class="font-normal">Update nodes automatically</Field.Label>
+					<Field.Description>
+						After the control plane updates itself, update every node with these settings. One
+						rollout per control-plane version; a paused one waits for you on the Nodes page.
+					</Field.Description>
+				</Field.Content>
+			</Field.Field>
+
+			<Field.Field>
+				<Field.Label for="updates-strategy">Strategy</Field.Label>
+				<NativeSelect.Root id="updates-strategy" name="strategy" bind:value={rolloutStrategy}>
+					{#each nodeRolloutStrategies as strategy (strategy)}
+						<NativeSelect.Option value={strategy}>{strategyLabels[strategy]}</NativeSelect.Option>
+					{/each}
+				</NativeSelect.Root>
+			</Field.Field>
+
+			<div class="grid gap-4 sm:grid-cols-3">
+				<Field.Field>
+					<Field.Label for="updates-batch">Nodes per wave</Field.Label>
+					<Input
+						id="updates-batch"
+						name="batchSize"
+						type="number"
+						min="1"
+						max={nodeRolloutLimits.maxBatchSize}
+						value={updates.batchSize}
+					/>
+					<Field.Description>Rolling only.</Field.Description>
+				</Field.Field>
+				<Field.Field>
+					<Field.Label for="updates-soak">Soak (seconds)</Field.Label>
+					<Input
+						id="updates-soak"
+						name="soakSeconds"
+						type="number"
+						min="0"
+						max={nodeRolloutLimits.maxSoakSeconds}
+						value={updates.soakSeconds}
+					/>
+					<Field.Description>Each wave stays healthy this long before the next.</Field.Description>
+				</Field.Field>
+				<Field.Field>
+					<Field.Label for="updates-failures">Failures allowed</Field.Label>
+					<Input
+						id="updates-failures"
+						name="maxFailures"
+						type="number"
+						min="0"
+						max={nodeRolloutLimits.maxFailures}
+						value={updates.maxFailures}
+					/>
+					<Field.Description>0 pauses on the first failed node.</Field.Description>
+				</Field.Field>
+			</div>
+
+			<div class="grid gap-4 sm:grid-cols-2">
+				<Field.Field>
+					<Field.Label for="updates-canary">Canary</Field.Label>
+					<NativeSelect.Root id="updates-canary" name="canary" bind:value={rolloutCanary}>
+						<NativeSelect.Option value="">Strategy default (on, except parallel)</NativeSelect.Option>
+						<NativeSelect.Option value="true">Always update one node first</NativeSelect.Option>
+						<NativeSelect.Option value="false">No canary</NativeSelect.Option>
+					</NativeSelect.Root>
+				</Field.Field>
+				<Field.Field orientation="horizontal" class="gap-2 self-end">
+					<input type="hidden" name="drain" value={rolloutDrain ? 'true' : ''} />
+					<Switch id="updates-drain" bind:checked={rolloutDrain} />
+					<Field.Content>
+						<Field.Label for="updates-drain" class="font-normal">Drain each wave first</Field.Label>
+						<Field.Description>
+							Move movable workloads off before the agent restarts. An update stops no workload, but
+							it blips cross-node endpoints, replication links, mail and running builds.
+						</Field.Description>
+					</Field.Content>
+				</Field.Field>
+			</div>
+		</Field.Group>
+		{#if result?.section === 'updates' && result.message}<p class="mt-3 text-sm text-destructive">{result.message}</p>{/if}
+		{#if result?.section === 'updates' && result.success}<p class="mt-3 text-sm text-success">{result.success}</p>{/if}
+		{#snippet footer()}
+			<div class="flex justify-end">
+				<Button type="submit" size="sm" disabled={updatesPending}>Save node updates</Button>
+			</div>
+		{/snippet}
+	</Panel>
+</form>
+
 <form method="POST" action="?/save" class="space-y-5">
 	<Panel title="Cluster configuration" icon={NetworkIcon} description="Validated against the ClusterConfig schema; unknown keys are rejected.">
 		<Field.Field>
 			<Field.Label for="cluster-config">JSON</Field.Label>
 			<Textarea id="cluster-config" name="config" bind:value={text} rows={26} class="font-mono text-xs" spellcheck="false" />
 			<Field.Description>
-				Overlay CIDR/MTU/port, endpoint port range and mTLS, replica limits, spread, health-check interval and failover grace, database replica limits and promotion lag limits, storage targets, the failover controller's lease timing, automatic failover and the share mount root.
+				Overlay CIDR/MTU/port, endpoint port range and mTLS, replica limits, spread, health-check interval and failover grace, database replica limits and promotion lag limits, storage targets, the failover controller's lease timing, automatic failover, scheduling (packing strategy, memory and CPU overcommit, automatic rebalance) and the share mount root.
 			</Field.Description>
 		</Field.Field>
-		{#if result?.message}<p class="text-sm text-destructive">{result.message}</p>{/if}
-		{#if result?.success}<p class="text-sm text-success">{result.success}</p>{/if}
+		{#if result?.section !== 'updates' && result?.message}<p class="text-sm text-destructive">{result.message}</p>{/if}
+		{#if result?.section !== 'updates' && result?.success}<p class="text-sm text-success">{result.success}</p>{/if}
 	</Panel>
 	<div class="flex justify-end">
 		<Button type="submit">Save configuration</Button>

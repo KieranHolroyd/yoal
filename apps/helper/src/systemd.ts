@@ -231,6 +231,8 @@ export interface HelperWorkloadStatus {
 	status: WorkloadStatus;
 	restarts: number;
 	memoryBytes?: number;
+	/** Cumulative CPU time the unit has used, in nanoseconds (systemd `CPUUsageNSec`). */
+	cpuNanos?: number;
 	/** Managed databases only: TLS state derived from the node's certificate files. */
 	tls?: DatabaseTlsState;
 }
@@ -2702,6 +2704,7 @@ END $$;`];
 			status: unit.status,
 			restarts: unit.restarts,
 			...(unit.memoryBytes !== undefined ? { memoryBytes: unit.memoryBytes } : {}),
+			...(unit.cpuNanos !== undefined ? { cpuNanos: unit.cpuNanos } : {}),
 			...(tls ? { tls } : {}),
 		};
 	}
@@ -2711,6 +2714,7 @@ END $$;`];
 		status: WorkloadStatus;
 		restarts: number;
 		memoryBytes?: number;
+		cpuNanos?: number;
 	}> {
 		const result = await this.systemctl(
 			[
@@ -2721,6 +2725,7 @@ END $$;`];
 				'--property=SubState',
 				'--property=NRestarts',
 				'--property=MemoryCurrent',
+				'--property=CPUUsageNSec',
 				'--property=Result',
 			],
 			{ allowFailure: true },
@@ -2730,6 +2735,7 @@ END $$;`];
 		const active = properties.ActiveState ?? '';
 		const restarts = parseRestarts(properties.NRestarts);
 		const memoryBytes = parseMemory(properties.MemoryCurrent);
+		const cpuNanos = parseCpuNanos(properties.CPUUsageNSec);
 		let status: WorkloadStatus;
 		switch (active) {
 			case 'active':
@@ -2753,7 +2759,12 @@ END $$;`];
 		// A systemd restart loop shows up as `failed` only between attempts; NRestarts makes it
 		// visible to the control plane even when the unit is momentarily active.
 		if (status === 'running' && restarts >= 5) status = 'failed';
-		return { status, restarts, ...(memoryBytes !== null ? { memoryBytes } : {}) };
+		return {
+			status,
+			restarts,
+			...(memoryBytes !== null ? { memoryBytes } : {}),
+			...(cpuNanos !== null ? { cpuNanos } : {}),
+		};
 	}
 
 	/** A compose stack is running when every service is; the worst status wins. */
@@ -3280,6 +3291,16 @@ function parseProperties(stdout: string): Record<string, string> {
 function parseRestarts(value: string | undefined): number {
 	const parsed = Number.parseInt(value ?? '0', 10);
 	return Number.isFinite(parsed) && parsed > 0 ? parsed : 0;
+}
+
+/**
+ * `CPUUsageNSec` is `[not set]` before a unit has run and 2^64-1 when CPU accounting is off.
+ * Anything past a century of CPU time is that sentinel, not a reading.
+ */
+export function parseCpuNanos(value: string | undefined): number | null {
+	if (!value) return null;
+	const parsed = Number.parseInt(value, 10);
+	return Number.isFinite(parsed) && parsed >= 0 && parsed < 3.2e18 ? parsed : null;
 }
 
 /** `MemoryCurrent` is `[not set]` (or `infinity`) before a unit has run. */

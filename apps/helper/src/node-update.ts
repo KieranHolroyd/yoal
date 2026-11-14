@@ -36,6 +36,45 @@ export interface NodeUpdateResult {
 	version: string;
 	previous: string;
 	installed: string[];
+	/** Whether the rollback guard is armed; false where systemd-run is unavailable (a container). */
+	guarded: boolean;
+}
+
+/**
+ * How long a freshly installed release has to prove itself before the node rolls back on its own.
+ * The new agent confirms after its first heartbeat the control plane accepts, which normally takes
+ * seconds; ten minutes covers a slow restart and a brief control-plane blip.
+ */
+export const NODE_UPDATE_GUARD_SECONDS = 600;
+/** The transient `.timer`/`.service` pair `systemd-run` creates for the guard. */
+export const NODE_UPDATE_GUARD_UNIT = 'yoal-node-update-guard';
+
+/** The armed guard, in `node-update-guard.json` beside the work dir (root-only). */
+export interface NodeUpdateGuard {
+	/** The release being proven. */
+	version: string;
+	/** The release the guard restores. */
+	previous: string;
+	/** Epoch milliseconds. */
+	armedAt: number;
+	/** Epoch milliseconds when the timer fires. */
+	deadline: number;
+}
+
+/** What the guard script leaves behind after it rolled a node back. */
+export interface NodeUpdateRollback {
+	/** The release that never confirmed. */
+	from: string;
+	/** The release now running again. */
+	to: string;
+	afterSeconds: number;
+	/** ISO time from `date -u -Iseconds`; empty if `date` failed. */
+	rolledBackAt: string;
+}
+
+export interface NodeUpdateGuardStatus {
+	guard: NodeUpdateGuard | null;
+	rollback: NodeUpdateRollback | null;
 }
 
 export interface NodeUpdatePaths {
@@ -62,6 +101,13 @@ export interface NodeUpdateDeps {
 	extract?: (archive: string, dest: string) => Promise<void>;
 	/** Restart the agent and this helper once the response is out. */
 	scheduleRestart?: () => void;
+	/** Seconds before an unconfirmed install rolls back (`NODE_UPDATE_GUARD_SECONDS`). */
+	guardSeconds?: number;
+	/** Absolute systemctl; `systemd-run` is expected beside it. */
+	systemctlPath?: string;
+	/** Run a command without a shell (systemd-run/systemctl for the guard). */
+	exec?: (argv: string[]) => Promise<{ code: number; stdout: string; stderr: string }>;
+	now?: () => number;
 	log?: (level: 'info' | 'warn' | 'error', message: string) => void;
 }
 
@@ -73,6 +119,18 @@ const METADATA_TIMEOUT_MS = 30_000;
 const DOWNLOAD_TIMEOUT_MS = 10 * 60_000;
 /** Generous for two compiled Bun binaries; a bigger bundle is refused before it fills the disk. */
 const MAX_BUNDLE_BYTES = 512 * 1024 * 1024;
+
+/** `POST /v1/node/update/confirm` takes exactly `{ version }`, a plain release version. */
+export function parseNodeUpdateConfirm(body: unknown): { version: string } {
+	if (typeof body !== 'object' || body === null || Array.isArray(body))
+		throw new ValidationError('request must be an object');
+	const record = body as Record<string, unknown>;
+	const extra = Object.keys(record).filter((key) => key !== 'version');
+	if (extra.length) throw new ValidationError(`unexpected field ${extra[0]}`);
+	if (typeof record.version !== 'string' || !VERSION_PATTERN.test(record.version))
+		throw new ValidationError('version must be a release version like 1.2.3');
+	return { version: record.version };
+}
 
 export function parseNodeUpdateRequest(body: unknown): NodeUpdateRequest {
 	if (typeof body !== 'object' || body === null || Array.isArray(body))
@@ -95,6 +153,10 @@ export class NodeUpdater {
 	private readonly list: (archive: string) => Promise<string[]>;
 	private readonly extract: (archive: string, dest: string) => Promise<void>;
 	private readonly scheduleRestart: () => void;
+	private readonly guardSeconds: number;
+	private readonly systemctl: string;
+	private readonly exec: NonNullable<NodeUpdateDeps['exec']>;
+	private readonly now: () => number;
 	private readonly log: NonNullable<NodeUpdateDeps['log']>;
 
 	constructor(private readonly deps: NodeUpdateDeps) {
@@ -104,7 +166,79 @@ export class NodeUpdater {
 		this.list = deps.list ?? tarList;
 		this.extract = deps.extract ?? tarExtract;
 		this.scheduleRestart = deps.scheduleRestart ?? restartNodeServices;
+		this.guardSeconds = deps.guardSeconds ?? NODE_UPDATE_GUARD_SECONDS;
+		this.systemctl = deps.systemctlPath ?? '/usr/bin/systemctl';
+		this.exec = deps.exec ?? execArgv;
+		this.now = deps.now ?? Date.now;
 		this.log = deps.log ?? (() => undefined);
+	}
+
+	/**
+	 * The new agent's word that it runs and the control plane accepted its heartbeat. Only a guard
+	 * armed for `version` is disarmed; anything else answers `confirmed: false`, so a retried or
+	 * late confirm is harmless.
+	 */
+	async confirm(version: string): Promise<{ confirmed: boolean }> {
+		const files = guardFiles(this.deps.paths);
+		const guard = await readGuard(files.guard);
+		if (!guard || guard.version !== version) return { confirmed: false };
+		// The marker first: if the timer fires while we stop it, the script still sees the confirm.
+		await writeFileAtomic(files.confirmed, `${version}\n`);
+		await this.disarm();
+		await fs.rm(files.guard, { force: true });
+		this.log('info', `${version} confirmed a healthy heartbeat; rollback guard disarmed`);
+		return { confirmed: true };
+	}
+
+	/** The armed guard and the last rollback, so the agent can explain why it runs the old version. */
+	async guardStatus(): Promise<NodeUpdateGuardStatus> {
+		const files = guardFiles(this.deps.paths);
+		return { guard: await readGuard(files.guard), rollback: await readRollback(files.rollback) };
+	}
+
+	/**
+	 * Arm a one-shot timer that restores `.previous` unless the new release confirms in time. It
+	 * runs as its own transient unit, outside both services, so neither new binary has to work for
+	 * it to fire. Best effort: without systemd-run the update goes ahead unguarded.
+	 */
+	private async arm(version: string, previous: string): Promise<boolean> {
+		const files = guardFiles(this.deps.paths);
+		try {
+			await this.disarm();
+			await fs.rm(files.confirmed, { force: true });
+			const script = renderGuardScript({
+				version,
+				previous,
+				agentBinary: this.deps.paths.agentBinary,
+				helperBinary: this.deps.paths.helperBinary,
+				confirmedPath: files.confirmed,
+				guardPath: files.guard,
+				rollbackPath: files.rollback,
+				systemctlPath: this.systemctl,
+				guardSeconds: this.guardSeconds,
+			});
+			const argv = renderGuardArgv(join(dirname(this.systemctl), 'systemd-run'), this.guardSeconds, script);
+			const armedAt = this.now();
+			const result = await this.exec(argv);
+			if (result.code !== 0) throw new Error(`systemd-run exited ${result.code}: ${result.stderr.trim().slice(0, 300)}`);
+			const guard: NodeUpdateGuard = { version, previous, armedAt, deadline: armedAt + this.guardSeconds * 1000 };
+			await writeFileAtomic(files.guard, `${JSON.stringify(guard)}\n`);
+			return true;
+		} catch (error) {
+			this.log(
+				'warn',
+				`could not arm the rollback guard, continuing unguarded: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			await this.disarm().catch(() => undefined);
+			return false;
+		}
+	}
+
+	/** Stop the timer (and a still-queued run) and clear failed state; "not loaded" is fine. */
+	private async disarm(): Promise<void> {
+		const units = [`${NODE_UPDATE_GUARD_UNIT}.timer`, `${NODE_UPDATE_GUARD_UNIT}.service`];
+		await this.exec([this.systemctl, 'stop', ...units]).catch(() => undefined);
+		await this.exec([this.systemctl, 'reset-failed', ...units]).catch(() => undefined);
 	}
 
 	async update(request: NodeUpdateRequest): Promise<NodeUpdateResult> {
@@ -182,13 +316,31 @@ export class NodeUpdater {
 				await fs.chmod(`${dest}.new`, 0o755);
 				await fs.chown(`${dest}.new`, 0, 0).catch(() => undefined);
 			}
+			// `.previous` must be exactly what runs now: the guard restores it. A stale copy from an
+			// older update would roll the node back further than it came from, so it goes.
 			for (const { dest } of targets) {
-				// Keep one previous copy for a manual rollback; rename is atomic over a running binary.
 				if (await isFile(dest)) await fs.copyFile(dest, `${dest}.previous`);
-				await fs.rename(`${dest}.new`, dest);
+				else await fs.rm(`${dest}.previous`, { force: true });
 			}
-			this.log('info', `installed yoal-agent and yoal-helper ${version} (was ${currentVersion}); restarting`);
-			return { version, previous: currentVersion, installed: targets.map((target) => target.dest) };
+			const guarded = await this.arm(version, currentVersion);
+			let swapped = 0;
+			try {
+				// Rename is atomic over a running binary.
+				for (const { dest } of targets) {
+					await fs.rename(`${dest}.new`, dest);
+					swapped += 1;
+				}
+			} catch (error) {
+				// Nothing replaced: the old pair keeps running and there is nothing to roll back.
+				// Half replaced: leave the guard armed, it restores the pair if nothing confirms.
+				if (guarded && swapped === 0) await this.disarm().then(() => fs.rm(guardFiles(paths).guard, { force: true }));
+				throw error;
+			}
+			this.log(
+				'info',
+				`installed yoal-agent and yoal-helper ${version} (was ${currentVersion}); restarting${guarded ? `, rolling back in ${this.guardSeconds}s unless it confirms` : ' (unguarded)'}`,
+			);
+			return { version, previous: currentVersion, installed: targets.map((target) => target.dest), guarded };
 		} finally {
 			for (const dest of [paths.agentBinary, paths.helperBinary])
 				await fs.rm(`${dest}.new`, { force: true }).catch(() => undefined);
@@ -284,13 +436,148 @@ async function tarExtract(archive: string, dest: string): Promise<void> {
 }
 
 /**
+ * The `systemctl --no-block` restarts after a swap, shared by the verb and the rollback guard. The
+ * builder, studio and mail run the agent binary too, but only where they are enabled.
+ */
+export const NODE_RESTARTS: readonly (readonly string[])[] = [
+	['try-restart', 'yoal-builder.service', 'yoal-studio.service', 'yoal-mail.service'],
+	['restart', 'yoal-agent.service', 'yoal-helper.service'],
+];
+
+/**
  * Queue the restarts with systemd and return at once (`--no-block`): the helper's own restart ends
- * this process, so it must not wait. The builder and studio run the agent binary too.
+ * this process, so it must not wait.
  */
 export function restartNodeServices(systemctl = '/usr/bin/systemctl'): void {
 	setTimeout(() => {
-		const queue = (args: string[]) => spawn(systemctl, ['--no-block', ...args], { stdio: 'ignore', detached: true }).unref();
-		queue(['try-restart', 'yoal-builder.service', 'yoal-studio.service', 'yoal-mail.service']);
-		queue(['restart', 'yoal-agent.service', 'yoal-helper.service']);
+		for (const args of NODE_RESTARTS)
+			spawn(systemctl, ['--no-block', ...args], { stdio: 'ignore', detached: true }).unref();
 	}, 500);
+}
+
+/** Root-only state beside the work dir (which is wiped on every update). */
+export function guardFiles(paths: Pick<NodeUpdatePaths, 'workDir'>): { guard: string; confirmed: string; rollback: string } {
+	const dir = dirname(paths.workDir);
+	return {
+		guard: join(dir, 'node-update-guard.json'),
+		confirmed: join(dir, 'node-update-confirmed'),
+		rollback: join(dir, 'node-update-rollback.json'),
+	};
+}
+
+/** POSIX single-quoting: the only character that needs care inside '…' is ' itself. */
+export function shellQuote(value: string): string {
+	return `'${value.replaceAll("'", "'\\''")}'`;
+}
+
+export interface GuardScriptInput {
+	version: string;
+	previous: string;
+	agentBinary: string;
+	helperBinary: string;
+	confirmedPath: string;
+	guardPath: string;
+	rollbackPath: string;
+	systemctlPath: string;
+	guardSeconds: number;
+}
+
+/**
+ * The rollback the guard timer runs as `/bin/sh -c`. It uses only coreutils, never either new
+ * binary, so it works however broken the new release is. Unless the confirm marker names this
+ * version it copies each `.previous` to a temp name beside the binary and renames it over (atomic,
+ * and `.previous` survives for another try), records the rollback and queues the same restarts as
+ * an update.
+ *
+ * The script contains no `$`: the service manager expands `$VAR` in a transient unit's command
+ * line on most systemd versions, and `$$` would not survive the ones that do not. Paths carrying
+ * `$`, `%`, a newline or NUL are refused rather than escaped for both layers.
+ */
+export function renderGuardScript(input: GuardScriptInput): string {
+	for (const [name, value] of Object.entries(input))
+		if (typeof value === 'string' && /[$%\n\0]/.test(value)) throw new NodeUpdateError(`${name} cannot be used in the rollback guard`);
+	if (!VERSION_PATTERN.test(input.version) || !VERSION_PATTERN.test(input.previous))
+		throw new NodeUpdateError('the rollback guard needs plain release versions');
+	const q = shellQuote;
+	const restore = (binary: string) =>
+		`cp -p ${q(`${binary}.previous`)} ${q(`${binary}.rollback`)} && chmod 0755 ${q(`${binary}.rollback`)} && mv -f ${q(`${binary}.rollback`)} ${q(binary)} || exit 1`;
+	const marker = JSON.stringify({ from: input.version, to: input.previous, afterSeconds: input.guardSeconds });
+	return [
+		`grep -qxF ${q(input.version)} ${q(input.confirmedPath)} 2>/dev/null && exit 0`,
+		`[ -f ${q(`${input.agentBinary}.previous`)} ] || exit 1`,
+		restore(input.agentBinary),
+		`if [ -f ${q(`${input.helperBinary}.previous`)} ]; then ${restore(input.helperBinary)}; fi`,
+		// One line of JSON with the time from `date`, without a `$(…)`.
+		`{ echo ${q(`${marker.slice(0, -1)},"rolledBackAt":"`)}; date -u -Iseconds; echo ${q('"}')}; } | tr -d '\\n' > ${q(`${input.rollbackPath}.tmp`)} && mv -f ${q(`${input.rollbackPath}.tmp`)} ${q(input.rollbackPath)}`,
+		`rm -f ${q(input.guardPath)}`,
+		...NODE_RESTARTS.map((args) => [q(input.systemctlPath), '--no-block', ...args].join(' ')),
+	].join('\n');
+}
+
+/** `systemd-run` argv for the guard: a transient timer firing once, `seconds` from now. */
+export function renderGuardArgv(systemdRun: string, seconds: number, script: string): string[] {
+	return [
+		systemdRun,
+		`--unit=${NODE_UPDATE_GUARD_UNIT}`,
+		'--description=Yoal node update rollback guard',
+		`--on-active=${seconds}s`,
+		'--timer-property=AccuracySec=5s',
+		'/bin/sh',
+		'-c',
+		script,
+	];
+}
+
+async function readGuard(path: string): Promise<NodeUpdateGuard | null> {
+	const value = await readJsonFile(path);
+	if (
+		!value ||
+		typeof value.version !== 'string' ||
+		typeof value.previous !== 'string' ||
+		typeof value.armedAt !== 'number' ||
+		typeof value.deadline !== 'number'
+	)
+		return null;
+	return { version: value.version, previous: value.previous, armedAt: value.armedAt, deadline: value.deadline };
+}
+
+async function readRollback(path: string): Promise<NodeUpdateRollback | null> {
+	const value = await readJsonFile(path);
+	if (!value || typeof value.from !== 'string' || typeof value.to !== 'string') return null;
+	return {
+		from: value.from,
+		to: value.to,
+		afterSeconds: typeof value.afterSeconds === 'number' ? value.afterSeconds : NODE_UPDATE_GUARD_SECONDS,
+		rolledBackAt: typeof value.rolledBackAt === 'string' ? value.rolledBackAt : '',
+	};
+}
+
+async function readJsonFile(path: string): Promise<Record<string, unknown> | null> {
+	try {
+		const value = JSON.parse(await fs.readFile(path, 'utf8')) as unknown;
+		return typeof value === 'object' && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+	} catch {
+		return null;
+	}
+}
+
+async function writeFileAtomic(path: string, contents: string): Promise<void> {
+	await fs.mkdir(dirname(path), { recursive: true, mode: 0o700 });
+	const temp = `${path}.tmp`;
+	await fs.writeFile(temp, contents, { mode: 0o600 });
+	await fs.rename(temp, path);
+}
+
+function execArgv(argv: string[]): Promise<{ code: number; stdout: string; stderr: string }> {
+	return new Promise((resolve, reject) => {
+		const [command, ...args] = argv;
+		if (!command) return reject(new Error('Refusing to run an empty command'));
+		const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] });
+		let stdout = '';
+		let stderr = '';
+		child.stdout.on('data', (chunk: Buffer) => (stdout += chunk.toString()));
+		child.stderr.on('data', (chunk: Buffer) => (stderr += chunk.toString()));
+		child.on('error', reject);
+		child.on('close', (code) => resolve({ code: code ?? 1, stdout, stderr }));
+	});
 }

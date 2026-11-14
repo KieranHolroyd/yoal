@@ -1297,6 +1297,32 @@ convergence*), it does not rewrite the worker's systemd units (agent, builder, s
 helper) or install a new workerd pin. A release that changes those needs the worker's setup
 re-run by hand until the helper learns to converge.
 
+**Updating many nodes: rollouts (D217).** **Nodes → Update fleet** (or `yoal nodes rollout start`)
+updates every node behind the control plane in waves, checked one after another
+([CLUSTERING.md](./CLUSTERING.md) §3.11). Pick a strategy: **Availability** (default: a canary, then
+waves that never take every ingress node, every copy of a replicated app or a database's whole
+replica set down together), **Rolling** (one node, or `--batch N`, at a time) or **Parallel**
+(everything at once). Options: **Drain first** moves movable workloads off each wave before it
+updates; **Soak** (default 60 s) is how long a wave must stay healthy before the next; **Max
+failures** (default 0) is how many nodes may fail before the rollout pauses. A paused rollout shows
+the failing node's reason; **Retry failed** runs them again, **Skip failed** continues without
+them, **Cancel** stops. To keep the fleet in step without clicking, turn on **Settings → Clustering →
+Node updates → Update nodes after the control plane updates**.
+
+```sh
+yoal nodes rollout plan --strategy availability       # preview the waves; changes nothing
+yoal nodes rollout start --strategy rolling --drain --wait
+yoal nodes rollout status
+yoal nodes rollout resume <id> [--skip-failed]
+```
+
+**Automatic rollback.** A node updated by a helper that has the guard (`node-update-guard`) restores
+its previous binaries by itself if the new agent has not had a heartbeat accepted within 10 minutes
+of the swap; its card then says it rolled back and why. To check or disarm a pending guard on the
+host: `systemctl list-timers yoal-node-update-guard.timer`, and
+`/var/lib/yoal-helper/node-update-{guard,rollback}.json`. The first update *to* a release with the
+guard is unguarded, because the old helper performs it.
+
 **Rolling back a node by hand.** The previous binaries are kept next to the new ones:
 
 ```sh

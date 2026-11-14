@@ -1,7 +1,7 @@
 import * as z from 'zod';
 import { accessModes, runtimes } from './model.ts';
 import { nodeStoragePathSchema } from './storage.ts';
-import { nodeLabelsSchema, nodeRoleSchema, nodeZoneSchema, placementSpecSchema } from './cluster.ts';
+import { nodeLabelsSchema, nodeRoleSchema, nodeZoneSchema, placementSpecSchema, privateNetworkNameSchema } from './cluster.ts';
 
 const slug = z.string().min(3).max(40);
 export const projectCreateSchema = z.object({
@@ -167,6 +167,8 @@ export const nodeUpdateSchema = z
 		labels: nodeLabelsSchema.optional(),
 		/** LAN address for direct peering inside one zone (C1). */
 		lanEndpoint: z.string().trim().max(253).nullable().optional(),
+		/** The private network the node sits on; nodes sharing one peer directly on `lanEndpoint` (D215). */
+		privateNetwork: privateNetworkNameSchema.nullable().optional(),
 		/** CPU reservation budget in millis; null removes it. */
 		cpuBudgetMillis: z.number().int().min(100).max(1_000_000).nullable().optional(),
 	})

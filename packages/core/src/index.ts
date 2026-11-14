@@ -33,6 +33,11 @@ import { DatabaseReplicaService } from './database-replica-service.ts';
 import { StorageReplicationService } from './storage-replication-service.ts';
 import { IngressHaService } from './ingress-ha.ts';
 import { FailoverService } from './failover-service.ts';
+import { SchedulingService } from './scheduling-service.ts';
+import { NodeRolloutService } from './node-rollouts.ts';
+import { NodeLinkService } from './link-service.ts';
+import { ScalingService } from './scaling-service.ts';
+import { RelocationService } from './relocation-service.ts';
 import { ClusterConfigService } from './cluster-config-service.ts';
 import { WorkloadService } from './workloads.ts';
 import { DatabaseService } from './databases.ts';
@@ -123,6 +128,13 @@ export * from './access.ts';
 export * from './deploy.ts';
 export * from './maintenance.ts';
 export * from './failover-service.ts';
+export * from './scheduling-service.ts';
+export * from './node-rollouts.ts';
+export * from './node-rollout-plan.ts';
+export * from './link-service.ts';
+export * from './scaling-service.ts';
+export * from './relocation-service.ts';
+export * from './rebalance.ts';
 export * from './secrets.ts';
 export * from './metrics.ts';
 export * from './metrics-export.ts';
@@ -287,6 +299,16 @@ export interface Core {
 	ingress: IngressHaService;
 	/** The failover controller (CLUSTERING §8.3, §9.3, C8). */
 	failover: FailoverService;
+	/** Fleet scheduling: utilisation, rebalance and workload moves (CLUSTERING §3.10). */
+	scheduling: SchedulingService;
+	/** Fleet node updates in waves (CLUSTERING §3.11, D217). */
+	nodeRollouts: NodeRolloutService;
+	/** Measured links between nodes (CLUSTERING §4.6). */
+	links: NodeLinkService;
+	/** Horizontal scaling per app (SCALING.md). */
+	scaling: ScalingService;
+	/** Moving an app together with its app volumes (SCALING §7). */
+	relocations: RelocationService;
 	/** Cluster tunables (CLUSTERING). */
 	cluster: ClusterConfigService;
 	/** Identity and access management (IAM.md I1). */
@@ -434,9 +456,15 @@ export function createCore(options: CoreOptions): Core {
 	ctx.storageReplication = new StorageReplicationService(ctx);
 	ctx.ingress = new IngressHaService(ctx);
 	ctx.failover = new FailoverService(ctx);
+	ctx.scheduling = new SchedulingService(ctx);
+	ctx.nodeRollouts = new NodeRolloutService(ctx);
+	ctx.links = new NodeLinkService(ctx);
+	ctx.scaling = new ScalingService(ctx);
+	ctx.relocations = new RelocationService(ctx);
 	ctx.cluster = new ClusterConfigService(ctx);
 	// Flow definitions register once every service exists, so their steps can call any of them.
 	ctx.flows.register(ctx.moves.databaseMoveFlow());
+	ctx.flows.register(ctx.nodeRollouts.rolloutFlow());
 	const source = new SourceService(ctx);
 
 	const deploy = new DeployService(ctx);
@@ -509,6 +537,11 @@ export function createCore(options: CoreOptions): Core {
 		storageReplication: ctx.storageReplication,
 		ingress: ctx.ingress,
 		failover: ctx.failover,
+		scheduling: ctx.scheduling,
+		nodeRollouts: ctx.nodeRollouts,
+		links: ctx.links,
+		scaling: ctx.scaling,
+		relocations: ctx.relocations,
 		cluster: ctx.cluster,
 		iam: ctx.iam,
 		governance: ctx.governance,

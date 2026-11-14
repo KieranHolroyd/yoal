@@ -62,6 +62,9 @@ import type { ConfigExportDocument } from './config-export.ts';
 import type { ImportView } from './config-import.ts';
 import type { OperationItemView, OperationView } from './operations.ts';
 import type { HaStatusView } from './ha.ts';
+import type { FleetLinksView, FleetRebalanceResult, FleetStatusView, RelocationStatusView } from './fleet.ts';
+import type { NodeSummary, RolloutCreateInput, RolloutOptions, RolloutPlanView, RolloutView } from './node-rollouts.ts';
+import type { ScaleResultView, ScalingPolicyView, ScalingStatusView } from './scaling.ts';
 import type { DomainCheckResult, DomainView } from './domains.ts';
 import type { EnvironmentView } from './environments.ts';
 import type { NodeCapacityView, WorkloadSpec, WorkloadView } from './workloads.ts';
@@ -501,6 +504,136 @@ export class ApiClient {
 	async getHaStatus(): Promise<{ status: HaStatusView; raw: unknown }> {
 		const raw = await this.request('GET', '/api/v1/ha/status');
 		return { status: raw as HaStatusView, raw };
+	}
+
+	/** Horizontal scaling for one app: its copies, usage, rollout and autoscaling policy. */
+	async getScaling(slug: string): Promise<{ view: ScalingStatusView; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/projects/${encodeURIComponent(slug)}/scaling`);
+		return { view: raw as ScalingStatusView, raw };
+	}
+
+	async scaleProject(slug: string, replicas: number): Promise<{ result: ScaleResultView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/projects/${encodeURIComponent(slug)}/scale`, { body: { replicas } });
+		return { result: raw as ScaleResultView, raw };
+	}
+
+	async setScalingPolicy(slug: string, policy: ScalingPolicyView): Promise<{ view: ScalingStatusView; raw: unknown }> {
+		const raw = await this.request('PUT', `/api/v1/projects/${encodeURIComponent(slug)}/scaling`, { body: policy });
+		return { view: raw as ScalingStatusView, raw };
+	}
+
+	async resumeRollout(slug: string): Promise<{ view: ScalingStatusView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/projects/${encodeURIComponent(slug)}/rollout/resume`);
+		return { view: raw as ScalingStatusView, raw };
+	}
+
+	/** Fleet scheduling (platform admin): utilisation per node and the moves a rebalance would make. */
+	async getFleetStatus(): Promise<{ view: FleetStatusView; raw: unknown }> {
+		const raw = await this.request('GET', '/api/v1/scheduling');
+		return { view: raw as FleetStatusView, raw };
+	}
+
+	async rebalanceFleet(input: { apply: boolean; strategy?: string }): Promise<{ result: FleetRebalanceResult; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/scheduling/rebalance', { body: input });
+		return { result: raw as FleetRebalanceResult, raw };
+	}
+
+	async rescheduleProject(
+		slug: string,
+		input: { node?: string },
+	): Promise<{ result: { project: string; from: { name: string }; to: { name: string }; mode: 'surge' | 'restart' }; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/projects/${encodeURIComponent(slug)}/reschedule`, { body: input });
+		return { result: raw as { project: string; from: { name: string }; to: { name: string }; mode: 'surge' | 'restart' }, raw };
+	}
+
+	/** Move an app and its app volumes to another node; the app is stopped for the copy. */
+	async relocateProject(slug: string, input: { node?: string }): Promise<{ result: RelocationStatusView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/projects/${encodeURIComponent(slug)}/relocate`, { body: input });
+		return { result: raw as RelocationStatusView, raw };
+	}
+
+	async getRelocation(slug: string): Promise<{ result: RelocationStatusView | null; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/projects/${encodeURIComponent(slug)}/relocation`);
+		return { result: (raw as { relocation: RelocationStatusView | null }).relocation, raw };
+	}
+
+	async cancelRelocation(slug: string): Promise<{ result: RelocationStatusView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/projects/${encodeURIComponent(slug)}/relocation/cancel`);
+		return { result: raw as RelocationStatusView, raw };
+	}
+
+	/** Links between nodes (platform admin): latency, loss, path and the last throughput test. */
+	async getFleetLinks(): Promise<{ view: FleetLinksView; raw: unknown }> {
+		const raw = await this.request('GET', '/api/v1/links');
+		return { view: raw as FleetLinksView, raw };
+	}
+
+	async startLinkTest(input: {
+		from?: string;
+		to?: string;
+		seconds?: number;
+		streams?: number;
+	}): Promise<{ result: { queued: Array<[string, string]>; skipped: Array<{ reason: string }> }; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/links/test', { body: input });
+		return { result: raw as { queued: Array<[string, string]>; skipped: Array<{ reason: string }> }, raw };
+	}
+
+	// ---------------------------------------------------------------- fleet node updates (D217)
+
+	/** Enrolled nodes (platform admin): id, name, agent version and status. */
+	async listNodes(): Promise<{ nodes: NodeSummary[]; raw: unknown }> {
+		const raw = await this.request('GET', '/api/v1/nodes');
+		const record = asRecord(unwrap(raw)) ?? {};
+		return { nodes: (asArray(record.nodes) ?? []) as NodeSummary[], raw };
+	}
+
+	/** Install the control plane's signed release on one node (D99). Needs a dashboard session. */
+	async requestNodeUpdate(nodeId: string): Promise<{ node: NodeSummary & { update?: { version: string } | null }; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/nodes/${encodeURIComponent(nodeId)}/update`);
+		return { node: unwrap(raw) as NodeSummary & { update?: { version: string } | null }, raw };
+	}
+
+	/** The running or paused rollout, and the most recent ones. */
+	async listNodeRollouts(limit?: number): Promise<{ active: RolloutView | null; rollouts: RolloutView[]; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/nodes/rollouts${limit ? `?limit=${limit}` : ''}`);
+		const record = asRecord(unwrap(raw)) ?? {};
+		return {
+			active: (asRecord(record.active) as unknown as RolloutView | null) ?? null,
+			rollouts: (asArray(record.rollouts) ?? []) as RolloutView[],
+			raw,
+		};
+	}
+
+	async getNodeRollout(id: string): Promise<{ rollout: RolloutView; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/nodes/rollouts/${encodeURIComponent(id)}`);
+		return { rollout: unwrap(raw) as RolloutView, raw };
+	}
+
+	async planNodeRollout(input: RolloutCreateInput): Promise<{ plan: RolloutPlanView; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/nodes/rollouts/plan', { body: input });
+		return { plan: unwrap(raw) as RolloutPlanView, raw };
+	}
+
+	async startNodeRollout(input: RolloutCreateInput): Promise<{ rollout: RolloutView; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/nodes/rollouts', { body: input });
+		return { rollout: unwrap(raw) as RolloutView, raw };
+	}
+
+	async resumeNodeRollout(id: string, input: { retryFailed: boolean }): Promise<{ rollout: RolloutView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/nodes/rollouts/${encodeURIComponent(id)}/resume`, { body: input });
+		return { rollout: unwrap(raw) as RolloutView, raw };
+	}
+
+	async cancelNodeRollout(id: string): Promise<{ rollout: RolloutView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/nodes/rollouts/${encodeURIComponent(id)}/cancel`);
+		return { rollout: unwrap(raw) as RolloutView, raw };
+	}
+
+	/** The rollout defaults in the cluster configuration (`updates`), or null when unreadable. */
+	async getRolloutDefaults(): Promise<Partial<RolloutOptions> | null> {
+		const raw = await this.request('GET', '/api/v1/cluster/config');
+		const config = asRecord(asRecord(unwrap(raw))?.config);
+		return (asRecord(config?.updates) as Partial<RolloutOptions> | null) ?? null;
 	}
 
 	async getQuotas(project?: string): Promise<{ quotas: unknown; raw: unknown }> {

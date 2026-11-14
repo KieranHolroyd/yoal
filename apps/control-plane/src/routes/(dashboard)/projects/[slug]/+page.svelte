@@ -78,6 +78,7 @@
 	import UserPoolCard from './_components/UserPoolCard.svelte';
 	import VolumesCard from './_components/VolumesCard.svelte';
 	import WorkerCard from './_components/WorkerCard.svelte';
+	import ScalingPanel from './_components/ScalingPanel.svelte';
 	import { displayUrl, formatBytes, formatDateTime, shortId, shortSha } from '../../_lib/format.js';
 	import type { PageProps } from './$types';
 
@@ -698,6 +699,15 @@
 						run: data.can.createDeployment,
 						readLogs: data.can.readLogs
 					}}
+				/>
+			{/if}
+		{:else if tab === 'scaling'}
+			{#if data.scaling}
+				<ScalingPanel
+					scaling={data.scaling}
+					relocation={data.relocation}
+					hasVolumes={data.appVolumes.length > 0}
+					canManage={data.can.manageWorkload}
 				/>
 			{/if}
 		{:else if tab === 'runtime'}

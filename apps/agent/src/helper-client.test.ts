@@ -154,6 +154,45 @@ describe('HelperClient', () => {
 		await expect(client.status('wld_abc123')).rejects.toThrow(/unit not found/);
 	});
 
+	test('confirms a node update and reads the rollback marker; an old helper has neither verb', async () => {
+		const path = await socketPath();
+		const requests: Array<{ method: string; path: string; body: unknown }> = [];
+		let supported = true;
+		const server = Bun.serve({
+			unix: path,
+			async fetch(request) {
+				const url = new URL(request.url);
+				const text = request.method === 'POST' ? await request.text() : '';
+				requests.push({ method: request.method, path: url.pathname, body: text ? JSON.parse(text) : null });
+				if (!supported) return Response.json({ error: 'not_found', path: url.pathname }, { status: 404 });
+				if (url.pathname === '/v1/node/update/confirm') return Response.json({ ok: true, confirmed: true });
+				if (url.pathname === '/v1/node/update/guard')
+					return Response.json({
+						ok: true,
+						guard: null,
+						rollback: { from: '0.8.0', to: '0.7.15', afterSeconds: 600, rolledBackAt: '2026-11-14T10:00:00+00:00' },
+					});
+				return Response.json({ error: 'nope' }, { status: 500 });
+			},
+		});
+		servers.push(server);
+
+		const client = new HelperClient(path);
+		expect(await client.confirmNodeUpdate('0.8.0')).toEqual({ confirmed: true });
+		expect(requests.at(-1)).toEqual({ method: 'POST', path: '/v1/node/update/confirm', body: { version: '0.8.0' } });
+		expect(await client.nodeUpdateRollback()).toEqual({
+			from: '0.8.0',
+			to: '0.7.15',
+			afterSeconds: 600,
+			rolledBackAt: '2026-11-14T10:00:00+00:00',
+		});
+
+		supported = false;
+		// A confirm that reached the old helper process must be retried, not swallowed.
+		await expect(client.confirmNodeUpdate('0.8.0')).rejects.toThrow(/-> 404/);
+		expect(await client.nodeUpdateRollback()).toBeNull();
+	});
+
 	test('reports a missing helper socket clearly', async () => {
 		const client = new HelperClient(join(tmpdir(), 'yoal-missing-helper-socket.sock'));
 		await expect(client.health()).rejects.toThrow(HelperError);

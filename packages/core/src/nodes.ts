@@ -123,6 +123,8 @@ export interface NodeView {
 	hardwareError: string | null;
 	/** LAN address for direct peering inside one zone (C1). */
 	lanEndpoint: string | null;
+	/** The private network this node shares with others, for direct peering across zones and roles (D215). */
+	privateNetwork: string | null;
 	/** CPU reservation budget in millis; null means no explicit cap. */
 	cpuBudgetMillis: number | null;
 	/** Managed overlay address (C1); null on external nodes. */
@@ -188,6 +190,7 @@ export class NodeService {
 			hardwareAt: row.hardwareAt ? new Date(row.hardwareAt).toISOString() : null,
 			hardwareError: row.hardwareError,
 			lanEndpoint: row.lanEndpoint,
+			privateNetwork: row.privateNetwork,
 			cpuBudgetMillis: row.cpuBudgetMillis,
 			privateAddress: row.privateAddress,
 			networkMode: row.networkMode,
@@ -233,6 +236,26 @@ export class NodeService {
 			throw new ConflictError(
 				`"${node.name}" runs an agent (${node.agentVersion ?? 'unknown version'}) that cannot update itself yet. Update it by hand once (docs/OPS.md "Updating worker nodes"); later updates work from here.`,
 			);
+		// An operator's request is always a fresh attempt (a retry after "no answer" must re-run).
+		this.scheduleUpdate(node.id, target, { principal, fresh: true });
+		const after = this.ctx.db.select().from(nodes).where(eq(nodes.id, nodeId)).get();
+		return this.view(after ?? node);
+	}
+
+	/**
+	 * Record that a node should install `target` (D99), for `requestUpdate` and fleet rollouts
+	 * (CLUSTERING §3.11). An update already outstanding for the same version keeps its generation, so
+	 * a rollout adopting a node an operator already asked to update does not restart the attempt.
+	 * Returns the generation the agent will run. `fresh` always starts a new generation.
+	 */
+	scheduleUpdate(
+		nodeId: string,
+		target: string,
+		actor: { principal?: Principal; rolloutId?: string; fresh?: boolean } = {},
+	): number {
+		const node = this.ctx.db.select().from(nodes).where(eq(nodes.id, nodeId)).get();
+		if (!node) throw new NotFoundError('Node');
+		if (!actor.fresh && node.updateVersion === target && node.updateFailedGeneration < node.updateGeneration) return node.updateGeneration;
 		const now = this.ctx.now();
 		const generation = node.updateGeneration + 1;
 		this.ctx.db
@@ -247,22 +270,20 @@ export class NodeService {
 			.where(eq(nodes.id, nodeId))
 			.run();
 		this.ctx.audit.record({
-			principal,
+			...(actor.principal ? { principal: actor.principal } : {}),
 			action: 'node.update_agent',
 			resource: 'node',
 			resourceId: nodeId,
-			args: { from: node.agentVersion, to: target, generation },
+			args: {
+				from: node.agentVersion,
+				to: target,
+				generation,
+				...(actor.rolloutId ? { rolloutId: actor.rolloutId } : {}),
+			},
 			result: 'ok',
 		});
 		this.bump();
-		return this.view({
-			...node,
-			updateVersion: target,
-			updateGeneration: generation,
-			updateRequestedAt: now,
-			updateError: null,
-			updatedAt: now,
-		});
+		return generation;
 	}
 
 	/** The update this node should run now, or null (none requested, done, or already failed). */
@@ -493,6 +514,7 @@ export class NodeService {
 		// re-key the operator must do by re-adopting, not something a heartbeat may change.
 		const adoptedKey =
 			node.networkMode !== 'external' && !node.wgPublicKey && input.wireguardPublicKey ? input.wireguardPublicKey : null;
+		const settled = this.settleUpdate(node, input.agentVersion, input.nodeUpdateResult);
 		this.ctx.db
 			.update(nodes)
 			.set({
@@ -504,7 +526,7 @@ export class NodeService {
 				...hardwarePatch(input.hardware, now),
 				...wireguardStatusPatch(input.wireguard, now),
 				...(adoptedKey ? { wgPublicKey: adoptedKey } : {}),
-				...this.settleUpdate(node, input.agentVersion, input.nodeUpdateResult),
+				...settled,
 				lastHeartbeatAt: now,
 				statsJson: input.stats ? JSON.stringify(input.stats) : node.statsJson,
 				storageStatusJson: input.storage ? JSON.stringify(input.storage) : node.storageStatusJson,
@@ -515,7 +537,8 @@ export class NodeService {
 		// Every peer's desired state now carries this node's key.
 		if (adoptedKey) this.bump();
 		if (input.workloads?.length) {
-			this.ctx.workloads.applyHeartbeat(node.id, input.workloads);
+			this.ctx.workloads.applyHeartbeat(node.id, input.workloads, input.actualStateVersion);
+			this.ctx.scaling.applyUsage(node.id, input.workloads);
 			this.ctx.databases.applyHeartbeat(node.id, input.workloads);
 			this.ctx.storage.applyHeartbeat(node.id, input.workloads);
 			this.ctx.brokers.applyHeartbeat(node.id, input.workloads);
@@ -563,6 +586,8 @@ export class NodeService {
 		this.ctx.disks.applyMountReport(node.id, input.diskMounts, input.unmountedDisks);
 		this.ctx.shares.applyNodeReport(node.id, input.shareMounts, input.unmountedShares);
 		if (input.volumeProfileResults?.length) this.ctx.disks.applyProfileResults(node.id, input.volumeProfileResults);
+		if (input.links?.length) this.ctx.links.applySamples(node.id, input.links);
+		if (input.linkTestResults?.length) this.ctx.links.applyTestResults(node.id, input.linkTestResults);
 		// Custom domains go `active` once an edge reports serving their certificate.
 		if (input.stats?.certs?.length) {
 			try {
@@ -573,8 +598,12 @@ export class NodeService {
 		}
 		// A database move waits for its source to stop the attached apps before dumping (D97).
 		this.ctx.moves.onHeartbeat(node.id, input.actualStateVersion, (input.workloads ?? []).map((item) => item.id));
+		this.ctx.relocations.onHeartbeat(node.id, input.actualStateVersion, (input.workloads ?? []).map((item) => item.id));
 		// A replica promotion waits for the old primary's node to stop it (C7, §9.3).
 		this.ctx.databaseReplicas.onHeartbeat(node.id, input.actualStateVersion, (input.workloads ?? []).map((item) => item.id));
+		// A fleet rollout waiting on this node's update hears about it now rather than on its next
+		// poll; last, so its checks see the workload statuses this heartbeat carried (CLUSTERING §3.11).
+		if (Object.keys(settled).length > 0) this.ctx.nodeRollouts?.nodeSettled(node.id);
 		return { ok: true, desiredStateVersion: this.stateVersion() };
 	}
 
@@ -795,6 +824,10 @@ export class NodeService {
 		if (patch.lanEndpoint !== undefined) {
 			const next = patch.lanEndpoint || null;
 			if (next !== node.lanEndpoint) changes.lanEndpoint = next;
+		}
+		if (patch.privateNetwork !== undefined) {
+			const next = patch.privateNetwork || null;
+			if (next !== node.privateNetwork) changes.privateNetwork = next;
 		}
 		if (patch.cpuBudgetMillis !== undefined) {
 			const next = patch.cpuBudgetMillis ?? null;
@@ -1139,6 +1172,7 @@ export class NodeService {
 				publicAddress: row.publicAddress,
 				wgEndpoint: row.wgEndpoint,
 				lanEndpoint: row.lanEndpoint,
+				privateNetwork: row.privateNetwork,
 			}));
 	}
 
@@ -1165,24 +1199,53 @@ export class NodeService {
 
 		// Apps are served from the node their workload was admitted to (`auto` and database pinning
 		// resolve at deploy time); the placement request is only the fallback before a deploy.
+		const workloadPlacements = this.ctx.db
+			.select({ projectId: workloads.projectId, nodeId: workloads.nodeId, movingFromNodeId: workloads.movingFromNodeId })
+			.from(workloads)
+			.all();
+		// During a surge move the old node still serves: the route follows only once the new copy
+		// has reported running and `moving_from_node_id` is cleared.
 		const workloadNodeByProject = new Map(
-			this.ctx.db
-				.select({ projectId: workloads.projectId, nodeId: workloads.nodeId })
-				.from(workloads)
-				.all()
-				.flatMap((row) => (row.nodeId ? [[row.projectId, row.nodeId] as const] : [])),
+			workloadPlacements.flatMap((row) =>
+				(row.movingFromNodeId ?? row.nodeId) ? [[row.projectId, (row.movingFromNodeId ?? row.nodeId)!] as const] : [],
+			),
 		);
+		/** Projects whose copy is starting here mid-move: this node needs the release before the route. */
+		const arrivingHere = new Set(
+			workloadPlacements.filter((row) => row.movingFromNodeId && row.nodeId === node.id).map((row) => row.projectId),
+		);
+		// Spread copies (C4), in index order so the upstream list is stable between pulls. A node
+		// appears once however many copies it holds: its own Caddy balances nothing locally.
 		const replicaNodesByProject = new Map<string, string[]>();
+		/** Nodes whose copy is up: the only ones an ingress should send traffic to. */
+		const readyNodesByProject = new Map<string, Set<string>>();
 		for (const replica of this.ctx.db
-			.select({ projectId: workloadReplicas.projectId, nodeId: workloadReplicas.nodeId })
+			.select({
+				projectId: workloadReplicas.projectId,
+				nodeId: workloadReplicas.nodeId,
+				status: workloadReplicas.status,
+				appliedVersion: workloadReplicas.appliedVersion,
+			})
 			.from(workloadReplicas)
+			.orderBy(workloadReplicas.replicaIndex)
 			.all()) {
 			const list = replicaNodesByProject.get(replica.projectId) ?? [];
-			list.push(replica.nodeId);
+			if (!list.includes(replica.nodeId)) list.push(replica.nodeId);
 			replicaNodesByProject.set(replica.projectId, list);
+			// A copy being restarted by a rollout leaves the upstreams before its node stops it.
+			if (replica.status === 'running' && replica.appliedVersion === null) {
+				const ready = readyNodesByProject.get(replica.projectId) ?? new Set<string>();
+				ready.add(replica.nodeId);
+				readyNodesByProject.set(replica.projectId, ready);
+			}
 		}
+		/** This node holds a copy of the project's workload, whichever index it is. */
+		const holdsCopy = (projectId: string): boolean => replicaNodesByProject.get(projectId)?.includes(node.id) ?? false;
 
 		const targetOf = (project: { id: string; runtime: string; runtimeName?: string | null; placement: string }): string | null =>
+			// Every node holding a copy serves the project itself: it needs the route and the release,
+			// not only the node `workloads.node_id` names (copy 0).
+			(effectiveRuntime(project) !== 'static' && holdsCopy(project.id) ? node.id : undefined) ??
 			(effectiveRuntime(project) !== 'static' ? workloadNodeByProject.get(project.id) : undefined) ??
 			(project.placement === 'edge' || project.placement === 'auto' ? edgeId : project.placement);
 
@@ -1194,8 +1257,8 @@ export class NodeService {
 			.filter((project) => {
 				const target = targetOf(project);
 				// Edge serves edge-placed projects locally and proxies worker-placed ones; a worker
-				// only serves the projects placed on it.
-				return isEdge || target === node.id;
+				// only serves the projects placed on it, or arriving on it.
+				return isEdge || target === node.id || arrivingHere.has(project.id);
 			});
 
 		const routes: RouteSpec[] = [];
@@ -1226,8 +1289,8 @@ export class NodeService {
 			this.ctx.db
 				.select()
 				.from(workloads)
-				.where(eq(workloads.nodeId, node.id))
 				.all()
+				.filter((row) => row.nodeId === node.id || row.movingFromNodeId === node.id || holdsCopy(row.projectId))
 				.map((row) => [row.projectId, row]),
 		);
 
@@ -1275,7 +1338,7 @@ export class NodeService {
 			for (const deployment of rows) {
 				const release = this.ctx.db.select().from(releases).where(eq(releases.id, deployment.releaseId)).get();
 				if (!release) continue;
-				if (local) releaseShas.add(release.sha256);
+				if (local || arrivingHere.has(project.id)) releaseShas.add(release.sha256);
 				const config = this.configFor(deployment.configSnapshotId);
 				// A function's assets are part of *this deployment's* snapshot (rollback restores it),
 				// and they live in the release, so only the node holding the release serves them. The
@@ -1307,13 +1370,25 @@ export class NodeService {
 								},
 							}
 						: {};
-				const replicaNodes = replicaNodesByProject.get(project.id) ?? [];
+				// Only an ingress balances across copies. A copy on this node is dialled directly (its
+				// socket or loopback port); the others through their node's Caddy over the overlay. A
+				// worker never fans out: it serves its own copy and nothing else.
+				const everyCopyNode = replicaNodesByProject.get(project.id) ?? [];
+				const ready = readyNodesByProject.get(project.id);
+				// Before any copy has reported (a first deploy) every node is listed, and the health
+				// check decides; after that only copies that are up take traffic.
+				const replicaNodes = ready?.size ? everyCopyNode.filter((nodeId) => ready.has(nodeId)) : everyCopyNode;
 				const replicaUpstreams =
-					!local && replicaNodes.length > 1
+					isEdge && everyCopyNode.length > 1
 						? replicaNodes
-								.map((nodeId) => nodeById.get(nodeId)?.publicAddress)
+								.map((nodeId) =>
+									nodeId === node.id
+										? (functionUpstream ?? upstream)
+										: nodeById.get(nodeId)?.publicAddress
+											? `http://${nodeById.get(nodeId)!.publicAddress}`
+											: null,
+								)
 								.filter((address): address is string => Boolean(address))
-								.map((address) => `http://${address}`)
 						: [];
 				const base = {
 					projectId: project.id,
@@ -1327,7 +1402,7 @@ export class NodeService {
 					redirects: config.redirects,
 					headers: config.headers,
 					upstream: functionUpstream ?? upstream,
-					...(replicaUpstreams.length > 1
+					...(replicaUpstreams.length > 0 && everyCopyNode.length > 1
 						? {
 							upstreams: replicaUpstreams,
 							...(deploymentSpec?.healthPath
@@ -1584,6 +1659,8 @@ export class NodeService {
 			diskMounts: this.ctx.disks.mountsForNode(node.id),
 			diskUnmounts: this.ctx.disks.unmountsForNode(node.id),
 			volumeProfileTasks: this.ctx.disks.profileTasksForNode(node.id),
+			linkProbes: this.ctx.links.probesForNode(node.id),
+			linkTests: this.ctx.links.testsForNode(node.id),
 			// App-volume usage, purges and snapshot/restore tasks (docs/VOLUMES.md).
 			appVolumes: this.ctx.appVolumes.lifecycle.volumesForNode(node.id),
 			appVolumePurges: this.ctx.appVolumes.lifecycle.purgesForNode(node.id),

@@ -47,6 +47,9 @@
 	import PageHeader from '../_lib/PageHeader.svelte';
 	import RowMenu from '../_lib/RowMenu.svelte';
 	import { formatBytes, formatDateTime } from '../_lib/format.js';
+	import RecentRollouts from './_components/RecentRollouts.svelte';
+	import RolloutPanel from './_components/RolloutPanel.svelte';
+	import UpdateFleetDialog from './_components/UpdateFleetDialog.svelte';
 	import type { PageProps } from './$types';
 
 	interface NodesFormResult {
@@ -74,6 +77,7 @@
 	let editRoles = $state<NodeRole[]>([]);
 	let editLabels = $state('');
 	let editLan = $state('');
+	let editPrivateNetwork = $state('');
 	let editCpuBudget = $state('');
 	let editDataDir = $state('');
 	let editBuildDir = $state('');
@@ -96,6 +100,7 @@
 			.map(([key, value]) => `${key}=${value}`)
 			.join('\n');
 		editLan = node.lanEndpoint ?? '';
+		editPrivateNetwork = node.privateNetwork ?? '';
 		editCpuBudget = node.cpuBudgetMillis === null ? '' : String(node.cpuBudgetMillis);
 		editDataDir = node.storage.dataDir ?? '';
 		editBuildDir = node.storage.buildDir ?? '';
@@ -211,9 +216,28 @@
 		});
 	}
 
+	// Fleet updates in waves (CLUSTERING §3.11): one rollout at a time, against the same target.
+	let fleetOpen = $state(false);
+	const behind = $derived(
+		data.denied ? 0 : data.nodes.filter((node) => updateState(node).kind !== 'current').length
+	);
+	const fleetBlocked = $derived(
+		!data.targetVersion
+			? 'The control plane is not on a release version, so there is nothing to install.'
+			: data.activeRollout
+				? 'A fleet update is already running. Finish or cancel it first.'
+				: behind === 0
+					? `Every node already runs ${data.targetVersion}.`
+					: ''
+	);
+	const recentRollouts = $derived(
+		data.recentRollouts.filter((rollout) => rollout.id !== data.activeRollout?.id)
+	);
+
 	// Follow a running update: the agent restarts on the new version within a minute or two.
 	const updating = $derived(
-		!data.denied && data.nodes.some((node) => node.update?.status === 'pending')
+		!data.denied &&
+			(data.activeRollout !== null || data.nodes.some((node) => node.update?.status === 'pending'))
 	);
 	$effect(() => {
 		if (!updating) return;
@@ -258,6 +282,14 @@
 				<NetworkIcon />
 				Worker over WireGuard
 			</Button>
+			{#if data.canUpdateFleet && data.nodes.length > 0}
+				<span title={fleetBlocked || undefined}>
+					<Button variant="outline" disabled={fleetBlocked !== ''} onclick={() => (fleetOpen = true)}>
+						<CircleArrowUpIcon />
+						Update fleet{behind > 0 ? ` (${behind})` : ''}
+					</Button>
+				</span>
+			{/if}
 			<Button onclick={() => (addOpen = true)}>
 				<PlusIcon />
 				Add node
@@ -287,6 +319,9 @@
 			<Button size="sm" onclick={() => (addOpen = true)}><PlusIcon />Add node</Button>
 		</EmptyState>
 	{:else}
+		{#if data.activeRollout}
+			<RolloutPanel rollout={data.activeRollout} canUpdate={data.canUpdateFleet} />
+		{/if}
 		<p class="text-sm text-muted-foreground">
 			<span class="font-mono text-foreground tabular-nums">{online}/{data.nodes.length}</span>
 			nodes online
@@ -533,6 +568,10 @@
 			{/each}
 		</div>
 
+		{#if recentRollouts.length > 0}
+			<RecentRollouts rollouts={recentRollouts.slice(0, 5)} />
+		{/if}
+
 		<Alert.Root>
 			<InfoIcon />
 			<Alert.Description>
@@ -602,6 +641,14 @@
 	</FormDialog>
 {/if}
 
+{#if !data.denied && data.canUpdateFleet}
+	<UpdateFleetDialog
+		bind:open={fleetOpen}
+		defaults={data.rolloutDefaults}
+		targetVersion={data.targetVersion}
+	/>
+{/if}
+
 {#if !data.denied && editing}
 	<FormDialog
 		bind:open={editOpen}
@@ -654,7 +701,24 @@
 						class="font-mono text-sm"
 					/>
 					<Field.Description>
-						Optional private address inside this zone; used for direct peering in C1.
+						This node's WireGuard address on its LAN or provider private network. Nodes that can
+						reach each other there peer directly on it instead of over the public internet.
+					</Field.Description>
+				</Field.Field>
+				<Field.Field>
+					<Field.Label for="node-private-network">Private network</Field.Label>
+					<Input
+						id="node-private-network"
+						name="privateNetwork"
+						bind:value={editPrivateNetwork}
+						placeholder="hetzner-vswitch"
+						maxlength={32}
+						class="font-mono text-sm"
+					/>
+					<Field.Description>
+						A name shared by every node on the same private network (a VPC, a vSwitch, a home
+						LAN). Nodes with the same name use each other's private endpoint, across zones.
+						Leave blank to treat one zone as one LAN.
 					</Field.Description>
 				</Field.Field>
 			</div>

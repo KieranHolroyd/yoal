@@ -14,6 +14,7 @@ export const PROJECT_TABS = [
 	'data',
 	'variables',
 	'runtime',
+	'scaling',
 	'shares',
 	'access',
 	'settings'

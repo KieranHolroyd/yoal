@@ -15,6 +15,9 @@ import { functionCommand } from './commands/function.ts';
 import { jobsCommand } from './commands/jobs.ts';
 import { repoCommand, runOrPipelineCommand, secretCommand, varCommand, workflowCommand } from './commands/pipelines.ts';
 import { haCommand } from './commands/ha.ts';
+import { fleetCommand } from './commands/fleet.ts';
+import { nodesCommand } from './commands/nodes.ts';
+import { scaleCommand } from './commands/scale.ts';
 import { backupTargetCommand } from './commands/backup-target.ts';
 import { blueprintCommand } from './commands/blueprint.ts';
 import { logDrainCommand } from './commands/log-drain.ts';
@@ -148,6 +151,10 @@ const commands: Record<string, (argv: string[]) => Promise<void>> = {
 	volume: volumeCommand,
 	volumes: volumeCommand,
 	ha: haCommand,
+	fleet: fleetCommand,
+	nodes: nodesCommand,
+	node: nodesCommand,
+	scale: scaleCommand,
 	upgrade: upgradeCommand,
 	wrangler: wranglerCommand,
 };
@@ -216,6 +223,9 @@ Commands:
   import <file> [--apply] [--secrets <f>]   Recreate an export's configuration here (create-only; plan by default)
   volume [list|show|snapshot|restore|…]      Persistent app volumes and their snapshots (\`yoal volume --help\`)
   ha status                                  Failover controller: lease, lost nodes, recent failovers (platform admin)
+  scale <project> [copies] [--auto --min --max --cpu]  Run more or fewer copies, or let Yoal decide (\`yoal scale --help\`)
+  fleet [status|rebalance|move|links|link-test]  Node utilisation, rebalancing, and latency/throughput between nodes (\`yoal fleet --help\`)
+  nodes [update|rollout]                     Update one node, or the fleet in waves: plan, start, status, resume, cancel (\`yoal nodes --help\`)
 
 Global:
   --profile <name>  Use a saved profile (also ${PROFILE_ENV})

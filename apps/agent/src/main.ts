@@ -30,6 +30,7 @@ import { AppVolumeRunner } from './app-volumes.ts';
 import { ShareMountRunner } from './share-mounts.ts';
 import { DiskMountRunner } from './disk-mounts.ts';
 import { VolumeProfileRunner } from './volume-profiles.ts';
+import { LinkTestRunner } from './link-tests.ts';
 import { DatabasePitrRunner } from './database-pitr.ts';
 import { DatabaseCredentialRunner } from './database-credentials.ts';
 import { StudioPrincipalRunner } from './studio/principal.ts';
@@ -137,6 +138,7 @@ class AgentRuntime {
 	private readonly diskMounts: DiskMountRunner;
 	/** Disk benchmarks (docs/STORAGE.md §5.1). */
 	private readonly volumeProfiles: VolumeProfileRunner;
+	private readonly linkTests: LinkTestRunner;
 	private readonly databasePitr: DatabasePitrRunner;
 	private readonly databaseRotations: DatabaseRotationRunner;
 	private readonly databaseCredentials: DatabaseCredentialRunner;
@@ -283,6 +285,7 @@ class AgentRuntime {
 		this.databaseBackups = new DatabaseBackupRunner({ helper: this.helper, log });
 		this.appVolumes = new AppVolumeRunner({ helper: this.helper, log });
 		this.volumeProfiles = new VolumeProfileRunner({ helper: this.helper, log });
+		this.linkTests = new LinkTestRunner({ log });
 		this.shareMounts = new ShareMountRunner({
 			controlUrl: config.controlUrl,
 			nodeToken: config.nodeToken,
@@ -494,6 +497,7 @@ class AgentRuntime {
 			this.appVolumeLoop(),
 			this.shareMountLoop(),
 			this.volumeProfileLoop(),
+			this.linkTestLoop(),
 			this.databasePitrLoop(),
 			this.databaseRotationLoop(),
 			this.databaseCredentialLoop(),
@@ -1053,6 +1057,27 @@ class AgentRuntime {
 		}
 	}
 
+	/**
+	 * Links to the other nodes (docs/CLUSTERING.md §4.6): pick up link tests quickly, and sample a
+	 * round trip to every peer about twice a minute. Both run beside the reconcile loop.
+	 */
+	private async linkTestLoop(): Promise<void> {
+		let lastSampleAt = 0;
+		while (this.running) {
+			await sleep(2_000, this.shutdownController.signal).catch(() => undefined);
+			if (!this.running) break;
+			const state = this.desired;
+			if (!state) continue;
+			this.linkTests.runOnce(state);
+			if (Date.now() - lastSampleAt < 30_000) continue;
+			lastSampleAt = Date.now();
+			void this.linkTests.sample(state).catch((error) => {
+				log('warn', `Link sampling failed: ${errorText(error)}`);
+			});
+		}
+		this.linkTests.stop();
+	}
+
 	/** App-volume work beside the reconcile loop; snapshots and restores run in the background. */
 	private async appVolumeLoop(): Promise<void> {
 		while (this.running) {
@@ -1248,6 +1273,8 @@ class AgentRuntime {
 		const shareMountReport = this.shareMounts.report();
 		const diskMountReport = this.diskMounts.report();
 		const volumeProfileResults = this.volumeProfiles.results();
+		const linkSamples = this.linkTests.links();
+		const linkTestResults = this.linkTests.results();
 		const volumeInventory = await this.volumeInventoryForHeartbeat();
 		const backupResults = this.databaseBackups.pendingResults();
 		const pitrResults = this.databasePitr.pendingResults();
@@ -1313,6 +1340,8 @@ class AgentRuntime {
 			...(diskMountReport.diskMounts.length > 0 ? { diskMounts: diskMountReport.diskMounts } : {}),
 			...(diskMountReport.unmountedDisks.length > 0 ? { unmountedDisks: diskMountReport.unmountedDisks } : {}),
 			...(volumeProfileResults.length > 0 ? { volumeProfileResults } : {}),
+			...(linkSamples.length > 0 ? { links: linkSamples } : {}),
+			...(linkTestResults.length > 0 ? { linkTestResults } : {}),
 			...(this.poolIdentity.isActive ? { identityStatus: this.poolIdentity.status() } : {}),
 		};
 
@@ -1343,6 +1372,8 @@ class AgentRuntime {
 		this.databasePoolerRestarts.acknowledge(poolerRestarted);
 		this.databaseReplication.acknowledgePromotions(promotionResults.map((result) => result.failoverId));
 		await this.nodeUpdate.acknowledge(nodeUpdateResult);
+		// The control plane accepted a heartbeat from this binary: stand the rollback guard down.
+		await this.nodeUpdate.confirmHealthy(this.shutdownController.signal);
 		this.workloads.acknowledgePurgedDatabases(purgedDatabases);
 		this.workloads.acknowledgePurgedStorage(purgedStorage);
 		this.workloads.acknowledgePurgedBrokers(purgedBrokers);
@@ -1350,6 +1381,7 @@ class AgentRuntime {
 		this.shareMounts.acknowledgeUnmounted(shareMountReport.unmountedShares);
 		this.diskMounts.acknowledgeUnmounted(diskMountReport.unmountedDisks);
 		this.volumeProfiles.acknowledge(volumeProfileResults);
+		this.linkTests.acknowledge(linkTestResults);
 		this.storageAdmin.acknowledgeBucketDeletions(storageBucketDeletions);
 		this.storageAdmin.acknowledgeBucketConfigs(storageBucketConfigs);
 		this.storageAdmin.acknowledgeRootKeyReports(storageRootKeys);

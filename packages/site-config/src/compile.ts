@@ -253,7 +253,9 @@ export function compileSiteRoute(input: SiteCompileInput): CaddyRoute {
 					// refuses unknown fields, and one bad route fails the node's whole config load.
 					...(input.upstreams && input.upstreams.length > 1
 						? {
-							load_balancing: { selection_policy: { policy: 'least_conn' } },
+							// A copy that refuses the connection (it is restarting, or its node just went) is
+							// retried on another copy instead of failing the request (SCALING §4).
+							load_balancing: { selection_policy: { policy: 'least_conn' }, try_duration: '3s', try_interval: '250ms' },
 							...(input.healthPath
 								? {
 									health_checks: {

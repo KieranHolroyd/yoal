@@ -49,6 +49,7 @@ import {
 } from './volume.ts';
 import { shareMountDesiredSchema, shareMountReportSchema, shareUnmountDesiredSchema } from './share.ts';
 import { volumeProfileResultSchema, volumeProfileTaskSchema } from './disk.ts';
+import { LINK_TESTS_CAPABILITY, linkProbeTargetSchema, linkSampleSchema, linkTestResultSchema, linkTestTaskSchema } from './link.ts';
 import {
 	appVolumeNodeRefSchema,
 	appVolumeTaskResultSchema,
@@ -245,6 +246,10 @@ export const desiredStateSchema = z.object({
 	diskUnmounts: z.array(diskUnmountDesiredSchema).default([]),
 	/** Disk benchmarks to run, one at a time (docs/STORAGE.md §5.1). */
 	volumeProfileTasks: z.array(volumeProfileTaskSchema).default([]),
+	/** The other overlay nodes, to sample a round trip to on every cycle (CLUSTERING §4.6, D216). */
+	linkProbes: z.array(linkProbeTargetSchema).default([]),
+	/** Link tests this node takes part in, as the listener or the prober. */
+	linkTests: z.array(linkTestTaskSchema).default([]),
 	/** Live app volumes placed on this node; the agent measures their usage (docs/VOLUMES.md). */
 	appVolumes: z.array(appVolumeNodeRefSchema).default([]),
 	/** Trashed app volumes past their retention window: delete the directory, then report. */
@@ -312,6 +317,8 @@ export type DesiredState = z.infer<typeof desiredStateSchema>;
  * out desired-state work an older agent would drop without a word.
  * - `studio-principal`: applies `databaseStudioPrincipals` (plan 22 track G).
  * - `node-update`: installs `nodeUpdate` through the helper's signed-release verb (D99).
+ * - `node-update-guard`: confirms a node update after its first accepted heartbeat; the helper
+ *   rolls the node back on its own if no confirm arrives within 10 minutes.
  * - `functions`: renders and runs `runtime: "function"` workloads (D110).
  * - `brokers`: runs `broker` workloads with the helper's fixed profile and purges `brokerPurges` (D111).
  * - `mail`: runs `yoal-mail` and bridges it to the control plane when `mail` is set (docs/EMAIL.md).
@@ -328,12 +335,15 @@ export type DesiredState = z.infer<typeof desiredStateSchema>;
  * - `volume-profiles`: benchmarks `volumeProfileTasks` through the helper and reports results.
  * - `workload-identity`: delivers a workload JWT file and serves the node-local metadata endpoint
  *   (docs/IAM.md I18).
+ * - `link-tests`: samples a round trip to each `linkProbes` target and runs `linkTests`
+ *   (docs/CLUSTERING.md §4.6).
  * - `storage-sts`: understands temporary RustFS STS credentials in an activation
  *   (`storageSts`) instead of only sealed attachment keys (docs/IAM.md §7.4).
  */
 export const nodeCapabilities = [
 	'studio-principal',
 	'node-update',
+	'node-update-guard',
 	'functions',
 	'brokers',
 	'mail',
@@ -348,6 +358,7 @@ export const nodeCapabilities = [
 	'disk-mounts',
 	'workload-identity',
 	STORAGE_STS_CAPABILITY,
+	LINK_TESTS_CAPABILITY,
 ] as const;
 export type NodeCapability = (typeof nodeCapabilities)[number];
 
@@ -409,12 +420,18 @@ export const heartbeatSchema = z.object({
 	unmountedDisks: z.array(z.string().max(100)).max(200).optional(),
 	/** Progress and results of `volumeProfileTasks`. */
 	volumeProfileResults: z.array(volumeProfileResultSchema).max(50).optional(),
+	/** The latest round-trip sample to each `linkProbes` target. */
+	links: z.array(linkSampleSchema).max(64).optional(),
+	/** Progress and results of the `linkTests` this node probes. */
+	linkTestResults: z.array(linkTestResultSchema).max(32).optional(),
 	/** Actual workload state, so the fleet view reflects restart loops and OOM kills (DESIGN §9). */
 	workloads: z.array(z.object({
 		id: z.string(),
 		status: z.enum(workloadStatuses),
 		restarts: z.number().int().nonnegative().default(0),
 		memoryBytes: z.number().int().nonnegative().optional(),
+		/** Cumulative CPU time the unit has used, in nanoseconds; a rate comes from two samples. */
+		cpuNanos: z.number().nonnegative().optional(),
 	})).optional(),
 	/** Database ids whose data dir was deleted after a `databasePurges` entry (D59). */
 	purgedDatabases: z.array(z.string()).optional(),

@@ -240,6 +240,9 @@ See [Pipelines](/deploying/pipelines). There are no tools for secrets, variables
 | `deploy_to_environment` | Deploy files or an upload into one environment, leaving production alone | `deployment:create`, `project:read` |
 | `get_workload` | Show the runtime spec and status of a process or container project | `deployment:read` |
 | `set_workload` | Set the runtime spec of a process or container project. Secrets are references only | `project:update` |
+| `get_scaling` | Read how an app is scaled: copies and their nodes, status, release and usage, room on the fleet, a rollout in progress, the autoscaling policy and its last decision | `project:read` |
+| `scale_project` | Set how many copies of an app run. Immediate, no deploy; running copies are not restarted | `project:update` |
+| `set_autoscaling` | Turn autoscaling on or off and set its bounds, signal (CPU, memory or request rate) and target | `project:update` |
 | `get_node_capacity` | Show each node's workload budget and reservations (platform admins) | `project:read` |
 | `list_volumes` | List a project's persistent volumes, with size, usage and the current writer | `project:read` |
 | `create_volume` | Create a persistent volume with a size quota | `project:update` |
@@ -440,5 +443,7 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 |---|---|---|
 | `list_nodes` | List fleet nodes. Requires a platform admin role | `project:read` |
 | `get_ha_status` | Read the failover controller: whether automatic failover is on, the lease, how long each node has been silent, the ingress record set, databases whose primary is lost and the replica a promotion would use, and recent failover events. Requires a platform admin role; never changes anything | `project:read` |
+| `get_fleet` | Read fleet capacity: per node what is reserved and in use, what may move and why the rest is pinned, and the moves a rebalance would make. Requires a platform admin role; never changes anything | `project:read` |
+| `get_node_links` | Read the links between nodes: path, latency, loss, the last hour, and the last throughput test. Requires a platform admin role; never changes anything | `project:read` |
 | `get_usage` | Show usage for the organisation, or one project: counts, database and storage bytes, egress, builds and jobs, and percentage of each quota | `project:read` |
 | `get_quotas` | Show the effective organisation quotas, or one project's overrides and limits | `project:read` |

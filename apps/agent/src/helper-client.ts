@@ -14,7 +14,7 @@ import {
 	type WorkloadDesired,
 	type WorkloadStatus,
 } from '@yoal/contracts';
-import type { HelperNodeUpdateApi } from './node-update.ts';
+import type { HelperNodeUpdateApi, HelperNodeUpdateRollback } from './node-update.ts';
 import type { HelperMailApi } from './mail-bridge.ts';
 import type { HelperShareApi } from './share-mounts.ts';
 import type { HelperDiskApi } from './disk-mounts.ts';
@@ -32,6 +32,7 @@ export interface HelperWorkloadStatus {
 	status: WorkloadStatus;
 	restarts: number;
 	memoryBytes?: number;
+	cpuNanos?: number;
 	/** Managed databases only: TLS state derived from the helper's certificate files. */
 	tls?: { enabled: boolean; caPem: string | null; error: string | null };
 }
@@ -164,7 +165,11 @@ export interface HelperPitrStatus {
 }
 
 export class HelperError extends Error {
-	constructor(message: string) {
+	constructor(
+		message: string,
+		/** The helper's HTTP status, when it answered at all. */
+		readonly status?: number,
+	) {
 		super(message);
 		this.name = 'HelperError';
 	}
@@ -189,6 +194,8 @@ const LOG_TIMEOUT_MS = 8_000;
 const STUDIO_TIMEOUT_MS = 30_000;
 /** Download plus checksum of the node bundle; the helper bounds the download at 10 minutes. */
 const NODE_UPDATE_TIMEOUT_MS = 11 * 60_000;
+/** Confirm and guard status are a file read and two systemctl calls. */
+const NODE_UPDATE_GUARD_TIMEOUT_MS = 30_000;
 /** Kernel WireGuard apply is a handful of local commands. */
 const WIREGUARD_TIMEOUT_MS = 30_000;
 /** `du` over every app volume on the node. */
@@ -341,6 +348,36 @@ export class HelperClient
 		const body = asRecord(await this.request('POST', '/v1/node/update', input, NODE_UPDATE_TIMEOUT_MS, signal));
 		if (typeof body.version !== 'string') throw new HelperError('helper node update returned no version');
 		return { version: body.version };
+	}
+
+	/**
+	 * Tell the helper this release runs and reached the control plane, disarming its rollback guard.
+	 * A 404 (a helper process still on the old release) throws, so the caller retries.
+	 */
+	async confirmNodeUpdate(version: string, signal?: AbortSignal): Promise<{ confirmed: boolean }> {
+		const body = asRecord(await this.request('POST', '/v1/node/update/confirm', { version }, NODE_UPDATE_GUARD_TIMEOUT_MS, signal));
+		return { confirmed: body.confirmed === true };
+	}
+
+	/** The rollback the helper's guard last performed; null when none, or the helper predates the guard. */
+	async nodeUpdateRollback(signal?: AbortSignal): Promise<HelperNodeUpdateRollback | null> {
+		let body: Record<string, unknown>;
+		try {
+			body = asRecord(await this.request('GET', '/v1/node/update/guard', undefined, NODE_UPDATE_GUARD_TIMEOUT_MS, signal));
+		} catch (error) {
+			if (error instanceof HelperError && error.status === 404) return null;
+			throw error;
+		}
+		const rollback = body.rollback;
+		if (typeof rollback !== 'object' || rollback === null) return null;
+		const record = rollback as Record<string, unknown>;
+		if (typeof record.from !== 'string' || typeof record.to !== 'string') return null;
+		return {
+			from: record.from,
+			to: record.to,
+			afterSeconds: typeof record.afterSeconds === 'number' ? record.afterSeconds : 600,
+			rolledBackAt: typeof record.rolledBackAt === 'string' ? record.rolledBackAt : '',
+		};
 	}
 
 	/** Generate or read the node's WireGuard key pair; only the public key returns (C1). */
@@ -850,7 +887,7 @@ export class HelperClient
 				payload && typeof payload === 'object' && typeof (payload as { error?: unknown }).error === 'string'
 					? String((payload as { error: string }).error)
 					: text.slice(0, 500);
-			throw new HelperError(`helper ${method} ${path} -> ${response.status}${message ? `: ${message}` : ''}`);
+			throw new HelperError(`helper ${method} ${path} -> ${response.status}${message ? `: ${message}` : ''}`, response.status);
 		}
 		return payload;
 	}
@@ -909,6 +946,8 @@ function parseStatus(value: unknown): HelperWorkloadStatus {
 	};
 	if (typeof record.memoryBytes === 'number' && Number.isFinite(record.memoryBytes) && record.memoryBytes >= 0)
 		status.memoryBytes = record.memoryBytes;
+	if (typeof record.cpuNanos === 'number' && Number.isFinite(record.cpuNanos) && record.cpuNanos >= 0)
+		status.cpuNanos = record.cpuNanos;
 	const tls = asOptionalRecord(record.tls);
 	if (tls && typeof tls.enabled === 'boolean') {
 		status.tls = {

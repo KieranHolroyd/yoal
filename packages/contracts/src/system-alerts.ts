@@ -24,6 +24,10 @@ export const systemAlertKinds = [
 	'quota',
 	'telemetry',
 	'failover',
+	'scaling',
+	'rollout',
+	'link',
+	'relocation',
 	'server_error',
 ] as const;
 export type SystemAlertKind = (typeof systemAlertKinds)[number];
@@ -131,6 +135,35 @@ export const systemAlertCatalog: SystemAlertInfo[] = [
 		label: 'Alert rules cannot evaluate',
 		description: 'The telemetry store has been unavailable for 10 minutes, so metric alert rules cannot fire.',
 		severity: 'critical',
+		thresholds: [],
+	},
+	{
+		kind: 'scaling',
+		label: 'Autoscaling short of capacity',
+		description: 'An autoscaling policy wanted more copies than the fleet has room for (Project → Scaling).',
+		severity: 'warning',
+		thresholds: [],
+	},
+	{
+		kind: 'rollout',
+		label: 'Rollout paused',
+		description:
+			'A copy failed, or did not become healthy, while a new release was rolled across an app’s copies. The remaining copies keep serving the previous release.',
+		severity: 'warning',
+		thresholds: [],
+	},
+	{
+		kind: 'relocation',
+		label: 'App moved with its data',
+		description: 'An app and its app volumes finished moving to another node, or the move failed and the app was started again where it was.',
+		severity: 'info',
+		thresholds: [],
+	},
+	{
+		kind: 'link',
+		label: 'Link between nodes down',
+		description: 'Two nodes on the managed overlay have not reached each other for several minutes, or reach each other again (Fleet → Links).',
+		severity: 'warning',
 		thresholds: [],
 	},
 	{

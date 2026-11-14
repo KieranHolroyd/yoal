@@ -135,6 +135,29 @@ const api: RequestHandler = async (event) => {
 				const input = await readJson(request, serviceMoveSchema);
 				return core.moves.moveApp(principal, slug, input);
 			}
+			// Unlike `move`, this does not pin the placement: the scheduler picks the node (or takes
+			// the one named) and may move the app again later (CLUSTERING §3.10).
+			if (action === 'reschedule' && method === 'POST')
+				return core.scheduling.move(principal, slug, await request.json().catch(() => ({})));
+			// A move that carries the app volumes along; the app is stopped for the copy (SCALING §7).
+			if (action === 'relocate' && method === 'POST')
+				return json(core.relocations.start(principal, slug, await request.json().catch(() => ({}))), 202);
+			if (action === 'relocation' && segments.length === 3 && method === 'GET')
+				return { relocation: core.relocations.latest(principal, core.projects.requireRow(principal, slug)) };
+			if (action === 'relocation' && segments[3] === 'cancel' && method === 'POST') return core.relocations.cancel(principal, slug);
+			// Horizontal scaling (docs/SCALING.md): copies, the autoscaling policy and the rollout.
+			if (action === 'scaling' && segments.length === 3) {
+				const project = core.projects.requireRow(principal, slug);
+				if (method === 'GET') return core.scaling.view(principal, project);
+				if (method === 'PUT') return core.scaling.setPolicy(principal, project, await request.json().catch(() => ({})));
+			}
+			if (action === 'scale' && method === 'POST')
+				return core.scaling.scale(principal, core.projects.requireRow(principal, slug), await request.json().catch(() => ({})));
+			if (action === 'rollout' && segments[3] === 'resume' && method === 'POST') {
+				const project = core.projects.requireRow(principal, slug);
+				core.workloads.resumeRollout(principal, project);
+				return core.scaling.view(principal, project);
+			}
 			if (action === 'function' && segments.length === 3) {
 				if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
 				const view = core.functions.view(principal, core.projects.requireRow(principal, slug));
@@ -401,12 +424,49 @@ const api: RequestHandler = async (event) => {
 			return json({ error: 'not_found' }, 404);
 		}
 
+		// --- scheduling (platform admin; CLUSTERING §3.10, D214) ---------------
+		if (segments[0] === 'scheduling') {
+			if (segments.length === 1 && method === 'GET') return core.scheduling.view(principal);
+			if (segments.length === 2 && segments[1] === 'rebalance' && method === 'POST')
+				return core.scheduling.rebalance(principal, await request.json().catch(() => ({})));
+			return json({ error: 'not_found' }, 404);
+		}
+
+		// --- links between nodes (platform admin; CLUSTERING §4.6, D216) -------
+		if (segments[0] === 'links') {
+			if (segments.length === 1 && method === 'GET') return core.links.view(principal);
+			if (segments.length === 2 && segments[1] === 'test' && method === 'POST')
+				return json(core.links.start(principal, await request.json().catch(() => ({}))), 202);
+			return json({ error: 'not_found' }, 404);
+		}
+
 		// --- nodes (platform admin) -------------------------------------------
 		if (segments[0] === 'nodes') {
 			if (segments.length === 1 && method === 'GET') return { nodes: core.nodes.list(principal) };
 			if (segments.length === 2 && segments[1] === 'join-token' && method === 'POST') {
 				const body = (await request.json().catch(() => ({}))) as { name?: string };
 				return json(core.nodes.createJoinToken(principal, body.name), 201);
+			}
+			// Fleet updates in waves (CLUSTERING §3.11, D217). `rollouts` is not a node id: ids are `nod_…`.
+			if (segments[1] === 'rollouts') {
+				const body = async () => request.json().catch(() => ({}));
+				if (segments.length === 2 && method === 'GET') {
+					const limit = Number(event.url.searchParams.get('limit') ?? 20);
+					return {
+						active: core.nodeRollouts.active(principal),
+						rollouts: core.nodeRollouts.list(principal, Number.isFinite(limit) ? limit : 20),
+					};
+				}
+				if (segments.length === 2 && method === 'POST')
+					return json(core.nodeRollouts.start(principal, await body()), 201);
+				if (segments.length === 3 && segments[2] === 'plan' && method === 'POST')
+					return core.nodeRollouts.plan(principal, await body());
+				const rolloutId = segments[2]!;
+				if (segments.length === 3 && method === 'GET') return core.nodeRollouts.get(principal, rolloutId);
+				if (segments[3] === 'resume' && method === 'POST')
+					return core.nodeRollouts.resume(principal, rolloutId, await body());
+				if (segments[3] === 'cancel' && method === 'POST') return core.nodeRollouts.cancel(principal, rolloutId);
+				return json({ error: 'not_found' }, 404);
 			}
 			const nodeId = segments[1]!;
 			if (segments.length === 2 && method === 'PATCH')
@@ -416,6 +476,9 @@ const api: RequestHandler = async (event) => {
 				return core.nodes.setDraining(principal, nodeId, true);
 			if (segments[2] === 'resume' && method === 'POST')
 				return core.nodes.setDraining(principal, nodeId, false);
+			// One node's signed-release update (D99); fleets use /nodes/rollouts.
+			if (segments.length === 3 && segments[2] === 'update' && method === 'POST')
+				return core.nodes.requestUpdate(principal, nodeId);
 			if (segments[2] === 'rotate-token' && method === 'POST')
 				return core.nodes.rotateToken(principal, nodeId);
 			if (segments[2] === 'edge' && method === 'POST') return core.nodes.setEdge(principal, nodeId);

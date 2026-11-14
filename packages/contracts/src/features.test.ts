@@ -25,6 +25,7 @@ describe('feature registry', () => {
 			'DB_TLS',
 			'ORG_NETWORKS',
 			'MULTI_NODE_REPLICAS',
+			'WORKLOAD_MOVES',
 			'SERVICE_ENDPOINTS',
 			'APP_VOLUMES',
 			'JOBS',

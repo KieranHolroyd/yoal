@@ -105,8 +105,12 @@ describe('tier 2 workloads', () => {
 	});
 
 	test('refuses a deploy that exceeds the slice budget', async () => {
+		// A redeploy is not charged for the room its own running copy already holds, so 300 MB
+		// still fits this 256 MB app; a budget under one copy does not.
 		opened.db.update(nodes).set({ sliceMemoryMb: 300 }).where(eq(nodes.id, nodeId)).run();
 		const project = core.projects.requireRow(principal, 'app');
+		expect(() => core.workloads.plan(principal, project)).not.toThrow();
+		opened.db.update(nodes).set({ sliceMemoryMb: 200 }).where(eq(nodes.id, nodeId)).run();
 		await expect(
 			core.uploads.deployInline(principal, project, [file('other.js', 'x')], { promote: false }),
 		).rejects.toMatchObject({ code: 'validation' });
