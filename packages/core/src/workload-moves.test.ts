@@ -225,6 +225,39 @@ describe('single-copy moves', () => {
 		expect(f.workloadRow('cron').nodeId).toBe(f.node[lost]!.id);
 	});
 
+	test('with run leases on, a lone worker carries a lease and is re-placed off a lost node', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		f.core.cluster.update(principal, { failover: { enabled: true }, scheduling: { workerRunLeases: true } });
+		const worker = await f.app('cron', { ingress: 'none' });
+		const home = f.nameOf(worker.nodeId!);
+		const entry = async () => (await f.desired(home)).workloads.find((item) => item.id === worker.id);
+		// An agent that cannot fence gets no lease, and its worker stays where it is.
+		expect((await entry())?.runLease).toBeUndefined();
+		f.sqlite.run('UPDATE nodes SET capabilities_json = ?', [JSON.stringify(['run-leases'])]);
+		expect((await entry())?.runLease).toEqual({ ttlSeconds: 60 });
+		// A lease is the agent's rule: it must not change what the unit looks like.
+		expect((await entry())?.activationVersion).toBeDefined();
+
+		f.clock.now += 130_000;
+		for (const name of ['edge', 'a', 'b']) if (name !== home) f.sqlite.run('UPDATE nodes SET last_heartbeat_at = ? WHERE id = ?', [f.clock.now, f.node[name]!.id]);
+		expect((await f.core.failover.tick()).moved).toBe(1);
+		expect(f.workloadRow('cron')).toMatchObject({ reason: 'failover', movingFrom: null });
+		expect(f.workloadRow('cron').nodeId).not.toBe(f.node[home]!.id);
+	});
+
+	test('no lease when the fleet would restart the worker before its node has surely stopped it', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		f.sqlite.run('UPDATE nodes SET capabilities_json = ?', [JSON.stringify(['run-leases'])]);
+		f.core.cluster.update(principal, { failover: { enabled: true }, scheduling: { workerRunLeases: true, runLeaseSeconds: 100 } });
+		const worker = await f.app('cron', { ingress: 'none' });
+		// 120 s of grace leaves no margin after a 100 s lease.
+		expect((await f.desired(f.nameOf(worker.nodeId!))).workloads[0]?.runLease).toBeUndefined();
+		// Nor for an HTTP app, which may run twice for a moment without harm.
+		f.core.cluster.update(principal, { scheduling: { runLeaseSeconds: 60 } });
+		const web = await f.app('web');
+		expect((await f.desired(f.nameOf(web.nodeId!))).workloads.find((item) => item.id === web.id)?.runLease).toBeUndefined();
+	});
+
 	test('a one-node install has nothing to move and raises nothing on drain', async () => {
 		const f = fleet(['edge']);
 		await f.app('solo');

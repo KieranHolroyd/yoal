@@ -752,3 +752,24 @@ describe('function routes (D110)', () => {
 		expect(new Set(ids).size).toBe(ids.length);
 	});
 });
+
+describe('unavailable routes (D225)', () => {
+	test('a route the control plane marked unavailable serves the 503 page: no proxy, no release files', () => {
+		const value = state();
+		value.routes[0] = {
+			...value.routes[0]!,
+			upstream: 'unix//run/yoal/route-unavailable.sock',
+			unavailable: 'Port 3000 on this node belongs to another app.',
+		};
+		const compiled = routes(config(value));
+		expect(compiled.some((route) => String(route['@id']).startsWith('site:prj_public:'))).toBe(false);
+		const blocked = compiled.find((route) => route['@id'] === 'unavailable:public.example.com');
+		expect(blocked).toBeDefined();
+		const handlers = collectHandlers(blocked);
+		expect(handlers.some((handler) => handler.handler === 'reverse_proxy')).toBe(false);
+		expect(handlers.some((handler) => handler.handler === 'file_server')).toBe(false);
+		expect(handlers.some((handler) => handler.status_code === 503)).toBe(true);
+		// The other site is untouched.
+		expect(compiled.some((route) => String(route['@id']).startsWith('site:prj_secret:'))).toBe(true);
+	});
+});

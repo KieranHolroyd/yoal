@@ -126,10 +126,22 @@
 							</Button>
 						</div>
 					{/if}
+				{:else if scaling.rollout.automatic}
+					<p>A release failed and the previous one is being put back. The app keeps serving meanwhile.</p>
+				{:else if scaling.rollout.surge}
+					<p>
+						A temporary second copy is starting on another node. Once it is healthy it takes the traffic while this app’s own copy
+						restarts on the new release, and then it is removed.
+					</p>
 				{:else}
 					<p>Copies update one at a time; each must be healthy before the next is touched, so the app keeps serving.</p>
 				{/if}
 			</div>
+		</Notice>
+	{:else if scaling.lastRollback}
+		<Notice tone="warning" title="A release was rolled back automatically">
+			<p>{scaling.lastRollback.note}</p>
+			<p class="text-xs text-muted-foreground">{formatDate(scaling.lastRollback.at)} · The failed deployment is still in Deployments, with its logs.</p>
 		</Notice>
 	{/if}
 
@@ -254,6 +266,25 @@
 				</div>
 			{:else if !scaling.deployed}
 				<p class="text-sm text-muted-foreground">Not deployed yet. The next deploy starts this many copies.</p>
+			{/if}
+
+			{#if scaling.sizing.advice === 'raise'}
+				<Notice tone="warning" title="Close to its memory limit">
+					A copy reached {scaling.sizing.memoryPeakMb} MB of its {scaling.memoryMb} MB. At the limit it is killed and restarted. Consider
+					{scaling.sizing.suggestedMemoryMb} MB on the Runtime tab.
+				</Notice>
+			{:else if scaling.sizing.advice === 'lower'}
+				<Notice tone="info" title="Reserves more memory than it uses">
+					The busiest copy reached {scaling.sizing.memoryPeakMb} MB over the last day, against {scaling.memoryMb} MB reserved for each copy.
+					{scaling.sizing.suggestedMemoryMb} MB would leave a quarter of headroom and free
+					{(scaling.memoryMb - (scaling.sizing.suggestedMemoryMb ?? scaling.memoryMb)) * scaling.replicas} MB for other apps. Change it on the Runtime tab.
+				</Notice>
+			{:else if scaling.sizing.memoryPeakMb !== null}
+				<p class="text-xs text-muted-foreground">
+					Busiest copy: {scaling.sizing.memoryPeakMb} MB of {scaling.memoryMb} MB{scaling.sizing.cpuPeakMillis !== null
+						? `, ${Math.round(percent(scaling.sizing.cpuPeakMillis, scaling.cpuMillis))}% CPU`
+						: ''}{scaling.sizing.settled ? ' over the last day.' : ' so far today.'}
+				</p>
 			{/if}
 		</div>
 	</Panel>

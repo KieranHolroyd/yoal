@@ -131,15 +131,19 @@ Pointing every install at your own collector is supported and does not need a co
 
 ## The collector
 
-`apps/usage` is a single Bun process with one SQLite file. It is deployed as a normal Yoal project,
-so the same source that receives our pings can be run on your own install.
+`apps/usage` is a single Bun process with one SQLite file. It receives the pings and serves an
+operator dashboard over them. It is deployed as a normal Yoal project, so the same source that
+receives our pings can be run on your own install.
 
 | Route | Purpose |
 |---|---|
 | `POST /api/v1/ping` | Validate against the schema and store. `202` accepted (also for a duplicate id), `400` invalid, `413` too large, `415` not JSON, `429` rate-limited, `405` wrong method. |
 | `GET /healthz` | `{ ok, version }`. |
-| `GET /` | What the service is and where the docs are. |
-| `GET /api/v1/stats?days=30` | Operator view. `404` unless `YOAL_USAGE_ADMIN_TOKEN` is set; needs `Authorization: Bearer …`. |
+| `GET /` | The operator dashboard (sign-in page when signed out). |
+| `GET /api/v1` | What the service is and where the docs are, as JSON. |
+| `GET /api/v1/stats?days=30` | Aggregate stats as JSON, for scripts. Needs `Authorization: Bearer <YOAL_USAGE_ADMIN_TOKEN>` or a dashboard session with a second factor. |
+| `GET /api/v1/overview`, `/api/v1/installs` | The dashboard's data. A dashboard session with a second factor only. |
+| `/api/auth/*` | Better Auth (sign-in, two-factor, passkeys, account admin). |
 
 Storage is two tables: `installs` (one row per anonymous install, first/last seen, version, OS,
 arch, ping count) and `pings` (validated payloads, unique by ping id). Raw pings are kept for
@@ -149,6 +153,29 @@ answered from stored payloads.
 
 Limits: a 32 KiB body cap before parsing, 60 requests a minute per client address, and no CORS
 header (no browser should post here). The listener is loopback-only behind Caddy.
+
+### The dashboard
+
+Operators sign in with Better Auth (the same version as the control plane):
+
+- **Email and password, no public sign-up.** The first account is created on `/setup` with a
+  setup token. The collector writes that token to its log at boot while no account exists, or uses
+  `YOAL_USAGE_SETUP_TOKEN`. Setup closes once an account exists. Admins add everyone else from
+  **Users**.
+- **A second factor is required to see any data**: an authenticator app (TOTP, with backup codes)
+  or a passkey. Until you enrol one, a signed-in person sees only **Account**. The server enforces
+  this on every data route, and on the admin routes too.
+- **Roles:** an admin manages accounts; a viewer reads the dashboard.
+- **Sessions** last 7 days and can be listed and revoked from **Account**. Cookies are `__Host-`
+  and Secure over HTTPS. Credential endpoints have tight rate limits (5 sign-ins a minute per
+  address).
+- The Better Auth secret is generated on first boot and stored in the data directory (0600), unless
+  `YOAL_USAGE_AUTH_SECRET` is set. A restart or redeploy never signs anyone out.
+
+The dashboard shows active and new installs per day, versions, OS and architecture, feature and
+service adoption, and platform-size metrics. Every figure comes from each install's latest ping in
+the chosen window. **Installs** lists installs by last seen. Only a 12-character prefix of each
+random id is shown.
 
 ### Running it yourself
 
@@ -166,5 +193,5 @@ every variable and the deployment shape on Yoal.
 - **Settings → Usage analytics → Send one ping now** sends a single ping and reports the result.
 - The raw JSON panel on the same page is the body that would be sent; it is built live from the
   database.
-- The audit log records each send, and the collector's `GET /api/v1/stats` (with the admin token)
-  shows the install appearing.
+- The audit log records each send, and the collector's dashboard (or `GET /api/v1/stats` with the
+  admin token) shows the install appearing.

@@ -168,6 +168,37 @@ static sites.
 - **Why place an app on the edge:** it keeps serving when the homelab is offline, skips the WireGuard
   hop, and lets a single-node install run apps at all.
 
+#### 3.4.2 Loopback ports and route safety (D225)
+
+A container publishes `127.0.0.1:<port>`, and a process app with socket activation off binds that
+port itself. Caddy routes the project's host to it. Whatever listens on that port answers the
+project's visitors, so Yoal makes sure it can only be the project's own app.
+
+- **Platform ports are never app ports.** `PLATFORM_HOST_PORTS` (contracts `host-ports.ts`) lists
+  the privileged ports, the storage and database gateways, the studio, the container console, the
+  analytics sink, the workload identity endpoint, the identity service, the managed-service ranges
+  (databases, poolers, storage, brokers, registry), service endpoints and compose routes. An
+  install's own overrides (`YOAL_*_PORT`, `endpoints.portMin/Max`) are added. Spec save and deploy
+  refuse these ports, naming the owner.
+- **One app per port per node.** The host-port ledger (core `host-ports.ts`) collects the ports apps
+  hold on a node: placed workloads, copies, and workloads still serving there mid-move. Spec save
+  checks the app's current nodes, and deploy checks the chosen node(s) whichever path chose them.
+  Auto placement, copies, moves and rebalancing skip nodes where the port is taken. The refusal
+  names the app holding the port and a free one nearby. Socket-activated processes and functions
+  use unix sockets, and compose routes get Yoal-assigned ports, so they never conflict.
+- **The route guard is the last check.** When it builds a node's desired state, the control plane
+  re-checks every local app route (core `route-guard.ts`). The route is marked `unavailable` when the
+  app has no running workload, sits on a platform port, or shares its port with an app placed
+  earlier. Status is deliberately not a gate: `failed` also marks an app that is serving again after
+  a restart loop, and a dead app on its own port only produces a dial error, which is a 503. The agent then serves the branded 503 instead of proxying, and the route's
+  upstream is a socket nothing listens on, so an older agent fails closed as well. A process or
+  container release is never served as static files: it is source code, not a site.
+- **Process units find their runtime and state.** A bare `bun` command runs the node's pinned Bun.
+  The pinned runtime directories come first on the unit's `PATH`. The state root
+  (`/var/lib/yoal-workloads`) is kept at 0711, so a sandboxed app can reach its own
+  `$STATE_DIRECTORY` symlink. Before restarting a unit on a new spec, the helper resets the start
+  limit an earlier crash loop left behind.
+
 ---
 
 ## 4. Deploy pipeline

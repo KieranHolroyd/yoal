@@ -31,6 +31,7 @@ import { ShareMountRunner } from './share-mounts.ts';
 import { DiskMountRunner } from './disk-mounts.ts';
 import { VolumeProfileRunner } from './volume-profiles.ts';
 import { LinkTestRunner } from './link-tests.ts';
+import { RunLeaseClock, leaseState } from './run-lease.ts';
 import { DatabasePitrRunner } from './database-pitr.ts';
 import { DatabaseCredentialRunner } from './database-credentials.ts';
 import { StudioPrincipalRunner } from './studio/principal.ts';
@@ -139,6 +140,9 @@ class AgentRuntime {
 	/** Disk benchmarks (docs/STORAGE.md §5.1). */
 	private readonly volumeProfiles: VolumeProfileRunner;
 	private readonly linkTests: LinkTestRunner;
+	private readonly runLease: RunLeaseClock;
+	/** The leased workloads this node was last holding back, so a change triggers one converge. */
+	private fencedKey = '';
 	private readonly databasePitr: DatabasePitrRunner;
 	private readonly databaseRotations: DatabaseRotationRunner;
 	private readonly databaseCredentials: DatabaseCredentialRunner;
@@ -267,7 +271,9 @@ class AgentRuntime {
 			intervalMs: config.logDrainIntervalMs,
 			log,
 		});
+		this.runLease = new RunLeaseClock({ path: join(config.dataDir, 'run-lease.json'), log });
 		this.workloads = new WorkloadRuntime({
+			runLeaseValid: (ttlSeconds) => this.runLease.valid(ttlSeconds),
 			helper: this.helper,
 			releases: this.releases,
 			fetchActivation: (id, signal) => this.fetchWorkloadActivation(id, signal),
@@ -431,6 +437,8 @@ class AgentRuntime {
 					`Ignoring cached desired state for node ${cached.state.nodeId}; this is ${this.config.nodeId}`,
 				);
 			} else {
+				// Before anything converges from the cache: a fresh contact time must not fence, a stale one must.
+				await this.runLease.load();
 				this.desired = cached.state;
 				this.desiredEtag = cached.etag;
 				this.applyStudio(cached.state.studio);
@@ -498,6 +506,7 @@ class AgentRuntime {
 			this.shareMountLoop(),
 			this.volumeProfileLoop(),
 			this.linkTestLoop(),
+			this.runLeaseLoop(),
 			this.databasePitrLoop(),
 			this.databaseRotationLoop(),
 			this.databaseCredentialLoop(),
@@ -1058,6 +1067,34 @@ class AgentRuntime {
 	}
 
 	/**
+	 * Self-fencing (docs/CLUSTERING.md §8.4). Whenever the set of leased workloads this node must
+	 * hold back changes (a lease ran out, or contact came back), converge once from the desired
+	 * state already in hand: the runtime removes the fenced units, or starts them again.
+	 */
+	private async runLeaseLoop(): Promise<void> {
+		await this.runLease.load();
+		while (this.running) {
+			const state = this.desired;
+			if (state) {
+				const { fenced } = leaseState(state, this.runLease);
+				const key = fenced.join(',');
+				if (key !== this.fencedKey) {
+					this.fencedKey = key;
+					if (fenced.length > 0)
+						log('warn', `No contact with the control plane for ${this.runLease.silentSeconds() ?? '?'} s: stopping ${fenced.length} leased workload(s) so they cannot run twice`);
+					else log('info', 'Contact with the control plane is back: leased workloads may run again');
+					await this.workloads.converge(state, this.shutdownController.signal).catch((error) => {
+						log('warn', `Applying the run-lease change failed: ${errorText(error)}`);
+						// Try again on the next pass rather than believing it was applied.
+						this.fencedKey = '\u0000';
+					});
+				}
+			}
+			await sleep(3_000, this.shutdownController.signal).catch(() => undefined);
+		}
+	}
+
+	/**
 	 * Links to the other nodes (docs/CLUSTERING.md §4.6): pick up link tests quickly, and sample a
 	 * round trip to every peer about twice a minute. Both run beside the reconcile loop.
 	 */
@@ -1364,6 +1401,8 @@ class AgentRuntime {
 			const text = await response.text().catch(() => '');
 			throw new Error(`heartbeat -> ${response.status}${text ? `: ${text}` : ''}`);
 		}
+		// The control plane answered: every run lease on this node is good for another TTL.
+		await this.runLease.touch(leaseState(this.desired, this.runLease).leased.length > 0);
 		this.databaseBackups.acknowledge(backupResults.map((result) => result.taskId));
 		this.databasePitr.acknowledge(pitrResults.map((result) => result.taskId));
 		this.databaseRotations.acknowledge(rotationResults.map((result) => result.taskId));

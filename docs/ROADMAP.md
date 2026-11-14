@@ -223,7 +223,7 @@
 - [ ] C4: HTTP replicas across nodes, spread, health-checked load balancing, rolling deploys, drain, opt-in failover, singletons with run leases
 - [x] Fleet scheduling (D214): per-copy accounting, every copy's node serves it, single-copy moves with surge on drain/failover/rebalance, `spread`/`pack`, overcommit, opt-in automatic rebalance, Fleet page
 - [x] Private networks (D215) and measured links with on-demand throughput tests, an hour of history and link-down alerts (D216)
-- [x] Horizontal scaling ([SCALING.md](./SCALING.md)): scale without a deploy, sticky copies, process apps and workers across nodes, rolling deploys with a health gate, CPU/memory/request-rate autoscaling, moves with app volumes, the Scaling tab and `yoal scale`
+- [x] Horizontal scaling ([SCALING.md](./SCALING.md)): scale without a deploy, sticky copies, process apps and workers across nodes, rolling deploys with a health gate, CPU/memory/request-rate autoscaling, moves with app volumes, the Scaling tab and `yoal scale`; no-gap deploys for a single copy, automatic rollback, right-sizing advice, memory-pressure-aware placement and run leases for lone workers (D222–D224)
 - [x] Fleet node updates (D217): `availability`/`rolling`/`parallel` rollouts with drain, soak, failure budget, pause/resume, auto-rollout after a control-plane update, and an on-node rollback guard (CLUSTERING §3.11)
 - [ ] C5: every ingress node a full edge, `dns-failover` driver, distributed certificates
 - [ ] C6: control-plane warm standby, Litestream follow, lease + epoch fencing, manual promote

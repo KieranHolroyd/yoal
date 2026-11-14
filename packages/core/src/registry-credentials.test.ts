@@ -212,7 +212,7 @@ describe('digest pinning (R1) and activation credentials (R2)', () => {
 	});
 
 	test('localhost images are never resolved and carry no credential', async () => {
-		core.workloads.setSpec(owner, core.projects.requireRow(owner, 'local'), spec('localhost/app:1'));
+		core.workloads.setSpec(owner, core.projects.requireRow(owner, 'local'), spec('localhost/app:1', { port: 8090 }));
 		calls.length = 0;
 		await deploy('local');
 		expect(calls).toEqual([]);
@@ -222,7 +222,7 @@ describe('digest pinning (R1) and activation credentials (R2)', () => {
 	});
 
 	test('an image already pinned by digest runs without its tag', async () => {
-		core.workloads.setSpec(owner, core.projects.requireRow(owner, 'local'), spec(`ghcr.io/acme/api:1.0@${DIGEST_A}`));
+		core.workloads.setSpec(owner, core.projects.requireRow(owner, 'local'), spec(`ghcr.io/acme/api:1.0@${DIGEST_A}`, { port: 8090 }));
 		calls.length = 0;
 		await deploy('local');
 		expect(calls).toEqual([]);

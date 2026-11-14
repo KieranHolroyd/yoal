@@ -21,6 +21,8 @@ export interface ReplicaCandidate {
 	freeCpuMillis?: number | null;
 	/** An ingress node takes a copy only after the compute-only nodes (§3.4 score). */
 	ingress?: boolean;
+	/** The host's memory is nearly full right now: last choice, whatever its reservations say. */
+	pressured?: boolean;
 }
 
 export interface ReplicaRequest {
@@ -99,6 +101,7 @@ export function planReplicas(request: ReplicaRequest): ReplicaDecision {
 		eligible.sort(
 			(a, b) =>
 				(copiesOn.get(a.id) ?? 0) - (copiesOn.get(b.id) ?? 0) ||
+				Number(a.pressured ?? false) - Number(b.pressured ?? false) ||
 				Number(a.ingress ?? false) - Number(b.ingress ?? false) ||
 				byFree * (b.freeMemoryMb - a.freeMemoryMb) ||
 				a.name.localeCompare(b.name),

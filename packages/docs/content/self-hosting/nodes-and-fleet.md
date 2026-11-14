@@ -294,6 +294,17 @@ An HTTP app with nothing attached moves without downtime. An app whose data live
 > [!WARNING]
 > Memory overcommit above 100 is a bet that apps do not all reach their limit at once. The limit on the host itself does not change, so if they do, the kernel kills something.
 
+Reservations are not the only input. A node whose own memory is 90% full (`scheduling.memoryPressurePercent`) is the last choice for a new copy and receives nothing from a rebalance, whatever its reservations say.
+
+### Single workers and run leases
+
+When a node goes silent, Yoal restarts its HTTP apps elsewhere if failover is on, but leaves a single-copy worker alone: the node may only be cut off, with the worker still running, and a second copy would do its work twice.
+
+Turning on `scheduling.workerRunLeases` changes that. Each node then stops its single-copy workers by itself once it has had no answer from the control plane for 60 seconds (`runLeaseSeconds`), and Yoal restarts them on another node after the failover grace.
+
+> [!WARNING]
+> A node cannot tell being cut off from the control plane being down. With run leases on, single-copy workers stop fleet-wide if the control plane is unreachable for longer than the lease, and start again when it returns. Leave it off unless a worker being down on a lost node costs you more than that.
+
 ### Private networks
 
 Nodes that share a private network (a provider VPC, a vSwitch, a home LAN) can use it between themselves instead of their public addresses. Under **Edit node**, give each of them the same **Private network** name and its own **LAN endpoint** (its address and WireGuard port on that network). Traffic is still encrypted by WireGuard; it travels over the faster link. Nodes that are not on the network keep reaching the others through the hub.

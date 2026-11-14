@@ -1,7 +1,7 @@
 # Yoal — Horizontal scaling
 
-Status: **built 2026-11-14** (D218–D221; builds on D214–D216 in [CLUSTERING.md](./CLUSTERING.md)
-§3.10 and §4.6). Migration `0114_scaling.sql`. User-facing guide:
+Status: **built 2026-11-14** (D218–D224; builds on D214–D216 in [CLUSTERING.md](./CLUSTERING.md)
+§3.10 and §4.6). Migrations `0114_scaling.sql` and `0115_rollback_leases_usage.sql`. User-facing guide:
 `packages/docs/content/compute/scaling.md`.
 
 Related: [CLUSTERING.md](./CLUSTERING.md) §8, [VOLUMES.md](./VOLUMES.md), [ALERTS.md](./ALERTS.md),
@@ -107,8 +107,39 @@ and the node pull independently, a request can still reach a copy as it stops; t
 refused connection on another copy for up to 3 s (`load_balancing.try_duration`).
 
 A paused rollout is resumed by a new deploy, a rollback (the updated copy rolls back to the release
-the others never left), or `POST /projects/:slug/rollout/resume`. A single copy, or
-`scheduling.rollingDeploys: false`, updates in place as before.
+the others never left), or `POST /projects/:slug/rollout/resume`.
+`scheduling.rollingDeploys: false` updates every copy in place at once, as before.
+
+### 4.1 Deploying a single copy (D223)
+
+One copy has nothing to roll to, so a deploy used to mean a gap while it restarted. With
+`scheduling.surgeDeploys` (on), `record` starts a **surge** instead when the app is HTTP, is
+serving, may run on another node (`spread` mode) and another node has room:
+
+1. Two copy rows are written: the app's own copy, marked as still on the release it runs, and a
+   temporary copy on another node on the new release. The workload reserves two copies for the
+   length of the rollout, so both nodes account for theirs.
+2. The rollout controller waits for the temporary copy to be healthy. It then takes the traffic.
+3. The app's own copy is restarted on the new release, confirmed as in §4.
+4. The rows are removed: one copy again, on the node it was on, having never stopped serving.
+
+The app keeps its node, which is the point of doing it this way rather than moving it. An app that
+is not serving (never started, or idle-stopped), pinned to its node, or alone on a one-node fleet
+restarts in place. A deploy that arrives mid-surge undoes it first and starts again from what the
+app's own copy actually runs.
+
+### 4.2 Automatic rollback (D223)
+
+With `scheduling.autoRollback` (on), the failure in step 1 of §4 does not pause: the controller
+puts back the release the rollout started from (`workloads.rollout_from_deployment_id`).
+`DeploymentService.revertFailedRelease` moves the production pointer back when the failed deployment
+held it, so routes, the environment and the workload agree; a deployment that was never promoted
+only has the workload returned. The copies that never left the old release are not touched, and for
+a surge the temporary copy is dropped and the app's own copy was never restarted at all.
+
+It happens **once**. The rollback is itself a rollout (`rollout_auto`); if it fails as well, the
+release was not the problem, and it pauses for a person rather than bouncing between two releases.
+The Scaling tab keeps a note of what was undone and why until the next deploy.
 
 ## 5. Usage and autoscaling (D220)
 
@@ -143,6 +174,19 @@ change an activation version.
 Scale events (`workload_scale_events`) record every change with its reason and, for the autoscaler,
 the measurement that caused it.
 
+### 5.1 Right-sizing and memory pressure (D222)
+
+Reservations admit work; measurements advise and guard.
+
+- **Peaks.** `workload_usage` keeps each copy's highest memory and CPU for today and yesterday
+  (UTC). The Scaling tab says "raise" as soon as a copy reaches 90% of its memory limit, and "lower"
+  only once a full day exists and the peak plus a quarter, rounded up to 32 MB, is under 60% of the
+  reservation. Yoal never changes a reservation itself: a limit is the app owner's call.
+- **Pressure.** A node whose host memory (from its heartbeat) is at or above
+  `scheduling.memoryPressurePercent` (90) is the last choice for a new copy and receives nothing
+  from a rebalance. It still takes work when no other node can. This is the guard that makes memory
+  overcommit usable: reservations stop being a promise, so the host's own reading has a say.
+
 ## 6. Links: history and alerts (amends D216)
 
 `node_link_history` keeps one round-trip point a minute per ordered pair for a day; the Fleet page
@@ -171,7 +215,28 @@ controller takes.
 Not covered: a persistent data directory (`spec.data`) has no snapshot path, so it still pins its
 app; and there is no node-to-node stream, so the copy goes through the backup target.
 
-## 8. Surfaces
+## 8. Run leases for single workers (D224)
+
+A lone worker on a node that went silent may still be running there, so D214 leaves it alone. A run
+lease removes the doubt (CLUSTERING §8.4, the worker half of H15).
+
+- **Who gets one.** With `scheduling.workerRunLeases` on and failover enabled: a single-copy worker
+  that could move, on an agent that declares `run-leases`, on a fleet with two compute nodes. Its
+  desired state carries `runLease.ttlSeconds` (`scheduling.runLeaseSeconds`, 60).
+- **The node's side.** The agent records each answer from the control plane on disk as wall-clock
+  time. A leased workload whose lease has run out is treated as not wanted on the node: its units
+  are removed, not just stopped, so a reboot cannot start them. A stale timestamp found at start-up
+  fences before anything converges; a fresh one touches nothing, so an agent restart does not
+  restart the worker. When contact returns the units come back.
+- **The fleet's side.** The failover controller re-places the worker after
+  `replicas.failoverGraceSeconds` of silence. No lease is given unless that grace exceeds the TTL
+  by 30 s, so the node has stopped the worker before another copy starts.
+
+The cost is the reason it is opt-in: a node cannot tell a partition from a control-plane outage, so
+leased workers also stop when the control plane itself is down for longer than the TTL, and start
+again when it returns. An HTTP app never carries a lease; two copies of it for a moment do no harm.
+
+## 9. Surfaces
 
 | Surface | Scaling | Fleet |
 |---|---|---|
@@ -181,18 +246,24 @@ app; and there is no node-to-node stream, so the copy goes through the backup ta
 | MCP | `get_scaling`, `scale_project`, `set_autoscaling` | `get_fleet`, `get_node_links` (read-only) |
 | Alerts | `rollout`, `scaling`, `relocation` | `link`, `failover` |
 
-## 9. Mixed versions
+## 10. Mixed versions
 
 Every addition is additive. An older agent ignores `linkProbes` and `linkTests`, sends no `cpuNanos`
 (CPU autoscaling then reports "no CPU usage reported yet") and reports `running` from systemd, so a
 rollout across old agents is gated on restart and the state version but not on the health path. An
-older control plane ignores the new heartbeat fields.
+agent without `run-leases` is given no lease, so its lone workers keep the old rule. An older
+control plane ignores the new heartbeat fields.
 
-## 10. Not built
+## 11. Not built
 
+- **Moving a persistent data directory** (`spec.data`). The helper derives every data path from
+  validated ids and has snapshot and restore only for app volumes; a data directory has a different
+  layout and ownership, and that root-side code needs a real Linux host to prove. Until then the
+  way to make such an app movable is to keep its data in an app volume.
 - Scale to zero for a set (a single process app already has `idleStopSeconds`, D121).
-- Surge for a single-copy deploy: one copy still restarts in place.
-- Vertical scaling suggestions from measured usage, and placement by usage rather than reservation.
-- Moving a persistent data directory, and a direct node-to-node copy.
-- Singletons with run leases (CLUSTERING §8.4), so a lone worker still stays on a silent node.
-- Automatic rollback of a paused rollout; it waits for a person on purpose.
+- A surge for a single-copy app that must stay on its node: there is nowhere else to run the
+  second copy, so it restarts in place.
+- Admission by measured usage. Measurements advise and guard (§5.1); they do not replace
+  reservations.
+- Named singletons with a lease table for workloads other than single-copy workers (the rest of H15).
+- A direct node-to-node copy; a move with data goes through the backup target.

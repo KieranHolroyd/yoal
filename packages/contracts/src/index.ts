@@ -58,6 +58,7 @@ export * from './pipeline.ts';
 export * from './pipeline-workflow.ts';
 export * from './pipeline-expr.ts';
 export * from './registry.ts';
+export * from './host-ports.ts';
 export * from './log.ts';
 export * from './log-parse.ts';
 export * from './domain.ts';

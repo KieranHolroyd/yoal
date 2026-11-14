@@ -1181,3 +1181,49 @@ describe('compose stacks (level 4)', () => {
 		).toThrow(/undeclared volume missing/);
 	});
 });
+
+describe('process runtime guards (D225)', () => {
+	test('a bare `bun` command runs the pinned Bun, and the unit PATH lists the pinned runtimes first', async () => {
+		const f = await fixture();
+		await f.driver.apply(workload({ command: ['bun', 'server.js'], socketActivation: false }), activation());
+		const service = await fs.readFile(join(f.unitDir, 'yoal-workload-wld_abc123.service'), 'utf8');
+		expect(service).toContain('ExecStart="/usr/local/bin/bun" "server.js"');
+		expect(service).not.toContain('/usr/bin/env "bun"');
+		expect(service).toMatch(/^Environment=PATH=\/usr\/local\/bin:/m);
+	});
+
+	test('other bare commands still resolve through PATH', async () => {
+		const f = await fixture();
+		await f.driver.apply(workload({ command: ['node', 'index.js'], socketActivation: false }), activation());
+		const service = await fs.readFile(join(f.unitDir, 'yoal-workload-wld_abc123.service'), 'utf8');
+		expect(service).toContain('ExecStart=/usr/bin/env "node" "index.js"');
+	});
+
+	test('the state root is made traversable, so $STATE_DIRECTORY is reachable from the sandbox', async () => {
+		const f = await fixture();
+		await fs.mkdir(f.stateDir, { recursive: true, mode: 0o700 });
+		await fs.chmod(f.stateDir, 0o700);
+		await f.driver.apply(workload(), activation());
+		expect((await fs.stat(f.stateDir)).mode & 0o777).toBe(0o711);
+	});
+
+	test('a container data dir created first does not leave the state root at 0700', async () => {
+		const f = await fixture();
+		await f.driver.apply(
+			workload({ runtime: 'container', image: 'localhost/app:1', release: null, socketActivation: false, upstream: '127.0.0.1:3000' }),
+			activation(),
+		);
+		expect((await fs.stat(f.stateDir)).mode & 0o011).toBe(0o011);
+	});
+
+	test('a unit stuck in the start limit is reset before the fixed spec restarts it', async () => {
+		const f = await fixture();
+		await f.driver.apply(workload({ socketActivation: false }), activation());
+		const reset = f.runner.calls.findIndex(
+			(argv) => argv[1] === 'reset-failed' && argv[2] === 'yoal-workload-wld_abc123.service',
+		);
+		const restart = f.runner.calls.findIndex((argv) => argv[1] === 'restart' && argv[2] === 'yoal-workload-wld_abc123.service');
+		expect(reset).toBeGreaterThanOrEqual(0);
+		expect(reset).toBeLessThan(restart);
+	});
+});

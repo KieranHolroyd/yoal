@@ -464,7 +464,7 @@ tracks the move as a `failover_events` row until the copy reports `running`, tim
 | Single HTTP app, nothing attached | Moves | Moves | **Surge**: the new node starts its copy while the old one serves; the route follows when the new copy reports `running`. If it never does, the workload goes back to the copy still running. A failover has no old copy, so it is a plain start |
 | Single process app with a database or storage attached over endpoints | Moves | Moves | Stops, then starts; its loopback endpoints are planned on the new node and freed on the old |
 | Single app with app volumes | Stays | Stays | Only a person moves it, with its data and with downtime ([SCALING.md](./SCALING.md) §7) |
-| Single worker (`ingress: none`) | Moves | **Stays** | A silent node may still be running it; a second copy would do its work twice (§8.4) |
+| Single worker (`ingress: none`) | Moves | **Stays**, unless it carries a run lease | A silent node may still be running it; a second copy would do its work twice (§8.4). With `scheduling.workerRunLeases` its node stops it by itself, and it moves ([SCALING.md](./SCALING.md) §8) |
 | Data directory, app volume, compose stack, same-node attachment, pinned placement | Stays | Stays | The move is `blocked` with the reason, and the Fleet page lists it under "cannot move" |
 
 A one-node install has nowhere to move anything, so it records nothing and behaves as before.

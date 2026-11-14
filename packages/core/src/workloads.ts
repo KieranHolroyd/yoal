@@ -1,6 +1,7 @@
 import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
 import { deployments, nodes, projects, releases, workloadReplicas, workloads } from '@yoal/db';
 import {
+	RUN_LEASES_CAPABILITY,
 	type ScalingMode,
 	githubRunnerSecretNames,
 	githubRunnerTarget,
@@ -45,6 +46,7 @@ import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import { matchingPlacementSpec, resolvePlacement, type PlacementCandidate } from './placement.ts';
+import { appSpecPortProblem, nodeAppPortClaims, nodePortConflict } from './host-ports.ts';
 import { planReplicas } from './replicas.ts';
 import type { BalanceNode, BalanceUnit } from './rebalance.ts';
 import { effectiveRuntime, storedRuntime, workloadRuntimeOf } from './runtime-tier.ts';
@@ -83,6 +85,9 @@ export interface ReplicaCopy {
 export type MoveReason = 'failover' | 'drain' | 'rebalance' | 'manual';
 
 const ACTIVE_STATUSES: WorkloadStatus[] = ['pending', 'starting', 'running'];
+
+/** Seconds between a lease running out on a node and the fleet starting the worker elsewhere, at least. */
+export const RUN_LEASE_MARGIN_SECONDS = 30;
 
 /**
  * Loopback ports Yoal assigns to compose services (Caddy dials one per exposed service). The
@@ -180,6 +185,9 @@ export class WorkloadService {
 				ingress: spec.compose.routes.length === 0 ? ('none' as const) : ('http' as const),
 			};
 		}
+		// An app never takes a port the platform holds on every node (D225).
+		const reservedPort = appSpecPortProblem(this.ctx, spec);
+		if (reservedPort) throw new ValidationError(reservedPort);
 		if (this.ctx.relocations.isRelocating(project.id))
 			throw new ConflictError(`"${project.slug}" is stopped while it moves to another node with its data. Deploy again once the move finishes.`);
 		if (this.ctx.moves.quiescedProjectIds().has(project.id))
@@ -235,7 +243,7 @@ export class WorkloadService {
 				memoryMb: reservedMemoryMb(spec),
 				cpuMillis: (spec.cpus ?? 1) * 1000 * (spec.replicas ?? 1),
 				edgeNodeId: this.edgeNodeId(),
-				candidates: this.candidates({ excludeWorkloadId: existing?.id }),
+				candidates: this.withPortConflicts(this.candidates({ excludeWorkloadId: existing?.id }), project.id, spec),
 				spec: placementSpec,
 				nearNodeIds: placementSpec?.near ? this.nearNodeIds(placementSpec.near) : undefined,
 				strategy: scheduling.strategy,
@@ -250,6 +258,12 @@ export class WorkloadService {
 				? { ...stay, reason: 'Auto: staying on its current node.' }
 				: resolvePlacement({ ...request, requested: pinned ?? project.placement });
 			if (!decision.ok) throw new ValidationError(decision.message, decision.rejections?.length ? decision.rejections : decision.freeByNode);
+		}
+		// The last word on ports, whichever path chose the node (stay, pinned, spread copies): no two
+		// apps hold one loopback port on a node, or one project's host would reach the other (D225).
+		for (const nodeId of new Set([decision.nodeId, ...(replicas ?? []).map((replica) => replica.nodeId)])) {
+			const conflict = nodePortConflict(this.ctx, project.id, spec, nodeId, this.nodeName(nodeId));
+			if (conflict) throw new ConflictError(conflict);
 		}
 		if (crossNode) this.ctx.endpoints.reconcile(project.id, decision.nodeId);
 		if (runtime === 'function') this.assertFunctionTarget(decision.nodeId, Boolean(spec.function && functionIsPython(spec.function)));
@@ -284,15 +298,8 @@ export class WorkloadService {
 	 * collide. An existing port is kept when it is still free, which keeps redeploys quiet.
 	 */
 	private assignComposePorts(project: ProjectRow, spec: ComposeSpec, nodeId: string): ComposeSpec {
-		const used = new Set<number>();
-		for (const row of this.ctx.db.select().from(workloads).where(eq(workloads.nodeId, nodeId)).all()) {
-			if (row.projectId === project.id) continue;
-			const other = workloadSpecSchema.safeParse(parseJson<unknown>(row.specJson, null)).data;
-			if (!other) continue;
-			if (other.compose) {
-				for (const route of other.compose.routes) if (route.hostPort) used.add(route.hostPort);
-			} else if (other.runtime === 'container') used.add(other.port);
-		}
+		// Every app port on the node counts, copies and process apps included (D225).
+		const used = new Set<number>(nodeAppPortClaims(this.ctx, nodeId, project.id).keys());
 		const next = { ...spec, routes: spec.routes.map((route) => ({ ...route })) };
 		for (const route of next.routes) {
 			let port = route.hostPort;
@@ -333,7 +340,19 @@ export class WorkloadService {
 			};
 		this.assertEnvResolvable(project, spec);
 		this.assertRunnerResolvable(project, spec);
+		const reservedPort = appSpecPortProblem(this.ctx, spec);
+		if (reservedPort) throw new ValidationError(reservedPort);
 		const existing = this.ctx.db.select().from(workloads).where(eq(workloads.projectId, project.id)).get();
+		// A port change applies on the app's current node(s) at once (the row below is re-applied),
+		// so it must be free there now, not only at the next deploy (D225).
+		if (existing) {
+			const here = new Set([existing.nodeId, ...this.copyPlacements(existing).map((copy) => copy.nodeId)]);
+			for (const nodeId of here) {
+				if (!nodeId) continue;
+				const conflict = nodePortConflict(this.ctx, project.id, spec, nodeId, this.nodeName(nodeId));
+				if (conflict) throw new ConflictError(conflict);
+			}
+		}
 		// The running workload keeps its pinned digest while the image is unchanged, so saving other
 		// fields neither restarts it on a moved tag nor drops the pin. A new image runs by tag until
 		// the next deploy pins it.
@@ -502,7 +521,7 @@ export class WorkloadService {
 	}
 
 	/** Re-point the workload at an existing deployment (promote/rollback); placement is preserved. */
-	syncDeployment(project: ProjectRow, deploymentId: string): void {
+	syncDeployment(project: ProjectRow, deploymentId: string, options: { auto?: boolean } = {}): void {
 		const deployment = this.ctx.db.select().from(deployments).where(eq(deployments.id, deploymentId)).get();
 		if (!deployment || !deployment.workloadJson || !deployment.nodeId) return;
 		const parsed = workloadSpecSchema.safeParse(parseJson<unknown>(deployment.workloadJson, null));
@@ -525,19 +544,34 @@ export class WorkloadService {
 					this.attachmentsVersion(project.id, deployment.nodeId, spec.runtime, project.orgId, spec),
 				),
 			},
-			{ keepSpread: true },
+			{ keepSpread: true, auto: options.auto },
 		);
 	}
 
 	/** Record the resolved workload for a new deployment (called from DeploymentService). */
-	record(project: ProjectRow, deploymentId: string, resolved: ResolvedWorkload, options: { keepSpread?: boolean } = {}): void {
+	record(
+		project: ProjectRow,
+		deploymentId: string,
+		resolved: ResolvedWorkload,
+		/** `auto` marks an automatic rollback: its own failure pauses instead of rolling back again. */
+		options: { keepSpread?: boolean; auto?: boolean } = {},
+	): void {
 		const now = this.ctx.now();
 		const existing = this.ctx.db.select().from(workloads).where(eq(workloads.projectId, project.id)).get();
 		const id = existing?.id ?? newId('wld_');
-		const priorRows = existing
+		let priorRows = existing
 			? this.ctx.db.select().from(workloadReplicas).where(eq(workloadReplicas.workloadId, id)).all()
 			: [];
 		const nodesBefore = new Set([...(existing?.nodeId ? [existing.nodeId] : []), ...priorRows.map((row) => row.nodeId)]);
+		// The deployment the app actually runs. A surge deploy that is being replaced is undone first:
+		// its temporary copy goes, and what counts is what the app's own copy is still on.
+		let running = existing?.deploymentId ?? null;
+		if (existing?.rolloutSurge) {
+			const own = priorRows.find((row) => row.replicaIndex === 0);
+			if (own?.deploymentId) running = own.deploymentId;
+			this.ctx.db.delete(workloadReplicas).where(eq(workloadReplicas.workloadId, id)).run();
+			priorRows = [];
+		}
 		// A promote or rollback keeps the copies where they are; the workload's node is copy 0's.
 		const keptFirst = options.keepSpread && !resolved.replicas ? [...priorRows].sort((a, b) => a.replicaIndex - b.replicaIndex)[0] : undefined;
 		const values = {
@@ -561,6 +595,11 @@ export class WorkloadService {
 			rolloutStatus: null as string | null,
 			rolloutMessage: null as string | null,
 			rolloutStartedAt: null as number | null,
+			rolloutFromDeploymentId: null as string | null,
+			rolloutSurge: false,
+			rolloutAuto: Boolean(options.auto),
+			// A person's deploy, promote or rollback supersedes the note an automatic rollback left.
+			...(options.auto ? {} : { rollbackNote: null, rollbackAt: null }),
 			updatedAt: now,
 		};
 		if (existing) this.ctx.db.update(workloads).set(values).where(eq(workloads.id, existing.id)).run();
@@ -581,18 +620,14 @@ export class WorkloadService {
 
 		// A new release reaches a set of copies one at a time (SCALING §4): every copy that stays
 		// where it is keeps running the previous deployment until the rollout controller reaches it.
-		const changed = Boolean(existing?.deploymentId) && existing!.deploymentId !== deploymentId;
+		const scheduling = this.ctx.cluster.get().scheduling;
+		const changed = running !== null && running !== deploymentId;
 		const total = this.ctx.db.select({ id: workloadReplicas.id }).from(workloadReplicas).where(eq(workloadReplicas.workloadId, id)).all().length;
-		const rolling =
-			changed &&
-			total >= 2 &&
-			kept.length > 0 &&
-			this.ctx.cluster.get().scheduling.rollingDeploys &&
-			this.copyRelease(existing!.deploymentId) !== null;
+		const rolling = changed && total >= 2 && kept.length > 0 && scheduling.rollingDeploys && this.copyRelease(running) !== null;
 		let waiting = 0;
 		for (const row of kept) {
 			// Mid-rollout, a copy not yet reached still runs the release before that one.
-			const runs = row.deploymentId ?? existing?.deploymentId ?? null;
+			const runs = row.deploymentId ?? running;
 			const previous = rolling && runs && runs !== deploymentId && this.copyRelease(runs) !== null ? runs : null;
 			if (previous) waiting += 1;
 			this.ctx.db
@@ -609,10 +644,73 @@ export class WorkloadService {
 		if (waiting > 0)
 			this.ctx.db
 				.update(workloads)
-				.set({ rolloutStatus: 'rolling', rolloutStartedAt: now })
+				.set({ rolloutStatus: 'rolling', rolloutStartedAt: now, rolloutFromDeploymentId: running })
 				.where(eq(workloads.id, id))
 				.run();
+		else if (changed && total === 0 && existing && scheduling.rollingDeploys && scheduling.surgeDeploys)
+			this.startSurge(project, { ...existing, ...values, id }, resolved.spec, running!, existing.status === 'running', now);
 		this.reconcileEndpoints(project.id, nodesBefore);
+	}
+
+	/**
+	 * Deploy a single-copy HTTP app without a gap (SCALING §4): a temporary second copy starts on
+	 * another node on the new release, takes the traffic once it is healthy, and only then is the
+	 * app's own copy restarted. The extra copy is removed when the rollout ends. Skipped, leaving
+	 * the plain restart in place, when the app is not serving, must stay on its node, or no other
+	 * node has room.
+	 */
+	private startSurge(project: ProjectRow, workload: WorkloadRow, spec: WorkloadSpec, running: string, serving: boolean, now: number): boolean {
+		if (!serving || !workload.nodeId || spec.replicas !== 1 || spec.ingress === 'none') return false;
+		if (this.scalingMode(project, { ...spec, replicas: 2 }, workload).mode !== 'spread') return false;
+		if (this.copyRelease(running) === null) return false;
+		const planned = planReplicas({
+			count: 2,
+			memoryMb: spec.memoryMb,
+			cpuMillis: Math.round((spec.cpus ?? 1) * 1000),
+			spread: this.ctx.cluster.get().replicas.spread,
+			strategy: this.ctx.cluster.get().scheduling.strategy,
+			reason: 'surge',
+			existing: [{ index: 0, nodeId: workload.nodeId }],
+			candidates: this.copyCandidates(project, spec, workload.id),
+		});
+		if (!planned.ok || planned.kept.length !== 1) return false;
+		const extra = planned.plan.assignments.find((copy) => copy.index !== 0)!;
+		const row = { workloadId: workload.id, projectId: project.id, appliedVersion: null, rolledAt: null, createdAt: now, updatedAt: now };
+		this.ctx.db
+			.insert(workloadReplicas)
+			.values([
+				// The app's own copy: still serving, still on the release it was.
+				{ ...row, id: newId('wrl_'), nodeId: workload.nodeId, replicaIndex: 0, status: 'running', placementReason: 'deploy', deploymentId: running },
+				{ ...row, id: newId('wrl_'), nodeId: extra.nodeId, replicaIndex: extra.index, status: 'pending', placementReason: extra.reason, deploymentId: null },
+			])
+			.run();
+		this.ctx.db
+			.update(workloads)
+			.set({
+				rolloutStatus: 'rolling',
+				rolloutStartedAt: now,
+				rolloutFromDeploymentId: running,
+				rolloutSurge: true,
+				// Two copies exist for the length of the rollout, and both nodes must account for theirs.
+				memoryMb: spec.memoryMb * 2,
+			})
+			.where(eq(workloads.id, workload.id))
+			.run();
+		return true;
+	}
+
+	/** A surge deploy is over: the temporary copy goes and the app is one copy on its node again. */
+	private endSurge(workload: WorkloadRow, now: number): void {
+		const rows = this.ctx.db.select().from(workloadReplicas).where(eq(workloadReplicas.workloadId, workload.id)).all();
+		const project = this.requireProject(workload.projectId);
+		this.ctx.db.delete(workloadReplicas).where(eq(workloadReplicas.workloadId, workload.id)).run();
+		this.ctx.db
+			.update(workloads)
+			.set({ rolloutSurge: false, memoryMb: reservedMemoryMb(this.specOf(project, workload)), updatedAt: now })
+			.where(eq(workloads.id, workload.id))
+			.run();
+		this.reconcileEndpoints(workload.projectId, rows.map((row) => row.nodeId));
+		this.ctx.projects.bump(workload.orgId);
 	}
 
 	/**
@@ -673,7 +771,7 @@ export class WorkloadService {
 		const all = this.candidates({ excludeWorkloadId });
 		const placementSpec = placementSpecFor(project);
 		const matching = placementSpec ? matchingPlacementSpec(all, placementSpec) : all;
-		return this.replicaCandidates(matching.filter((candidate) => this.canHost(candidate.id, spec)));
+		return this.replicaCandidates(matching.filter((candidate) => this.canHost(candidate.id, spec, project.id)));
 	}
 
 	/** A deployment a copy can still run: active, with its release and the spec it was made with. */
@@ -916,8 +1014,12 @@ export class WorkloadService {
 					};
 				});
 			}
-			// Plain single-copy workloads keep exactly the desired state they had before plan 21.
-			if (spec.replicas === 1 && !spec.runner) return [base];
+			// Plain single-copy workloads keep exactly the desired state they had before plan 21. A lone
+			// worker that may be restarted elsewhere carries the lease that makes that safe (§8.4).
+			if (spec.replicas === 1 && !spec.runner) {
+				const ttlSeconds = this.runLeaseSeconds(project, workload, spec);
+				return [ttlSeconds === null ? base : { ...base, runLease: { ttlSeconds } }];
+			}
 			return Array.from({ length: spec.replicas }, (_, index) => {
 				const id = workloadReplicaId(workload.id, index);
 				return {
@@ -975,7 +1077,8 @@ export class WorkloadService {
 			.all();
 		for (const { workload, project } of singles) {
 			if (!workload.nodeId || spreadWorkloads.has(workload.id)) continue;
-			const ingress = this.specOf(project as ProjectRow, workload).ingress === 'none' ? 'none' : 'http';
+			const singleSpec = this.specOf(project as ProjectRow, workload);
+			const ingress = singleSpec.ingress === 'none' ? 'none' : 'http';
 			copies.push({
 				id: workload.id,
 				workloadId: workload.id,
@@ -988,7 +1091,8 @@ export class WorkloadService {
 				ingress,
 				updatedAt: workload.updatedAt,
 				single: true,
-				autoFailover: failoverSingles && ingress === 'http',
+				// A worker may be started elsewhere only when its node is bound to stop it first.
+				autoFailover: failoverSingles && (ingress === 'http' || this.runLeaseSeconds(project as ProjectRow, workload, singleSpec) !== null),
 			});
 		}
 		return copies;
@@ -1029,6 +1133,29 @@ export class WorkloadService {
 		return null;
 	}
 
+	/**
+	 * The run lease a single-copy worker carries, in seconds, or null when it has none (§8.4). A
+	 * lease is what lets a lone worker be started on another node after its own went silent: the
+	 * node stops it by itself once it has been out of contact for the TTL, and the fleet only
+	 * restarts it after the failover grace, which must leave that node time to do so. It is opt-in
+	 * (`scheduling.workerRunLeases`), because the same rule stops the worker when the control plane
+	 * itself is unreachable for that long.
+	 */
+	runLeaseSeconds(project: ProjectRow, workload: WorkloadRow, spec: WorkloadSpec): number | null {
+		const config = this.ctx.cluster.get();
+		if (!config.scheduling.workerRunLeases || !config.failover.enabled || !config.scheduling.failoverSingleCopies) return null;
+		if (!featureEnabled(this.ctx.config, 'WORKLOAD_MOVES')) return null;
+		if (spec.ingress !== 'none' || spec.replicas !== 1 || spec.runner || !workload.nodeId) return null;
+		const ttl = config.scheduling.runLeaseSeconds;
+		// The node must have surely stopped it before the fleet starts another.
+		if (config.replicas.failoverGraceSeconds < ttl + RUN_LEASE_MARGIN_SECONDS) return null;
+		if (!this.nodeHasCapability(workload.nodeId, RUN_LEASES_CAPABILITY)) return null;
+		// A worker that cannot move gains nothing from a lease and would only be stopped by it.
+		if (this.moveBlocker(project, workload, spec)) return null;
+		const computeNodes = this.ctx.db.select().from(nodes).all().filter((node) => this.ctx.nodes.view(node).roles.includes('compute'));
+		return computeNodes.length >= 2 ? ttl : null;
+	}
+
 	/** True when the project consumes a database, private storage or a broker. */
 	private hasAttachments(projectId: string): boolean {
 		return (
@@ -1039,7 +1166,9 @@ export class WorkloadService {
 	}
 
 	/** Can this node run the workload at all (a functions host, a Node.js runtime)? */
-	private canHost(nodeId: string, spec: WorkloadSpec): boolean {
+	private canHost(nodeId: string, spec: WorkloadSpec, projectId?: string): boolean {
+		// A node where another app holds this one's port can never take it (D225).
+		if (projectId && nodePortConflict(this.ctx, projectId, spec, nodeId)) return false;
 		try {
 			if (spec.runtime === 'function') this.assertFunctionTarget(nodeId, Boolean(spec.function && functionIsPython(spec.function)));
 			if (spec.runtime === 'process' && spec.engine === 'node') this.assertNodeEngineTarget(nodeId);
@@ -1089,7 +1218,7 @@ export class WorkloadService {
 				.filter((candidate) => to === undefined || candidate.id === to)
 				.filter((candidate) => !keptNodes.has(candidate.id))
 				.filter((candidate) => spread !== 'zone' || !keptZones.has(candidate.zone ?? 'default'))
-				.filter((candidate) => this.canHost(candidate.id, spec)),
+				.filter((candidate) => this.canHost(candidate.id, spec, workload.projectId)),
 		);
 		if (candidates.length === 0)
 			return { ok: false, message: 'placement_blocked: no other online node can take this copy.' };
@@ -1118,7 +1247,8 @@ export class WorkloadService {
 		const blocker = this.moveBlocker(project, workload, spec, options);
 		if (blocker) return { ok: false, message: `placement_blocked: ${project.slug} cannot move because ${blocker}.` };
 		const candidates = this.candidates({ excludeWorkloadId: workload.id }).filter(
-			(candidate) => candidate.id !== workload.nodeId && !exclude.has(candidate.id) && this.canHost(candidate.id, spec),
+			(candidate) =>
+				candidate.id !== workload.nodeId && !exclude.has(candidate.id) && this.canHost(candidate.id, spec, workload.projectId),
 		);
 		if (candidates.length === 0)
 			return { ok: false, message: 'placement_blocked: no other online node can take this workload.' };
@@ -1278,8 +1408,12 @@ export class WorkloadService {
 			id: candidate.id,
 			name: candidate.name,
 			zone: candidate.zone ?? 'default',
+			// A node whose host memory is nearly full gives work away but takes none.
 			eligible:
-				candidate.status === 'online' && (candidate.roles?.includes('compute') ?? true) && !exclude.has(candidate.id),
+				candidate.status === 'online' &&
+				(candidate.roles?.includes('compute') ?? true) &&
+				!exclude.has(candidate.id) &&
+				!candidate.pressured,
 			capacityMb: candidate.sliceMemoryMb,
 			reservedMb: candidate.reservedMemoryMb,
 			cpuCapacityMillis: candidate.cpuBudgetMillis ?? null,
@@ -1300,7 +1434,7 @@ export class WorkloadService {
 		for (const { workload, project } of rows) {
 			if (!workload.nodeId || !ACTIVE_STATUSES.includes(workload.status)) continue;
 			const spec = this.specOf(project as ProjectRow, workload);
-			const allowed = candidates.filter((candidate) => this.canHost(candidate.id, spec)).map((candidate) => candidate.id);
+			const allowed = candidates.filter((candidate) => this.canHost(candidate.id, spec, workload.projectId)).map((candidate) => candidate.id);
 			const allowedNodeIds = allowed.length === candidates.length ? null : allowed;
 			const copies = replicaRows.filter((row) => row.workloadId === workload.id);
 			if (copies.length === 0) {
@@ -1640,6 +1774,21 @@ export class WorkloadService {
 					failed.status === 'failed' && failed.appliedVersion === null
 						? `Copy r${failed.replicaIndex} failed on ${node} with the new release.`
 						: `Copy r${failed.replicaIndex} on ${node} did not become healthy within ${Math.round(timeoutMs / 1000)} s.`;
+				// The previous release is known to work, so it goes back by itself; once. If the
+				// rollback fails too, the problem is not the release, and a person has to look.
+				const from = workload.rolloutFromDeploymentId;
+				if (project && from && !workload.rolloutAuto && this.ctx.cluster.get().scheduling.autoRollback && this.copyRelease(from)) {
+					const serving = waiting.length > 0 ? 'The app kept serving on the previous release throughout.' : '';
+					const detail = `${what} ${slug} was rolled back to its previous release automatically. ${serving}`.trim();
+					this.ctx.deployments.revertFailedRelease(project as ProjectRow, workload.deploymentId, from, what);
+					this.ctx.db
+						.update(workloads)
+						.set({ rollbackNote: detail, rollbackAt: now })
+						.where(eq(workloads.id, workload.id))
+						.run();
+					alerts.push({ key: `rollout:${workload.id}`, title: `${slug}: a failed release was rolled back`, detail, severity: 'warning' });
+					continue;
+				}
 				const rest =
 					waiting.length > 0
 						? `The rollout is paused: ${waiting.length} of ${rows.length} ${waiting.length === 1 ? 'copy still runs' : 'copies still run'} the previous release and ${waiting.length === 1 ? 'keeps' : 'keep'} serving.`
@@ -1659,9 +1808,10 @@ export class WorkloadService {
 			if (!next) {
 				this.ctx.db
 					.update(workloads)
-					.set({ rolloutStatus: null, rolloutMessage: null, updatedAt: now })
+					.set({ rolloutStatus: null, rolloutMessage: null, rolloutFromDeploymentId: null, rolloutAuto: false, updatedAt: now })
 					.where(eq(workloads.id, workload.id))
 					.run();
+				if (workload.rolloutSurge) this.endSurge(workload, now);
 				continue;
 			}
 			this.ctx.projects.bump(workload.orgId);
@@ -1740,6 +1890,8 @@ export class WorkloadService {
 		const { mode, blocker } = this.scalingMode(project, next, workload);
 		if (replicas > 1 && mode === 'single') throw new ValidationError(`"${project.slug}" cannot run ${replicas} copies: ${blocker}.`);
 
+		if (workload?.rolloutSurge)
+			throw new ConflictError(`"${project.slug}" is in the middle of a deploy. Scale it once the new release is up.`);
 		const now = this.ctx.now();
 		let added: ReplicaRow[] = [];
 		let removed: ReplicaRow[] = [];
@@ -1996,6 +2148,7 @@ export class WorkloadService {
 				freeCpuMillis:
 					candidate.cpuBudgetMillis == null ? null : candidate.cpuBudgetMillis - (candidate.reservedCpuMillis ?? 0),
 				ingress: candidate.mode === 'edge' || (candidate.roles?.includes('ingress') ?? false),
+				pressured: candidate.pressured,
 			}));
 	}
 
@@ -2017,6 +2170,18 @@ export class WorkloadService {
 		return own;
 	}
 
+	/** Mark the nodes where another app already holds this app's loopback port (D225). */
+	private withPortConflicts(candidates: PlacementCandidate[], projectId: string, spec: WorkloadSpec): PlacementCandidate[] {
+		return candidates.map((candidate) => ({
+			...candidate,
+			portConflict: nodePortConflict(this.ctx, projectId, spec, candidate.id, candidate.name),
+		}));
+	}
+
+	private nodeName(nodeId: string): string {
+		return this.ctx.db.select({ name: nodes.name }).from(nodes).where(eq(nodes.id, nodeId)).get()?.name ?? nodeId;
+	}
+
 	private candidates(options: { excludeWorkloadId?: string } = {}): PlacementCandidate[] {
 		const reserved = this.reservedByNode();
 		const reservedDisk = this.ctx.appVolumes.reservedDiskByNode();
@@ -2027,7 +2192,7 @@ export class WorkloadService {
 				reservedCpu.set(nodeId, Math.max(0, (reservedCpu.get(nodeId) ?? 0) - own.cpuMillis));
 			}
 		// Overcommit raises the admission ceiling, never the slice's own limit on the node (D214).
-		const { memoryOvercommitPercent, cpuOvercommitPercent } = this.ctx.cluster.get().scheduling;
+		const { memoryOvercommitPercent, cpuOvercommitPercent, memoryPressurePercent } = this.ctx.cluster.get().scheduling;
 		// Disk tiers (plus `remote`) answer the `volumeClass` / `volumeId` placement constraints (D169).
 		const volumeFacts = this.ctx.disks.placementFacts();
 		return this.ctx.db
@@ -2054,6 +2219,7 @@ export class WorkloadService {
 					cpuBudgetMillis:
 						facts.cpuBudgetMillis == null ? facts.cpuBudgetMillis : Math.floor((facts.cpuBudgetMillis * cpuOvercommitPercent) / 100),
 					reservedCpuMillis: reservedCpu.get(node.id) ?? 0,
+					pressured: hostMemoryPercent(node.statsJson) >= memoryPressurePercent,
 				};
 			});
 	}
@@ -2294,4 +2460,11 @@ export function withEngineCommand(spec: WorkloadSpec): WorkloadSpec {
 	if (!isBunDefault) return spec;
 	const { command: _bun, ...rest } = spec;
 	return rest as WorkloadSpec;
+}
+
+/** Host memory in use as a percentage, from the node's last heartbeat; 0 when it has not reported. */
+function hostMemoryPercent(statsJson: string | null): number {
+	const stats = parseJson<{ memoryBytes?: number; memoryTotalBytes?: number } | null>(statsJson, null);
+	if (!stats?.memoryBytes || !stats.memoryTotalBytes) return 0;
+	return (stats.memoryBytes / stats.memoryTotalBytes) * 100;
 }

@@ -3,6 +3,7 @@ import type { DesiredState, IdentityDesired, RouteSpec } from '@yoal/contracts';
 import {
 	compileAwaitingDeployRoute,
 	compileCaddyConfig,
+	compileUnavailableRoute,
 	type CaddyHandler,
 	type CaddyRoute,
 	type SiteCompileInput,
@@ -516,6 +517,22 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 	if (functionRoutes.size > 0) {
 		server.routes = server.routes.map((route) =>
 			(typeof route['@id'] === 'string' ? functionRoutes.get(route['@id']) : undefined) ?? route,
+		);
+	}
+
+	// A route the control plane marked unavailable (D225) never proxies and never serves its
+	// release as files: the app is not up, or its loopback port belongs to someone else.
+	const unavailableRoutes = new Map<string, CaddyRoute>();
+	for (const { site, route } of entries) {
+		if (!route.unavailable) continue;
+		unavailableRoutes.set(`site:${site.projectId}:${site.deploymentId ?? site.host}:${site.host}`, {
+			...compileUnavailableRoute(site.host),
+			terminal: true,
+		});
+	}
+	if (unavailableRoutes.size > 0) {
+		server.routes = server.routes.map((route) =>
+			(typeof route['@id'] === 'string' ? unavailableRoutes.get(route['@id']) : undefined) ?? route,
 		);
 	}
 

@@ -1,24 +1,37 @@
 {
 	"name": "@yoal/usage",
 	"private": true,
-	"version": "0.1.0",
+	"version": "0.2.0",
 	"type": "module",
-	"description": "Yoal's anonymous usage analytics collector (usage.yoal.dev).",
+	"description": "Yoal's anonymous usage analytics collector and its operator dashboard.",
 	"exports": {
 		".": "./src/index.ts",
 		"./process": "./src/process.ts"
 	},
 	"scripts": {
-		"dev": "bun --watch src/process.ts",
+		"dev": "NODE_ENV=development bun --watch src/process.ts",
 		"start": "bun src/process.ts",
+		"build": "bun build --target=bun --production --outdir dist src/process.ts",
+		"deploy": "bash deploy/deploy.sh",
 		"check": "tsc -p . --noEmit",
 		"test": "bun test"
 	},
 	"dependencies": {
+		"@better-auth/passkey": "1.7.15",
+		"@fontsource-variable/geist": "^5.3.0",
+		"@fontsource-variable/geist-mono": "^5.3.0",
 		"@yoal/contracts": "workspace:*",
+		"better-auth": "1.7.15",
+		"react": "19.3.1",
+		"react-dom": "19.3.1",
+		"uqr": "^0.1.3",
 		"zod": "^4.6.7"
 	},
 	"engines": {
 		"bun": ">=1.4"
+	},
+	"devDependencies": {
+		"@types/react": "19.3.0",
+		"@types/react-dom": "19.3.0"
 	}
 }

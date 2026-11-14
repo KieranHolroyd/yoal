@@ -223,6 +223,7 @@ Yoal is a Bun monorepo:
 | [`packages/site-config`](packages/site-config) | `_redirects` / `_headers` / `yoal.json` parsing and Caddy route compilation |
 | [`packages/docs`](packages/docs) | User documentation (Markdown), its renderer and the agents' search index; shown in the dashboard at `/docs` |
 | [`apps/docs`](apps/docs) | The same docs as a standalone static site, deployable anywhere (including Yoal) |
+| [`apps/site`](apps/site) | The public front page: one static page, deployable anywhere (including Yoal) |
 
 User documentation (how to use and run Yoal) lives in [`packages/docs/content`](packages/docs/content): read it in the dashboard under **Docs**, run `bun run docs:dev`, or ask your agent, which can search it with `search_docs`.
 

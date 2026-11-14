@@ -2,7 +2,7 @@ import { fail } from '@sveltejs/kit';
 import type { NodeView } from '@yoal/core';
 import type { DiskView, NodeCapacityView, NodeRole, NodeRolloutView } from '@yoal/contracts';
 import { core } from '#lib/server/core.js';
-import { rolloutInput } from './_rollout.server.js';
+import { rolloutActions } from './_rollout.server.js';
 import {
 	failStatus,
 	formBoolean,
@@ -118,8 +118,10 @@ export const actions: Actions = {
 		if (!name) return fail(400, { message: 'Give the node a name.' });
 		const sliceMemoryMb = formOptionalPositiveInt(data, 'sliceMemoryMb');
 		const sliceCpuWeight = formOptionalPositiveInt(data, 'sliceCpuWeight');
-		if (sliceMemoryMb === null) return fail(400, { message: 'Slice memory must be a whole number of MB.' });
-		if (sliceCpuWeight === null) return fail(400, { message: 'CPU weight must be a whole number.' });
+		if (sliceMemoryMb === null)
+			return fail(400, { message: 'Slice memory must be a whole number of MB.' });
+		if (sliceCpuWeight === null)
+			return fail(400, { message: 'CPU weight must be a whole number.' });
 		const roles = data.getAll('roles').map(String).filter(Boolean) as NodeRole[];
 		if (roles.length === 0) return fail(400, { message: 'A node needs at least one role.' });
 		const cpuBudgetRaw = formString(data, 'cpuBudgetMillis');
@@ -230,58 +232,8 @@ export const actions: Actions = {
 		}
 	},
 
-	startRollout: async ({ request, locals }) => {
-		const principal = locals.principal!;
-		const data = await request.formData();
-		try {
-			const rollout = core.nodeRollouts.start(
-				principal,
-				rolloutInput(
-					(key) => formString(data, key) || null,
-					data.getAll('nodeId').map(String)
-				)
-			);
-			const nodes = rollout.nodes.length;
-			return {
-				success: `Fleet update to ${rollout.targetVersion} started: ${nodes} node${nodes === 1 ? '' : 's'} in ${rollout.waves} wave${rollout.waves === 1 ? '' : 's'}.`
-			};
-		} catch (error) {
-			return fail(failStatus(error), toFormFailure(error));
-		}
-	},
-
-	resumeRollout: async ({ request, locals }) => {
-		const principal = locals.principal!;
-		const data = await request.formData();
-		const rolloutId = formString(data, 'rolloutId');
-		if (!rolloutId) return fail(400, { message: 'Missing rollout id.' });
-		const retryFailed = formBoolean(data, 'retryFailed');
-		try {
-			core.nodeRollouts.resume(principal, rolloutId, { retryFailed });
-			return {
-				success: retryFailed
-					? 'Rollout resumed: the failed nodes are tried again first.'
-					: 'Rollout resumed: the failed nodes are left as they are.'
-			};
-		} catch (error) {
-			return fail(failStatus(error), toFormFailure(error));
-		}
-	},
-
-	cancelRollout: async ({ request, locals }) => {
-		const principal = locals.principal!;
-		const data = await request.formData();
-		const rolloutId = formString(data, 'rolloutId');
-		if (!rolloutId) return fail(400, { message: 'Missing rollout id.' });
-		try {
-			core.nodeRollouts.cancel(principal, rolloutId);
-			return {
-				success: 'Rollout cancelled. No further waves start; a node already installing finishes on its own.'
-			};
-		} catch (error) {
-			return fail(failStatus(error), toFormFailure(error));
-		}
-	},
+	// Fleet updates in waves (CLUSTERING §3.11); shared with Settings → Updates.
+	...rolloutActions,
 
 	rotateToken: async ({ request, locals }) => {
 		const principal = locals.principal!;

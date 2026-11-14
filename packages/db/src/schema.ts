@@ -163,6 +163,12 @@ export const workloadUsage = sqliteTable(
 		/** CPU in use between the last two samples, in millis (1000 = one core). */
 		cpuMillis: real('cpu_millis'),
 		cpuMillisAvg: real('cpu_millis_avg'),
+		/** UTC day number of the current peaks; yesterday's are kept beside them. */
+		peakDay: integer('peak_day'),
+		memoryPeakBytes: integer('memory_peak_bytes'),
+		cpuPeakMillis: real('cpu_peak_millis'),
+		memoryPeakPrevBytes: integer('memory_peak_prev_bytes'),
+		cpuPeakPrevMillis: real('cpu_peak_prev_millis'),
 		sampledAt: integer('sampled_at').notNull(),
 	},
 	(t) => [index('workload_usage_workload_idx').on(t.workloadId)],
@@ -1137,6 +1143,15 @@ export const workloads = sqliteTable(
 		rolloutStatus: text('rollout_status'),
 		rolloutMessage: text('rollout_message'),
 		rolloutStartedAt: integer('rollout_started_at'),
+		/** The deployment the rollout started from, so a failed one can be put back. */
+		rolloutFromDeploymentId: text('rollout_from_deployment_id'),
+		/** A single-copy app deploying through a temporary second copy on another node. */
+		rolloutSurge: integer('rollout_surge', { mode: 'boolean' }).notNull().default(false),
+		/** The current rollout is itself an automatic rollback; a second failure pauses. */
+		rolloutAuto: integer('rollout_auto', { mode: 'boolean' }).notNull().default(false),
+		/** What the last automatic rollback undid and why; shown until the next deploy. */
+		rollbackNote: text('rollback_note'),
+		rollbackAt: integer('rollback_at'),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
 		updatedAt: integer('updated_at').notNull().$defaultFn(now),
 	},

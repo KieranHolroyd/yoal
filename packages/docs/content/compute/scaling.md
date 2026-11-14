@@ -65,19 +65,37 @@ When an app has two or more copies, a deploy does not restart them together. Yoa
 
 A copy counts as healthy when its node has applied the change and the app answers its health path. An app that starts but never answers is not healthy.
 
-If a copy fails on the new release, or does not become healthy within 5 minutes, **the rollout pauses**. Nothing else is touched: the remaining copies keep serving the previous release. You then have two choices:
+A promote or a rollback rolls the same way. Both keep the number of copies the app runs now: rolling back a release never removes capacity you added since.
+
+### An app with one copy
+
+One copy has nothing to roll to, so Yoal borrows a node. It starts a temporary second copy on another node on the new release. When that copy is healthy it takes the traffic, the app's own copy restarts on the new release, and the temporary copy is removed. The app ends on the node it started on and never stops serving.
+
+This needs another node with room and an app that may run there. An app pinned to its node by its data, or a fleet of one node, restarts in place with a short gap.
+
+### When a release fails
+
+If a copy fails on the new release, or does not become healthy within 5 minutes, **Yoal puts the previous release back**. Copies that had not been reached were never touched, and for a single-copy app the running copy was never restarted. The production pointer moves back too, the Scaling tab says what was undone and why, and an alert is raised. The failed deployment stays in **Deployments** with its logs.
+
+It rolls back once. If the previous release fails as well, the release was not the problem, and the rollout pauses for you:
 
 ```sh
-yoal rollback shop        # put the updated copy back on the previous release
+yoal rollback shop        # go back a release yourself
 yoal scale shop --resume  # try the failed copy again, then carry on
 ```
 
 Deploying a fix also works. It starts with the copy that is already broken, so a healthy copy is never taken down while a broken one is waiting.
 
-A promote or a rollback rolls the same way. Both keep the number of copies the app runs now: rolling back a release never removes capacity you added since.
+To have a failed rollout always pause instead, turn off `scheduling.autoRollback` in **Settings → Clustering**.
 
-> [!NOTE]
-> An app with one copy has nothing to roll to. A deploy restarts it in place, as before, which means a short gap. Run two copies if a deploy must not interrupt traffic.
+## Right-sizing
+
+Each copy reserves `memoryMb` on its node whether it uses it or not. The Scaling tab records the busiest moment of the last day and tells you when the reservation is far from it:
+
+- **Close to its memory limit**: a copy reached 90% of its limit. At the limit it is killed and restarted, so raise `memoryMb`.
+- **Reserves more memory than it uses**: after a full day, the peak plus a quarter of headroom is still well under the reservation. Lowering `memoryMb` frees the difference for other apps.
+
+Yoal only advises. The limit is yours to set, on the **Runtime** tab.
 
 ## Move an app to another node
 
@@ -110,6 +128,8 @@ Both nodes need a current agent, and the move needs a backup target with room fo
 | Autoscaling bounds | 1 to 3 | **Scaling → Autoscaling**, `PUT /api/v1/projects/:slug/scaling` |
 | Scale-down window | 5 minutes | Same |
 | Rolling deploys | on | **Settings → Clustering**, `scheduling.rollingDeploys` |
+| No-gap deploys for one copy | on | **Settings → Clustering**, `scheduling.surgeDeploys` |
+| Automatic rollback | on | **Settings → Clustering**, `scheduling.autoRollback` |
 | Rollout timeout per copy | 300 seconds | **Settings → Clustering**, `scheduling.rolloutTimeoutSeconds` |
 
 Over MCP, an agent can read scaling with `get_scaling` and change it with `scale_project` and `set_autoscaling`.

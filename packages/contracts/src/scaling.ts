@@ -75,6 +75,10 @@ export interface ScalingRolloutView {
 	/** Copies already on the new release, and the total. */
 	updated: number;
 	total: number;
+	/** A single-copy app deploying through a temporary second copy on another node. */
+	surge: boolean;
+	/** This rollout is an automatic rollback of a release that failed. */
+	automatic: boolean;
 }
 
 export interface ScalingEventView {
@@ -85,6 +89,20 @@ export interface ScalingEventView {
 	detail: string | null;
 	actor: string | null;
 	at: string;
+}
+
+/** What the app actually used at its busiest, against what it reserves (SCALING §5). */
+export interface ScalingSizingView {
+	/** The highest memory any copy reached today or yesterday (UTC), in MB; null before a sample. */
+	memoryPeakMb: number | null;
+	/** The highest CPU any copy reached, in millis (1000 is one core). */
+	cpuPeakMillis: number | null;
+	/** True once a whole day of peaks exists, so the advice is not drawn from a quiet hour. */
+	settled: boolean;
+	/** `lower`: the reservation is well above the peak. `raise`: the peak is close to the limit. */
+	advice: 'lower' | 'raise' | null;
+	/** The memory reservation the peak suggests, in MB, when there is advice. */
+	suggestedMemoryMb: number | null;
 }
 
 export interface ScalingView {
@@ -101,7 +119,10 @@ export interface ScalingView {
 	memoryMb: number;
 	cpuMillis: number;
 	copies: ScalingCopyView[];
+	sizing: ScalingSizingView;
 	rollout: ScalingRolloutView | null;
+	/** The last time a failed release was rolled back automatically; cleared by the next deploy. */
+	lastRollback: { at: string; note: string } | null;
 	policy: ScalingPolicy;
 	autoscale: {
 		/** The last measured value of the policy's metric, in the unit of its target. */

@@ -229,8 +229,9 @@ describe('rolling deploys', () => {
 		for (const name of f.names) expect(await release(f, name)).not.toBe(old);
 	});
 
-	test('a copy that fails on the new release pauses the rollout; the rest keep serving the old one', async () => {
+	test('with automatic rollback off, a copy that fails pauses the rollout; the rest keep serving the old one', async () => {
 		const f = fleet(['edge', 'a', 'b']);
+		f.core.cluster.update(principal, { scheduling: { autoRollback: false } });
 		await f.app('web');
 		f.core.scaling.scale(principal, f.project('web'), { replicas: 3 });
 		await f.settle('web');
@@ -262,6 +263,7 @@ describe('rolling deploys', () => {
 
 	test('a copy that never becomes healthy times the rollout out', async () => {
 		const f = fleet(['edge', 'a', 'b']);
+		f.core.cluster.update(principal, { scheduling: { autoRollback: false } });
 		await f.app('web');
 		f.core.scaling.scale(principal, f.project('web'), { replicas: 2 });
 		await f.settle('web');
@@ -285,6 +287,162 @@ describe('rolling deploys', () => {
 		await f.deploy('web', '3');
 		expect(f.rollout('web').status).toBeNull();
 		expect(f.copies('web').every((copy) => copy.deploymentId === null)).toBe(true);
+	});
+});
+
+describe('automatic rollback', () => {
+	const release = async (f: ReturnType<typeof fleet>, name: string) => (await f.desired(name, 'web'))[0]?.release;
+	const production = (f: ReturnType<typeof fleet>) => f.core.projects.requireRow(principal, 'web').productionDeploymentId;
+
+	test('a release that fails on its first copy is put back by itself, production pointer included', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		await f.app('web');
+		f.core.scaling.scale(principal, f.project('web'), { replicas: 3 });
+		await f.settle('web');
+		const good = production(f);
+		const old = await release(f, 'a');
+
+		await f.deploy('web', '2');
+		expect(production(f)).not.toBe(good);
+		await f.core.failover.tick();
+		const rolled = f.copies('web').find((copy) => copy.deploymentId === null)!;
+		f.beat(rolled.node, [{ id: (await f.desired(rolled.node, 'web'))[0]!.id, status: 'failed', restarts: 5 }]);
+		await f.core.failover.tick();
+
+		expect(production(f)).toBe(good);
+		const view = f.core.scaling.view(principal, f.project('web'));
+		expect(view.lastRollback?.note).toContain('rolled back to its previous release automatically');
+		expect(view.lastRollback?.note).toContain('kept serving on the previous release');
+		// Only the one copy that was touched has anything to undo.
+		expect(view.rollout).toMatchObject({ status: 'rolling', automatic: true, updated: 2, total: 3 });
+		for (let step = 0; step < 3; step++) {
+			await f.settle('web');
+			await f.core.failover.tick();
+		}
+		expect(f.rollout('web').status).toBeNull();
+		for (const name of f.names) expect(await release(f, name)).toBe(old);
+		expect(f.copies('web').every((copy) => copy.status === 'running')).toBe(true);
+	});
+
+	test('if the rollback fails too it pauses: the release was not the problem', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		await f.app('web');
+		f.core.scaling.scale(principal, f.project('web'), { replicas: 2 });
+		await f.settle('web');
+		await f.deploy('web', '2');
+		await f.core.failover.tick();
+		const rolled = f.copies('web').find((copy) => copy.deploymentId === null)!;
+		const fail = async () => f.beat(rolled.node, [{ id: (await f.desired(rolled.node, 'web'))[0]!.id, status: 'failed', restarts: 5 }]);
+		await fail();
+		await f.core.failover.tick();
+		// The rollback restarts that copy on the old release...
+		await f.core.failover.tick();
+		await fail();
+		await f.core.failover.tick();
+		// ...and when that fails as well, nothing bounces: it stops and waits.
+		expect(f.rollout('web').status).toBe('paused');
+	});
+
+	test('the next deploy clears the note', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		await f.app('web');
+		f.core.scaling.scale(principal, f.project('web'), { replicas: 2 });
+		await f.settle('web');
+		await f.deploy('web', '2');
+		await f.core.failover.tick();
+		const rolled = f.copies('web').find((copy) => copy.deploymentId === null)!;
+		f.beat(rolled.node, [{ id: (await f.desired(rolled.node, 'web'))[0]!.id, status: 'failed', restarts: 5 }]);
+		await f.core.failover.tick();
+		expect(f.core.scaling.view(principal, f.project('web')).lastRollback).not.toBeNull();
+		await f.deploy('web', '3');
+		expect(f.core.scaling.view(principal, f.project('web')).lastRollback).toBeNull();
+	});
+});
+
+describe('deploying a single copy without a gap', () => {
+	const own = async (f: ReturnType<typeof fleet>, name: string) => (await f.desired(name, 'web'))[0];
+
+	test('a temporary second copy takes the traffic while the app\'s own copy restarts, then goes', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		const workload = await f.app('web');
+		const home = f.nameOf(workload.nodeId!);
+		await f.settle('web');
+		const before = (await own(f, home))!;
+
+		await f.deploy('web', '2');
+		expect(f.core.scaling.view(principal, f.project('web')).rollout).toMatchObject({ status: 'rolling', surge: true, updated: 1, total: 2 });
+		const [mine, extra] = f.copies('web');
+		expect(mine).toMatchObject({ index: 0, node: home, status: 'running' });
+		expect(extra!.node).not.toBe(home);
+		// The app's own copy is untouched: same unit, same release.
+		expect(await own(f, home)).toMatchObject({ id: before.id, release: before.release });
+		expect((await own(f, extra!.node))?.release).not.toBe(before.release);
+		// Both nodes account for their copy while two exist.
+		expect(Object.fromEntries(f.core.workloads.capacityInternal().map((row) => [row.name, row.reservedMemoryMb]))).toMatchObject({ [home]: 256, [extra!.node]: 256 });
+
+		// Until the new copy is up, nothing happens to the old one.
+		await f.core.failover.tick();
+		expect(f.copies('web')[0]!.deploymentId).not.toBeNull();
+		await f.settle('web');
+		await f.core.failover.tick();
+		expect(f.copies('web')[0]).toMatchObject({ deploymentId: null, status: 'pending' });
+		expect((await own(f, home))?.release).not.toBe(before.release);
+		// The temporary copy is the only upstream while the app's own restarts.
+		const route = (await f.core.nodes.desiredState(f.node.edge!.token)).routes.find((entry) => entry.slug === 'web' && entry.upstreams);
+		expect(route?.upstreams).toEqual([`http://${extra!.node}.internal:8080`]);
+
+		await f.settle('web');
+		await f.core.failover.tick();
+		expect(f.copies('web')).toEqual([]);
+		expect(f.rollout('web').status).toBeNull();
+		const after = f.core.workloads.view(f.project('web'))!;
+		expect(after).toMatchObject({ nodeId: workload.nodeId, memoryMb: 256 });
+		expect(await own(f, extra!.node)).toBeUndefined();
+		expect((await own(f, home))?.id).toBe(before.id);
+	});
+
+	test('a release that never comes up is dropped, and the running copy was never touched', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		const workload = await f.app('web');
+		const home = f.nameOf(workload.nodeId!);
+		await f.settle('web');
+		const good = f.core.projects.requireRow(principal, 'web').productionDeploymentId;
+		const before = (await own(f, home))!;
+
+		await f.deploy('web', '2');
+		const extra = f.copies('web')[1]!;
+		f.beat(extra.node, [{ id: (await own(f, extra.node))!.id, status: 'failed', restarts: 5 }]);
+		await f.core.failover.tick();
+
+		expect(f.copies('web')).toEqual([]);
+		expect(f.core.projects.requireRow(principal, 'web').productionDeploymentId).toBe(good);
+		expect(await own(f, home)).toMatchObject({ id: before.id, release: before.release, activationVersion: before.activationVersion });
+		expect(f.core.scaling.view(principal, f.project('web')).lastRollback?.note).toContain('rolled back');
+		expect(f.core.workloads.view(f.project('web'))).toMatchObject({ memoryMb: 256 });
+	});
+
+	test('with nowhere to put a second copy, or surge deploys off, the copy restarts in place', async () => {
+		const f = fleet(['edge']);
+		await f.app('web');
+		await f.settle('web');
+		await f.deploy('web', '2');
+		expect(f.copies('web')).toEqual([]);
+		expect(f.rollout('web').status).toBeNull();
+
+		const g = fleet(['edge', 'a', 'b']);
+		g.core.cluster.update(principal, { scheduling: { surgeDeploys: false } });
+		await g.app('web');
+		await g.settle('web');
+		await g.deploy('web', '2');
+		expect(g.copies('web')).toEqual([]);
+	});
+
+	test('an app that must stay on its node is not surged', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		await f.app('web', { data: { sizeMb: 64 } });
+		await f.settle('web');
+		await f.deploy('web', '2');
+		expect(f.copies('web')).toEqual([]);
 	});
 });
 
@@ -381,3 +539,46 @@ describe('autoscaling', () => {
 		expect(f.core.scaling.view(principal, f.project('web')).autoscale.reason).toContain('needs telemetry');
 	});
 });
+
+describe('measured usage', () => {
+	const MB = 1024 * 1024;
+
+	test('right-sizing waits for a whole day, then suggests a reservation a quarter above the peak', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		const workload = await f.app('web');
+		const node = f.nameOf(workload.nodeId!);
+		const sample = (memoryMb: number) => f.beat(node, [{ id: workload.id, status: 'running', restarts: 0, memoryBytes: memoryMb * MB }]);
+		sample(40);
+		sample(60);
+		sample(50);
+		let sizing = f.core.scaling.view(principal, f.project('web')).sizing;
+		expect(sizing).toMatchObject({ memoryPeakMb: 60, settled: false, advice: null });
+
+		f.clock.now += 24 * 60 * 60_000;
+		sample(45);
+		sizing = f.core.scaling.view(principal, f.project('web')).sizing;
+		// Yesterday's 60 MB still counts; 60 × 1.25 = 75, to the next 32 MB is 96, far under 256.
+		expect(sizing).toMatchObject({ memoryPeakMb: 60, settled: true, advice: 'lower', suggestedMemoryMb: 96 });
+	});
+
+	test('a copy near its limit is told to raise it, straight away', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		const workload = await f.app('web');
+		f.beat(f.nameOf(workload.nodeId!), [{ id: workload.id, status: 'running', restarts: 0, memoryBytes: 240 * MB }]);
+		expect(f.core.scaling.view(principal, f.project('web')).sizing).toMatchObject({ advice: 'raise', suggestedMemoryMb: 320 });
+	});
+
+	test('a node whose host memory is nearly full is the last choice, whatever its reservations say', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		const full = JSON.stringify({ memoryBytes: 95, memoryTotalBytes: 100, diskFreeBytes: 90_000_000_000, diskTotalBytes: 100_000_000_000 });
+		f.sqlite.run('UPDATE nodes SET stats_json = ? WHERE id = ?', [full, f.node.a!.id]);
+		const first = await f.app('one');
+		expect(f.nameOf(first.nodeId!)).toBe('b');
+		// It still takes work when it is the only place left.
+		f.core.scaling.scale(principal, f.project('one'), { replicas: 3 });
+		expect(f.copies('one').map((copy) => copy.node)).toEqual(['b', 'edge', 'a']);
+		// And it gives work away without being offered any.
+		expect(f.core.scheduling.view(principal).nodes.find((node) => node.name === 'a')?.eligible).toBe(false);
+	});
+});
+

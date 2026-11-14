@@ -14,6 +14,7 @@ import { entriesFromFiles, type FileEntry } from './artifact.ts';
 import { assertComposeSupported, parseComposeDocument } from './compose.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, NotFoundError, ValidationError } from './errors.ts';
+import { buildSystemPrincipal } from './iam/system.ts';
 import { resolveImageDigest } from './oci-client.ts';
 import type { PreparedRelease } from './releases.ts';
 import { effectiveRuntime, storedRuntime } from './runtime-tier.ts';
@@ -799,7 +800,43 @@ export class DeploymentService {
 			.get();
 	}
 
-	private setProduction(project: ProjectRow, deploymentId: string | null, now: number): void {
+	/**
+	 * Put the release before a failed one back, on the controller's own authority (SCALING §4).
+	 * When the failed deployment was production the pointer moves back with it, so routes, the
+	 * environment and the workload agree; otherwise only the workload returns to what it ran.
+	 */
+	revertFailedRelease(project: ProjectRow, failedId: string | null, previousId: string, reason: string): void {
+		const now = this.ctx.now();
+		const production = failedId !== null && project.productionDeploymentId === failedId;
+		if (production) this.setProduction(project, previousId, now, { auto: true });
+		else {
+			this.ctx.workloads.syncDeployment(project, previousId, { auto: true });
+			this.ctx.projects.bump(project.orgId);
+		}
+		this.ctx.audit.record({
+			principal: buildSystemPrincipal('system:rollout', project.orgId),
+			action: 'deployment.auto_rollback',
+			resource: 'deployment',
+			resourceId: previousId,
+			args: { project: project.slug, from: failedId, production, reason },
+			result: 'ok',
+		});
+		if (production) {
+			const previous = this.ctx.db.select().from(deployments).where(eq(deployments.id, previousId)).get();
+			this.ctx.events.emitDeployment(project.orgId, project.id, 'promoted', {
+				project: project.slug,
+				deploymentId: previousId,
+				shortId: previous?.shortId ?? previousId,
+				environment: 'production',
+				production: true,
+				rollback: true,
+				automatic: true,
+				from: failedId,
+			});
+		}
+	}
+
+	private setProduction(project: ProjectRow, deploymentId: string | null, now: number, options: { auto?: boolean } = {}): void {
 		this.ctx.db
 			.update(projects)
 			.set({ productionDeploymentId: deploymentId, updatedAt: now })
@@ -808,7 +845,7 @@ export class DeploymentService {
 		const environment = this.ctx.environments.ensureProduction(project);
 		this.ctx.environments.setDeployment(environment, deploymentId);
 		// Rollback restores the runtime spec and placement recorded on that deployment (D17).
-		if (deploymentId && project.runtime !== 'static') this.ctx.workloads.syncDeployment(project, deploymentId);
+		if (deploymentId && project.runtime !== 'static') this.ctx.workloads.syncDeployment(project, deploymentId, options);
 		this.ctx.projects.bump(project.orgId);
 	}
 

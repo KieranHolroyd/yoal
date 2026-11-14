@@ -77,7 +77,18 @@ export class ScalingService {
 				cpuMillis = (sample.cpuNanos - last.cpuNanos) / elapsedMs / 1_000;
 			const smooth = (value: number | null, average: number | null | undefined): number | null =>
 				value === null ? (average ?? null) : average == null || elapsedMs > USAGE_FRESH_MS ? value : average + SMOOTHING * (value - average);
+			// Peaks per UTC day, with yesterday's kept beside today's, so right-sizing reads a full day.
+			const day = Math.floor(now / 86_400_000);
+			const sameDay = last?.peakDay === day;
+			const rolled = last && last.peakDay !== null && last.peakDay === day - 1;
+			const peak = (value: number | null, current: number | null | undefined): number | null =>
+				value === null ? (sameDay ? (current ?? null) : null) : sameDay && current != null ? Math.max(current, value) : value;
 			const values = {
+				peakDay: day,
+				memoryPeakBytes: peak(sample.memoryBytes ?? null, last?.memoryPeakBytes),
+				cpuPeakMillis: peak(cpuMillis, last?.cpuPeakMillis),
+				memoryPeakPrevBytes: sameDay ? (last?.memoryPeakPrevBytes ?? null) : rolled ? (last?.memoryPeakBytes ?? null) : null,
+				cpuPeakPrevMillis: sameDay ? (last?.cpuPeakPrevMillis ?? null) : rolled ? (last?.cpuPeakMillis ?? null) : null,
 				workloadId: parseWorkloadReplicaId(sample.id).workloadId,
 				nodeId,
 				memoryBytes: sample.memoryBytes ?? null,
@@ -116,7 +127,9 @@ export class ScalingService {
 				memoryMb: 0,
 				cpuMillis: 0,
 				copies: [],
+				sizing: { memoryPeakMb: null, cpuPeakMillis: null, settled: false, advice: null, suggestedMemoryMb: null },
 				rollout: null,
+				lastRollback: null,
 				policy,
 				autoscale: { observed: null, desired: null, reason: null, evaluatedAt: null, scaledAt: null, available: false },
 				events: [],
@@ -143,6 +156,7 @@ export class ScalingService {
 			memoryMb: spec.memoryMb,
 			cpuMillis: Math.round((spec.cpus ?? 1) * 1000),
 			copies,
+			sizing: this.#sizing(workload, spec),
 			rollout:
 				workload?.rolloutStatus === 'rolling' || workload?.rolloutStatus === 'paused'
 					? {
@@ -151,7 +165,13 @@ export class ScalingService {
 							startedAt: workload.rolloutStartedAt ? new Date(workload.rolloutStartedAt).toISOString() : null,
 							updated: copies.length - waiting,
 							total: copies.length,
+							surge: workload.rolloutSurge,
+							automatic: workload.rolloutAuto,
 						}
+					: null,
+			lastRollback:
+				workload?.rollbackNote && workload.rollbackAt
+					? { at: new Date(workload.rollbackAt).toISOString(), note: workload.rollbackNote }
 					: null,
 			policy,
 			autoscale: {
@@ -502,6 +522,37 @@ export class ScalingService {
 				sampledAt: fresh ? new Date(fresh.sampledAt).toISOString() : null,
 			};
 		});
+	}
+
+	/**
+	 * Right-sizing from measured peaks. The advice is deliberately cautious: it wants a whole day
+	 * of data, leaves a quarter of headroom above the busiest moment, and only speaks up when the
+	 * reservation is far from what the app used.
+	 */
+	#sizing(workload: WorkloadRow | null, spec: WorkloadSpec): ScalingView['sizing'] {
+		const rows = workload ? this.#usage(workload.id) : [];
+		const max = (values: Array<number | null>): number | null => {
+			const present = values.filter((value): value is number => value !== null);
+			return present.length ? Math.max(...present) : null;
+		};
+		const memoryPeak = max(rows.flatMap((row) => [row.memoryPeakBytes, row.memoryPeakPrevBytes]));
+		const cpuPeak = max(rows.flatMap((row) => [row.cpuPeakMillis, row.cpuPeakPrevMillis]));
+		const settled = rows.some((row) => row.memoryPeakPrevBytes !== null);
+		const memoryPeakMb = memoryPeak === null ? null : Math.ceil(memoryPeak / 1048576);
+		let advice: ScalingView['sizing']['advice'] = null;
+		let suggestedMemoryMb: number | null = null;
+		if (memoryPeakMb !== null) {
+			// A quarter above the peak, to the next 32 MB, and never under the 32 MB floor.
+			const wanted = Math.max(32, Math.ceil((memoryPeakMb * 1.25) / 32) * 32);
+			if (memoryPeakMb >= spec.memoryMb * 0.9) {
+				advice = 'raise';
+				suggestedMemoryMb = Math.max(wanted, spec.memoryMb + 32);
+			} else if (settled && wanted <= spec.memoryMb * 0.6) {
+				advice = 'lower';
+				suggestedMemoryMb = wanted;
+			}
+		}
+		return { memoryPeakMb, cpuPeakMillis: cpuPeak === null ? null : Math.round(cpuPeak), settled, advice, suggestedMemoryMb };
 	}
 
 	#metricAvailable(metric: AutoscaleMetric, copies: ScalingCopyView[]): boolean {

@@ -603,7 +603,9 @@ export class SystemdDriver {
 		let modulePaths: string[] = [];
 		if (workload.runtime === 'process') {
 			releaseDir = await this.resolveRelease(workload.release!);
-			command = workload.command ?? (await this.defaultCommand(releaseDir, workload.engine ?? 'bun'));
+			command = workload.command
+				? this.pinRuntime(workload.command)
+				: await this.defaultCommand(releaseDir, workload.engine ?? 'bun');
 		} else if (workload.runtime === 'function') {
 			const fn = workload.function;
 			if (!fn) throw new ValidationError('Function workloads need workload.function');
@@ -680,6 +682,7 @@ export class SystemdDriver {
 		let changed = false;
 
 		if (workload.runtime === 'process') {
+			await this.ensureStateRoot();
 			const socketPath = workload.socketActivation
 				? join(this.runtimeDir, `${workload.projectId}.sock`)
 				: null;
@@ -698,6 +701,7 @@ export class SystemdDriver {
 				volumeMounts,
 				...(nodeListen ? { nodeListen } : {}),
 				...(identityPath ? { identityPath } : {}),
+				pathDirs: this.runtimePathDirs(),
 			});
 			changed = (await this.writeIfChanged(paths.service, service, 0o644)) || changed;
 
@@ -728,6 +732,9 @@ export class SystemdDriver {
 				});
 				await this.systemctl(['enable', serviceUnitName(workload.id)]);
 			}
+			// A unit that crash-looped into systemd's start limit refuses even an explicit restart,
+			// so a fixed spec would never run until someone reset it by hand (D225).
+			await this.systemctl(['reset-failed', serviceUnitName(workload.id)], { allowFailure: true });
 			// `restart` starts an inactive unit too, so env/unit changes take effect immediately.
 			await this.systemctl(['restart', serviceUnitName(workload.id)]);
 			if (workload.socketActivation) {
@@ -801,6 +808,7 @@ export class SystemdDriver {
 			// start workerd without the inherited listener.
 			await this.systemctl(['disable', serviceUnitName(workload.id)], { allowFailure: true });
 			await this.systemctl(['enable', socketUnitName(workload.id)]);
+			await this.systemctl(['reset-failed', serviceUnitName(workload.id)], { allowFailure: true });
 			await this.systemctl(['restart', serviceUnitName(workload.id)]);
 			await this.systemctl(['restart', socketUnitName(workload.id)]);
 		} else {
@@ -810,6 +818,8 @@ export class SystemdDriver {
 			const networkName = workloadNetworkName(workload);
 			changed = (await this.ensureNetworkUnit(networkName)) || changed;
 			const dataDir = await this.resolveDataDir(workload);
+			// Create the root first: a recursive mkdir would otherwise make it 0700 as a parent.
+			await this.ensureStateRoot();
 			if (workload.volumeId) await fs.mkdir(dirname(dataDir), { recursive: true, mode: 0o755 });
 			await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
 			const owner = managedOwner(workload);
@@ -918,7 +928,8 @@ export class SystemdDriver {
 			});
 			// A managed service's first start pulls the image (and runs initdb for a database) under
 			// TimeoutStartSec=600, which would outlive the agent's apply request. Queue the restart;
-			// the agent probes readiness.
+			// the agent probes readiness. A unit stuck in the start limit is reset first (D225).
+			await this.systemctl(['reset-failed', serviceUnitName(workload.id)], { allowFailure: true });
 			await this.systemctl(
 				owner || workload.runner
 					? ['restart', '--no-block', serviceUnitName(workload.id)]
@@ -2958,6 +2969,36 @@ END $$;`];
 		throw new ValidationError(
 			`Release ${sha256} is not present on this node (looked in ${this.releaseDirs.join(', ')})`,
 		);
+	}
+
+	/**
+	 * The state root (`/var/lib/yoal-workloads`) must be traversable by every workload user. A
+	 * process app's `StateDirectory=` is a symlink inside it to `/var/lib/private/…`, and systemd
+	 * hands the app that symlink path as `$STATE_DIRECTORY`; with the root at 0700 the app gets
+	 * EACCES on its own state (D225). 0711 lets workloads pass through without listing the ids;
+	 * each workload's own directory stays 0700. A symlinked root is left alone.
+	 */
+	async ensureStateRoot(): Promise<void> {
+		await fs.mkdir(this.stateDir, { recursive: true, mode: 0o711 });
+		const stat = await fs.lstat(this.stateDir);
+		if (!stat.isDirectory()) return;
+		if ((stat.mode & 0o011) !== 0o011) await fs.chmod(this.stateDir, (stat.mode & 0o7777) | 0o011);
+	}
+
+	/**
+	 * A command that names Bun bare (`bun server.js`) runs the node's pinned Bun, not whatever
+	 * `/usr/bin/env` finds: Yoal installs Bun under its own prefix, so a bare `bun` is not on the
+	 * system PATH at all (D225). Other names (`node`, `bunx`, `./bin/app`) resolve through PATH,
+	 * which now lists the pinned runtime directories first.
+	 */
+	pinRuntime(command: string[]): string[] {
+		const [executable, ...args] = command;
+		return executable === 'bun' ? [this.bunPath, ...args] : command;
+	}
+
+	/** Directories of the pinned runtimes, for a process unit's PATH. */
+	runtimePathDirs(): string[] {
+		return [...new Set([dirname(this.bunPath), dirname(this.nodePath)])];
 	}
 
 	/**

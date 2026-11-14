@@ -71,6 +71,8 @@ export interface WorkloadRuntimeOptions {
 	socketDir?: string;
 	healthTimeoutMs?: number;
 	probeHealth?: (workload: WorkloadDesired, signal: AbortSignal) => Promise<boolean>;
+	/** May a workload with this run-lease TTL run right now? Defaults to always (no lease clock). */
+	runLeaseValid?: (ttlSeconds: number) => boolean;
 	sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
 	log?: WorkloadLog;
 	/** Delay before an unchanged desired state is retried after a workload failure. */
@@ -136,6 +138,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	private readonly socketDir: string;
 	private readonly healthTimeoutMs: number;
 	private readonly probeHealth: (workload: WorkloadDesired, signal: AbortSignal) => Promise<boolean>;
+	private readonly runLeaseValid: (ttlSeconds: number) => boolean;
 	private readonly sleep: (ms: number, signal: AbortSignal) => Promise<void>;
 	private readonly log: WorkloadLog;
 	private readonly retryDelayMs: number;
@@ -188,6 +191,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 		this.sliceMemoryMb = options.sliceMemoryMb;
 		this.socketDir = options.socketDir ?? DEFAULT_WORKLOAD_SOCKET_DIR;
 		this.healthTimeoutMs = options.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS;
+		this.runLeaseValid = options.runLeaseValid ?? (() => true);
 		this.probeHealth =
 			options.probeHealth ??
 			((workload, signal) => probeWorkloadHealth(workload, this.socketDir, signal));
@@ -439,7 +443,11 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	}
 
 	private async convergeState(state: DesiredState, signal: AbortSignal): Promise<void> {
-		const desired = state.workloads.filter((workload) => workload.status !== 'stopped');
+		// A leased workload whose lease has run out is treated as not wanted here: the pass below
+		// removes its units like any workload that left the node, and it comes back when the lease does.
+		const desired = state.workloads.filter(
+			(workload) => workload.status !== 'stopped' && !(workload.runLease && !this.runLeaseValid(workload.runLease.ttlSeconds)),
+		);
 		const desiredIds = new Set(desired.map((workload) => workload.id));
 		this.desiredById = new Map(desired.map((workload) => [workload.id, workload]));
 		for (const id of [...this.recycleDue]) if (!desiredIds.has(id)) this.recycleDue.delete(id);
@@ -1254,7 +1262,9 @@ export function withOptionalSpec(workload: WorkloadDesired): WorkloadDesired {
 			version: workload.broker.version,
 			storageMb: workload.broker.storageMb,
 		};
-	return Object.keys(extras).length === 0 ? workload : { ...workload, ...extras };
+	// The lease is the agent's rule, not part of the unit: the helper never sees it.
+	const { runLease: _lease, ...unit } = workload;
+	return { ...unit, ...extras };
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {

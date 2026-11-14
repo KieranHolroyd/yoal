@@ -20,6 +20,7 @@ import {
 } from '@yoal/db';
 import {
 	compareSemver,
+	UNAVAILABLE_UPSTREAM,
 	contentUrl,
 	parseSemver,
 	nodeHardwareSchema,
@@ -59,7 +60,9 @@ import {
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, UnauthorizedError, ValidationError } from './errors.ts';
 import { effectiveRuntime } from './runtime-tier.ts';
+import { reservedPortOwner } from './host-ports.ts';
 import { upstreamFor } from './workloads.ts';
+import { routeBlockReason, tcpPortWinners } from './route-guard.ts';
 import { allocateOverlayAddress, buildWireguardState, type OverlayNode } from './overlay.ts';
 import { effectiveAccessMode } from './access.ts';
 import { newId, randomToken, sha256Hex, parseJson } from './util.ts';
@@ -1294,6 +1297,8 @@ export class NodeService {
 				.map((row) => [row.projectId, row]),
 		);
 
+		// Which app owns each loopback port on this node; any other claimant is not routed (D225).
+		const portWinners = tcpPortWinners([...workloadByProject.values()]);
 		/** Projects that serve HTTP at all (everything but workers); candidates for a default page. */
 		const siteProjectIds = new Set<string>();
 		for (const project of projectRows) {
@@ -1323,9 +1328,21 @@ export class NodeService {
 				continue;
 			}
 			siteProjectIds.add(project.id);
+			// The last check before Caddy (D225): a local app route proxies only to its own running
+			// listener. Never to a port another app or the platform holds, and never by serving the
+			// app's release (its source) as static files while it has no upstream.
+			const block = local
+				? routeBlockReason({
+						runtime: effectiveRuntime(project),
+						workload: workload ?? null,
+						portWinners,
+						reserved: (port) => reservedPortOwner(this.ctx, port),
+					})
+				: null;
 			// Apps proxy to the workload on their node; the edge reaches a worker's Caddy over WireGuard.
-			const upstream =
-				effectiveRuntime(project) !== 'static' && local
+			const upstream = block
+				? UNAVAILABLE_UPSTREAM
+				: effectiveRuntime(project) !== 'static' && local
 					? (workload?.upstream ?? null)
 					: local
 						? null
@@ -1383,7 +1400,9 @@ export class NodeService {
 						? replicaNodes
 								.map((nodeId) =>
 									nodeId === node.id
-										? (functionUpstream ?? upstream)
+										? block
+											? null
+											: (functionUpstream ?? upstream)
 										: nodeById.get(nodeId)?.publicAddress
 											? `http://${nodeById.get(nodeId)!.publicAddress}`
 											: null,
@@ -1402,6 +1421,7 @@ export class NodeService {
 					redirects: config.redirects,
 					headers: config.headers,
 					upstream: functionUpstream ?? upstream,
+					...(block && !(replicaUpstreams.length > 0 && everyCopyNode.length > 1) ? { unavailable: block } : {}),
 					...(replicaUpstreams.length > 0 && everyCopyNode.length > 1
 						? {
 							upstreams: replicaUpstreams,

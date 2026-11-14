@@ -1,0 +1,30 @@
+# The usage collector and its dashboard on Yoal (a process app).
+#
+#   yoal blueprint plan apps/usage/deploy/blueprint.yaml
+#   yoal blueprint apply --plan <id>
+#   apps/usage/deploy/deploy.sh
+#
+# The release is `bun build` output (deploy.sh): one `process.js` plus the dashboard's assets, with
+# no node_modules. The app reads Yoal's PORT, HOST and $STATE_DIRECTORY. Its SQLite database and
+# the generated Better Auth secret live in the state directory, so redeploys keep both.
+#
+# `env` here replaces the whole set on apply.
+apiVersion: yoal/v1
+name: yoal-analytics-engine
+
+projects:
+  yoal-analytics-engine:
+    name: Yoal Analytics Engine
+    runtime: process
+    access:
+      production: public
+      previews: platform
+    # Absolute until every node runs the D225 helper (which maps a bare `bun` to the pinned one).
+    command: [/opt/yoal/runtime/bin/bun, process.js]
+    port: 8790
+    healthPath: /healthz
+    memoryMb: 192
+    env:
+      YOAL_USAGE_PUBLIC_URL: https://yoal-analytics-engine.kierancloud.dev
+      YOAL_USAGE_TRUST_PROXY: "1"
+      YOAL_USAGE_RETENTION_DAYS: "400"

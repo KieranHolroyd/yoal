@@ -106,6 +106,25 @@ const scheduling = z.object({
 	rolloutTimeoutSeconds: int(30, 3_600).default(300),
 	/** Seconds between autoscaler evaluations. */
 	autoscaleIntervalSeconds: int(10, 600).default(30),
+	/**
+	 * Deploy a single-copy HTTP app through a temporary second copy on another node, so the app
+	 * keeps serving while its own copy restarts (SCALING §4). Needs a second node with room.
+	 */
+	surgeDeploys: z.boolean().default(true),
+	/** Put the previous release back when a rollout fails, instead of pausing for a person. */
+	autoRollback: z.boolean().default(true),
+	/**
+	 * A node whose host memory is this full takes no new copies while another node can, whatever
+	 * its reservations say. It matters most with overcommit, where reservations stop being a promise.
+	 */
+	memoryPressurePercent: int(50, 100).default(90),
+	/**
+	 * Give single-copy workers a run lease: a node that loses the control plane for
+	 * `runLeaseSeconds` stops them, which is what makes it safe to start them elsewhere (§8.4).
+	 * Off by default, because it also stops them when the control plane itself is down that long.
+	 */
+	workerRunLeases: z.boolean().default(false),
+	runLeaseSeconds: int(20, 600).default(60),
 });
 
 /**

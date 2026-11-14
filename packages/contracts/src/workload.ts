@@ -588,6 +588,12 @@ export const workloadDesiredSchema = z.object({
 	 * others are `<id>-r<index>`. The count is deliberately absent so scaling never restarts a copy.
 	 */
 	replica: z.object({ index: z.number().int().min(0).max(MAX_WORKLOAD_REPLICAS - 1) }).optional(),
+	/**
+	 * This workload must not run twice (CLUSTERING §8.4): the node may run it only while it has
+	 * heard from the control plane within `ttlSeconds`, and removes it by itself otherwise. Only
+	 * sent to an agent that declares `run-leases`.
+	 */
+	runLease: z.object({ ttlSeconds: z.number().int().min(10).max(3_600) }).optional(),
 });
 export type WorkloadDesired = z.infer<typeof workloadDesiredSchema>;
 

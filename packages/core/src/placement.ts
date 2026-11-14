@@ -39,6 +39,16 @@ export interface PlacementCandidate {
 	/** Optional CPU reservation ceiling and current reservation, in millis. */
 	cpuBudgetMillis?: number | null;
 	reservedCpuMillis?: number;
+	/**
+	 * The host's memory is nearly full right now (`scheduling.memoryPressurePercent`), whatever the
+	 * reservations say. Such a node takes new work only when no other node can (D222, SCALING §5.1).
+	 */
+	pressured?: boolean;
+	/**
+	 * Why the requesting app cannot hold its loopback port here (another app on this node has it,
+	 * D225); set by the caller for the app being placed. A node with a conflict never takes it.
+	 */
+	portConflict?: string | null;
 }
 
 export interface PlacementRequest {
@@ -114,7 +124,7 @@ const cpuProblem = (node: PlacementCandidate, cpuMillis: number | undefined): st
 };
 
 const canAdmit = (node: PlacementCandidate, memoryMb: number, diskMb?: number, cpuMillis?: number): boolean =>
-	freeMemory(node) >= memoryMb && diskProblem(node, diskMb) === null && cpuProblem(node, cpuMillis) === null;
+	freeMemory(node) >= memoryMb && diskProblem(node, diskMb) === null && cpuProblem(node, cpuMillis) === null && !node.portConflict;
 
 function freeByNode(candidates: PlacementCandidate[]) {
 	return candidates.map((node) => ({
@@ -239,7 +249,7 @@ export function resolvePlacement(request: PlacementRequest): PlacementDecision {
 				rejections,
 			};
 		if (!canAdmit(edge, memoryMb, request.diskMb, request.cpuMillis)) {
-			const disk = diskProblem(edge, request.diskMb) ?? cpuProblem(edge, request.cpuMillis);
+			const disk = edge.portConflict || (diskProblem(edge, request.diskMb) ?? cpuProblem(edge, request.cpuMillis));
 			return {
 				ok: false,
 				message:
@@ -271,7 +281,7 @@ export function resolvePlacement(request: PlacementRequest): PlacementDecision {
 				rejections,
 			};
 		if (!canAdmit(target, memoryMb, request.diskMb, request.cpuMillis)) {
-			const disk = diskProblem(target, request.diskMb) ?? cpuProblem(target, request.cpuMillis);
+			const disk = target.portConflict || (diskProblem(target, request.diskMb) ?? cpuProblem(target, request.cpuMillis));
 			return {
 				ok: false,
 				message:
@@ -296,6 +306,7 @@ export function resolvePlacement(request: PlacementRequest): PlacementDecision {
 		)
 		.sort(
 			(a, b) =>
+				Number(a.pressured ?? false) - Number(b.pressured ?? false) ||
 				locality(b, request) - locality(a, request) ||
 				byFree * (freeMemory(b) - freeMemory(a)) ||
 				a.name.localeCompare(b.name),
@@ -321,6 +332,9 @@ export function resolvePlacement(request: PlacementRequest): PlacementDecision {
 		.map((node) => ({ node, problem: cpuProblem(node, request.cpuMillis) }))
 		.filter((row): row is { node: PlacementCandidate; problem: string } => row.problem !== null)
 		.map((row) => `${row.node.name}: ${row.problem}`);
+	const portReasons = candidates.filter((node) => node.portConflict).map((node) => node.portConflict!);
+	if (portReasons.length > 0 && portReasons.length === healthy.length)
+		return { ok: false, message: portReasons.join(' '), freeByNode: freeByNode(candidates), rejections };
 	return {
 		ok: false,
 		message: `No node can admit ${memoryMb} MB of workload memory. Free budget: ${

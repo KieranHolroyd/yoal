@@ -30,6 +30,41 @@ export interface UsageStats {
 	capabilities: Array<{ name: UsageCapability; installs: number }>;
 }
 
+/** One UTC day of the time series. */
+export interface UsageDay {
+	/** `YYYY-MM-DD`, UTC. */
+	day: string;
+	/** Installs that pinged that day. */
+	activeInstalls: number;
+	/** Installs seen for the first time that day. */
+	newInstalls: number;
+	pings: number;
+}
+
+/** One install as the operator sees it. The id is a prefix: enough to tell installs apart. */
+export interface UsageInstallRow {
+	id: string;
+	firstSeenAt: string;
+	lastSeenAt: string;
+	firstVersion: string;
+	lastVersion: string;
+	os: string;
+	arch: string;
+	pings: number;
+	/** A few headline counts from the install's latest ping. */
+	nodes: number | null;
+	projects: number | null;
+	users: number | null;
+	features: number | null;
+}
+
+export interface UsageInstallPage {
+	total: number;
+	rows: UsageInstallRow[];
+}
+
+export const INSTALL_ID_HINT_LENGTH = 12;
+
 const DAY_MS = 86_400_000;
 
 export class UsageStore {
@@ -128,6 +163,94 @@ export class UsageStore {
 
 	private count(sql: string, ...params: Array<string | number>): number {
 		return this.db.query<{ count: number }, Array<string | number>>(sql).get(...params)?.count ?? 0;
+	}
+
+	/** Daily active and new installs and ping counts for the last `days` UTC days, oldest first. */
+	daily(now = Date.now(), days = 30): UsageDay[] {
+		const today = Math.floor(now / DAY_MS);
+		const first = today - days + 1;
+		const since = first * DAY_MS;
+		const active = new Map<number, { installs: number; pings: number }>();
+		for (const row of this.db
+			.query<{ d: number; installs: number; pings: number }, [number]>(
+				`SELECT CAST(received_at / ${DAY_MS} AS INTEGER) AS d, COUNT(DISTINCT install_id) AS installs, COUNT(*) AS pings
+				 FROM pings WHERE received_at >= ? GROUP BY d`
+			)
+			.all(since))
+			active.set(row.d, { installs: row.installs, pings: row.pings });
+		const fresh = new Map<number, number>();
+		for (const row of this.db
+			.query<{ d: number; installs: number }, [number]>(
+				`SELECT CAST(first_seen_at / ${DAY_MS} AS INTEGER) AS d, COUNT(*) AS installs FROM installs WHERE first_seen_at >= ? GROUP BY d`
+			)
+			.all(since))
+			fresh.set(row.d, row.installs);
+		const series: UsageDay[] = [];
+		for (let d = first; d <= today; d++)
+			series.push({
+				day: new Date(d * DAY_MS).toISOString().slice(0, 10),
+				activeInstalls: active.get(d)?.installs ?? 0,
+				newInstalls: fresh.get(d) ?? 0,
+				pings: active.get(d)?.pings ?? 0
+			});
+		return series;
+	}
+
+	/** Installs, most recently seen first, with headline counts from each one's latest ping. */
+	installs(options: { limit?: number; offset?: number; version?: string | null } = {}): UsageInstallPage {
+		const limit = Math.min(Math.max(Math.trunc(options.limit ?? 50), 1), 200);
+		const offset = Math.max(Math.trunc(options.offset ?? 0), 0);
+		const where = options.version ? 'WHERE i.last_version = ?' : '';
+		const params: Array<string | number> = options.version ? [options.version] : [];
+		const total = this.count(`SELECT COUNT(*) AS count FROM installs i ${where}`, ...params);
+		const rows = this.db
+			.query<
+				{
+					install_id: string;
+					first_seen_at: number;
+					last_seen_at: number;
+					first_version: string;
+					last_version: string;
+					os: string;
+					arch: string;
+					pings: number;
+					payload_json: string | null;
+				},
+				Array<string | number>
+			>(
+				`SELECT i.*, (
+					SELECT p.payload_json FROM pings p WHERE p.install_id = i.install_id ORDER BY p.received_at DESC LIMIT 1
+				 ) AS payload_json
+				 FROM installs i ${where}
+				 ORDER BY i.last_seen_at DESC, i.install_id
+				 LIMIT ? OFFSET ?`
+			)
+			.all(...params, limit, offset);
+		return {
+			total,
+			rows: rows.map((row) => {
+				let latest: UsagePing | null = null;
+				try {
+					latest = row.payload_json ? (JSON.parse(row.payload_json) as UsagePing) : null;
+				} catch {
+					latest = null;
+				}
+				return {
+					id: row.install_id.slice(0, INSTALL_ID_HINT_LENGTH),
+					firstSeenAt: new Date(row.first_seen_at).toISOString(),
+					lastSeenAt: new Date(row.last_seen_at).toISOString(),
+					firstVersion: row.first_version,
+					lastVersion: row.last_version,
+					os: row.os,
+					arch: row.arch,
+					pings: row.pings,
+					nodes: latest?.metrics.nodes ?? null,
+					projects: latest?.metrics.projects ?? null,
+					users: latest?.metrics.users ?? null,
+					features: latest ? latest.features.length : null
+				};
+			})
+		};
 	}
 
 	stats(now = Date.now(), days = 30): UsageStats {

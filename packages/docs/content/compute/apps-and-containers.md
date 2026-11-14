@@ -54,7 +54,7 @@ Socket activation is on by default, and it changes how your app must listen. Wit
 A PHP app that adopts the socket is in `examples/php-frankenphp` in the repository. It can scale to zero, as described under [scale to zero](#scale-to-zero).
 
 > [!NOTE]
-> Yoal does not install Node or Python. Process apps run whatever is on the node's `PATH` or inside the release. FrankenPHP is an opt-in install on the node, and the process unit cannot find it until it is installed.
+> Yoal does not install Node or Python. Process apps run whatever is on the node's `PATH` or inside the release. The Bun that Yoal installs comes first on that `PATH`, and a command that starts with a bare `bun` always runs it. FrankenPHP is an opt-in install on the node, and the process unit cannot find it until it is installed.
 
 ## Create a container
 
@@ -163,7 +163,7 @@ These fields make up the workload spec. Send them as the JSON body of `PUT /api/
 | `runtime` | none, required | `process` or `container` for an app |
 | `command` | `["bun", "run", "start"]` | Process only, 1 to 64 arguments of up to 1,024 characters. Refused for containers |
 | `image` | none | Container only, required. Refused for processes |
-| `port` | `3000` | 1 to 65535. The port the app listens on, used when socket activation is off |
+| `port` | `3000` | 1024 to 65535, outside the platform's ports. The port the app listens on, used when socket activation is off. One app per port on each node; see [ports](#ports) |
 | `memoryMb` | `256` | 32 to 8,192. Per replica. Enforced by the unit's memory limit |
 | `cpus` | `1` | Above 0, up to 8. Per replica. Enforced as a CPU quota |
 | `healthPath` | `/` | Must start with `/`. Up to 512 characters |
@@ -174,6 +174,14 @@ These fields make up the workload spec. Send them as the JSON body of `PUT /api/
 | `env` | `{}` | Plain variables. Names match `[A-Za-z_][A-Za-z0-9_]*`. Values up to 16,384 characters |
 | `secrets` | `[]` | Up to 128 secret references. See [secrets](#environment-variables-and-secrets) |
 | `volumes` | none | Mount [app volumes](/compute/volumes) into the workload |
+
+### Ports
+
+A container, or a process app with socket activation off, holds its `port` on the node's loopback interface. The project's public host is routed there. Yoal makes sure only your app can answer on that host:
+
+- **One app per port on each node.** Saving or deploying an app on a port another app already holds on that node is refused. The error names the other project and a free port nearby. Automatic placement, copies and moves skip nodes where the port is taken. Socket-activated apps and functions use unix sockets, so they never conflict.
+- **Platform ports are reserved.** Ports below 1024, 8081 to 8086, 8788, 15000, 18123 and the ranges 14222–14721, 15432–17431, 19000–19999, 21000–21999 and 30000–39999 belong to the platform on every node. An operator who moved a platform port gets that port reserved instead.
+- **No route to a stranger.** If your app is not running, has no workload yet, or its port belongs to someone else, its host returns a 503 page. It is never proxied to another listener, and a process or container release is never served as files.
 
 ### Scale to zero
 

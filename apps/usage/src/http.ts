@@ -31,6 +31,11 @@ export interface UsageHttpOptions {
 	/** Injectable so tests can prove the limit without sleeping. */
 	limiter?: RateLimiter;
 	log?: (message: string) => void;
+	/**
+	 * A signed-in dashboard operator with a second factor may read `/api/v1/stats` too. With this
+	 * set, the route exists even without `adminToken`.
+	 */
+	sessionAllowed?: (request: Request) => Promise<boolean>;
 }
 
 const JSON_HEADERS = {
@@ -125,7 +130,8 @@ export async function handleUsageRequest(
 		return json({ ok: true, version: options.version ?? null });
 	}
 
-	if (path === '/' || path === '') {
+	// The front page is the dashboard; the same description stays at `/api/v1` for scripts.
+	if (path === '/' || path === '' || path === '/api/v1') {
 		if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405, { allow: 'GET' });
 		return json({
 			name: 'Yoal usage analytics',
@@ -138,9 +144,11 @@ export async function handleUsageRequest(
 
 	if (path === '/api/v1/stats') {
 		if (request.method !== 'GET') return json({ error: 'method_not_allowed' }, 405, { allow: 'GET' });
-		// Without a configured token the operator view does not exist at all.
-		if (!options.adminToken) return json({ error: 'not_found' }, 404);
-		if (!authorized(request, options.adminToken)) return json({ error: 'unauthorized' }, 401);
+		// Without a token or a dashboard the operator view does not exist at all.
+		if (!options.adminToken && !options.sessionAllowed) return json({ error: 'not_found' }, 404);
+		const allowed =
+			authorized(request, options.adminToken) || (options.sessionAllowed ? await options.sessionAllowed(request) : false);
+		if (!allowed) return json({ error: 'unauthorized' }, 401);
 		const days = Number(url.searchParams.get('days') ?? '30');
 		const window = Number.isInteger(days) && days >= 1 && days <= 400 ? days : 30;
 		const stats: UsageStats = options.store.stats(now(), window);

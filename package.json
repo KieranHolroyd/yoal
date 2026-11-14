@@ -10,6 +10,8 @@
     "docs:dev": "bun run --cwd apps/docs dev",
     "docs:build": "bun run --cwd apps/docs build",
     "docs:check": "bun packages/docs/scripts/check-page.ts",
+    "site:dev": "bun run --cwd apps/site dev",
+    "site:build": "bun run --cwd apps/site build",
     "test": "bun test",
     "test:parallel": "bun test --parallel=4",
     "test:changed": "bun test --changed",

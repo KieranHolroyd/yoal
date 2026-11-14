@@ -126,6 +126,13 @@ export const routeSpecSchema = z.object({
 	upstream: z.string().nullable().default(null),
 	/** Several healthy worker upstreams for a multi-node replica set (C4). */
 	upstreams: z.array(z.string()).max(20).optional(),
+	/**
+	 * Set when this node must not proxy the route to its app (D225): it has no workload or upstream
+	 * yet, or its loopback port is held by another app or by the platform. The
+	 * agent serves the branded 503 instead. `upstream` then names a socket nothing listens on, so
+	 * an agent that predates this field fails closed too, and never serves the release as files.
+	 */
+	unavailable: z.string().max(500).optional(),
 	/** Health path used by Caddy's active checks across replicas. */
 	healthPath: z.string().max(200).optional(),
 	/** Seconds between those active checks (`replicas.healthIntervalSeconds`); agents default to 5. */
@@ -337,9 +344,14 @@ export type DesiredState = z.infer<typeof desiredStateSchema>;
  *   (docs/IAM.md I18).
  * - `link-tests`: samples a round trip to each `linkProbes` target and runs `linkTests`
  *   (docs/CLUSTERING.md §4.6).
+ * - `run-leases`: removes a workload carrying `runLease` when the control plane has been out of
+ *   reach for its TTL, and keeps it removed until contact returns (docs/CLUSTERING.md §8.4).
  * - `storage-sts`: understands temporary RustFS STS credentials in an activation
  *   (`storageSts`) instead of only sealed attachment keys (docs/IAM.md §7.4).
  */
+/** The agent capability that says a build fences leased workloads by itself. */
+export const RUN_LEASES_CAPABILITY = 'run-leases';
+
 export const nodeCapabilities = [
 	'studio-principal',
 	'node-update',
@@ -359,6 +371,7 @@ export const nodeCapabilities = [
 	'workload-identity',
 	STORAGE_STS_CAPABILITY,
 	LINK_TESTS_CAPABILITY,
+	RUN_LEASES_CAPABILITY,
 ] as const;
 export type NodeCapability = (typeof nodeCapabilities)[number];
 

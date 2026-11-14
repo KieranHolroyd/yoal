@@ -49,6 +49,20 @@ describe('yoal scale', () => {
 	});
 });
 
+describe('yoal scale: rollback and sizing', () => {
+	test('reports an automatic rollback and right-sizing advice', () => {
+		const text = formatScaling(
+			view({
+				lastRollback: { at: '2026-11-14T12:00:00.000Z', note: 'Copy r1 failed on edge with the new release. shop was rolled back to its previous release automatically.' },
+				sizing: { memoryPeakMb: 60, advice: 'lower', suggestedMemoryMb: 96, settled: true },
+			}),
+		);
+		expect(text).toContain('Rolled back automatically');
+		expect(text).toContain('96 MB would leave a quarter of headroom');
+		expect(formatScaling(view({ rollout: { status: 'rolling', message: null, updated: 1, total: 2, surge: true } }))).toContain('temporary second copy');
+	});
+});
+
 describe('yoal fleet', () => {
 	test('formats throughput, capacity and links', () => {
 		expect(formatBps(1_420_000_000)).toBe('1.42 Gbit/s');

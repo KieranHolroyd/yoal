@@ -210,7 +210,7 @@
 			<Field.Label for="cluster-config">JSON</Field.Label>
 			<Textarea id="cluster-config" name="config" bind:value={text} rows={26} class="font-mono text-xs" spellcheck="false" />
 			<Field.Description>
-				Overlay CIDR/MTU/port, endpoint port range and mTLS, replica limits, spread, health-check interval and failover grace, database replica limits and promotion lag limits, storage targets, the failover controller's lease timing, automatic failover, scheduling (packing strategy, memory and CPU overcommit, automatic rebalance) and the share mount root.
+				Overlay CIDR/MTU/port, endpoint port range and mTLS, replica limits, spread, health-check interval and failover grace, database replica limits and promotion lag limits, storage targets, the failover controller's lease timing, automatic failover, scheduling (packing strategy, memory and CPU overcommit and the memory-pressure limit, automatic rebalance, rolling and surge deploys, automatic rollback, run leases for single workers) and the share mount root.
 			</Field.Description>
 		</Field.Field>
 		{#if result?.section !== 'updates' && result?.message}<p class="text-sm text-destructive">{result.message}</p>{/if}

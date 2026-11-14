@@ -9,13 +9,12 @@ import { startUsageServer } from './server.ts';
  */
 
 const config = loadUsageConfig();
-const started = startUsageServer(config);
+const started = await startUsageServer(config, { development: process.env.NODE_ENV === 'development' });
 
 console.log(
 	`[usage] listening on http://${config.host}:${started.server.port} (db ${config.dbPath}, retention ${config.retentionDays}d)`
 );
-if (!config.adminToken)
-	console.log('[usage] YOAL_USAGE_ADMIN_TOKEN is not set: GET /api/v1/stats is disabled.');
+console.log(`[usage] dashboard at ${config.publicUrl}`);
 
 let stopping = false;
 function shutdown(signal: string): void {

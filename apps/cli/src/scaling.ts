@@ -33,7 +33,9 @@ export interface ScalingStatusView {
 		memoryBytes: number | null;
 		cpuMillis: number | null;
 	}>;
-	rollout: { status: 'rolling' | 'paused'; message: string | null; updated: number; total: number } | null;
+	rollout: { status: 'rolling' | 'paused'; message: string | null; updated: number; total: number; surge?: boolean; automatic?: boolean } | null;
+	lastRollback?: { at: string; note: string } | null;
+	sizing?: { memoryPeakMb: number | null; advice: 'lower' | 'raise' | null; suggestedMemoryMb: number | null; settled: boolean };
 	policy: ScalingPolicyView;
 	autoscale: { observed: number | null; desired: number | null; reason: string | null; evaluatedAt: string | null; available: boolean };
 	events: Array<{ from: number; to: number; reason: string; detail: string | null; at: string }>;
@@ -69,8 +71,13 @@ export function formatScaling(view: ScalingStatusView): string {
 			'',
 			view.rollout.status === 'paused'
 				? `Rollout paused at ${view.rollout.updated} of ${view.rollout.total}. ${view.rollout.message ?? ''}\nRun \`yoal scale ${view.project} --resume\` to retry, or \`yoal rollback ${view.project}\`.`
-				: `Rolling out: ${view.rollout.updated} of ${view.rollout.total} copies on the new release.`,
+				: view.rollout.automatic
+					? `Rolling back a failed release: ${view.rollout.updated} of ${view.rollout.total} copies on the previous release.`
+					: view.rollout.surge
+						? 'Deploying through a temporary second copy on another node, so the app keeps serving.'
+						: `Rolling out: ${view.rollout.updated} of ${view.rollout.total} copies on the new release.`,
 		);
+	else if (view.lastRollback) lines.push('', `Rolled back automatically (${formatTime(view.lastRollback.at)}): ${view.lastRollback.note}`);
 	if (view.copies.length > 0)
 		lines.push(
 			'',
@@ -88,6 +95,10 @@ export function formatScaling(view: ScalingStatusView): string {
 			),
 		);
 	else if (!view.deployed) lines.push('', 'Not deployed yet: the next deploy starts this many copies.');
+	if (view.sizing?.advice === 'raise')
+		lines.push('', `Close to its memory limit: a copy reached ${view.sizing.memoryPeakMb} MB of ${view.memoryMb} MB. Consider ${view.sizing.suggestedMemoryMb} MB.`);
+	else if (view.sizing?.advice === 'lower')
+		lines.push('', `Reserves more than it uses: the busiest copy reached ${view.sizing.memoryPeakMb} MB of ${view.memoryMb} MB over the last day. ${view.sizing.suggestedMemoryMb} MB would leave a quarter of headroom.`);
 	lines.push(
 		'',
 		view.policy.enabled
