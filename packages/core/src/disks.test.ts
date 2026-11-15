@@ -133,6 +133,26 @@ describe('candidates', () => {
 		{ name: 'zram0', type: 'disk' },
 	];
 
+	test('gives RAID members and cloned filesystems, which share a UUID, distinct keys', () => {
+		const list = diskCandidates({
+			inventory: inventory(
+				[],
+				[
+					{ name: 'sda3', type: 'part', fsType: 'linux_raid_member', uuid: 'raid-0000' },
+					{ name: 'sdb3', type: 'part', fsType: 'linux_raid_member', uuid: 'raid-0000' },
+					{ name: 'sdc1', type: 'part', fsType: 'ext4', uuid: 'clone-1111' },
+					{ name: 'sdd1', type: 'part', fsType: 'ext4', uuid: 'CLONE-1111' },
+				],
+			),
+			disks: [],
+			canMount: true,
+		});
+		expect(list).toHaveLength(4);
+		expect(new Set(list.map((item) => item.key)).size).toBe(4);
+		expect(list.every((item) => !item.usable)).toBe(true);
+		expect(list.find((item) => item.device === '/dev/sdc1')?.reason).toMatch(/same filesystem UUID/);
+	});
+
 	test('lists usable disks first with one key each, and folds the rest with a reason', () => {
 		const list = diskCandidates({
 			inventory: inventory([{ sourceKey: 'zfs:tank/media', mountPath: '/mnt/tank', kind: 'zfs', device: 'tank/media', size: TB, free: TB }], devices),

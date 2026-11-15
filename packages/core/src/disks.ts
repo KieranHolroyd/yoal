@@ -1118,6 +1118,14 @@ export function diskCandidates(input: {
 	}
 
 	// Block devices: unmounted filesystems Yoal can mount, and everything it cannot use.
+	// A filesystem UUID is not always unique: every member of a RAID array reports the array's
+	// UUID, and a cloned disk keeps its source's. Those rows are keyed by device name instead,
+	// because the dashboard renders candidates keyed and a repeated key breaks the page.
+	const uuidUses = new Map<string, number>();
+	for (const name of new Set(inventory.devices.map((device) => device.name))) {
+		const uuid = inventory.devices.find((device) => device.name === name)?.uuid?.toLowerCase();
+		if (uuid) uuidUses.set(uuid, (uuidUses.get(uuid) ?? 0) + 1);
+	}
 	const seen = new Set<string>();
 	for (const device of inventory.devices) {
 		if (seen.has(device.name)) continue;
@@ -1132,6 +1140,7 @@ export function diskCandidates(input: {
 		if (device.mountPath && takenPaths.has(device.mountPath)) continue;
 		const parent = device.parent ? byName.get(device.parent) : undefined;
 		const fs = device.fsType?.toLowerCase() ?? null;
+		const sharedUuid = device.uuid ? (uuidUses.get(device.uuid.toLowerCase()) ?? 0) > 1 : false;
 		let reason: string | null = null;
 		if (device.mountPath === '[SWAP]' || fs === 'swap') reason = MEMBER_FS.swap!;
 		else if (device.mountPath)
@@ -1144,9 +1153,11 @@ export function diskCandidates(input: {
 		else if (!fs) reason = 'No filesystem. Yoal does not format disks; create one on the node (e.g. mkfs.ext4) and it appears here.';
 		else if (!isMountableFsType(fs)) reason = `${device.fsType} has no Unix ownership and permissions; managed data needs ${mountableFsTypes.join(', ')}.`;
 		else if (!device.uuid) reason = 'The filesystem has no UUID, so it cannot be found reliably after a reboot.';
+		else if (sharedUuid)
+			reason = 'Another device on this node has the same filesystem UUID, so it cannot be mounted reliably. Give one a new UUID on the node (e.g. tune2fs -U random) and it appears here.';
 		else if (!input.canMount) reason = "This node's agent cannot mount disks yet. Update the node, or mount it yourself under /mnt.";
 		out.push({
-			key: device.uuid ? `uuid:${device.uuid}` : `device:${device.name}`,
+			key: device.uuid && !sharedUuid ? `uuid:${device.uuid}` : `device:${device.name}`,
 			usable: reason === null,
 			reason,
 			device: device.name,
@@ -1161,6 +1172,14 @@ export function diskCandidates(input: {
 			suggestedName: slugName(device.label ?? device.name.split('/').at(-1) ?? 'disk'),
 			suggestedTier: deviceTier(device, parent),
 		});
+	}
+	// Whatever a node reports, no two rows may share a key.
+	const keys = new Set<string>();
+	for (const item of out) {
+		let key = item.key;
+		for (let n = 2; keys.has(key); n += 1) key = `${item.key}#${n}`;
+		keys.add(key);
+		item.key = key;
 	}
 	return out.sort(
 		(a, b) => Number(b.usable) - Number(a.usable) || a.device.localeCompare(b.device, undefined, { numeric: true }),
