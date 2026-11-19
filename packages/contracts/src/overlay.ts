@@ -36,8 +36,12 @@ export const wireguardPeerSchema = z.object({
 	publicKey: wireguardPublicKeySchema,
 	/** `host:port` or null for a peer that dials out and is learned from its handshake. */
 	endpoint: z.string().max(253).nullable().default(null),
-	/** Every /32 this peer is allowed to route (cryptokey routing). */
-	allowedIps: z.array(z.string().regex(/^(?:\d{1,3}\.){3}\d{1,3}\/32$/)).min(1).max(64),
+	/**
+	 * Every /32 this peer is allowed to route (cryptokey routing), plus the /24 machine subnet of a
+	 * node that runs multi-node Kubernetes machines (docs/KUBERNETES.md §10), sent only to nodes
+	 * whose agent advertises `wg-subnets`.
+	 */
+	allowedIps: z.array(z.string().regex(/^(?:\d{1,3}\.){3}\d{1,3}\/(?:32|24)$/)).min(1).max(128),
 	persistentKeepalive: z.number().int().min(0).max(65_535).default(WG_KEEPALIVE_SECONDS),
 });
 export type WireguardPeer = z.infer<typeof wireguardPeerSchema>;
@@ -49,6 +53,10 @@ export const wireguardStateSchema = z.object({
 	mtu: z.number().int().min(1280).max(1420).default(DEFAULT_WG_MTU),
 	listenPort: z.number().int().min(1).max(65_535).default(DEFAULT_WG_PORT),
 	peers: z.array(wireguardPeerSchema).max(64).default([]),
+	/** Extra prefixes routed into the interface (the Kubernetes machine supernet). */
+	routes: z.array(z.string().regex(/^(?:\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/)).max(8).default([]),
+	/** This node's own machine subnet, which its `yoal-k8s` network uses (K6). */
+	machineSubnet: z.string().regex(/^(?:\d{1,3}\.){3}0\/24$/).nullable().default(null),
 });
 export type WireguardState = z.infer<typeof wireguardStateSchema>;
 
@@ -74,3 +82,22 @@ export const wireguardStatusSchema = z.object({
 	peers: z.array(wireguardPeerStatusSchema).max(64).default([]),
 });
 export type WireguardStatus = z.infer<typeof wireguardStatusSchema>;
+
+/** Kubernetes machines on multi-node clusters get routed addresses from here (docs/KUBERNETES.md §10). */
+export const DEFAULT_K8S_MACHINE_CIDR = '10.48.0.0/16';
+/** The agent capability that says its helper accepts /24 machine subnets in WireGuard peers. */
+export const WG_SUBNETS_CAPABILITY = 'wg-subnets';
+
+/**
+ * A node's machine subnet: `10.48.<n>.0/24`, where n is the node's host number in the overlay
+ * (`10.47.1.5` → 5, `10.47.2.5` → 261 mod 256). Collides only beyond 255 overlay nodes.
+ */
+export function machineSubnetFor(privateAddress: string | null, supernet = DEFAULT_K8S_MACHINE_CIDR): string | null {
+	if (!privateAddress) return null;
+	const parts = privateAddress.split('.').map(Number);
+	if (parts.length !== 4 || parts.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return null;
+	const base = supernet.split('/')[0]!.split('.').map(Number);
+	const index = ((parts[2]! - 1) * 256 + parts[3]!) % 256;
+	if (index <= 0) return null;
+	return `${base[0]}.${base[1]}.${index}.0/24`;
+}

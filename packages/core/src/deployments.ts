@@ -380,7 +380,7 @@ export class DeploymentService {
 			shortId: idShort,
 			environment: environment.slug,
 			production: promoteProduction,
-			previewUrl: `https://${row.previewHost}`,
+			previewUrl: contentUrl(this.ctx.config.platformOrigin, row.previewHost),
 			message: row.message ?? null,
 		});
 		return this.view(row as typeof deployments.$inferSelect, project, promoteProduction);

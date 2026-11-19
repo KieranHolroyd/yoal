@@ -30,6 +30,15 @@ import {
 	bucketNameSchema,
 	brokerAttachSchema,
 	brokerCreateSchema,
+	kubernetesApplySchema,
+	kubernetesAttachSchema,
+	kubernetesCreateSchema,
+	kubernetesGenerateSchema,
+	kubernetesMinors,
+	kubernetesRestoreSchema,
+	kubernetesRouteCreateSchema,
+	kubernetesUpdateSchema,
+	type KubernetesClusterView,
 	eventDeliveryStatuses,
 	eventRuleCreateSchema,
 	type EventRuleView,
@@ -126,13 +135,14 @@ import {
 	logDrainSources,
 	type LogDrainView,
 } from '@yoal/contracts';
-import { MAX_DURATION_SECONDS, featureEnabled, parseAuditTime } from '@yoal/core';
+import { MAX_DURATION_SECONDS, featureEnabled, parseAuditTime, parseManifestYaml } from '@yoal/core';
 import { authSecret } from './config';
 import { core } from './core';
 import { principalFromMcp } from './principal';
 import { consoleJson } from './container-console';
 import { containerConsoleDeps } from './container-console-deps';
 import { pipelineTools } from './mcp-pipelines';
+import { generateKubernetesConfig } from './kubernetes-ai';
 
 /**
  * Yoal's MCP server (DESIGN §6.3, D11, D29, D35).
@@ -224,6 +234,16 @@ export const TOOL_PERMISSIONS: Record<string, Permission> = {
 	send_queue_message: 'broker:update',
 	peek_queue_messages: 'broker:update',
 	redrive_queue: 'broker:update',
+	// Managed Kubernetes (docs/KUBERNETES.md §11): lifecycle only; no token or kubeconfig (D58).
+	create_k8s_cluster: 'kubernetes:create',
+	update_k8s_cluster: 'kubernetes:update',
+	delete_k8s_cluster: 'kubernetes:delete',
+	add_k8s_route: 'kubernetes:update',
+	attach_to_k8s_cluster: 'kubernetes:update',
+	backup_k8s_cluster: 'kubernetes:update',
+	restore_k8s_backup: 'kubernetes:create',
+	// Configs from plain language (§18): a real apply runs as the caller, after a confirmation.
+	apply_k8s_config: 'kubernetes:edit',
 	invoke_function: 'deployment:create',
 	run_function_cron: 'deployment:create',
 	// Jobs (plan 09): definitions are project config, runs are deploys of a kind.
@@ -791,6 +811,7 @@ function buildServer(
 		'database',
 		'storage',
 		'broker',
+		'kubernetesCluster',
 		'emailDomain',
 		'shareLink',
 		'container',
@@ -3734,6 +3755,394 @@ function buildServer(
 				core.brokers.detach(principal, core.projects.requireRow(principal, project), broker);
 				return { ok: true, project, broker };
 			}),
+	);
+
+	// --- managed Kubernetes (docs/KUBERNETES.md §11) ----
+	// Lifecycle only. No tool returns a cluster token, an access-key kubeconfig or the admin
+	// certificate (D58): people get those from the CLI (`yoal k8s kubeconfig`) or the dashboard.
+	const k8sNote =
+		'A cluster is a k3s control plane plus 0–8 agent machines on one node with the optional Kubernetes component. ' +
+		'People reach it with `yoal k8s kubeconfig <name>` (kubectl then mints 15-minute tokens through `yoal k8s token`); ' +
+		'their in-cluster access follows their Yoal role (kubernetes:view/edit/admin).';
+	const k8sNext = (view: KubernetesClusterView) => [
+		`Follow it with get_k8s_cluster({ cluster: "${view.name}" }) until it is running.`,
+		view.apiUrl
+			? `Ask the user to run \`yoal k8s kubeconfig ${view.name}\` to use kubectl against ${view.apiUrl}.`
+			: `The API is private; switch apiAccess to public with update_k8s_cluster to reach it from outside.`,
+	];
+
+	tool(
+		'list_k8s_clusters',
+		{
+			title: 'List Kubernetes clusters',
+			description: `List managed Kubernetes clusters in the org with version, status, node, size and API endpoint. ${k8sNote}`,
+			inputSchema: z.object({
+				includeDeleted: z.boolean().default(false).describe('Also list clusters in the trash'),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('kubernetes:read'),
+			feature: 'KUBERNETES',
+		},
+		async ({ includeDeleted }) => run(() => ({ clusters: core.kubernetes.list(principal, { includeDeleted }) })),
+	);
+
+	tool(
+		'get_k8s_cluster',
+		{
+			title: 'Get Kubernetes cluster',
+			description:
+				'Get one managed Kubernetes cluster: status, version and the minor it may upgrade to, end of support, API URL, tier, ' +
+				'machines, nodes ready, routes and attachments. Never includes a token or kubeconfig.',
+			inputSchema: z.object({ cluster: z.string().describe('Cluster name') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('kubernetes:read'),
+			feature: 'KUBERNETES',
+		},
+		async ({ cluster }) => run(() => core.kubernetes.get(principal, cluster, { includeDeleted: true })),
+	);
+
+	tool(
+		'create_k8s_cluster',
+		{
+			title: 'Create Kubernetes cluster',
+			description:
+				`Create a managed Kubernetes (k3s) cluster. \`version\` is one of ${kubernetesMinors.join(', ')} (newest by default); ` +
+				'`placement` is auto or a node id with the Kubernetes component; `memoryMb`/`cpus` are per machine; `agents` adds ' +
+				'agent machines (memory at least 2048 MB each). `servers` 3 runs embedded etcd (HA) across three capable nodes; `nodes` spreads ' +
+				'machines across named nodes. `purpose` production defaults to hourly snapshots and the pod-log shipper ' +
+				'(`backupHours`, `backupRetentionDays`, `shipper` override). `tier` userns is the default; trusted needs a platform grant ' +
+				`and a dedicated node. Persistent volumes are node-local; keep data in attached databases. ${k8sNote}`,
+			inputSchema: kubernetesCreateSchema,
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+			scopeChallenge: requires('kubernetes:create'),
+			feature: 'KUBERNETES',
+		},
+		async (input) =>
+			run(() => {
+				const view = core.kubernetes.create(principal, input);
+				return { cluster: view, nextSteps: k8sNext(view) };
+			}),
+	);
+
+	tool(
+		'update_k8s_cluster',
+		{
+			title: 'Update Kubernetes cluster',
+			description:
+				'Upgrade a cluster one minor at a time (`version` = its upgradeTo; downgrades are refused), scale `agents` (0–8), ' +
+				'resize machines, or change API access (`apiAccess` public/private, `allowCidrs`), the maintenance `window` and `autoPatch`. ' +
+				'`servers: 3` makes a production single-server cluster highly available (SQLite → etcd in place, then two more servers; ' +
+				'never back down). Also `purpose`, `backupHours`, `backupRetentionDays`, `shipper` and `logRetentionDays`. ' +
+				'Machines restart as needed; the cluster keeps its data. A rollout shows in get_k8s_cluster as `upgrade`.',
+			inputSchema: kubernetesUpdateSchema.extend({ cluster: z.string().describe('Cluster name') }),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('kubernetes:update'),
+			feature: 'KUBERNETES',
+		},
+		async ({ cluster, ...patch }) => run(() => ({ cluster: core.kubernetes.update(principal, cluster, patch) })),
+	);
+
+	tool(
+		'add_k8s_route',
+		{
+			title: 'Add Kubernetes route',
+			description:
+				'Claim `<name>.<content domain>` for a cluster and route it to its bundled Traefik ingress; in-cluster Ingress objects ' +
+				'for that host then serve it over HTTPS. The name shares the project-slug namespace.',
+			inputSchema: kubernetesRouteCreateSchema.extend({ cluster: z.string().describe('Cluster name') }),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+			scopeChallenge: requires('kubernetes:update'),
+			feature: 'KUBERNETES',
+		},
+		async ({ cluster, ...input }) =>
+			run(() => {
+				const route = core.kubernetes.addRoute(principal, cluster, input);
+				return {
+					route,
+					nextSteps: [`Create an Ingress for host ${route.host} (entrypoint web, plain HTTP) in the cluster.`],
+				};
+			}),
+	);
+
+	tool(
+		'attach_to_k8s_cluster',
+		{
+			title: 'Attach to Kubernetes cluster',
+			description:
+				'Attach a managed database or broker to a cluster: Yoal writes its connection values as a Secret (default ' +
+				'`yoal-<name>`) in `namespace`. The database or broker must run on the cluster\'s node for now.',
+			inputSchema: kubernetesAttachSchema.extend({ cluster: z.string().describe('Cluster name') }),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+			scopeChallenge: requiresWith(['kubernetes:update'], (args) => [
+				args.kind === 'broker' ? 'broker:read' : 'database:read',
+			]),
+			feature: 'KUBERNETES',
+		},
+		async ({ cluster, ...input }) =>
+			run(() => {
+				const attachment = core.kubernetes.attach(principal, cluster, input);
+				return {
+					attachment,
+					nextSteps: [`Reference Secret ${attachment.namespace}/${attachment.secret} from your pods (envFrom.secretRef).`],
+				};
+			}),
+	);
+
+	tool(
+		'list_k8s_backups',
+		{
+			title: 'List Kubernetes backups',
+			description:
+				'Datastore snapshots of a cluster (scheduled, manual and pre-upgrade) with status, size, version and expiry. ' +
+				'Restore one into a new cluster with restore_k8s_backup.',
+			inputSchema: z.object({ cluster: z.string().describe('Cluster name') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('kubernetes:read'),
+			feature: 'KUBERNETES',
+		},
+		async ({ cluster }) => run(() => ({ backups: core.kubernetes.backups(principal, cluster) })),
+	);
+
+	tool(
+		'backup_k8s_cluster',
+		{
+			title: 'Back up Kubernetes cluster',
+			description:
+				'Take a datastore snapshot now (SQLite or etcd), stored in Yoal object storage. The node runs it; follow it with list_k8s_backups.',
+			inputSchema: z.object({ cluster: z.string().describe('Cluster name') }),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+			scopeChallenge: requires('kubernetes:update'),
+			feature: 'KUBERNETES',
+		},
+		async ({ cluster }) =>
+			run(() => ({
+				backup: core.kubernetes.backupNow(principal, cluster),
+				nextSteps: [`Follow it with list_k8s_backups({ cluster: "${cluster}" }).`],
+			})),
+	);
+
+	tool(
+		'restore_k8s_backup',
+		{
+			title: 'Restore Kubernetes backup',
+			description:
+				'Create a NEW cluster named `name` from a backup id (`kb_…`); restores never overwrite a live cluster. `placement` is auto or a node id.',
+			inputSchema: kubernetesRestoreSchema,
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+			scopeChallenge: requires('kubernetes:create'),
+			feature: 'KUBERNETES',
+		},
+		async (input) =>
+			run(() => {
+				const view = core.kubernetes.restoreBackup(principal, input);
+				return { cluster: view, nextSteps: k8sNext(view) };
+			}),
+	);
+
+	tool(
+		'k8s_pod_logs',
+		{
+			title: 'Kubernetes pod logs',
+			description:
+				'Pod log lines the cluster\'s log shipper sent to Yoal (needs `shipper` on the cluster). Filter by `namespace`, `pod` and ' +
+				'`search` text; pass the last `seq` as `after` to read newer lines. Lines only, nothing else from the cluster.',
+			inputSchema: z.object({
+				cluster: z.string().describe('Cluster name'),
+				namespace: z.string().max(63).optional().describe('Kubernetes namespace'),
+				pod: z.string().max(253).optional().describe('Pod name'),
+				search: z.string().max(200).optional().describe('Substring to match in the message'),
+				after: z.number().int().nonnegative().optional().describe('Return lines after this seq (oldest first)'),
+				limit: z.number().int().min(1).max(500).default(100),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('kubernetes:view'),
+			feature: 'KUBERNETES',
+		},
+		async ({ cluster, ...options }) => run(() => ({ lines: core.kubernetes.podLogs(principal, cluster, options) })),
+	);
+
+	tool(
+		'delete_k8s_cluster',
+		{
+			title: 'Delete Kubernetes cluster',
+			description:
+				'Soft-delete a cluster: its machines stop, the data stays on the node and it can be restored for the trash period ' +
+				'(7 days by default). Requires confirmation. Permanent deletion is dashboard/CLI only.',
+			inputSchema: z.object({ cluster: z.string().describe('Cluster name') }),
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+			scopeChallenge: requires('kubernetes:read', 'kubernetes:delete'),
+			feature: 'KUBERNETES',
+		},
+		async ({ cluster }, ctx) => {
+			if (era === 'assistant')
+				return run(() => {
+					const view = core.kubernetes.delete(principal, cluster);
+					return { ok: true, cluster: view.name, restorable: true, restoreBefore: view.purgeAt };
+				});
+			if (era === 'legacy')
+				return {
+					isError: true,
+					...text(
+						`Deleting Kubernetes cluster "${cluster}" needs your confirmation, which this MCP client can't show. ` +
+							`Ask the user to delete it from the Yoal dashboard: ${core.ctx.config.platformOrigin}/kubernetes/${encodeURIComponent(cluster)}`,
+					),
+				};
+			const key = `confirm_delete_k8s_cluster:${cluster}`;
+			const schema = z.object({ confirm: z.boolean() });
+			// Only an answer to a prompt we issued (signed requestState bound to this target) counts.
+			const prompted = verifyConfirmation(ctx.mcpReq.requestState(), principal, 'delete_k8s_cluster', cluster);
+			const answer = prompted ? acceptedContent(ctx.mcpReq.inputResponses, key, schema) : undefined;
+			const responded = prompted && ctx.mcpReq.inputResponses?.[key] !== undefined;
+			if (responded && answer?.confirm !== true) {
+				const cancelled = text(`Cancelled: Kubernetes cluster "${cluster}" was not deleted (the user did not confirm).`);
+				declined.add(cancelled);
+				return cancelled;
+			}
+			if (answer?.confirm !== true) {
+				// Fail before prompting when the delete can't succeed (unknown cluster, no access).
+				let view: KubernetesClusterView;
+				try {
+					view = core.kubernetes.get(principal, cluster);
+				} catch (error) {
+					return run(() => {
+						throw error;
+					});
+				}
+				return inputRequired({
+					inputRequests: {
+						[key]: inputRequired.elicit({
+							message:
+								`Delete Kubernetes cluster "${cluster}"? Its ${view.machines.length} machine(s) stop now; the data stays on node ` +
+								`"${view.nodeName ?? view.nodeId}" and it can be restored for ${core.policies.get().trashDays} days.`,
+							requestedSchema: schema,
+						}),
+					},
+					requestState: mintConfirmation(principal, 'delete_k8s_cluster', cluster),
+				});
+			}
+			return run(() => {
+				const view = core.kubernetes.delete(principal, cluster);
+				return {
+					ok: true,
+					cluster: view.name,
+					restorable: true,
+					restoreBefore: view.purgeAt,
+					nextSteps: ['A human can restore it from the dashboard or with `yoal k8s restore`.'],
+				};
+			});
+		},
+	);
+
+	// --- Kubernetes configs from plain language (docs/KUBERNETES.md §18) ----
+	// The result is YAML, findings and per-object outcomes only: never a cluster token or kubeconfig.
+	const parseK8sYaml = (yaml: string) => {
+		try {
+			return parseManifestYaml(yaml);
+		} catch (error) {
+			throw new Error(`The YAML does not parse: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	};
+	const k8sObjectLabel = (manifest: Record<string, unknown>) => {
+		const metadata = (manifest.metadata ?? {}) as Record<string, unknown>;
+		const namespace = typeof metadata.namespace === 'string' ? ` (${metadata.namespace})` : '';
+		return `${String(manifest.kind ?? '?')}/${String(metadata.name ?? '?')}${namespace}`;
+	};
+
+	tool(
+		'generate_k8s_config',
+		{
+			title: 'Write Kubernetes config',
+			description:
+				'Write Kubernetes YAML for a cluster from a plain-language request ("nginx serving a static site on shop, 2 replicas", ' +
+				'"a worker that reads jobs from the attached broker"). Yoal gives the model the cluster\'s real facts (version, ingress, ' +
+				'claimed route hosts, attachment Secrets and their keys, storage, memory), lints and repairs the result, and returns ' +
+				'`summary`, `yaml`, `objects`, `findings` (with `fixed` for automatic repairs), `assumptions`, `questions` and `ok`. ' +
+				'Pass existing YAML as `yaml` to change it instead of starting over. `dryRun: true` also validates it on the cluster ' +
+				'as the caller. Nothing is applied: use apply_k8s_config. Needs a model provider in Settings → Assistant; takes tens of seconds.',
+			inputSchema: kubernetesGenerateSchema.extend({ cluster: z.string().describe('Cluster name') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+			scopeChallenge: requires('kubernetes:read'),
+			feature: 'KUBERNETES',
+		},
+		async ({ cluster, prompt, namespace, yaml, dryRun }) =>
+			run(() =>
+				generateKubernetesConfig(principal, cluster, {
+					prompt,
+					namespace,
+					...(yaml?.trim() ? { yaml } : {}),
+					dryRun,
+				}),
+			),
+	);
+
+	tool(
+		'apply_k8s_config',
+		{
+			title: 'Apply Kubernetes config',
+			description:
+				'Server-side apply Kubernetes YAML to a cluster as the caller (field manager `yoal`). `dryRun: true` validates it on ' +
+				'the API server and changes nothing. A real apply asks the user to confirm first and needs kubernetes:edit; the ' +
+				'cluster\'s own RBAC still decides per object. Returns per-object `outcomes` (created, configured, unchanged or the ' +
+				'API server\'s reason) and lint `findings`; lint errors stop it before anything is sent. `namespace` applies to objects ' +
+				'that name none. The cluster must be running with a public API.',
+			inputSchema: kubernetesApplySchema.extend({ cluster: z.string().describe('Cluster name') }),
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+			scopeChallenge: requires('kubernetes:edit'),
+			feature: 'KUBERNETES',
+		},
+		async ({ cluster, yaml, dryRun, namespace }, ctx) => {
+			const applyNow = () =>
+				run(() => core.kubernetes.applyManifests(principal, cluster, { manifests: parseK8sYaml(yaml), dryRun, namespace }));
+			// Dry runs change nothing; the assistant chat confirms real applies before the handler runs.
+			if (dryRun || era === 'assistant') return applyNow();
+			if (era === 'legacy')
+				return {
+					isError: true,
+					...text(
+						`Applying to Kubernetes cluster "${cluster}" needs your confirmation, which this MCP client can't show. ` +
+							'Check it here with dryRun: true, then ask the user to apply it from the Yoal dashboard ' +
+							`(${core.ctx.config.platformOrigin}/kubernetes/${encodeURIComponent(cluster)}?tab=write) or with \`yoal k8s apply ${cluster} -f <file>\`.`,
+					),
+				};
+			// The confirmation is bound to this exact YAML and namespace, not just the cluster.
+			const digest = createHash('sha256').update(`${namespace}\0${yaml}`).digest('base64url').slice(0, 32);
+			const target = `${cluster}:${digest}`;
+			const key = `confirm_apply_k8s_config:${cluster}`;
+			const schema = z.object({ confirm: z.boolean() });
+			const prompted = verifyConfirmation(ctx.mcpReq.requestState(), principal, 'apply_k8s_config', target);
+			const answer = prompted ? acceptedContent(ctx.mcpReq.inputResponses, key, schema) : undefined;
+			const responded = prompted && ctx.mcpReq.inputResponses?.[key] !== undefined;
+			if (responded && answer?.confirm !== true) {
+				const cancelled = text(`Cancelled: nothing was applied to Kubernetes cluster "${cluster}" (the user did not confirm).`);
+				declined.add(cancelled);
+				return cancelled;
+			}
+			if (answer?.confirm !== true) {
+				// Fail before prompting when the apply can't succeed (unknown cluster, no access, bad YAML).
+				let objects: string[];
+				try {
+					core.kubernetes.get(principal, cluster);
+					objects = parseK8sYaml(yaml).map((manifest) => k8sObjectLabel(manifest as Record<string, unknown>));
+				} catch (error) {
+					return run(() => {
+						throw error;
+					});
+				}
+				const shown = objects.slice(0, 20).join(', ') + (objects.length > 20 ? `, and ${objects.length - 20} more` : '');
+				return inputRequired({
+					inputRequests: {
+						[key]: inputRequired.elicit({
+							message:
+								`Apply ${objects.length} object(s) to Kubernetes cluster "${cluster}" as you? ${shown}. ` +
+								`Objects without a namespace go to "${namespace}". Existing objects with these names are updated.`,
+							requestedSchema: schema,
+						}),
+					},
+					requestState: mintConfirmation(principal, 'apply_k8s_config', target),
+				});
+			}
+			return applyNow();
+		},
 	);
 
 	// --- event notifications (docs/EVENTS.md, D122) ----

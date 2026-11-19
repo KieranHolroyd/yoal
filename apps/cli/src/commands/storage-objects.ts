@@ -1,3 +1,5 @@
+import { readFile, stat, writeFile } from 'node:fs/promises';
+import { extname } from 'node:path';
 import { parseArgs, rejectExtraPositionals, requirePositional, type FlagSpec } from '../args.ts';
 import { CliError, UsageError } from '../errors.ts';
 import { parseDuration } from '../object-storage.ts';
@@ -128,7 +130,7 @@ async function getObject(argv: string[]): Promise<void> {
 	const { body } = await client.downloadObject(name, bucket, key);
 	const output = args.string('output');
 	if (output) {
-		await Bun.write(output, body);
+		await writeFile(output, body);
 		console.log(`Wrote ${formatBytes(body.byteLength)} to ${output}.`);
 		return;
 	}
@@ -142,10 +144,11 @@ async function putObject(argv: string[]): Promise<void> {
 	const key = keyOf(args, usage);
 	const file = args.string('file');
 	if (!file) throw new UsageError(`put needs --file <path>.\n\n${usage}`);
-	const handle = Bun.file(file);
-	if (!(await handle.exists())) throw new CliError(`No such file: ${file}`);
-	const body = new Uint8Array(await handle.arrayBuffer());
-	const contentType = args.string('content-type') || handle.type || 'application/octet-stream';
+	// node:fs rather than Bun.file so the published CLI runs under Node as well as Bun.
+	const info = await stat(file).catch(() => null);
+	if (!info?.isFile()) throw new CliError(`No such file: ${file}`);
+	const body = new Uint8Array(await readFile(file));
+	const contentType = args.string('content-type') || contentTypeFor(file);
 	const client = await authenticatedClient();
 	const object = await client.uploadObject(name, bucket, key, body, contentType);
 	if (args.boolean('json')) {
@@ -294,4 +297,40 @@ export async function storageObjectsCommand(argv: string[]): Promise<void> {
 	const handler = handlers[first];
 	if (!handler) throw new UsageError(`Unknown storage objects command "${first}".\n\n${usage}`);
 	await handler(argv.slice(1));
+}
+
+/** Common types by extension; anything else uploads as `application/octet-stream` unless --content-type says otherwise. */
+const CONTENT_TYPES: Record<string, string> = {
+	'.html': 'text/html;charset=utf-8',
+	'.htm': 'text/html;charset=utf-8',
+	'.css': 'text/css;charset=utf-8',
+	'.js': 'text/javascript;charset=utf-8',
+	'.mjs': 'text/javascript;charset=utf-8',
+	'.json': 'application/json;charset=utf-8',
+	'.txt': 'text/plain;charset=utf-8',
+	'.md': 'text/markdown;charset=utf-8',
+	'.csv': 'text/csv;charset=utf-8',
+	'.xml': 'application/xml',
+	'.svg': 'image/svg+xml',
+	'.png': 'image/png',
+	'.jpg': 'image/jpeg',
+	'.jpeg': 'image/jpeg',
+	'.gif': 'image/gif',
+	'.webp': 'image/webp',
+	'.avif': 'image/avif',
+	'.ico': 'image/x-icon',
+	'.pdf': 'application/pdf',
+	'.zip': 'application/zip',
+	'.gz': 'application/gzip',
+	'.tar': 'application/x-tar',
+	'.wasm': 'application/wasm',
+	'.woff': 'font/woff',
+	'.woff2': 'font/woff2',
+	'.mp4': 'video/mp4',
+	'.webm': 'video/webm',
+	'.mp3': 'audio/mpeg',
+};
+
+export function contentTypeFor(file: string): string {
+	return CONTENT_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream';
 }

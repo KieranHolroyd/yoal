@@ -308,6 +308,25 @@ const GROUP_PAIRS: ReadonlyArray<readonly [string, string]> = [
 	['skiff', 'yoal'],
 ];
 
+/**
+ * Re-own what a legacy account still owns once its Yoal twin already existed (renameAccounts left
+ * the legacy account in place). Without this the Yoal services cannot read their own state: on
+ * the first converted host the identity master key and an old release stayed `skiff`-owned, so
+ * yoal-identity crash-looped on EACCES and release GC failed every cycle. `--from` limits each
+ * chown to files the legacy account or group owns; `-h` never follows a symlink. Runtime and
+ * share mounts are skipped: /run is rebuilt on boot and shares belong to their own owners.
+ */
+export function leftoverOwnershipCommands(
+	users: ReadonlyArray<readonly [string, string]>,
+	groups: ReadonlyArray<readonly [string, string]>,
+): string[][] {
+	const dirs = TOP_LEVEL.map(([, to]) => to).filter((dir) => !dir.startsWith('/run/') && !dir.startsWith('/mnt/'));
+	const commands: string[][] = [];
+	for (const [from, to] of users) commands.push(['chown', '-R', '-h', `--from=${from}`, to, ...dirs]);
+	for (const [from, to] of groups) commands.push(['chown', '-R', '-h', `--from=:${from}`, `:${to}`, ...dirs]);
+	return commands;
+}
+
 const ENV_MERGE_FILES = new Set(['skiff.env', 'agent.env', 'identity.env', 'mail.env', 'helper.env']);
 const LEGACY_WINS_FILES = new Set(['master.key', 'master.key.cred', 'config.xml', 'users.xml', 'litestream.yml', 'litestream-identity.yml']);
 
@@ -392,6 +411,9 @@ class Migrator {
 	readonly changed: string[] = [];
 	readonly warnings: string[] = [];
 	readonly backedUp = new Set<string>();
+	/** Legacy accounts left in place because the Yoal name already existed; see reownLeftovers. */
+	readonly leftoverUsers: Array<[string, string]> = [];
+	readonly leftoverGroups: Array<[string, string]> = [];
 	private stopped = false;
 
 	constructor(options: MigrateOptions = {}) {
@@ -721,6 +743,7 @@ class Migrator {
 			if (!groupExists(from)) continue;
 			if (groupExists(to)) {
 				this.warn(`group ${to} already exists; left ${from} in place`);
+				this.leftoverGroups.push([from, to]);
 				continue;
 			}
 			const result = this.command(['groupmod', '-n', to, from]);
@@ -736,6 +759,7 @@ class Migrator {
 			if (!userExists(from)) continue;
 			if (userExists(to)) {
 				this.warn(`user ${to} already exists; left ${from} in place`);
+				this.leftoverUsers.push([from, to]);
 				continue;
 			}
 			const args = ['usermod', '-l', to, from];
@@ -760,6 +784,22 @@ class Migrator {
 			this.record(`${this.dryRun ? 'would create' : 'created'} group yoal-caddy`);
 		}
 		if (userExists('yoal') && groupExists('caddy')) this.command(['usermod', '-aG', 'caddy', 'yoal']);
+	}
+
+	/** After the directories moved: hand files a left-in-place legacy account owns to its Yoal twin. */
+	reownLeftovers(): void {
+		// `chown -R` on a missing directory fails the whole command, so pass only those present.
+		for (const cmd of leftoverOwnershipCommands(this.leftoverUsers, this.leftoverGroups)) {
+			const head = cmd.slice(0, 5);
+			const dirs = cmd.slice(5).filter((dir) => this.exists(dir));
+			if (dirs.length === 0) continue;
+			const result = this.command([...head, ...dirs]);
+			if (result.code !== 0) {
+				this.warn(`could not re-own ${head[3]} files: ${result.stderr || `exit ${result.code}`}`);
+				continue;
+			}
+			this.record(`${this.dryRun ? 'would re-own' : 're-owned'} files ${head[3]} -> ${head[4]}`);
+		}
 	}
 
 	renameDirectories(): void {
@@ -1175,6 +1215,7 @@ class Migrator {
 			this.backup();
 			this.renameAccounts();
 			this.renameDirectories();
+			this.reownLeftovers();
 			this.renameEnvFiles();
 			this.fixAbsoluteSymlinks('/opt/yoal');
 			this.fixAbsoluteSymlinks('/usr/local/lib/yoal-updater');

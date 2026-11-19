@@ -5,6 +5,7 @@ import { STUDIO_DEFAULT_PORT } from './database-studio.ts';
 import { endpointPortRange } from './endpoint.ts';
 import { FUNCTION_ANALYTICS_PORT } from './function.ts';
 import { IDENTITY_DEFAULT_PORT } from './identity.ts';
+import { KUBERNETES_API_PORT_MIN, KUBERNETES_INGRESS_PORT_MAX } from './kubernetes.ts';
 import { STORAGE_PORT_MAX, STORAGE_PORT_MIN } from './object-storage.ts';
 import { REGISTRY_DEFAULT_PORT } from './registry.ts';
 import { WORKLOAD_IDENTITY_PORT } from './workload-identity.ts';
@@ -52,6 +53,7 @@ export const PLATFORM_HOST_PORTS: readonly ReservedPortRange[] = [
 	{ min: TELEMETRY_CLICKHOUSE_PORT, max: TELEMETRY_CLICKHOUSE_PORT, owner: 'the telemetry store' },
 	{ min: STORAGE_PORT_MIN, max: STORAGE_PORT_MAX, owner: 'managed object storage and link tests' },
 	{ min: endpointPortRange.min, max: endpointPortRange.max, owner: 'service endpoints' },
+	{ min: KUBERNETES_API_PORT_MIN, max: KUBERNETES_INGRESS_PORT_MAX, owner: 'Kubernetes clusters' },
 	{ min: COMPOSE_HOST_PORT_MIN, max: COMPOSE_HOST_PORT_MAX, owner: 'compose service routes' },
 ];
 

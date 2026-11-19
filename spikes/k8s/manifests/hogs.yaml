@@ -1,0 +1,23 @@
+# S2 overrun tests. slowhog: 16 MiB/s into a memory-backed emptyDir (tmpfs, not freed by OOM kills).
+# anonhog: 16 MiB/s of anonymous memory.
+apiVersion: v1
+kind: Pod
+metadata: {name: slowhog, namespace: default}
+spec:
+  restartPolicy: Never
+  containers:
+  - name: hog
+    image: docker.io/library/busybox:1.37
+    command: [sh, -c, "i=0; while true; do i=$((i+1)); dd if=/dev/zero of=/m/f$i bs=1M count=16 2>/dev/null; sleep 1; done"]
+    volumeMounts: [{name: m, mountPath: /m}]
+  volumes: [{name: m, emptyDir: {medium: Memory}}]
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: anonhog, namespace: default}
+spec:
+  restartPolicy: Never
+  containers:
+  - name: hog
+    image: docker.io/library/python:3.13-alpine
+    command: [python3, -c, "import time\na=[]\nwhile True:\n  a.append(bytearray(b'x'*(16<<20)))\n  time.sleep(1)"]

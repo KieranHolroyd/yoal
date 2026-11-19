@@ -6,6 +6,7 @@ import { contentDomain, features, platformOrigin, sharedDomain } from '#lib/serv
 import { availableUpdate } from '#lib/server/self-update.js';
 import { assistantStatus } from '#lib/server/assistant/config.js';
 import { listMemberships } from '#lib/server/org-membership.js';
+import { kubernetesAreaVisible } from '#lib/server/kubernetes.js';
 import type { LayoutServerLoad } from './$types';
 
 /**
@@ -130,7 +131,13 @@ export const load: LayoutServerLoad = ({ locals, url, cookies }) => {
 		},
 		contentDomain,
 		/** Opt-in tiers the shell offers (docs/OPS.md §2.5). Functions stay hidden until switched on. */
-		features: { functions: features.FUNCTIONS, brokers: features.BROKERS, email: features.EMAIL },
+		features: {
+			functions: features.FUNCTIONS,
+			brokers: features.BROKERS,
+			email: features.EMAIL,
+			/** Shown once a node has the optional component or the org has a cluster (docs/KUBERNETES.md §11). */
+			kubernetes: kubernetesAreaVisible(principal, features.KUBERNETES)
+		},
 		/** Optional in-dashboard assistant; hidden until an owner configures a provider. */
 		assistant: assistantStatus(),
 		/** shadcn sidebar persists its collapsed state in this cookie. */

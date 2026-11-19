@@ -167,3 +167,20 @@ describe('renderR2Binding', () => {
 		);
 	});
 });
+
+describe('renderR2Binding: S3 endpoint outbound', () => {
+	test('a loopback endpoint becomes the worker\'s only outbound, so private-deny does not block it', () => {
+		const rendered = render(R2_BINDING, { env: { MEDIA_ENDPOINT_URL: 'http://127.0.0.1:19001' } });
+		expect(rendered.services).toHaveLength(2);
+		expect(rendered.services[0]).toContain('globalOutbound = "r2-s3-0",');
+		expect(rendered.services[1]).toBe('    ( name = "r2-s3-0",\n      external = ( address = "127.0.0.1:19001", http = () ) )');
+	});
+
+	test('a non-loopback or HTTPS endpoint keeps the default outbound', () => {
+		for (const endpoint of ['https://s3.example.com', 'http://10.89.0.4:9000', 'http://s3.example.com:9000', 'not a url']) {
+			const rendered = render(R2_BINDING, { env: { MEDIA_ENDPOINT_URL: endpoint } });
+			expect(rendered.services).toHaveLength(1);
+			expect(rendered.services[0]).not.toContain('globalOutbound');
+		}
+	});
+});

@@ -18,9 +18,11 @@ import { renderTailWorker } from './function-bindings/tail.ts';
  * the output is a pure function of the workload, so two applies of the same desired state produce
  * byte-identical configs.
  *
- * The module *contents* are not inlined. The helper writes each module to a systemd credential and
- * workerd resolves `embed` relative to the config's own directory in the credentials directory, so
- * the embed names below (`function-shim`, `module-<i>`) are a hard cross-package contract.
+ * The module *contents* are not inlined. The generated pieces (`function-shim`, binding files) are
+ * systemd credentials, embedded relative to the config's own directory in the credentials
+ * directory. The user's modules are embedded by absolute path (`/<release>/<module>`), which workerd
+ * resolves against `--import-path`, set by the helper to the release root. Both forms are a hard
+ * cross-package contract with the helper.
  */
 
 export interface RenderWorkerdConfigInput {
@@ -61,13 +63,18 @@ const MODULE_KINDS: Record<FunctionModule['type'], string> = {
 };
 
 /**
- * Embed names of the manifest's modules, in manifest order: `['module-0', 'module-1', …]`.
+ * Embed paths of the manifest's modules, in manifest order: `/<release>/<module name>`.
  *
- * The helper writes `LoadCredential=module-<i>:<releaseDir>/<modules[i].name>`, so the index is the
- * contract: a renderer that reordered or renamed these would make workerd load the wrong bytes.
+ * The leading `/` makes workerd look the file up under its `--import-path`, which the helper sets
+ * to the release root that holds `<release>/`, so workerd reads each module straight from the
+ * release as the unit's dynamic user (release files are 0644). They used to travel as one systemd
+ * credential each, and a credential is capped at 1 MiB: any larger bundle failed to start with
+ * "Failed to set up credentials: Argument list too long". The import root holds only release
+ * directories named by sha256, so nothing in a release can shadow `/workerd/workerd.capnp`.
  */
-export function functionModuleEmbedNames(modules: FunctionModule[]): string[] {
-	return modules.map((_, index) => `module-${index}`);
+export function functionModuleEmbedPaths(release: string, modules: FunctionModule[]): string[] {
+	if (!/^[a-f0-9]{64}$/.test(release)) throw new Error(`Function release must be a sha256 digest, got ${JSON.stringify(release)}.`);
+	return modules.map((module) => `/${release}/${module.name}`);
 }
 
 /**
@@ -105,9 +112,11 @@ export function renderWorkerdConfigParts(input: RenderWorkerdConfigInput): Rende
 	const fragments = collectBindingFragments(workload, spec, input.env ?? {}, releaseDir);
 	mergeTailWorker(workload, fragments);
 
-	// The embed names come from the exported helper so the config and the helper's
-	// `LoadCredential=module-<i>:…` lines can never drift apart.
-	const embedNames = functionModuleEmbedNames(spec.modules);
+	// The embed paths come from the exported helper so the config and the helper's
+	// `--import-path` can never drift apart.
+	if (!workload.release)
+		throw new Error(`Cannot render a workerd config for workload ${workload.id}: it has no release.`);
+	const embedNames = functionModuleEmbedPaths(workload.release, spec.modules);
 	const userModuleLine = (module: FunctionModule, index: number): string =>
 		`          ( name = ${capnpText(module.name)}, ${moduleKind(module)} = embed ${capnpText(embedNames[index]!)} ),`;
 	// A Python Worker (D121) cannot import the JavaScript shim, and workerd treats its first module
@@ -152,7 +161,9 @@ export function renderWorkerdConfigParts(input: RenderWorkerdConfigInput): Rende
 		// FN7: the egress first line. Global fetch()/connect() can reach public addresses only;
 		// every intentional private target is an explicit `external` service below, which is a
 		// capability the user declared and the control plane validated.
-		'    ( name = "internet",\n      network = ( allow = ["public"], deny = ["private"] ) )',
+		// tlsOptions is required for HTTPS: a network service without it fails every TLS
+		// connection with "this client has no TLS configuration". Trust the public web PKI.
+		'    ( name = "internet",\n      network = ( allow = ["public"], deny = ["private"], tlsOptions = ( trustBrowserCas = true ) ) )',
 		...fragments.services,
 		// One shared disk service for every Durable Object/KV/cache backend (FN11). The helper
 		// passes its directory with `--directory-path`; the main Worker points at it above.
@@ -196,7 +207,7 @@ export function renderWorkerdConfigParts(input: RenderWorkerdConfigInput): Rende
 	const header = [
 		`# Yoal function host for workload ${commentText(workload.id)} (project ${commentText(workload.projectSlug)}).`,
 		'# Rendered by the agent from desired state on every apply; local edits are overwritten.',
-		`# Module sources are embedded as helper credentials from the release at ${commentText(releaseDir)}.`,
+		`# Module sources are embedded from the release at ${commentText(releaseDir)} (via --import-path).`,
 		// Hyperdrive credentials are literals in this file; say so where a reader will see it.
 		...(fragments.carriesCredentials
 			? [

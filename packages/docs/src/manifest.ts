@@ -75,7 +75,23 @@ export const SECTIONS: DocsSection[] = [
 		id: 'clients',
 		title: 'CLI, API & agents',
 		icon: 'terminal',
-		pages: ['clients/cli', 'clients/rest-api', 'clients/mcp', 'clients/assistant']
+		pages: ['clients/cli', 'clients/rest-api', 'clients/mcp', 'clients/agent-docs', 'clients/assistant']
+	},
+	{
+		id: 'cli',
+		title: 'CLI reference',
+		icon: 'terminal',
+		pages: [
+			'cli/accounts-and-settings',
+			'cli/deploying',
+			'cli/compute',
+			'cli/databases',
+			'cli/data-services',
+			'cli/pipelines-and-registry',
+			'cli/identity-and-access',
+			'cli/operations-and-config',
+			'cli/platform'
+		]
 	},
 	{
 		id: 'accounts',

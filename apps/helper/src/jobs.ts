@@ -1,7 +1,7 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
 import type { CommandRunner, RunResult } from './systemd.ts';
-import { renderContainerEnvFile, renderEnvFile, WORKLOAD_SLICE, type UnitVolumeMount } from './units.ts';
+import { renderContainerEnvFile, renderEnvFile, serviceUnitName, WORKLOAD_SLICE, type UnitVolumeMount } from './units.ts';
 import {
 	assertRecord,
 	assertRelativePath,
@@ -192,6 +192,13 @@ export interface JobUnitOptions {
 
 export interface ProcessJobOptions extends JobUnitOptions {
 	releaseDir: string;
+	/**
+	 * The app unit's dynamic user as systemd resolved it (`systemctl show -P User`), or null when
+	 * the app has no unit on this node. Not `yoal-workload-<id>`: that is longer than the 31
+	 * characters systemd accepts for `User=`, so systemd names the app's user `_du<hash>` itself,
+	 * and passing the long name failed every run with "Failed to spawn 'start' task: Invalid argument".
+	 */
+	appUser: string | null;
 	/** Directories of the node's bun and node, put ahead of the default `PATH`. */
 	pathDirs: string[];
 }
@@ -242,10 +249,11 @@ export function renderProcessJobArgs(options: ProcessJobOptions): string[] {
 	const { run, workload } = options;
 	const unit = jobUnitName(run.runId);
 	const args = commonArgs(options);
-	// The app's own dynamic user (systemd names it after the unit) and state directory: a run
-	// sees exactly the files the app wrote, and nothing is re-chowned.
+	// The app's own dynamic user and state directory: a run sees exactly the files the app wrote,
+	// and nothing is re-chowned. Two units with the same dynamic `User=` share its uid. Without an
+	// app unit on this node, systemd picks a user for the job unit itself.
 	args.push('--property=DynamicUser=yes');
-	args.push(`--property=User=yoal-workload-${workload.id}`);
+	if (options.appUser) args.push(`--property=User=${assertDynamicUserName(options.appUser)}`);
 	args.push(`--property=StateDirectory=yoal-workloads/${workload.id}`);
 	args.push('--property=StateDirectoryMode=0700');
 	args.push(`--working-directory=${options.releaseDir}`);
@@ -268,6 +276,17 @@ export function renderProcessJobArgs(options: ProcessJobOptions): string[] {
 	const command = program!.startsWith('/') ? run.command : ['/usr/bin/env', ...run.command];
 	args.push(...commandTail(command, options.expandFlag));
 	return args;
+}
+
+/**
+ * A user name systemd accepts for `User=` in strict mode: what it derives for a DynamicUser unit
+ * (the unit prefix when that is short enough, else `_du<16 hex>`).
+ */
+export const DYNAMIC_USER_NAME_PATTERN = /^[a-z_][a-z0-9_-]{0,30}$/;
+
+export function assertDynamicUserName(name: string): string {
+	if (!DYNAMIC_USER_NAME_PATTERN.test(name)) throw new ValidationError(`${JSON.stringify(name)} is not a valid systemd user name`);
+	return name;
 }
 
 export function jobContainerName(runId: string): string {
@@ -428,8 +447,10 @@ export class JobDriver implements JobApi {
 		// Resolve everything that can fail before a secret is written.
 		let releaseDir: string | null = null;
 		let dataDir: string | null = null;
+		let appUser: string | null = null;
 		if (workload.runtime === 'process') {
 			releaseDir = await this.resolveRelease(workload.release!);
+			appUser = await this.appDynamicUser(workload.id);
 		} else {
 			dataDir = await this.options.resolveDataDir(workload);
 			await this.requireAppContainer(workload);
@@ -451,6 +472,7 @@ export class JobDriver implements JobApi {
 				? renderProcessJobArgs({
 						...common,
 						releaseDir: releaseDir!,
+						appUser,
 						pathDirs: [dirname(this.options.nodePath), dirname(this.options.bunPath)],
 					})
 				: renderContainerJobArgs({
@@ -466,6 +488,19 @@ export class JobDriver implements JobApi {
 		}
 		this.timeouts.set(run.runId, run.timeoutSeconds);
 		return this.status(run.runId, run.timeoutSeconds);
+	}
+
+	/**
+	 * The dynamic user systemd resolved for the app's own unit, or null when there is no such unit
+	 * (or it does not run as a dynamic user). Anything that is not a plain user name is ignored.
+	 */
+	private async appDynamicUser(workloadId: string): Promise<string | null> {
+		const result = await this.options.runner
+			.run([this.options.systemctlPath, 'show', '-P', 'User', serviceUnitName(workloadId)])
+			.catch(() => null);
+		if (!result || result.code !== 0) return null;
+		const name = result.stdout.trim();
+		return DYNAMIC_USER_NAME_PATTERN.test(name) ? name : null;
 	}
 
 	async status(runId: string, timeoutSeconds?: number): Promise<JobStatus> {

@@ -34,7 +34,7 @@ elif command -v dnf >/dev/null 2>&1; then
 elif command -v apt-get >/dev/null 2>&1; then
 	apt-get update -qq
 	DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
-		ca-certificates curl unzip git iproute2 caddy podman uidmap passt netavark aardvark-dns
+		ca-certificates curl unzip git iproute2 caddy podman uidmap passt netavark aardvark-dns nftables
 else
 	echo "no supported package manager (pacman, dnf, apt-get); install: curl unzip git caddy podman passt netavark aardvark-dns" >&2
 	exit 1
@@ -45,7 +45,7 @@ getent group caddy >/dev/null || { echo "the caddy package did not create a cadd
 
 say "Bun $BUN_VERSION"
 if [ ! -x "$BUN" ] || [ "$("$BUN" --version)" != "$BUN_VERSION" ]; then
-	case "$(uname -m)" in x86_64|amd64) arch=x64 ;; aarch64|arm64) arch=arm64 ;; *) echo "bad arch" >&2; exit 1 ;; esac
+	case "$(uname -m)" in x86_64|amd64) arch=x64 ;; aarch64|arm64) arch=aarch64 ;; *) echo "bad arch" >&2; exit 1 ;; esac
 	tmp=$(mktemp -d)
 	curl -fsSL -o "$tmp/bun.zip" "https://github.com/oven-sh/bun/releases/download/bun-v$BUN_VERSION/bun-linux-$arch.zip"
 	unzip -q "$tmp/bun.zip" -d "$tmp"

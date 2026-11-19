@@ -41,6 +41,10 @@ export interface WireguardState {
 	mtu: number;
 	listenPort: number;
 	peers: WireguardPeer[];
+	/** Extra prefixes routed into the interface: the Kubernetes machine supernet (docs/KUBERNETES.md §10). */
+	routes: string[];
+	/** This node's own machine /24, for the `yoal-k8s` network. */
+	machineSubnet: string | null;
 }
 
 export interface WireguardStatusPeer {
@@ -82,14 +86,14 @@ export const LEGACY_WIREGUARD_KEY_PATH = '/etc/yoal/wireguard/wg0.key';
 export class WireguardManager {
 	private readonly paths: WireguardPaths;
 	private readonly runner: CommandRunner;
-	private readonly firewall?: { apply(): Promise<unknown> };
+	private readonly firewall?: { apply(options?: { forwardCidrs?: string[] }): Promise<unknown> };
 	private readonly legacyKeyPath: string | null;
 
 	constructor(
 		options: {
 			paths?: Partial<WireguardPaths>;
 			runner?: CommandRunner;
-			firewall?: { apply(): Promise<unknown> };
+			firewall?: { apply(options?: { forwardCidrs?: string[] }): Promise<unknown> };
 			legacyKeyPath?: string | null;
 		} = {},
 	) {
@@ -155,7 +159,13 @@ export class WireguardManager {
 			const route = await this.runIp(['route', 'replace', state.cidr, 'dev', this.paths.interface, 'src', state.address]);
 			if (route.code !== 0) throw new WireguardError(`could not route ${state.cidr} via ${this.paths.interface}: ${route.stderr.trim()}`);
 		}
-		await this.firewall?.apply();
+		// The Kubernetes machine supernet (docs/KUBERNETES.md §10). This node's own /24 is more
+		// specific and lives on its local `yoal-k8s` bridge, so it wins over this route.
+		for (const prefix of state.routes) {
+			const route = await this.runIp(['route', 'replace', prefix, 'dev', this.paths.interface, 'src', state.address!]);
+			if (route.code !== 0) throw new WireguardError(`could not route ${prefix} via ${this.paths.interface}: ${route.stderr.trim()}`);
+		}
+		await this.firewall?.apply({ forwardCidrs: state.routes });
 		return { peers: state.peers.length };
 	}
 
@@ -235,10 +245,11 @@ export function parseWireguardState(raw: unknown): WireguardState {
 		if (typeof peer.publicKey !== 'string' || !/^[A-Za-z0-9+/]{43}=$/.test(peer.publicKey))
 			throw new WireguardError(`peer ${index} has an invalid public key`);
 		if (peer.endpoint !== null && typeof peer.endpoint !== 'string') throw new WireguardError(`peer ${index} has an invalid endpoint`);
-		if (!Array.isArray(peer.allowedIps) || peer.allowedIps.length === 0 || peer.allowedIps.length > 64)
+		if (!Array.isArray(peer.allowedIps) || peer.allowedIps.length === 0 || peer.allowedIps.length > 128)
 			throw new WireguardError(`peer ${index} has invalid allowed IPs`);
+		// /32 overlay addresses, plus /24 Kubernetes machine subnets.
 		for (const ip of peer.allowedIps)
-			if (typeof ip !== 'string' || !/^(?:\d{1,3}\.){3}\d{1,3}\/32$/.test(ip))
+			if (typeof ip !== 'string' || !/^(?:\d{1,3}\.){3}\d{1,3}\/(?:32|24)$/.test(ip))
 				throw new WireguardError(`peer ${index} has an invalid allowed IP`);
 		const keepalive = peer.persistentKeepalive === undefined ? 0 : Number(peer.persistentKeepalive);
 		if (!Number.isInteger(keepalive) || keepalive < 0 || keepalive > 65_535)
@@ -250,7 +261,17 @@ export function parseWireguardState(raw: unknown): WireguardState {
 			persistentKeepalive: keepalive,
 		};
 	});
-	return { mode, address, cidr, mtu, listenPort, peers };
+	const routesRaw = record.routes === undefined ? [] : record.routes;
+	if (!Array.isArray(routesRaw) || routesRaw.length > 8) throw new WireguardError('routes must be an array of at most 8');
+	const routes = routesRaw.map((value) => {
+		if (typeof value !== 'string' || !/^(?:\d{1,3}\.){3}\d{1,3}\/(?:[89]|1\d|2[0-4])$/.test(value))
+			throw new WireguardError('invalid route prefix');
+		return value;
+	});
+	const machineSubnet = record.machineSubnet === undefined || record.machineSubnet === null ? null : record.machineSubnet;
+	if (machineSubnet !== null && (typeof machineSubnet !== 'string' || !/^(?:\d{1,3}\.){3}0\/24$/.test(machineSubnet)))
+		throw new WireguardError('invalid machine subnet');
+	return { mode, address, cidr, mtu, listenPort, peers, routes, machineSubnet };
 }
 
 export const defaultRunner: CommandRunner = async (argv, input) => {

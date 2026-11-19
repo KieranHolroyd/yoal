@@ -1,3 +1,4 @@
+import { assertKubernetesId, parseManifestFiles } from './kubernetes.ts';
 import type { ImagePruneResult } from './images.ts';
 import { MirrorValidationError, parseMirrorRequest, type MirrorRequest } from './registry-mirror.ts';
 import { createReadStream, promises as fs } from 'node:fs';
@@ -71,6 +72,11 @@ export interface HelperRuntime {
 	restart(id: string): Promise<void>;
 	/** Replace one workload's identity token file without re-applying it (IAM.md I18). */
 	setIdentity?(id: string, token: string): Promise<void>;
+	/** Fixed operations on Kubernetes machines (docs/KUBERNETES.md). */
+	kubernetesOps?(): import('./kubernetes.ts').KubernetesOps;
+	/** Install or remove the optional Kubernetes node component (docs/KUBERNETES.md K2). */
+	kubernetesComponent?(action: 'install' | 'remove', purge: boolean): import('./kubernetes-component.ts').KubernetesComponentJob;
+	kubernetesComponentJob?(): import('./kubernetes-component.ts').KubernetesComponentJob;
 	logs(id: string, options?: LogReadOptions): Promise<HelperLogResult>;
 	/** Remove a purged database's or storage instance's unit and `<stateDir>/<id>` data dir (D59, S8). */
 	purge(id: string): Promise<void>;
@@ -598,6 +604,64 @@ export function createHandler(
 					return json({ ok: true });
 				}
 				return methodNotAllowed('GET, DELETE');
+			}
+
+			// --- the optional Kubernetes component (docs/KUBERNETES.md K2): a fixed install/remove ---
+			if (path === '/v1/components/kubernetes') {
+				if (!runtime.kubernetesComponent || !runtime.kubernetesComponentJob) return json({ error: 'not_supported' }, 501);
+				if (method === 'GET') return json({ ok: true, job: runtime.kubernetesComponentJob() });
+				if (method !== 'POST') return methodNotAllowed('GET, POST');
+				const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
+				for (const key of Object.keys(body))
+					if (key !== 'action' && key !== 'purge') throw new ValidationError(`request.${key} is not supported`);
+				if (body.action !== 'install' && body.action !== 'remove')
+					throw new ValidationError('request.action must be "install" or "remove"');
+				if (body.purge !== undefined && typeof body.purge !== 'boolean') throw new ValidationError('request.purge must be a boolean');
+				return json({ ok: true, job: runtime.kubernetesComponent(body.action, body.purge === true) }, 202);
+			}
+
+			// --- Kubernetes machines (docs/KUBERNETES.md): manifest sync and status, fixed operations only ---
+			const kubernetesMatch = /^\/v1\/kubernetes\/([^/]+)\/(manifests|status|snapshot|restore)$/.exec(path);
+			if (kubernetesMatch) {
+				if (!runtime.kubernetesOps) return json({ error: 'not_supported' }, 501);
+				const id = assertKubernetesId(decodeWorkloadId(kubernetesMatch[1]!));
+				const ops = runtime.kubernetesOps();
+				if (kubernetesMatch[2] === 'status') {
+					if (method === 'GET') return json({ ok: true, status: await ops.status(id) });
+					if (method !== 'POST') return methodNotAllowed('GET, POST');
+					// `keep`: the node names the cluster should have; NotReady others are pruned (S7).
+					const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
+					const keepRaw = body.keep ?? [];
+					if (!Array.isArray(keepRaw) || keepRaw.length > 64) throw new ValidationError('request.keep must be an array of at most 64');
+					const keep = keepRaw.map((name, index) => {
+						if (typeof name !== 'string' || !/^[a-z0-9-]{1,63}$/.test(name)) throw new ValidationError(`request.keep[${index}] is not a node name`);
+						return name;
+					});
+					return json({ ok: true, status: await ops.status(id, keep) });
+				}
+				if (kubernetesMatch[2] === 'snapshot') {
+					if (method !== 'GET') return methodNotAllowed('GET');
+					const datastore = url.searchParams.get('datastore') === 'etcd' ? 'etcd' : 'sqlite';
+					const snapshot = await ops.snapshot(id, datastore);
+					// The file goes once the agent has had time to stream it (as database dumps do).
+					setTimeout(() => void snapshot.cleanup(), 60 * 60_000).unref?.();
+					return new Response(Bun.file(snapshot.path).stream(), {
+						headers: {
+							'content-type': 'application/gzip',
+							'content-length': String(snapshot.sizeBytes),
+							'cache-control': 'no-store',
+						},
+					});
+				}
+				if (kubernetesMatch[2] === 'restore') {
+					if (method !== 'POST') return methodNotAllowed('POST');
+					await ops.restore(id, request.body);
+					return json({ ok: true, restored: id });
+				}
+				if (method !== 'POST') return methodNotAllowed('POST');
+				const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
+				const result = await ops.syncManifests(id, parseManifestFiles(body.files));
+				return json({ ok: true, ...result });
 			}
 
 			// --- workload identity (IAM.md I18): rotate one token file without restarting a unit ---

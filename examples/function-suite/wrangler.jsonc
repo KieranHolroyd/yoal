@@ -1,0 +1,94 @@
+{
+	// function-suite: one Yoal Function that touches every binding Yoal Functions can serve.
+	// `yoal deploy` reads this file (Wrangler is never run on the deploy path) and the same file
+	// drives `wrangler dev` locally. Resource names on the Yoal side come from the `yoal` block;
+	// Cloudflare ids below are placeholders that only Wrangler reads.
+	"$schema": "node_modules/wrangler/config-schema.json",
+	"name": "function-suite",
+	"main": "src/index.ts",
+	// Must not be later than the node's pinned workerd (1.20261106.1).
+	"compatibility_date": "2026-11-01",
+	"compatibility_flags": ["nodejs_compat"],
+
+	// text + json bindings
+	"vars": {
+		"SUITE_GREETING": "hello from the function suite",
+		"SUITE_CONFIG": { "version": 1, "suite": "function-suite" }
+	},
+
+	// Static assets: Caddy serves public/ first; /api/* always reaches the Worker.
+	"assets": {
+		"directory": "public",
+		"binding": "ASSETS",
+		"run_worker_first": ["/api/*"]
+	},
+
+	// KV and D1 are node-local, backed by Durable Object SQLite on Yoal.
+	"kv_namespaces": [{ "binding": "KV", "id": "function-suite-kv" }],
+	"d1_databases": [
+		{ "binding": "DB", "database_name": "function-suite", "database_id": "function-suite-d1" }
+	],
+
+	// R2 → the managed RustFS instance named in yoal.storage, bucket `suite-objects`.
+	"r2_buckets": [{ "binding": "BUCKET", "bucket_name": "suite-objects" }],
+
+	// SQLite-backed Durable Objects: a counter with alarms and a hibernating WebSocket room.
+	"durable_objects": {
+		"bindings": [
+			{ "name": "COUNTER", "class_name": "Counter" },
+			{ "name": "ROOM", "class_name": "ChatRoom" }
+		]
+	},
+	"migrations": [{ "tag": "v1", "new_sqlite_classes": ["Counter", "ChatRoom"] }],
+
+	// Hyperdrive → the managed Postgres named in yoal.hyperdrive (through its PgBouncer).
+	// localConnectionString is only for `wrangler dev` (`bun run pg:local` starts one).
+	"hyperdrive": [
+		{
+			"binding": "HYPERDRIVE",
+			"id": "function-suite",
+			"localConnectionString": "postgres://suite:suite@127.0.0.1:55432/suite"
+		}
+	],
+
+	// Analytics Engine → ClickHouse telemetry on Yoal.
+	"analytics_engine_datasets": [{ "binding": "ANALYTICS", "dataset": "function_suite" }],
+
+	// Queues on the project's managed NATS broker (D112). The function produces to suite-jobs and
+	// consumes all three queues: jobs, their dead letters, and storage events from an event rule.
+	"queues": {
+		"producers": [{ "binding": "JOBS", "queue": "suite-jobs" }],
+		"consumers": [
+			{
+				"queue": "suite-jobs",
+				"max_batch_size": 10,
+				"max_batch_timeout": 1,
+				"max_retries": 2,
+				"retry_delay": 1,
+				"dead_letter_queue": "suite-jobs-dlq"
+			},
+			{ "queue": "suite-jobs-dlq", "max_batch_size": 10, "max_batch_timeout": 1 },
+			{ "queue": "suite-events", "max_batch_size": 10, "max_batch_timeout": 1 }
+		]
+	},
+
+	// TOOLBOX: a named entrypoint of this Worker (in-process JS RPC).
+	// COMPANION: another Yoal project on the same node (fetch only).
+	"services": [
+		{ "binding": "TOOLBOX", "service": "function-suite", "entrypoint": "Toolbox" },
+		{ "binding": "COMPANION", "service": "function-suite-companion" }
+	],
+
+	"triggers": { "crons": ["*/5 * * * *"] },
+
+	// Yoal-only settings; Wrangler warns about this key and ignores it.
+	"yoal": {
+		"storage": { "BUCKET": "function-suite" },
+		"hyperdrive": { "HYPERDRIVE": "function-suite" },
+		"secrets": ["SUITE_SECRET"],
+		// Cache API (caches.default) has no Wrangler binding; Yoal needs one to back it.
+		"bindings": [{ "name": "CACHE", "type": "cache" }],
+		"idleStopSeconds": 60,
+		"memoryMb": 192
+	}
+}

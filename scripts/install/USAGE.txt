@@ -41,6 +41,9 @@ Options:
                               they stay unavailable on this node. Also YOAL_NO_PYTHON=1.
   --with-php                  Install the pinned FrankenPHP runtime for PHP process apps
                               (~175 MB; off by default). Also YOAL_INSTALL_PHP=1.
+  --with-kubernetes           Install the optional Kubernetes component so this node can run
+                              managed k3s clusters (~1 GB of images; off by default).
+                              Also YOAL_INSTALL_KUBERNETES=1.
   --clickhouse                Also install the optional ClickHouse telemetry store (traffic
                               charts, dashboards; ~240 MB download, ~300–800 MB RAM).
                               Asked interactively; off with --yes. Also YOAL_INSTALL_CLICKHOUSE=1.

@@ -14,6 +14,15 @@ import { workloadDesiredSchema, workloadStatuses } from './workload.ts';
 import { STORAGE_STS_CAPABILITY } from './object-storage.ts';
 import { databaseMetricBucketSchema, databaseSnapshotSchema } from './database.ts';
 import { brokerMetricBucketSchema, brokerQueueSnapshotSchema } from './broker.ts';
+import {
+	kubernetesBackupResultSchema,
+	kubernetesBackupTaskSchema,
+	kubernetesComponentReportSchema,
+	kubernetesComponentRequestSchema,
+	kubernetesComponentResultSchema,
+	kubernetesRouteSchema,
+	kubernetesStatusSampleSchema,
+} from './kubernetes.ts';
 import { databaseBackupResultSchema, databaseBackupTaskSchema } from './database-backup.ts';
 import { databasePitrResultSchema, databasePitrTaskSchema } from './database-pitr.ts';
 import {
@@ -297,6 +306,22 @@ export const desiredStateSchema = z.object({
 	storagePurges: z.array(z.string()).default([]),
 	/** Purged queue brokers whose data dir this node must delete, then report (D111). */
 	brokerPurges: z.array(z.string()).default([]),
+	/** Purged Kubernetes machines whose data dir this node must delete, then report. */
+	kubernetesPurges: z.array(z.string()).default([]),
+	/** Public routes to Kubernetes API servers and cluster ingress (docs/KUBERNETES.md K7, K11). */
+	kubernetesRoutes: z.array(kubernetesRouteSchema).default([]),
+	/**
+	 * Manifest generation per server machine here. When it changes the agent fetches the files from
+	 * `/api/agent/kubernetes/manifests/<machineId>` (they can hold attachment passwords) and hands
+	 * them to the helper, without restarting the machine.
+	 */
+	kubernetesManifests: z
+		.array(z.object({ machineId: z.string(), generation: z.string(), nodes: z.array(z.string()).max(64).default([]) }))
+		.default([]),
+	/** Install or remove the optional Kubernetes component on this node (docs/KUBERNETES.md K2). */
+	kubernetesComponentRequest: kubernetesComponentRequestSchema.nullable().default(null),
+	/** Datastore snapshots and restores for server machines here (K14). */
+	kubernetesBackupTasks: z.array(kubernetesBackupTaskSchema).default([]),
 	/**
 	 * Present only on the mail node (docs/EMAIL.md §3.5): run `yoal-mail` and keep it fed. No
 	 * secrets: the agent fetches keys and credential hashes from `/api/agent/email-state`.
@@ -328,6 +353,10 @@ export type DesiredState = z.infer<typeof desiredStateSchema>;
  *   rolls the node back on its own if no confirm arrives within 10 minutes.
  * - `functions`: renders and runs `runtime: "function"` workloads (D110).
  * - `brokers`: runs `broker` workloads with the helper's fixed profile and purges `brokerPurges` (D111).
+ * - `kubernetes` (not static: advertised only while the optional component is installed, like
+ *   `process-node`): runs `kubernetes` machine workloads, purges `kubernetesPurges`, serves
+ *   `kubernetesRoutes` and reports cluster status (docs/KUBERNETES.md). `kubernetes-userns` /
+ *   `kubernetes-trusted` say which isolation tiers the node's probe accepted.
  * - `mail`: runs `yoal-mail` and bridges it to the control plane when `mail` is set (docs/EMAIL.md).
  * - `identity`: runs the separate `yoal-identity` user-pool process and pushes its projection
  *   (docs/IAM.md §11.2).
@@ -372,6 +401,8 @@ export const nodeCapabilities = [
 	STORAGE_STS_CAPABILITY,
 	LINK_TESTS_CAPABILITY,
 	RUN_LEASES_CAPABILITY,
+	// The helper accepts /24 Kubernetes machine subnets in WireGuard peers (docs/KUBERNETES.md §10).
+	'wg-subnets',
 ] as const;
 export type NodeCapability = (typeof nodeCapabilities)[number];
 
@@ -452,6 +483,16 @@ export const heartbeatSchema = z.object({
 	purgedStorage: z.array(z.string()).optional(),
 	/** Broker ids whose data dir was deleted after a `brokerPurges` entry (D111). */
 	purgedBrokers: z.array(z.string()).optional(),
+	/** Kubernetes machine ids whose data dir was deleted after a `kubernetesPurges` entry. */
+	purgedKubernetes: z.array(z.string()).optional(),
+	/** The optional Kubernetes component (installed minors, working tiers); absent when not installed. */
+	kubernetes: kubernetesComponentReportSchema.optional(),
+	/** One status sample per cluster whose server machine runs here. */
+	kubernetesStatus: z.array(kubernetesStatusSampleSchema).max(200).optional(),
+	/** The outcome of `kubernetesComponentRequest` once the helper's job finished. */
+	kubernetesComponentResult: kubernetesComponentResultSchema.optional(),
+	/** Outcomes of `kubernetesBackupTasks` since the last heartbeat. */
+	kubernetesBackupResults: z.array(kubernetesBackupResultSchema).max(50).optional(),
 	/** App volume ids whose directory was deleted after an `appVolumePurges` entry. */
 	purgedAppVolumes: z.array(z.string().max(100)).max(500).optional(),
 	/** Latest usage sample per app volume, sent after each measurement round. */

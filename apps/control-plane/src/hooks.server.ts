@@ -358,7 +358,9 @@ function isAuthenticatedApi(pathname: string): boolean {
 		// redirects to `/login` (IAM.md I25, §11.1).
 		pathname !== '/api/v1/access/authorize' &&
 		// `/login` asks this before a session exists (email → IdP routing).
-		pathname !== '/api/v1/sso/resolve'
+		pathname !== '/api/v1/sso/resolve' &&
+		// A cluster's log shipper authenticates with its own ingest token (docs/KUBERNETES.md K23).
+		!pathname.startsWith('/api/v1/kubernetes-ingest/')
 	);
 }
 

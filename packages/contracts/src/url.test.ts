@@ -21,6 +21,14 @@ describe('contentUrl', () => {
 		expect(contentUrl('', 'blog.localhost')).toBe('https://blog.localhost');
 	});
 
+	test('an install without TLS (plain-HTTP, non-loopback platform) serves content over HTTP', () => {
+		expect(contentUrl('http://192.168.5.15', 'app.192-168-5-15.sslip.io')).toBe('http://app.192-168-5-15.sslip.io');
+		expect(contentUrl('http://control.example.com', 'blog.example.com')).toBe('http://blog.example.com');
+		// A loopback dev control plane is not one: its real content domains stay HTTPS.
+		expect(contentUrl('http://127.0.0.1:5173', 'blog.example.com')).toBe('https://blog.example.com');
+		expect(contentUrl('http://localhost:5173', 'blog.example.com')).toBe('https://blog.example.com');
+	});
+
 	test('a hostname that merely contains localhost is not loopback', () => {
 		expect(contentUrl('http://localhost:5173', 'localhost.example.com')).toBe('https://localhost.example.com');
 	});

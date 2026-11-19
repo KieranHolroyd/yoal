@@ -3,7 +3,6 @@ import type { RouteSpec } from '@yoal/contracts';
 import {
 	compilePattern,
 	compileTarget,
-	errorPageHandler,
 	type CaddyHandler,
 	type CaddyRoute,
 	type HeaderRule,
@@ -247,12 +246,9 @@ function proxyHandler(upstreams: readonly string[]): CaddyHandler {
 			},
 		},
 		transport: { protocol: 'http', response_header_timeout: '5m' },
-		handle_response: [
-			{
-				match: { status_code: [502, 503, 504] },
-				routes: [{ handle: [errorPageHandler('unavailable', 503, { 'Retry-After': ['30'] })] }],
-			},
-		],
+		// No `handle_response` for 5xx: it only ever sees responses the function itself sent (a
+		// failed dial is a proxy error, not a response), so it replaced an app's own 502 or 503,
+		// body and all, with the platform's "unavailable" page and hid the real error.
 	};
 }
 

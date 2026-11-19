@@ -349,6 +349,26 @@ afterEach(() => {
 	Date.now = ORIGINAL_NOW;
 });
 
+describe('global fetch', () => {
+	test('calls fetch unbound: workerd rejects a fetch called with a foreign `this`', async () => {
+		const s3 = new FakeS3();
+		const original = globalThis.fetch;
+		// Stand-in for workerd's check ("Illegal invocation" when `this` is not the global scope).
+		const strict = function (this: unknown, input: RequestInfo | URL, init?: RequestInit) {
+			if (this !== undefined && this !== globalThis) throw new TypeError('Illegal invocation');
+			return s3.fetch(input as string, init);
+		};
+		globalThis.fetch = strict as typeof fetch;
+		try {
+			const env = makeEnv(s3, { FETCH: undefined });
+			const response = await r2Worker.fetch(bodyRequest({ method: 'put', object: 'a.txt' }, text('a')), env);
+			expect(response.status).toBe(200);
+		} finally {
+			globalThis.fetch = original;
+		}
+	});
+});
+
 describe('R2 put', () => {
 	test('frames metadata and value, signs a path-style PUT and returns R2 metadata', async () => {
 		const s3 = new FakeS3();
@@ -444,6 +464,38 @@ describe('R2 put', () => {
 			expect(errorBody(response).message).toContain('Multipart uploads are not supported');
 		}
 		expect(s3.requests).toHaveLength(0);
+	});
+});
+
+describe('custom metadata key case', () => {
+	test('mixed-case keys read back as written, although S3 stores them lower-cased', async () => {
+		const s3 = new FakeS3();
+		const env = makeEnv(s3);
+		const put = await r2Worker.fetch(
+			bodyRequest({ method: 'put', object: 'case.txt', customFields: [{ k: 'runId', v: 'r1' }, { k: 'owner', v: 'ada' }] }, text('x')),
+			env,
+		);
+		expect(put.status).toBe(200);
+		const head = await decode(await r2Worker.fetch(headerRequest({ method: 'head', object: 'case.txt' }), env));
+		expect(head.metadata.customFields).toEqual([
+			{ k: 'owner', v: 'ada' },
+			{ k: 'runId', v: 'r1' },
+		]);
+	});
+
+	test('keys that differ only by case, and the reserved name, are refused', async () => {
+		const s3 = new FakeS3();
+		const env = makeEnv(s3);
+		const twins = await r2Worker.fetch(
+			bodyRequest({ method: 'put', object: 'a.txt', customFields: [{ k: 'runId', v: '1' }, { k: 'runid', v: '2' }] }, text('x')),
+			env,
+		);
+		expect(twins.status).toBe(400);
+		const reserved = await r2Worker.fetch(
+			bodyRequest({ method: 'put', object: 'a.txt', customFields: [{ k: 'Yoal-Names', v: 'x' }] }, text('x')),
+			env,
+		);
+		expect(reserved.status).toBe(400);
 	});
 });
 

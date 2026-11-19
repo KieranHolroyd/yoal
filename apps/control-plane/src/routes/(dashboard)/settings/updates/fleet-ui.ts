@@ -1,13 +1,10 @@
-import type { ClusterConfig, NodeRolloutNodeState, NodeRolloutView } from '@yoal/contracts';
+import type { ClusterConfig, NodeRolloutView } from '@yoal/contracts';
 import type { Tone } from '#lib/status.js';
 
 /**
  * The fleet half of the updates page (docs/CLUSTERING.md §3.11, D217): where every node stands
  * against the control plane's release, and the rollout moving them there.
  */
-
-/** The two steps a release takes through a cluster; also the page's two tabs. */
-export type UpdateStage = 'control' | 'fleet';
 
 /**
  * - `current`: runs the target release (or there is no release to compare against).
@@ -67,18 +64,7 @@ export const fleetStateOrder: FleetNodeState[] = [
 	'failed'
 ];
 
-/** A rollout's word for a node, when the node is part of the running rollout. */
-export const rolloutNodeLabel: Record<NodeRolloutNodeState, string> = {
-	pending: 'Waiting for its wave',
-	draining: 'Draining',
-	updating: 'Installing',
-	verifying: 'Verifying',
-	done: 'Updated',
-	failed: 'Failed',
-	skipped: 'Skipped'
-};
-
-/** The one-line state of the fleet, for the stage card and the fleet headline. */
+/** The one-line state of the fleet, for the fleet card. */
 export function fleetSummary(fleet: FleetView): { tone: Tone; label: string; live: boolean } {
 	if (!fleet.readable) return { tone: 'neutral', label: 'Not visible to your role', live: false };
 	if (fleet.nodes.length === 0) return { tone: 'neutral', label: 'No nodes enrolled', live: false };

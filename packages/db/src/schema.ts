@@ -2845,7 +2845,229 @@ export const pipelineDeploys = sqliteTable(
 	(t) => [index('pipeline_deploys_job_idx').on(t.jobId)],
 );
 
+/** Managed Kubernetes clusters (docs/KUBERNETES.md, migration 0116). */
+export const k8sClusters = sqliteTable(
+	'k8s_clusters',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		name: text('name').notNull(),
+		/** A supported minor (`1.37`); mirrors `kubernetesVersions` in @yoal/contracts. */
+		minor: text('minor').notNull(),
+		/** The pinned k3s release the cluster runs (`v1.37.2+k3s1`). */
+		release: text('release').notNull(),
+		tier: text('tier', { enum: ['userns', 'trusted'] }).notNull().default('userns'),
+		purpose: text('purpose', { enum: ['lab', 'production'] }).notNull().default('lab'),
+		nodeId: text('node_id').notNull(),
+		/** Disk holding the machines' data dirs; null is the system disk (D169). */
+		diskId: text('volume_id'),
+		memoryMb: integer('memory_mb').notNull(),
+		cpus: real('cpus').notNull().default(1),
+		agents: integer('agents').notNull().default(0),
+		apiPort: integer('api_port').notNull(),
+		ingressPort: integer('ingress_port').notNull(),
+		apiAccess: text('api_access', { enum: ['public', 'private'] }).notNull().default('public'),
+		/** JSON string array of CIDRs. */
+		allowCidrs: text('allow_cidrs').notNull().default('[]'),
+		windowHour: integer('window_hour').notNull().default(3),
+		windowHours: integer('window_hours').notNull().default(2),
+		autoPatch: integer('auto_patch', { mode: 'boolean' }).notNull().default(true),
+		traefik: integer('traefik', { mode: 'boolean' }).notNull().default(true),
+		status: text('status', { enum: ['pending', 'starting', 'running', 'degraded', 'failed', 'stopped'] })
+			.notNull()
+			.default('pending'),
+		message: text('message'),
+		/** The k3s join token, sealed with the org data key. */
+		tokenSecret: text('token_secret').notNull(),
+		restartGeneration: integer('restart_generation').notNull().default(0),
+		manifestsGeneration: integer('manifests_generation').notNull().default(0),
+		nodesReady: integer('nodes_ready'),
+		nodesTotal: integer('nodes_total'),
+		/** JSON string array from the newest status sample. */
+		deprecatedApis: text('deprecated_apis'),
+		statsAt: integer('stats_at'),
+		createdBy: text('created_by').notNull(),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+		deletedAt: integer('deleted_at'),
+		purgeAt: integer('purge_at'),
+		purgeRequestedAt: integer('purge_requested_at'),
+		// K5/K6 (migration 0117).
+		servers: integer('servers').notNull().default(1),
+		datastore: text('datastore', { enum: ['sqlite', 'etcd'] }).notNull().default('sqlite'),
+		backupHours: integer('backup_hours').notNull().default(24),
+		backupRetentionDays: integer('backup_retention_days').notNull().default(7),
+		nextBackupAt: integer('next_backup_at'),
+		lastBackupAt: integer('last_backup_at'),
+		lastBackupStatus: text('last_backup_status'),
+		previousRelease: text('previous_release'),
+		upgradeStartedAt: integer('upgrade_started_at'),
+		upgradeMessage: text('upgrade_message'),
+		eosWarned: text('eos_warned'),
+		shipper: integer('shipper', { mode: 'boolean' }).notNull().default(false),
+		shipperTokenHash: text('shipper_token_hash'),
+		shipperTokenSecret: text('shipper_token_secret'),
+		logRetentionDays: integer('log_retention_days').notNull().default(7),
+		restoreBackupId: text('restore_backup_id'),
+		alertState: text('alert_state'),
+	},
+	(t) => [
+		uniqueIndex('k8s_clusters_org_name_idx').on(t.orgId, t.name),
+		uniqueIndex('k8s_clusters_node_api_port_idx').on(t.nodeId, t.apiPort),
+		uniqueIndex('k8s_clusters_node_ingress_port_idx').on(t.nodeId, t.ingressPort),
+		index('k8s_clusters_node_idx').on(t.nodeId),
+		index('k8s_clusters_deleted_idx').on(t.deletedAt),
+	],
+);
+
+export const k8sMachines = sqliteTable(
+	'k8s_machines',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		clusterId: text('cluster_id').notNull(),
+		role: text('role', { enum: ['server', 'agent'] }).notNull(),
+		ordinal: integer('ordinal').notNull().default(0),
+		nodeId: text('node_id').notNull(),
+		status: text('status', { enum: ['pending', 'starting', 'running', 'degraded', 'failed', 'stopped'] })
+			.notNull()
+			.default('pending'),
+		restarts: integer('restarts').notNull().default(0),
+		removedAt: integer('removed_at'),
+		purgeRequestedAt: integer('purge_requested_at'),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+		/** Routed overlay address for multi-node clusters (K6); null on a single-node cluster. */
+		overlayIp: text('overlay_ip'),
+		/** The release this machine runs; a rollout moves one machine at a time. Null = the cluster's. */
+		release: text('release'),
+		/** Loopback API port for a server on its own node (HA servers on other nodes). */
+		apiPort: integer('api_port'),
+	},
+	(t) => [index('k8s_machines_cluster_idx').on(t.clusterId), index('k8s_machines_node_idx').on(t.nodeId)],
+);
+
+export const k8sRoutes = sqliteTable(
+	'k8s_routes',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		clusterId: text('cluster_id').notNull(),
+		host: text('host').notNull(),
+		createdBy: text('created_by').notNull(),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+	},
+	(t) => [uniqueIndex('k8s_routes_host_idx').on(t.host), index('k8s_routes_cluster_idx').on(t.clusterId)],
+);
+
+export const k8sAttachments = sqliteTable(
+	'k8s_attachments',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		clusterId: text('cluster_id').notNull(),
+		kind: text('kind', { enum: ['database', 'broker'] }).notNull(),
+		targetId: text('target_id').notNull(),
+		namespace: text('namespace').notNull(),
+		secret: text('secret').notNull(),
+		createdBy: text('created_by').notNull(),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+	},
+	(t) => [
+		uniqueIndex('k8s_attachments_secret_idx').on(t.clusterId, t.namespace, t.secret),
+		index('k8s_attachments_target_idx').on(t.targetId),
+	],
+);
+
+export const k8sAccessKeys = sqliteTable('k8s_access_keys', {
+	id: text('id').primaryKey(),
+	orgId: text('org_id').notNull(),
+	clusterId: text('cluster_id').notNull(),
+	name: text('name').notNull(),
+	role: text('role', { enum: ['view', 'edit', 'admin'] }).notNull(),
+	createdBy: text('created_by').notNull(),
+	createdAt: integer('created_at').notNull().$defaultFn(now),
+	expiresAt: integer('expires_at'),
+	revokedAt: integer('revoked_at'),
+});
+
+export const k8sLogEvents = sqliteTable(
+	'k8s_log_events',
+	{
+		seq: integer('seq').primaryKey({ autoIncrement: true }),
+		orgId: text('org_id').notNull(),
+		clusterId: text('cluster_id').notNull(),
+		machineId: text('machine_id'),
+		nodeId: text('node_id'),
+		source: text('source', { enum: ['runtime', 'system'] }).notNull().default('runtime'),
+		stream: text('stream', { enum: ['stdout', 'stderr', 'system'] }).notNull().default('stdout'),
+		level: text('level', { enum: ['debug', 'info', 'warn', 'error'] }).notNull().default('info'),
+		message: text('message').notNull(),
+		ts: integer('ts').notNull(),
+	},
+	(t) => [index('k8s_log_events_cluster_seq_idx').on(t.clusterId, t.seq), index('k8s_log_events_ts_idx').on(t.ts)],
+);
+
+export const k8sBackups = sqliteTable(
+	'k8s_backups',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		clusterId: text('cluster_id').notNull(),
+		clusterName: text('cluster_name').notNull(),
+		kind: text('kind', { enum: ['scheduled', 'manual', 'pre-upgrade'] }).notNull().default('scheduled'),
+		datastore: text('datastore', { enum: ['sqlite', 'etcd'] }).notNull().default('sqlite'),
+		status: text('status', { enum: ['pending', 'running', 'ok', 'failed'] }).notNull().default('pending'),
+		error: text('error'),
+		objectKey: text('object_key').notNull(),
+		targetId: text('target_id'),
+		targetName: text('target_name'),
+		locationJson: text('location_json'),
+		sizeBytes: integer('size_bytes'),
+		sha256: text('sha256'),
+		minor: text('minor').notNull(),
+		release: text('release').notNull(),
+		tokenSecret: text('token_secret').notNull(),
+		createdBy: text('created_by').notNull(),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+		finishedAt: integer('finished_at'),
+		expiresAt: integer('expires_at').notNull(),
+	},
+	(t) => [index('k8s_backups_cluster_idx').on(t.clusterId, t.createdAt), index('k8s_backups_status_idx').on(t.status)],
+);
+
+export const k8sPodLogs = sqliteTable(
+	'k8s_pod_logs',
+	{
+		seq: integer('seq').primaryKey({ autoIncrement: true }),
+		orgId: text('org_id').notNull(),
+		clusterId: text('cluster_id').notNull(),
+		namespace: text('namespace').notNull(),
+		pod: text('pod').notNull(),
+		container: text('container').notNull(),
+		stream: text('stream').notNull().default('stdout'),
+		message: text('message').notNull(),
+		ts: integer('ts').notNull(),
+	},
+	(t) => [index('k8s_pod_logs_cluster_seq_idx').on(t.clusterId, t.seq), index('k8s_pod_logs_ts_idx').on(t.ts)],
+);
+
+export const k8sTrustedOrgs = sqliteTable('k8s_trusted_orgs', {
+	orgId: text('org_id').primaryKey(),
+	grantedBy: text('granted_by').notNull(),
+	grantedAt: integer('granted_at').notNull(),
+});
+
 export const schema = {
+	k8sClusters,
+	k8sMachines,
+	k8sRoutes,
+	k8sAttachments,
+	k8sAccessKeys,
+	k8sLogEvents,
+	k8sTrustedOrgs,
+	k8sBackups,
+	k8sPodLogs,
 	nodes,
 	nodeJoinTokens,
 	projects,

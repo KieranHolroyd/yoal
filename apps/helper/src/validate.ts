@@ -1,3 +1,4 @@
+import { KUBERNETES_ID_PREFIX, kubernetesReleaseImage, parseKubernetes, type WorkloadKubernetes } from './kubernetes.ts';
 /**
  * Validation for everything that crosses the helper socket. The helper is the last line of
  * defence for a privileged process: it never trusts the control plane or the agent, never sees a
@@ -280,6 +281,8 @@ export interface WorkloadDesired {
 	 * cap matter: image, user, mounts, config and container port come from `BROKER_ENGINES`.
 	 */
 	broker?: WorkloadBroker;
+	/** A managed Kubernetes machine (docs/KUBERNETES.md); image, flags and mounts are the helper's. */
+	kubernetes?: WorkloadKubernetes;
 	/** Disk for the data dir (D169); resolved and verified against the helper's registry. */
 	volumeId?: string;
 	/** App volumes mounted into this workload (plan 07); ids and mount points only, never paths. */
@@ -702,7 +705,7 @@ export function assertBrokerId(value: unknown, label = 'broker id'): string {
 /** A managed-service id (`db_`, `st_` or `mq_`): the only ids whose data dir `purge` may delete. */
 export function assertManagedId(value: unknown, label = 'managed id'): string {
 	const id = assertId(value, label);
-	for (const prefix of [DATABASE_ID_PREFIX, STORAGE_ID_PREFIX, BROKER_ID_PREFIX, REGISTRY_ID_PREFIX]) {
+	for (const prefix of [DATABASE_ID_PREFIX, STORAGE_ID_PREFIX, BROKER_ID_PREFIX, REGISTRY_ID_PREFIX, KUBERNETES_ID_PREFIX]) {
 		if (id.startsWith(prefix) && id.length > prefix.length) return id;
 	}
 	throw new ValidationError(
@@ -1306,7 +1309,7 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 		workloadCompose = parseWorkloadCompose(record.compose);
 		// Services carry their own images and commands; the workload-level fields would be ignored
 		// or, worse, silently shadow one service's setting.
-		for (const key of ['image', 'command', 'database', 'objectStorage', 'broker', 'registry', 'runner', 'pooler', 'volumeId'] as const)
+		for (const key of ['image', 'command', 'database', 'objectStorage', 'broker', 'kubernetes', 'registry', 'runner', 'pooler', 'volumeId'] as const)
 			if (record[key] !== undefined) throw new ValidationError(`Compose workloads cannot set workload.${key}`);
 		if (record.socketActivation === true)
 			throw new ValidationError('Compose services are containers; socket activation is for process apps');
@@ -1325,7 +1328,7 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 		// Functions are HTTP-only and run the pinned binary, never an image or a command.
 		if (record.ingress !== undefined)
 			throw new ValidationError('Function workloads must have HTTP ingress; workload.ingress must be omitted');
-		for (const key of ['image', 'command', 'database', 'objectStorage', 'broker', 'runner', 'pooler', 'volumeId'] as const) {
+		for (const key of ['image', 'command', 'database', 'objectStorage', 'broker', 'kubernetes', 'runner', 'pooler', 'volumeId'] as const) {
 			if (record[key] !== undefined)
 				throw new ValidationError(`Function workloads cannot set workload.${key}`);
 		}
@@ -1352,6 +1355,9 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 	}
 	if (registry && (database || objectStorage || broker))
 		throw new ValidationError('A workload cannot have a registry profile together with another managed profile');
+	const kubernetes = record.kubernetes === undefined ? undefined : parseKubernetes(record.kubernetes);
+	if (kubernetes && (database || objectStorage || broker || registry))
+		throw new ValidationError('A workload cannot have a kubernetes profile together with another managed profile');
 	const id = assertId(record.id, 'workload.id');
 	const orgId = record.orgId === undefined ? undefined : assertId(record.orgId, 'workload.orgId');
 	const networkName =
@@ -1400,6 +1406,17 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 			throw new ValidationError('Broker workloads cannot mount file secrets');
 	} else if (id.startsWith(BROKER_ID_PREFIX)) {
 		throw new ValidationError(`workload.id prefix "${BROKER_ID_PREFIX}" is reserved for queue brokers`);
+	}
+	if (kubernetes) {
+		if (runtime !== 'container') throw new ValidationError('Kubernetes machines must use the container runtime');
+		const expected = kubernetesReleaseImage(kubernetes.release);
+		if (image !== expected) throw new ValidationError(`workload.image must be ${expected} for k3s ${kubernetes.release}`);
+		if (!id.startsWith(KUBERNETES_ID_PREFIX) || id.length === KUBERNETES_ID_PREFIX.length)
+			throw new ValidationError(`Kubernetes machines need an id starting with "${KUBERNETES_ID_PREFIX}"`);
+		if (secrets.length > 0) throw new ValidationError('Kubernetes machines cannot take secrets');
+		if (record.orgId === undefined) throw new ValidationError('Kubernetes machines need workload.orgId');
+	} else if (id.startsWith(KUBERNETES_ID_PREFIX)) {
+		throw new ValidationError(`workload.id prefix "${KUBERNETES_ID_PREFIX}" is reserved for Kubernetes machines`);
 	}
 	if (registry) {
 		if (runtime !== 'container') throw new ValidationError('Registry workloads must use the container runtime');
@@ -1462,10 +1479,11 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 	}
 	if (objectStorage) workload.objectStorage = objectStorage;
 	if (broker) workload.broker = broker;
+	if (kubernetes) workload.kubernetes = kubernetes;
 	if (registry) workload.registry = registry;
 	if (record.ingress !== undefined) {
 		if (record.ingress !== 'none') throw new ValidationError('workload.ingress must be "none" when present');
-		if (database || objectStorage || broker || registry) throw new ValidationError('Managed services cannot be workers');
+		if (database || objectStorage || broker || registry || kubernetes) throw new ValidationError('Managed services cannot be workers');
 		workload.ingress = 'none';
 	}
 	if (record.runner !== undefined) {
@@ -1479,7 +1497,7 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 	if (record.identity !== undefined) {
 		if (record.identity !== true) throw new ValidationError('workload.identity must be true when present');
 		if (runtime === 'function') throw new ValidationError('Function workloads do not get a workload identity');
-		if (database || objectStorage || broker || registry)
+		if (database || objectStorage || broker || registry || kubernetes)
 			throw new ValidationError('Managed services do not get a workload identity');
 		if (workload.runner) throw new ValidationError('Ephemeral runners do not get a workload identity');
 		workload.identity = true;
@@ -1489,8 +1507,8 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 	const volumeId = record.volumeId === undefined ? undefined : assertId(record.volumeId, 'workload.volumeId');
 	if (volumeId) {
 		// Disks hold managed-service data dirs (D169); an app workload reaches one only through an app volume.
-		if (!database && !objectStorage && !broker)
-			throw new ValidationError('workload.volumeId is only valid for a database, objectStorage or broker workload');
+		if (!database && !objectStorage && !broker && !kubernetes)
+			throw new ValidationError('workload.volumeId is only valid for a database, objectStorage, broker or kubernetes workload');
 		workload.volumeId = volumeId;
 	}
 	return workload;

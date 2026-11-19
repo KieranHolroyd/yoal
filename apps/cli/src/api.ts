@@ -55,6 +55,28 @@ import type {
 	BrokerUpdateInput,
 	BrokerView,
 } from './brokers.ts';
+import type {
+	KubernetesAccessKeySecret,
+	KubernetesAccessKeyView,
+	KubernetesAttachmentView,
+	KubernetesBackupView,
+	KubernetesClusterView,
+	KubernetesPodLogLine,
+	KubernetesCreateInput,
+	KubernetesLogEvent,
+	KubernetesRouteView,
+	KubernetesToken,
+	KubernetesUpdateInput,
+} from './kubernetes.ts';
+import type {
+	KubernetesApplyInput,
+	KubernetesApplyResult,
+	KubernetesGenerateInput,
+	KubernetesGenerateProgress,
+	KubernetesGenerateResult,
+} from './kubernetes-write.ts';
+import { readGenerateEvents } from './kubernetes-write.ts';
+import { readSse } from './sse.ts';
 import type { EventDeliveryView, EventRuleCreateInput, EventRuleUpdateInput, EventRuleView } from './events.ts';
 import type { AuditEntryView, LogDrainCreateInput, LogDrainTestResult, LogDrainUpdateInput, LogDrainView } from './log-drains.ts';
 import type { BlueprintPlanView, BlueprintRunView, BlueprintValidation } from './blueprints.ts';
@@ -2033,6 +2055,229 @@ export class ApiClient {
 		return this.request('DELETE', `/api/v1/projects/${encodeURIComponent(project)}/email${query}`);
 	}
 
+	// ---------------------------------------------------------------- managed Kubernetes (docs/KUBERNETES.md)
+
+	async listKubernetes(options: { includeDeleted?: boolean } = {}): Promise<{ clusters: KubernetesClusterView[]; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/kubernetes${options.includeDeleted ? '?includeDeleted=1' : ''}`);
+		return { clusters: (asArray(asRecord(raw)?.clusters) ?? []) as KubernetesClusterView[], raw };
+	}
+
+	async getKubernetes(name: string, options: { includeDeleted?: boolean } = {}): Promise<{ cluster: KubernetesClusterView; raw: unknown }> {
+		const raw = await this.request(
+			'GET',
+			`/api/v1/kubernetes/${encodeURIComponent(name)}${options.includeDeleted ? '?includeDeleted=1' : ''}`,
+		);
+		return { cluster: kubernetesFrom(raw), raw };
+	}
+
+	async createKubernetes(input: KubernetesCreateInput): Promise<{ cluster: KubernetesClusterView; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/kubernetes', { body: input });
+		return { cluster: kubernetesFrom(raw), raw };
+	}
+
+	async updateKubernetes(name: string, input: KubernetesUpdateInput): Promise<{ cluster: KubernetesClusterView; raw: unknown }> {
+		const raw = await this.request('PATCH', `/api/v1/kubernetes/${encodeURIComponent(name)}`, { body: input });
+		return { cluster: kubernetesFrom(raw), raw };
+	}
+
+	async deleteKubernetes(name: string): Promise<{ cluster: KubernetesClusterView; raw: unknown }> {
+		const raw = await this.request('DELETE', `/api/v1/kubernetes/${encodeURIComponent(name)}`);
+		return { cluster: kubernetesFrom(raw), raw };
+	}
+
+	async purgeKubernetes(name: string): Promise<unknown> {
+		return this.request('POST', `/api/v1/kubernetes/${encodeURIComponent(name)}/purge`, { body: {} });
+	}
+
+	async restoreKubernetes(name: string): Promise<{ cluster: KubernetesClusterView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/kubernetes/${encodeURIComponent(name)}/restore`, { body: {} });
+		return { cluster: kubernetesFrom(raw), raw };
+	}
+
+	async restartKubernetes(name: string): Promise<{ cluster: KubernetesClusterView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/kubernetes/${encodeURIComponent(name)}/restart`, { body: {} });
+		return { cluster: kubernetesFrom(raw), raw };
+	}
+
+	/** A 15-minute cluster token for the caller (K8). */
+	async kubernetesToken(name: string): Promise<KubernetesToken> {
+		const raw = await this.request('POST', `/api/v1/kubernetes/${encodeURIComponent(name)}/token`, { body: {} });
+		const token = asRecord(asRecord(raw)?.token);
+		if (!token || typeof token.token !== 'string' || typeof token.expiresAt !== 'string')
+			throw new CliError('The platform returned an unexpected token response.', { code: 'protocol' });
+		return token as unknown as KubernetesToken;
+	}
+
+	/** The exec-plugin kubeconfig as YAML text; it holds no credential. */
+	async kubernetesKubeconfig(name: string): Promise<string> {
+		const response = await this.raw('GET', `/api/v1/kubernetes/${encodeURIComponent(name)}/kubeconfig?format=yaml`, {
+			headers: { accept: 'application/yaml' },
+			signal: AbortSignal.timeout(this.timeoutMs),
+		});
+		return response.text();
+	}
+
+	async listKubernetesAccessKeys(name: string): Promise<{ keys: KubernetesAccessKeyView[]; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/kubernetes/${encodeURIComponent(name)}/access-keys`);
+		return { keys: (asArray(asRecord(raw)?.keys) ?? []) as KubernetesAccessKeyView[], raw };
+	}
+
+	async createKubernetesAccessKey(
+		name: string,
+		input: { name: string; role: string; expiresAt?: string },
+	): Promise<{ key: KubernetesAccessKeySecret; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/kubernetes/${encodeURIComponent(name)}/access-keys`, { body: input });
+		const key = asRecord(asRecord(raw)?.key);
+		if (!key || typeof key.kubeconfig !== 'string')
+			throw new CliError('The platform returned an unexpected access key response.', { code: 'protocol' });
+		return { key: key as unknown as KubernetesAccessKeySecret, raw };
+	}
+
+	async revokeKubernetesAccessKey(name: string, key: string): Promise<unknown> {
+		return this.request('DELETE', `/api/v1/kubernetes/${encodeURIComponent(name)}/access-keys/${encodeURIComponent(key)}`);
+	}
+
+	async listKubernetesRoutes(name: string): Promise<{ routes: KubernetesRouteView[]; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/kubernetes/${encodeURIComponent(name)}/routes`);
+		return { routes: (asArray(asRecord(raw)?.routes) ?? []) as KubernetesRouteView[], raw };
+	}
+
+	async addKubernetesRoute(name: string, label: string): Promise<{ route: KubernetesRouteView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/kubernetes/${encodeURIComponent(name)}/routes`, { body: { name: label } });
+		return { route: asRecord(asRecord(raw)?.route) as unknown as KubernetesRouteView, raw };
+	}
+
+	async removeKubernetesRoute(name: string, host: string): Promise<unknown> {
+		return this.request('DELETE', `/api/v1/kubernetes/${encodeURIComponent(name)}/routes/${encodeURIComponent(host)}`);
+	}
+
+	async attachToKubernetes(
+		name: string,
+		input: { kind: 'database' | 'broker'; name: string; namespace?: string; secret?: string },
+	): Promise<{ attachment: KubernetesAttachmentView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/kubernetes/${encodeURIComponent(name)}/attachments`, { body: input });
+		return { attachment: asRecord(asRecord(raw)?.attachment) as unknown as KubernetesAttachmentView, raw };
+	}
+
+	async detachFromKubernetes(name: string, attachmentId: string): Promise<unknown> {
+		return this.request(
+			'DELETE',
+			`/api/v1/kubernetes/${encodeURIComponent(name)}/attachments/${encodeURIComponent(attachmentId)}`,
+		);
+	}
+
+	async listKubernetesBackups(name: string): Promise<{ backups: KubernetesBackupView[]; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/kubernetes/${encodeURIComponent(name)}/backups`);
+		return { backups: (asArray(asRecord(raw)?.backups) ?? []) as KubernetesBackupView[], raw };
+	}
+
+	async backupKubernetes(name: string): Promise<{ backup: KubernetesBackupView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/kubernetes/${encodeURIComponent(name)}/backups`, { body: {} });
+		const backup = asRecord(asRecord(raw)?.backup);
+		if (!backup || typeof backup.id !== 'string')
+			throw new CliError('The platform returned an unexpected backup response.', { code: 'protocol', details: raw });
+		return { backup: backup as unknown as KubernetesBackupView, raw };
+	}
+
+	/** A new cluster from a snapshot; restores never overwrite a live cluster. */
+	async restoreKubernetesBackup(input: {
+		backup: string;
+		name: string;
+		placement?: string;
+	}): Promise<{ cluster: KubernetesClusterView; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/kubernetes/restore-backup', { body: input });
+		return { cluster: kubernetesFrom(raw), raw };
+	}
+
+	/** Pod logs the cluster's shipper sent (K23); `after` is the polling cursor. */
+	async kubernetesPodLogs(
+		name: string,
+		options: { after?: number; limit?: number; namespace?: string; pod?: string; q?: string } = {},
+	): Promise<{ lines: KubernetesPodLogLine[]; raw: unknown }> {
+		const query = new URLSearchParams();
+		if (options.after !== undefined) query.set('after', String(options.after));
+		if (options.limit !== undefined) query.set('limit', String(options.limit));
+		if (options.namespace) query.set('namespace', options.namespace);
+		if (options.pod) query.set('pod', options.pod);
+		if (options.q) query.set('q', options.q);
+		const search = query.toString();
+		const raw = await this.request(
+			'GET',
+			`/api/v1/kubernetes/${encodeURIComponent(name)}/pod-logs${search ? `?${search}` : ''}`,
+		);
+		return { lines: (asArray(asRecord(raw)?.lines) ?? []) as KubernetesPodLogLine[], raw };
+	}
+
+	async kubernetesLogs(
+		name: string,
+		options: { after?: number; limit?: number } = {},
+	): Promise<{ events: KubernetesLogEvent[]; cursor: number; raw: unknown }> {
+		const query = new URLSearchParams();
+		if (options.after !== undefined) query.set('after', String(options.after));
+		if (options.limit !== undefined) query.set('limit', String(options.limit));
+		const search = query.toString();
+		const raw = await this.request('GET', `/api/v1/kubernetes/${encodeURIComponent(name)}/logs${search ? `?${search}` : ''}`);
+		const record = asRecord(raw) ?? {};
+		return {
+			events: (asArray(record.events) ?? []) as KubernetesLogEvent[],
+			cursor: numberValue(record.cursor) ?? options.after ?? 0,
+			raw,
+		};
+	}
+
+	/**
+	 * A config from plain language (docs/KUBERNETES.md §18). Streams progress over SSE; generation
+	 * takes tens of seconds, so there is no request timeout: `idleMs` aborts only when the stream
+	 * (keep-alives included) goes quiet. Fast failures (no provider, 403, bad YAML) throw an ApiError.
+	 */
+	async generateKubernetesConfig(
+		name: string,
+		input: KubernetesGenerateInput,
+		options: { onProgress?: (progress: KubernetesGenerateProgress) => void; idleMs?: number; signal?: AbortSignal } = {},
+	): Promise<KubernetesGenerateResult> {
+		const controller = new AbortController();
+		const idleMs = options.idleMs ?? 60_000;
+		let timer: ReturnType<typeof setTimeout> | undefined;
+		const arm = () => {
+			if (timer) clearTimeout(timer);
+			timer = setTimeout(() => controller.abort(new Error('idle')), idleMs);
+		};
+		const onAbort = () => controller.abort(options.signal?.reason);
+		options.signal?.addEventListener('abort', onAbort, { once: true });
+		arm();
+		try {
+			const response = await this.raw('POST', `/api/v1/kubernetes/${encodeURIComponent(name)}/generate`, {
+				body: JSON.stringify(input),
+				headers: { accept: 'text/event-stream', 'content-type': 'application/json' },
+				signal: controller.signal,
+			});
+			if (!response.body) throw new CliError('The config stream had no body.', { code: 'protocol' });
+			return await readGenerateEvents(readSse(response.body, { onChunk: arm }), options.onProgress);
+		} catch (error) {
+			if (controller.signal.aborted && !options.signal?.aborted)
+				throw new CliError(`The platform stopped responding for ${Math.round(idleMs / 1000)}s while writing the config.`, {
+					code: 'timeout',
+					cause: error,
+				});
+			throw error;
+		} finally {
+			if (timer) clearTimeout(timer);
+			options.signal?.removeEventListener('abort', onAbort);
+		}
+	}
+
+	/** Server-side apply (or `dryRun`) of YAML as the caller; the cluster's RBAC decides per object. */
+	async applyKubernetesConfig(name: string, input: KubernetesApplyInput): Promise<{ result: KubernetesApplyResult; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/kubernetes/${encodeURIComponent(name)}/apply`, {
+			body: input,
+			timeoutMs: Math.max(this.timeoutMs, 120_000),
+		});
+		const result = asRecord(raw);
+		if (!result || !Array.isArray(result.outcomes))
+			throw new CliError('The platform returned an unexpected apply response.', { code: 'protocol', details: raw });
+		return { result: result as unknown as KubernetesApplyResult, raw };
+	}
+
 	// ---------------------------------------------------------------- queue brokers (D111)
 
 	async listBrokers(options: { includeDeleted?: boolean } = {}): Promise<{ brokers: BrokerView[]; raw: unknown }> {
@@ -2909,6 +3154,20 @@ function brokerFrom(raw: unknown): BrokerView {
 	if (!view || typeof view.name !== 'string')
 		throw new CliError('The platform returned an unexpected broker response.', { code: 'protocol', details: raw });
 	return withAttachments(view as unknown as BrokerView);
+}
+
+/** Kubernetes endpoints wrap the view in `{ cluster }`. */
+function kubernetesFrom(raw: unknown): KubernetesClusterView {
+	const view = asRecord(asRecord(raw)?.cluster);
+	if (!view || typeof view.name !== 'string')
+		throw new CliError('The platform returned an unexpected Kubernetes cluster response.', { code: 'protocol', details: raw });
+	return {
+		...(view as unknown as KubernetesClusterView),
+		machines: (asArray(view.machines) ?? []) as KubernetesClusterView['machines'],
+		routes: (asArray(view.routes) ?? []) as KubernetesClusterView['routes'],
+		attachments: (asArray(view.attachments) ?? []) as KubernetesClusterView['attachments'],
+		allowCidrs: (asArray(view.allowCidrs) ?? []) as string[],
+	};
 }
 
 /** Domain endpoints return the view itself, or `{ domain }` from newer servers. */

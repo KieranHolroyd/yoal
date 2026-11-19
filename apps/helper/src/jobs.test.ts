@@ -11,6 +11,7 @@ import {
 	parseJobRequest,
 	renderContainerJobArgs,
 	renderProcessJobArgs,
+	assertDynamicUserName,
 	type JobApi,
 	type JobRequest,
 	type JobStatus,
@@ -114,6 +115,7 @@ describe('rendering', () => {
 			expandFlag: true,
 			systemdRunPath: '/usr/bin/systemd-run',
 			releaseDir: `/var/lib/yoal/releases/${SHA}`,
+			appUser: '_duca17989d1bcf0119',
 			pathDirs: ['/usr/local/bin'],
 		});
 		const separator = args.indexOf('--');
@@ -135,7 +137,7 @@ describe('rendering', () => {
 			'--property=MemoryMax=256M',
 			'--property=CPUQuota=100%',
 			'--property=DynamicUser=yes',
-			'--property=User=yoal-workload-wld_abc123',
+			'--property=User=_duca17989d1bcf0119',
 			'--property=StateDirectory=yoal-workloads/wld_abc123',
 			`--working-directory=/var/lib/yoal/releases/${SHA}`,
 			`--property=EnvironmentFile=-/run/yoal-workloads/jobs/${RUN}/env`,
@@ -182,6 +184,7 @@ describe('rendering', () => {
 			expandFlag: false,
 			systemdRunPath: '/usr/bin/systemd-run',
 			releaseDir: '/releases/x',
+			appUser: null,
 			pathDirs: [],
 		});
 		expect(args).not.toContain('--expand-environment=no');
@@ -276,12 +279,15 @@ describe('status', () => {
 class FakeRunner implements CommandRunner {
 	calls: string[][] = [];
 	show = 'LoadState=not-found\n';
+	/** `systemctl show -P User` of the app unit (systemd's `_du<hash>` for a long unit name). */
+	appUser = '_duca17989d1bcf0119\n';
 	version = 'systemd 255 (255.4-1ubuntu8)';
 	containerRunning = 'true';
 
 	async run(argv: string[]): Promise<RunResult> {
 		this.calls.push(argv);
 		if (argv[1] === '--version') return { code: 0, stdout: this.version, stderr: '' };
+		if (argv[1] === 'show' && argv[2] === '-P' && argv[3] === 'User') return { code: 0, stdout: this.appUser, stderr: '' };
 		if (argv[1] === 'show') return { code: 0, stdout: this.show, stderr: '' };
 		if (argv[0]?.endsWith('systemd-run')) {
 			this.show = 'LoadState=loaded\nActiveState=active\nSubState=running\nResult=success\nExecMainCode=0\n';
@@ -328,6 +334,10 @@ describe('JobDriver', () => {
 		expect((await fs.stat(jobDir)).mode & 0o777).toBe(0o700);
 		const started = runner.calls.filter((argv) => argv[0] === '/usr/bin/systemd-run' && argv[1] !== '--version');
 		expect(started).toHaveLength(1);
+		// The app unit's own dynamic user, never the over-long `yoal-workload-<id>` (EINVAL at spawn).
+		expect(runner.calls).toContainEqual(['/usr/bin/systemctl', 'show', '-P', 'User', 'yoal-workload-wld_abc123.service']);
+		expect(started[0]).toContain('--property=User=_duca17989d1bcf0119');
+		expect(started[0]!.some((arg) => arg.startsWith('--property=User=yoal-workload-'))).toBe(false);
 		expect(started[0]).toContain('--setenv=PATH=/usr/local/lib/yoal/node/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin');
 		await driver.start(parseJobRequest(requestInput()));
 		expect(runner.calls.filter((argv) => argv[0] === '/usr/bin/systemd-run' && argv[1] !== '--version')).toHaveLength(1);
@@ -338,6 +348,19 @@ describe('JobDriver', () => {
 		expect(runner.calls).toContainEqual(['/usr/bin/systemctl', 'reset-failed', `yoal-job-${RUN}.service`]);
 		expect(runner.calls).toContainEqual(['/usr/bin/podman', 'rm', '--force', '--ignore', `yoal-job-${RUN}`]);
 		expect(await fs.stat(jobDir).catch(() => null)).toBeNull();
+	});
+
+	test('without an app unit on the node (empty or odd User), the run gets a dynamic user of its own', async () => {
+		for (const appUser of ['\n', 'LoadState=not-found\n', 'yoal-workload-wld_abc123-far-too-long-for-systemd\n']) {
+			const { runner, driver } = await driverFixture();
+			runner.appUser = appUser;
+			await driver.start(parseJobRequest(requestInput()));
+			const started = runner.calls.find((argv) => argv[0] === '/usr/bin/systemd-run' && argv[1] !== '--version')!;
+			expect(started).toContain('--property=DynamicUser=yes');
+			expect(started.some((arg) => arg.startsWith('--property=User='))).toBe(false);
+		}
+		expect(() => assertDynamicUserName('yoal-workload-wld_0123456789abcdef0123456789abcdef')).toThrow(/valid systemd user name/);
+		expect(assertDynamicUserName('_du643146332563d908')).toBe('_du643146332563d908');
 	});
 
 	test('a missing release, or a container app that is not running, fails before anything is written', async () => {

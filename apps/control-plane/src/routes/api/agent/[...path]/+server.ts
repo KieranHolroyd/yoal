@@ -86,6 +86,16 @@ const handler: RequestHandler = async (event) => {
 			return core.workloads.activationFor(node.id, activation[1]!);
 		}
 
+		// Kubernetes manifests (docs/KUBERNETES.md K9, K12, K19): RBAC, access-key bindings and
+		// attachment Secrets for a server machine on this node. Fetched like an activation, never
+		// put in desired state, because attachment Secrets carry passwords.
+		const k8sManifests = /^kubernetes\/manifests\/([^/]+)$/.exec(action);
+		if (k8sManifests) {
+			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+			const node = core.nodes.authenticate(token);
+			return json(core.kubernetes.manifests(node.id, k8sManifests[1]!), 200, { 'cache-control': 'no-store' });
+		}
+
 		// Workload identity (IAM.md I18): the node's agent mints a token for one of its workloads,
 		// either for the file it delivers (aud=yoal) or for the metadata endpoint's other audiences.
 		const identity = /^workloads\/([^/]+)\/identity$/.exec(action);

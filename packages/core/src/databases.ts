@@ -3554,6 +3554,41 @@ export class DatabaseService {
 			.sort((a, b) => a.prefix.localeCompare(b.prefix));
 	}
 
+	/**
+	 * Connection values for a Kubernetes attachment Secret (docs/KUBERNETES.md K12). Pods reach the
+	 * database through the machine's org network alias, like a container app on the same node.
+	 */
+	connectionValuesForCluster(databaseId: string): Record<string, string> | null {
+		const db = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
+		if (!db || db.deletedAt) return null;
+		const info = databaseEngineRegistry[db.engine];
+		const pass = this.ctx.secrets.open(db.orgId, db.ownerSecret);
+		const user = databaseIdentifier(db.name);
+		const host = databaseAlias(db.id);
+		const name = databaseUrlDatabase(db.engine, databaseIdentifier(db.name));
+		const tls = this.tlsState(db);
+		const url = databaseConnectionUrl({
+			scheme: info.scheme,
+			user,
+			pass,
+			host,
+			port: info.containerPort,
+			database: name,
+			sslmode: tls.mode,
+			query: info.urlQuery,
+		});
+		return {
+			URL: url,
+			HOST: host,
+			PORT: String(info.containerPort),
+			USER: user,
+			PASSWORD: pass,
+			NAME: name,
+			...(info.capabilities.tls ? { SSL_MODE: tls.mode } : {}),
+			...(tls.enabled && tls.caPem ? { CA_CERT: tls.caPem } : {}),
+		};
+	}
+
 	private resolveForConsumer(projectId: string, nodeId: string | null, runtime: WorkloadRuntime): ResolvedAttachment[] {
 		if (!nodeId) return [];
 		return this.liveAttachmentRows(projectId).flatMap(({ db, prefix, credential }) => {

@@ -14,6 +14,7 @@ import {
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import {
+	leftoverOwnershipCommands,
 	migrateEnvText,
 	migrateHost,
 	migratePath,
@@ -125,6 +126,22 @@ describe('text conversion', () => {
 		expect(migrated).toContain('YOAL_CLICKHOUSE_READER_USER=yoal_reader');
 		expect(migrated).toContain('YOAL_BUILDER_USER=yoal-build');
 		expect(migrated).toContain('YOAL_HELPER_CONTROL_SOCKET_GROUP=yoal');
+	});
+});
+
+describe('leftoverOwnershipCommands', () => {
+	test('re-owns only legacy-owned files under the persistent Yoal trees', () => {
+		const commands = leftoverOwnershipCommands([['skiff', 'yoal']], [['skiff', 'yoal']]);
+		expect(commands).toHaveLength(2);
+		const [user, group] = commands as [string[], string[]];
+		expect(user.slice(0, 5)).toEqual(['chown', '-R', '-h', '--from=skiff', 'yoal']);
+		expect(group.slice(0, 5)).toEqual(['chown', '-R', '-h', '--from=:skiff', ':yoal']);
+		expect(user).toContain('/var/lib/yoal');
+		expect(user).toContain('/etc/yoal');
+		expect(user).toContain('/var/lib/yoal-agent');
+		// Never runtime dirs or mounted shares.
+		expect(user.some((arg) => arg.startsWith('/run/') || arg.startsWith('/mnt/'))).toBe(false);
+		expect(leftoverOwnershipCommands([], [])).toEqual([]);
 	});
 });
 

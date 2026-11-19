@@ -29,6 +29,7 @@ export type ScopeRef =
 				| 'database'
 				| 'storage'
 				| 'broker'
+				| 'kubernetesCluster'
 				| 'emailDomain'
 				| 'shareLink'
 				| 'container'

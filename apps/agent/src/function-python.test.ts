@@ -51,13 +51,13 @@ function pythonWorkload(): WorkloadDesired {
 describe('Python function config', () => {
 	const config = renderWorkerdConfigParts({ workload: pythonWorkload(), releaseDir: '/r', env: {} }).config;
 
-	test('the user Worker is `main`, entry module first, embeds keep manifest indexes, no shim inside', () => {
+	test('the user Worker is `main`, entry module first, embeds name each release file, no shim inside', () => {
 		const main = config.slice(config.indexOf('( name = "main",'), config.indexOf('( name = "yoal-shim",'));
 		const modules = [...main.matchAll(/\( name = "([^"]+)", (\w+) = embed "([^"]+)" \)/g)].map((match) => match.slice(1));
 		expect(modules).toEqual([
-			['entry.py', 'pythonModule', 'module-1'],
-			['a_helpers.py', 'pythonModule', 'module-0'],
-			['python_modules/workers/workflows.js', 'data', 'module-2'],
+			['entry.py', 'pythonModule', `/${SHA}/entry.py`],
+			['a_helpers.py', 'pythonModule', `/${SHA}/a_helpers.py`],
+			['python_modules/workers/workflows.js', 'data', `/${SHA}/python_modules/workers/workflows.js`],
 		]);
 		expect(main).toContain('compatibilityFlags = [ "python_workers" ]');
 		expect(main).not.toContain('function-shim');

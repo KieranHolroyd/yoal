@@ -206,6 +206,21 @@ export class LogService {
 			: this.ctx.db.select().from(databases).where(eq(databases.id, batch.workloadId)).get();
 		const service = storage ?? database;
 		if (!service) {
+			// Kubernetes machines keep their own log table (0116); the service checks node ownership.
+			if (this.ctx.kubernetes.isMachineId(batch.workloadId))
+				return this.ctx.kubernetes.appendRuntimeLogs(
+					nodeId,
+					batch.workloadId,
+					batch.lines.map((line) => {
+						const parsed = parseLogLine(line.message);
+						return {
+							stream: line.stream,
+							level: parsed.level ?? line.level,
+							message: sanitize(parsed.message),
+							ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? this.ctx.now(),
+						};
+					}),
+				);
 			// Brokers keep their own log table (0048); the service checks node ownership.
 			if (!this.ctx.brokers.isBrokerId(batch.workloadId)) return 0;
 			return this.ctx.brokers.appendRuntimeLogs(

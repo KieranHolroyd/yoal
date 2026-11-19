@@ -3,6 +3,7 @@ import { composeSpecSchema } from './compose.ts';
 import { databaseExtensionAllowlist, databaseMonitorSchema, workloadDatabaseSchema } from './database.ts';
 import { storageAdminSchema, workloadObjectStorageSchema, workloadStorageStsSchema } from './object-storage.ts';
 import { workloadBrokerSchema } from './broker.ts';
+import { workloadKubernetesSchema } from './kubernetes.ts';
 import { githubRunnerSchema } from './github-runner.ts';
 import { MAX_REGISTRY_AUTH_ENTRIES, imageDigestSchema, registryAuthEntrySchema, workloadRegistrySchema } from './registry.ts';
 import { workloadIdentityActivationSchema, workloadIdentitySpecSchema } from './workload-identity.ts';
@@ -545,6 +546,8 @@ export const workloadDesiredSchema = z.object({
 	objectStorage: workloadObjectStorageSchema.optional(),
 	/** Managed queue broker profile (D111); the helper derives image, user, config and mounts. */
 	broker: workloadBrokerSchema.optional(),
+	/** A managed Kubernetes machine (docs/KUBERNETES.md); the helper derives image, flags and mounts. */
+	kubernetes: workloadKubernetesSchema.optional(),
 	/** The platform registry (docs/REGISTRY.md G1): zot, rendered by the helper from this profile. */
 	registry: workloadRegistrySchema.optional(),
 	/**

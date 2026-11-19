@@ -98,6 +98,11 @@ export class MaintenanceService {
 		// Replication rules from before migration 0059 get their scoped key (OBJECT-STORAGE.md §12).
 		this.ctx.storageReplication.backfillKeys();
 		this.ctx.brokers.requestExpiredPurges();
+		this.ctx.kubernetes.requestExpiredPurges();
+		// Kubernetes (docs/KUBERNETES.md K14, K15, K17, K23): snapshots, rollouts and HA steps, log retention.
+		await this.ctx.kubernetes.backupTick().catch((error: unknown) => console.error('[maintenance] kubernetes backups:', error));
+		this.ctx.kubernetes.rolloutTick();
+		this.ctx.kubernetes.pruneLogs();
 		// App volumes: trash purge, snapshot/restore timeouts, snapshots of purged volumes (VOLUMES.md).
 		await this.ctx.appVolumes.lifecycle.tick().catch((error: unknown) => console.error('[maintenance] app volumes:', error));
 		// Pipelines: lapsed leases, `schedule:` triggers, expired artifacts and caches (docs/PIPELINES.md).
@@ -201,6 +206,7 @@ export class MaintenanceService {
 		alertsFired.push(...(await this.databaseAlerts()));
 		alertsFired.push(...(await this.storageAlerts()));
 		alertsFired.push(...(await this.brokerAlerts()));
+		alertsFired.push(...(await this.kubernetesAlerts()));
 		alertsFired.push(...(await this.appVolumeAlerts()));
 		alertsFired.push(...(await this.quotaAlerts()));
 		// Daily trend points are idempotent: after the first sweep of a UTC day this is a no-op.
@@ -573,6 +579,17 @@ export class MaintenanceService {
 				detail: `Storage ${row.name} uses ${(ratio * 100).toFixed(1)}% of its ${row.storageMb} MB budget.`,
 				severity: ratio >= 0.95 ? 'critical' : 'warning',
 			});
+		}
+		return fired;
+	}
+
+	/** Managed Kubernetes (docs/KUBERNETES.md §9.3): unhealthy clusters, failing snapshots, rollbacks, end of support. */
+	private async kubernetesAlerts(): Promise<string[]> {
+		const fired: string[] = [];
+		this.ctx.kubernetes.alertTick();
+		for (const alert of this.ctx.kubernetes.alertCandidates()) {
+			fired.push(alert.key);
+			await this.notify(alert);
 		}
 		return fired;
 	}

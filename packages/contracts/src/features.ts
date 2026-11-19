@@ -48,6 +48,14 @@ export const FEATURE_FLAGS = {
 		area: 'queues',
 		description: 'Create managed queue brokers (NATS with JetStream) and attach them to apps (docs/BROKERS.md).'
 	},
+	KUBERNETES: {
+		name: 'KUBERNETES',
+		// docs/KUBERNETES.md: purely additive. Nothing runs until an operator installs the optional
+		// node component and someone creates a cluster, so it ships on; 0 hides the surfaces.
+		default: true,
+		area: 'workloads',
+		description: 'Create managed Kubernetes (k3s) clusters on nodes with the optional component (docs/KUBERNETES.md).'
+	},
 	EMAIL: {
 		name: 'EMAIL',
 		// docs/EMAIL.md: purely additive. Nothing listens on 25/587/465 until a platform admin picks a

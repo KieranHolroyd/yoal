@@ -209,6 +209,102 @@ export function compileStorageRoute(route: DesiredState['storageRoutes'][number]
 	return compileProxyRoute(`storage:${route.storageId}`, route.host, route.upstream);
 }
 
+/** Paths the Kubernetes API answers without a token (liveness, readiness, version). */
+const KUBERNETES_OPEN_PATHS = ['/livez', '/livez/*', '/readyz', '/readyz/*', '/healthz', '/version'];
+
+/**
+ * A Kubernetes API or cluster-ingress route (docs/KUBERNETES.md K7, K11).
+ *
+ * - The allowlist is checked where public traffic arrives (the control plane only sends it there).
+ * - API routes refuse requests without `Authorization: Bearer` before they reach the API server, so
+ *   unauthenticated traffic never touches it (G8). Health paths stay open.
+ * - On the machine's own node the API upstream is HTTPS on loopback with the machine's own CA; it
+ *   is a loopback hop to a listener Yoal started, so the certificate is not verified.
+ * - Streams (`watch`, `logs -f`, `exec`, `port-forward`) pass through: no flush buffering, no
+ *   response timeout.
+ */
+export function compileKubernetesRoute(route: DesiredState['kubernetesRoutes'][number]): CaddyRoute {
+	const subroutes: CaddyRoute[] = [];
+	if (route.allowCidrs.length > 0)
+		subroutes.push({
+			match: [{ not: [{ remote_ip: { ranges: route.allowCidrs } }] }],
+			handle: [
+				{
+					handler: 'static_response',
+					status_code: 403,
+					headers: { 'Content-Type': ['text/plain; charset=utf-8'] },
+					body: 'This address is not on the cluster\'s allowlist.',
+				},
+			],
+			terminal: true,
+		});
+	if (route.bearerOnly)
+		subroutes.push({
+			match: [{ not: [{ header: { Authorization: ['Bearer *'] } }, { path: KUBERNETES_OPEN_PATHS }] }],
+			handle: [
+				{
+					handler: 'static_response',
+					status_code: 401,
+					headers: { 'Content-Type': ['application/json'] },
+					body: '{"kind":"Status","apiVersion":"v1","status":"Failure","message":"Unauthorized: use `yoal k8s kubeconfig`","reason":"Unauthorized","code":401}',
+				},
+			],
+			terminal: true,
+		});
+	const remote = /^https?:\/\//.test(route.upstream);
+	// An HA API has one upstream per server node (K17): Caddy uses the first healthy one, retries the
+	// next for a few seconds, and sets a failed node aside for half a minute.
+	const targets = (route.upstreams ?? []).length > 0 ? route.upstreams : [route.upstream];
+	subroutes.push({
+		handle: [
+			{
+				handler: 'reverse_proxy',
+				upstreams: targets.map((target) => ({ dial: target.replace(/^https?:\/\//, '') })),
+				...(targets.length > 1
+					? {
+							load_balancing: { selection_policy: { policy: 'first' }, try_duration: '5s' },
+							health_checks: { passive: { fail_duration: '30s', max_fails: 1 } },
+						}
+					: {}),
+				// The next hop (another node's Caddy) matches on the original host.
+				...(remote ? { headers: { request: { set: { Host: ['{http.request.host}'] } } } } : {}),
+				flush_interval: -1,
+				transport: {
+					protocol: 'http',
+					dial_timeout: '30s',
+					...(route.upstreamTls ? { tls: { insecure_skip_verify: true } } : {}),
+				},
+				handle_response: [
+					{
+						match: { status_code: [502, 503, 504] },
+						routes: [
+							{
+								handle: [
+									{
+										handler: 'static_response',
+										status_code: 503,
+										headers: { 'Retry-After': ['15'], 'Content-Type': ['text/plain; charset=utf-8'] },
+										body:
+											route.kind === 'api'
+												? 'The cluster API is not reachable right now. It may still be starting.'
+												: 'This cluster route is not reachable right now.',
+									},
+								],
+							},
+						],
+					},
+				],
+			},
+		],
+	});
+	return {
+		'@id': `k8s:${route.kind}:${route.clusterId}:${normalizeHost(route.host)}`,
+		match: [{ host: [normalizeHost(route.host)] }],
+		handle: [{ handler: 'subroute', routes: subroutes }],
+		terminal: true,
+	};
+}
+
 /**
  * User-pool issuer routes (IAM.md I26–I28, §11.2).
  *
@@ -549,7 +645,9 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 		.map((placeholder) => compileAwaitingDeployRoute(normalizeHost(placeholder.host), placeholder.dashboardUrl));
 	// Public storage endpoints match on a dedicated host and never collide with site routes (S3).
 	const storageRoutes = options.state.storageRoutes.map(compileStorageRoute);
-	server.routes = [...storageRoutes, ...redirects, ...domainRedirects, ...placeholderRoutes, ...server.routes];
+	// Kubernetes API and ingress hosts never collide with site routes (docs/KUBERNETES.md).
+	const kubernetesRoutes = (options.state.kubernetesRoutes ?? []).map(compileKubernetesRoute);
+	server.routes = [...kubernetesRoutes, ...storageRoutes, ...redirects, ...domainRedirects, ...placeholderRoutes, ...server.routes];
 
 	// Yoal Access needs its two response headers copied from the auth response to the upstream.
 	const accessHosts = new Set(
@@ -617,6 +715,24 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 		const automation = (tls.automation ??= {}) as Record<string, unknown>;
 		const policies = (automation.policies as Record<string, unknown>[] | undefined) ?? [];
 		policies.push({ subjects: customHosts, issuers: customDomainIssuers(options.tls) });
+		automation.policies = policies;
+	}
+
+	// Kubernetes API hosts are `<cluster>.k8s.<contentDomain>`, one label deeper than the content
+	// wildcard covers (D14), so the node that terminates them gets `*.k8s.<contentDomain>` over
+	// DNS-01 (docs/KUBERNETES.md K7). The record must be DNS-only: Cloudflare's proxy would neither
+	// cover the second label nor keep idle streams open.
+	const apiRoutes = (options.state.kubernetesRoutes ?? []).filter(
+		(route) => route.kind === 'api' && route.host.endsWith(`.k8s.${options.state.contentDomain}`),
+	);
+	if (apiRoutes.length > 0 && apps && options.tls) {
+		const wildcard = `*.k8s.${normalizeHost(options.state.contentDomain)}`;
+		const tls = (apps.tls ??= {});
+		const certificates = ((tls as Record<string, unknown>).certificates ??= {}) as Record<string, unknown>;
+		certificates.automate = [...new Set([...((certificates.automate as string[] | undefined) ?? []), wildcard])];
+		const automation = ((tls as Record<string, unknown>).automation ??= {}) as Record<string, unknown>;
+		const policies = (automation.policies as Record<string, unknown>[] | undefined) ?? [];
+		policies.push({ subjects: [wildcard], issuers: customDomainIssuers(options.tls) });
 		automation.policies = policies;
 	}
 

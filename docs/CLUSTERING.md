@@ -3514,7 +3514,7 @@ SQLite, loopback-only data ports, fixed helper verbs, human-gated destruction.
 
 | Option | Verdict | Decisive criterion | Evidence that would change it |
 |---|---|---|---|
-| Kubernetes (k3s), Nomad, Swarm | Rejected | Cost and footprint: a control plane larger than the workloads it schedules | 10+ nodes, several operators, a need for continuous scheduling |
+| Kubernetes (k3s), Nomad, Swarm as Yoal's scheduler | Rejected | Cost and footprint: a control plane larger than the workloads it schedules | 10+ nodes, several operators, a need for continuous scheduling. (Tenant clusters Yoal hosts, D226, do not change this.) |
 | Ceph, Longhorn, GlusterFS, DRBD | Rejected | Failure modes and footprint: quorum and heal behaviour at home scale | Cross-zone POSIX multi-writer with strong consistency |
 | Patroni + etcd/Consul | Rejected | A second consensus system and a per-database daemon | Postgres dominating the fleet, or zero-RPO beyond `ANY 1` |
 | pg_auto_failover | Rejected | A monitor Postgres to run, patch and lose | One large Postgres estate where one monitor beats our state machine |

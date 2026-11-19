@@ -29,6 +29,7 @@ export type ScopeType =
 	| 'database'
 	| 'storage'
 	| 'broker'
+	| 'kubernetesCluster'
 	| 'emailDomain'
 	| 'shareLink'
 	| 'container'
@@ -95,6 +96,10 @@ export const statements = {
 	database: ['create', 'read', 'update', 'delete', 'credentials', 'console'],
 	storage: ['create', 'read', 'update', 'delete', 'credentials'],
 	broker: ['create', 'read', 'update', 'delete', 'credentials'],
+	// Managed Kubernetes (docs/KUBERNETES.md): the cluster resource, plus the in-cluster groups a
+	// token carries (`view`, `edit`, `admin` → view/edit/cluster-admin, K9) and the break-glass
+	// admin certificate (`credentials`, K10).
+	kubernetes: ['create', 'read', 'update', 'delete', 'view', 'edit', 'admin', 'credentials'],
 	// Email (docs/EMAIL.md): domains, sending, suppressions, routes, credentials.
 	email: ['read', 'send', 'update', 'delete', 'credentials'],
 	shareLink: ['create', 'read', 'revoke'],
@@ -147,6 +152,7 @@ const RESOURCE_SCOPES: Record<Resource, readonly ScopeType[]> = {
 	database: ['org', 'project', 'database'],
 	storage: ['org', 'project', 'storage'],
 	broker: ['org', 'project', 'broker'],
+	kubernetes: ['org', 'kubernetesCluster'],
 	email: ['org', 'emailDomain'],
 	shareLink: ['org', 'project'],
 	logs: ['org', 'project', 'environment'],
@@ -211,6 +217,10 @@ const RISK_OVERRIDE: Partial<Record<Permission, Risk>> = {
 	// Revoking a share link is a write, not destruction: the link can be reissued and deployers
 	// have held this permission since D21.
 	'shareLink:revoke': 'write',
+	// In-cluster access levels (K9): reading resources, changing them, and cluster-admin.
+	'kubernetes:view': 'read',
+	'kubernetes:edit': 'write',
+	'kubernetes:admin': 'secret',
 };
 
 /** Step-up level, when the risk default isn't right. Ownership changes are `always` (STEP-UP §4). */

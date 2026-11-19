@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { crc32, deflateRawSync } from 'node:zlib';
 import { desiredStateSchema } from '@yoal/contracts';
-import { extractZip, ReleaseManager, safeEntryPath } from './releases.ts';
+import { extractZip, ReleaseManager, safeEntryPath, servesReleaseLocally } from './releases.ts';
 
 interface ZipInput {
 	name: string;
@@ -278,5 +278,44 @@ describe('ReleaseManager', () => {
 		expect(await fs.readlink(join(dir, 'sites', 'blog'))).toBe(join(dir, 'releases', PROD));
 		await expect(fs.lstat(join(dir, 'sites', 'gone'))).rejects.toThrow();
 		expect(await manager.hasRelease(PREVIEW)).toBe(true);
+	});
+
+	test('a local function route keeps its production symlink although it has an upstream', async () => {
+		const dir = await tempDir();
+		const manager = new ReleaseManager(dir);
+		await manager.init();
+		await fs.mkdir(join(dir, 'releases', PROD), { recursive: true });
+		await manager.activate('fn', PROD);
+		const fnRoute = route('fn', 'fn.example.com', PROD, {
+			production: true,
+			upstream: 'unix//run/yoal-workloads/wld_1.sock',
+			function: { assetsDirectory: 'public', runWorkerFirst: ['/api/*'] },
+		});
+		const desired = desiredStateSchema.parse({
+			version: 1,
+			nodeId: 'nod_1',
+			agentVersion: '0.1.0',
+			generatedAt: new Date().toISOString(),
+			contentDomain: 'example.com',
+			releases: [],
+			routes: [fnRoute],
+		});
+		expect(servesReleaseLocally(desired.routes[0]!)).toBe(true);
+		await manager.gc(desired);
+		expect(await fs.readlink(join(dir, 'sites', 'fn'))).toBe(join(dir, 'releases', PROD));
+		expect(await manager.hasRelease(PROD)).toBe(true);
+	});
+
+	test('a route proxied to another node is not served from local releases', () => {
+		const desired = desiredStateSchema.parse({
+			version: 1,
+			nodeId: 'nod_1',
+			agentVersion: '0.1.0',
+			generatedAt: new Date().toISOString(),
+			contentDomain: 'example.com',
+			releases: [],
+			routes: [route('app', 'app.example.com', PROD, { production: true, upstream: 'http://10.47.0.2:80' })],
+		});
+		expect(servesReleaseLocally(desired.routes[0]!)).toBe(false);
 	});
 });

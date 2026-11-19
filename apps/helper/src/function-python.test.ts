@@ -71,14 +71,14 @@ describe('Python function hosts', () => {
 		);
 		const execStart = unit.split('\n').find((line) => line.startsWith('ExecStart='));
 		expect(execStart).toBe(
-			`ExecStart=${WORKERD} serve %d/function-config --socket-fd http=3 --experimental --pyodide-bundle-disk-cache-dir /usr/lib/yoal/workerd/${VERSION}/pyodide`,
+			`ExecStart=${WORKERD} serve %d/function-config --socket-fd http=3 --import-path /srv/yoal/releases --experimental --pyodide-bundle-disk-cache-dir /usr/lib/yoal/workerd/${VERSION}/pyodide`,
 		);
-		expect(unit).toContain('LoadCredential=module-2:');
+		expect(unit).not.toContain("LoadCredential=module-");
 	});
 
 	test('a JavaScript host keeps its exact command line', () => {
 		const unit = unitFor(workload('index.js', [{ name: 'index.js', type: 'esm' }]));
-		expect(unit).toContain(`ExecStart=${WORKERD} serve %d/function-config --socket-fd http=3\n`);
+		expect(unit).toContain(`ExecStart=${WORKERD} serve %d/function-config --socket-fd http=3 --import-path /srv/yoal/releases\n`);
 		expect(unit).not.toContain('--experimental');
 	});
 

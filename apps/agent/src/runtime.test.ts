@@ -427,6 +427,45 @@ describe('WorkloadRuntime.converge', () => {
 		await second.converge(state([], 3));
 		expect(helper.removed).toEqual(['app']);
 	});
+	test('after a reboot every workload is applied again (its /run files are gone), and removal still works', async () => {
+		const dir = await fs.mkdtemp(join(tmpdir(), 'yoal-agent-runtime-'));
+		directories.push(dir);
+		const statePath = join(dir, 'workloads-state.json');
+
+		const helper = new FakeHelper();
+		const activations = new Map<string, WorkloadActivation>([
+			['app', activationFor('app')],
+			['old', activationFor('old')],
+		]);
+		const makeRuntime = (bootId: string | null) =>
+			new WorkloadRuntime({
+				helper,
+				releases: new FakeReleases(),
+				fetchActivation: async (id) => activations.get(id)!,
+				sliceMemoryMb: 1024,
+				healthTimeoutMs: 5,
+				probeHealth: async () => true,
+				sleep: async () => undefined,
+				statePath,
+				bootId,
+			});
+		const BOOT_A = '0f0e0d0c-0b0a-4908-8706-050403020100';
+		const BOOT_B = '1f1e1d1c-1b1a-4918-9716-151413121110';
+		await makeRuntime(BOOT_A).converge(state([workload('app'), workload('old')]));
+		expect(await fs.readFile(statePath, 'utf8')).toContain(`"bootId":"${BOOT_A}"`);
+		expect(helper.applyCalls).toEqual(['app', 'old']);
+
+		// Same boot (an agent restart): unchanged workloads are only reconciled.
+		await makeRuntime(BOOT_A).converge(state([workload('app'), workload('old')], 2));
+		expect(helper.applyCalls).toEqual(['app', 'old']);
+
+		// A new boot: `app` is applied again; `old`, gone from desired state, is still removed.
+		const rebooted = makeRuntime(BOOT_B);
+		await rebooted.converge(state([workload('app')], 3));
+		expect(helper.applyCalls).toEqual(['app', 'old', 'app']);
+		expect(helper.removed).toEqual(['old']);
+		expect(await fs.readFile(statePath, 'utf8')).toContain(`"bootId":"${BOOT_B}"`);
+	});
 });
 
 /** A minimal phase-1 function manifest: one ESM module, one text module, no bindings yet. */
@@ -469,9 +508,9 @@ describe('functions (phase 1)', () => {
 		const applied = f.helper.applied.get('fn')!;
 		expect(applied.function?.config.length).toBeGreaterThan(0);
 		expect(applied.function?.shim.length).toBeGreaterThan(0);
-		// PLAN.md embed names: the helper writes credentials under exactly these names.
-		expect(applied.function?.config).toContain('function-shim');
-		expect(applied.function?.config).toContain('module-0');
+		// The shim is a helper credential; modules are embedded from the release by path.
+		expect(applied.function?.config).toContain('embed "function-shim"');
+		expect(applied.function?.config).toMatch(/embed "\/[a-f0-9]{64}\/index\.js"/);
 		expect(applied.function?.shim).toContain('./index.js');
 		expect(f.runtime.currentReports()).toEqual([{ id: 'fn', status: 'running', restarts: 0 }]);
 	});

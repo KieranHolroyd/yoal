@@ -89,6 +89,7 @@ const RESOURCE_SCOPE_TYPES = new Set([
 	'database',
 	'storage',
 	'broker',
+	'kubernetesCluster',
 	'emailDomain',
 	'shareLink',
 	'container',

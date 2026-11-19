@@ -7,7 +7,7 @@ import {
 } from '@yoal/contracts';
 import {
 	capnpText,
-	functionModuleEmbedNames,
+	functionModuleEmbedPaths,
 	renderWorkerdConfig,
 	renderWorkerdConfigParts,
 } from './function-config.ts';
@@ -65,8 +65,8 @@ function parts(workload: WorkloadDesired, env: Record<string, string> = {}) {
 }
 
 const HYPERDRIVE_ENV = {
-	DATABASE_POOL_HOST: '127.0.0.1',
-	DATABASE_POOL_PORT: '16432',
+	DATABASE_HOST: '127.0.0.1',
+	DATABASE_PORT: '15432',
 	DATABASE_USER: 'app',
 	DATABASE_PASSWORD: 'hunter2',
 	DATABASE_NAME: 'app_db',
@@ -130,15 +130,16 @@ function stringLiterals(source: string): string[] {
 	return source.match(/"(?:[^"\\]|\\.)*"/g) ?? [];
 }
 
-describe('functionModuleEmbedNames', () => {
-	test('names modules module-0… in manifest order, for the helper credentials', () => {
+describe('functionModuleEmbedPaths', () => {
+	test('embeds modules as /<release>/<name> in manifest order, for the helper --import-path', () => {
 		const modules: FunctionModule[] = [
 			{ name: 'index.js', type: 'esm', sha256: SHA },
 			{ name: 'lib/strings.js', type: 'esm', sha256: SHA },
 			{ name: 'notes.txt', type: 'text', sha256: SHA },
 		];
-		expect(functionModuleEmbedNames(modules)).toEqual(['module-0', 'module-1', 'module-2']);
-		expect(functionModuleEmbedNames([])).toEqual([]);
+		expect(functionModuleEmbedPaths(SHA, modules)).toEqual([`/${SHA}/index.js`, `/${SHA}/lib/strings.js`, `/${SHA}/notes.txt`]);
+		expect(functionModuleEmbedPaths(SHA, [])).toEqual([]);
+		expect(() => functionModuleEmbedPaths('../etc', modules)).toThrow(/sha256/);
 	});
 });
 
@@ -154,10 +155,10 @@ describe('renderWorkerdConfig', () => {
 		});
 		expect(moduleLines(render(workload))).toEqual([
 			'( name = "function-shim", esModule = embed "function-shim" ),',
-			'( name = "index.js", esModule = embed "module-0" ),',
-			'( name = "lib/strings.js", esModule = embed "module-1" ),',
-			'( name = "notes.txt", text = embed "module-2" ),',
-			'( name = "sum.wasm", wasm = embed "module-3" ),',
+			`( name = "index.js", esModule = embed "/${SHA}/index.js" ),`,
+			`( name = "lib/strings.js", esModule = embed "/${SHA}/lib/strings.js" ),`,
+			`( name = "notes.txt", text = embed "/${SHA}/notes.txt" ),`,
+			`( name = "sum.wasm", wasm = embed "/${SHA}/sum.wasm" ),`,
 		]);
 	});
 
@@ -172,21 +173,21 @@ describe('renderWorkerdConfig', () => {
 			],
 		});
 		const lines = moduleLines(render(workload));
-		expect(lines[1]).toContain('esModule = embed "module-0"');
-		expect(lines[2]).toContain('commonJsModule = embed "module-1"');
-		expect(lines[3]).toContain('text = embed "module-2"');
-		expect(lines[4]).toContain('data = embed "module-3"');
-		expect(lines[5]).toContain('wasm = embed "module-4"');
+		expect(lines[1]).toContain(`esModule = embed "/${SHA}/`);
+		expect(lines[2]).toContain(`commonJsModule = embed "/${SHA}/`);
+		expect(lines[3]).toContain(`text = embed "/${SHA}/`);
+		expect(lines[4]).toContain(`data = embed "/${SHA}/`);
+		expect(lines[5]).toContain(`wasm = embed "/${SHA}/`);
 	});
 
 	test('renders the config envelope, the public-only egress and the http socket', () => {
 		const config = render(functionWorkload());
 		expect(config.startsWith('# Yoal function host for workload wl_1 (project api).\n')).toBe(true);
-		expect(config).toContain(`# Module sources are embedded as helper credentials from the release at ${RELEASE_DIR}.`);
+		expect(config).toContain(`# Module sources are embedded from the release at ${RELEASE_DIR} (via --import-path).`);
 		expect(config).toContain('using Workerd = import "/workerd/workerd.capnp";');
 		expect(config).toContain('const config :Workerd.Config = (');
 		expect(config).toContain('structuredLogging = true,');
-		expect(config).toContain('network = ( allow = ["public"], deny = ["private"] ) )');
+		expect(config).toContain('network = ( allow = ["public"], deny = ["private"], tlsOptions = ( trustBrowserCas = true ) ) )');
 		expect(config).toContain('compatibilityDate = "2026-10-01",');
 		expect(config).toContain('globalOutbound = "internet",');
 		expect(config).toContain('sockets = [ ( name = "http", http = (), service = "main" ) ],');
@@ -404,7 +405,7 @@ describe('renderWorkerdConfig', () => {
 		});
 		expect(render(workload)).toBe(`# Yoal function host for workload wl_1 (project api).
 # Rendered by the agent from desired state on every apply; local edits are overwritten.
-# Module sources are embedded as helper credentials from the release at ${RELEASE_DIR}.
+# Module sources are embedded from the release at ${RELEASE_DIR} (via --import-path).
 
 using Workerd = import "/workerd/workerd.capnp";
 
@@ -413,7 +414,7 @@ const config :Workerd.Config = (
   structuredLogging = true,
   services = [
     ( name = "internet",
-      network = ( allow = ["public"], deny = ["private"] ) ),
+      network = ( allow = ["public"], deny = ["private"], tlsOptions = ( trustBrowserCas = true ) ) ),
     ( name = "app-0",
       external = ( address = "unix:/run/yoal-workloads/prj_shop.sock", http = () ) ),
     ( name = "tail-api",
@@ -435,8 +436,8 @@ const config :Workerd.Config = (
       worker = (
         modules = [
           ( name = "function-shim", esModule = embed "function-shim" ),
-          ( name = "index.js", esModule = embed "module-0" ),
-          ( name = "lib/util.js", esModule = embed "module-1" ),
+          ( name = "index.js", esModule = embed "/${SHA}/index.js" ),
+          ( name = "lib/util.js", esModule = embed "/${SHA}/lib/util.js" ),
         ],
         compatibilityDate = "2026-10-01",
         compatibilityFlags = [ "nodejs_compat" ],
@@ -513,7 +514,7 @@ describe('phase-2 Durable Objects', () => {
 			'( name = "ROOMS", durableObjectNamespace = "Room" ),',
 		);
 		// The phase-1 egress line is untouched.
-		expect(config).toContain('network = ( allow = ["public"], deny = ["private"] ) )');
+		expect(config).toContain('network = ( allow = ["public"], deny = ["private"], tlsOptions = ( trustBrowserCas = true ) ) )');
 	});
 
 	test('two classes get two namespaces but one shared disk service', () => {
@@ -561,13 +562,13 @@ describe('phase-2 Durable Objects', () => {
 });
 
 describe('phase-2 Hyperdrive', () => {
-	test('points at the pooled loopback port and embeds the credentials', () => {
+	test('points at the direct loopback port and embeds the credentials', () => {
 		const { config, files } = parts(withHyperdrive(), HYPERDRIVE_ENV);
 		// The phase-3 tail module is always embedded; a binding adds no file of its own.
 		expect(Object.keys(files)).toEqual(['binding-tail']);
 		expect(serviceLines(config)).toEqual([
 			'( name = "hyperdrive-0",',
-			'external = ( address = "127.0.0.1:16432", tcp = () ) ),',
+			'external = ( address = "127.0.0.1:15432", tcp = () ) ),',
 		]);
 		expect(bindingLines(config)).toEqual([
 			'( name = "DB", hyperdrive = ( designator = "hyperdrive-0", database = "app_db", user = "app", password = "hunter2", scheme = "postgres" ) ),',
@@ -577,14 +578,14 @@ describe('phase-2 Hyperdrive', () => {
 		expect(config).toContain('0600 systemd credential');
 	});
 
-	test('falls back to the direct host and port when there is no pooler', () => {
-		const env = { ...HYPERDRIVE_ENV };
-		delete (env as Record<string, string>).DATABASE_POOL_HOST;
-		delete (env as Record<string, string>).DATABASE_POOL_PORT;
-		(env as Record<string, string>).DATABASE_HOST = '127.0.0.1';
-		(env as Record<string, string>).DATABASE_PORT = '15432';
-		const config = parts(withHyperdrive(), env).config;
-		expect(serviceLines(config)).toContain('external = ( address = "127.0.0.1:15432", tcp = () ) ),');
+	test('prefers direct Postgres over the TLS-only pooler, which is only a fallback', () => {
+		// workerd's Hyperdrive client never asks for TLS, and PgBouncer requires it ("SSL required").
+		const both = { ...HYPERDRIVE_ENV, DATABASE_POOL_HOST: '127.0.0.1', DATABASE_POOL_PORT: '16432' };
+		expect(serviceLines(parts(withHyperdrive(), both).config)).toContain('external = ( address = "127.0.0.1:15432", tcp = () ) ),');
+		const poolOnly = { ...both } as Record<string, string>;
+		delete poolOnly.DATABASE_HOST;
+		delete poolOnly.DATABASE_PORT;
+		expect(serviceLines(parts(withHyperdrive(), poolOnly).config)).toContain('external = ( address = "127.0.0.1:16432", tcp = () ) ),');
 	});
 
 	test('uses the attachment env prefix and a stable index per rendered binding', () => {
@@ -626,24 +627,21 @@ describe('phase-2 Hyperdrive', () => {
 		]);
 		const config = renderWorkerdConfigParts({ workload, releaseDir: RELEASE_DIR, env: HYPERDRIVE_ENV }).config;
 		expect(serviceLines(config)).toContain('( name = "do-storage", disk = ( writable = true ) ),');
-		expect(serviceLines(config)).toContain('external = ( address = "127.0.0.1:16432", tcp = () ) ),');
+		expect(serviceLines(config)).toContain('external = ( address = "127.0.0.1:15432", tcp = () ) ),');
 		expect(namespaceLines(config)).toHaveLength(1);
 		expect(bindingLines(config)).toHaveLength(2);
 	});
 
 	test('refuses to render when the activation env is missing any credential', () => {
 		for (const missing of [
-			'DATABASE_POOL_HOST',
-			'DATABASE_POOL_PORT',
+			'DATABASE_HOST',
+			'DATABASE_PORT',
 			'DATABASE_USER',
 			'DATABASE_PASSWORD',
 			'DATABASE_NAME',
 		]) {
 			const env = { ...HYPERDRIVE_ENV } as Record<string, string>;
 			delete env[missing];
-			// The host/port pair falls back to the direct variables: remove those too.
-			if (missing === 'DATABASE_POOL_HOST') delete env.DATABASE_HOST;
-			if (missing === 'DATABASE_POOL_PORT') delete env.DATABASE_PORT;
 			expect(() => render(withHyperdrive(), RELEASE_DIR, env)).toThrow(
 				new RegExp(`Hyperdrive binding "DB" cannot be rendered: the activation env is missing .*${missing}`),
 			);
@@ -656,9 +654,9 @@ describe('phase-2 Hyperdrive', () => {
 	});
 
 	test('refuses an out-of-range port instead of handing workerd a bad address', () => {
-		const env = { ...HYPERDRIVE_ENV, DATABASE_POOL_PORT: '70000' };
+		const env = { ...HYPERDRIVE_ENV, DATABASE_PORT: '70000' };
 		expect(() => render(withHyperdrive(), RELEASE_DIR, env)).toThrow(/invalid DATABASE_PORT "70000"/);
-		const notANumber = { ...HYPERDRIVE_ENV, DATABASE_POOL_PORT: 'postgres' };
+		const notANumber = { ...HYPERDRIVE_ENV, DATABASE_PORT: 'postgres' };
 		expect(() => render(withHyperdrive(), RELEASE_DIR, notANumber)).toThrow(/invalid DATABASE_PORT/);
 	});
 
@@ -823,8 +821,11 @@ describe.skipIf(!WORKERD_BIN)('rendered configs compile with workerd', () => {
 			await writeFile(join(dir, 'config.capnp'), rendered.config);
 			for (const [name, content] of Object.entries(rendered.files)) await writeFile(join(dir, name), content);
 			await writeFile(join(dir, 'function-shim'), 'export default {};');
-			await writeFile(join(dir, 'module-0'), 'export default {}; export class Room {}');
-			const proc = Bun.spawn([WORKERD_BIN!, 'compile', join(dir, 'config.capnp')], {
+			// The helper's layout: modules stay in `<release root>/<sha>/`, found through --import-path.
+			const releases = join(dir, 'releases');
+			await mkdir(join(releases, SHA), { recursive: true });
+			await writeFile(join(releases, SHA, 'index.js'), 'export default {}; export class Room {}');
+			const proc = Bun.spawn([WORKERD_BIN!, 'compile', join(dir, 'config.capnp'), '--import-path', releases], {
 				stdout: 'ignore',
 				stderr: 'pipe',
 			});

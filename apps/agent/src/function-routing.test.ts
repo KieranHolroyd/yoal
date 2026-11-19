@@ -129,7 +129,7 @@ describe('replica upstreams (phase 4)', () => {
 
 		const proxy = reverseProxy(route, 1);
 		expect(proxy.upstreams).toEqual(replicas.map((dial) => ({ dial })));
-		// The single-host guarantees survive the list: internal header, timeout and 503 handler.
+		// The single-host guarantees survive the list: internal header and timeout.
 		expect(proxy.headers).toEqual({
 			request: {
 				set: {
@@ -141,8 +141,8 @@ describe('replica upstreams (phase 4)', () => {
 		expect(proxy.transport).toEqual({ protocol: 'http', response_header_timeout: '5m' });
 		// A socket that is briefly gone (deploy, watchdog restart) holds the request, not a 503.
 		expect(proxy.load_balancing).toEqual({ try_duration: FUNCTION_DIAL_RETRY, try_interval: '250ms' });
-		expect(JSON.stringify(proxy.handle_response)).toContain('"status_code":503');
-		expect(JSON.stringify(proxy.handle_response)).toContain('Retry-After');
+		// The function's own 502/503/504 reach the client unchanged (no platform page over them).
+		expect(proxy.handle_response).toBeUndefined();
 	});
 
 	test('assets-first routing sends every function hop to the same replica list', () => {

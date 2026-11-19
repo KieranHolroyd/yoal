@@ -57,7 +57,8 @@ case "$(uname -s)" in
 esac
 case "$(uname -m)" in
 	x86_64 | amd64) ARCH="x64" ;;
-	aarch64 | arm64) ARCH="arm64" ;;
+	# Bun names its ARM build "aarch64" (bun-linux-aarch64.zip), not "arm64".
+	aarch64 | arm64) ARCH="aarch64" ;;
 	*) die "unsupported architecture $(uname -m)" ;;
 esac
 

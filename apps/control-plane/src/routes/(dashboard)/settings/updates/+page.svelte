@@ -1,46 +1,37 @@
 <script lang="ts">
 	import { browser } from '$app/env';
 	import { enhance } from '$app/forms';
-	import { invalidateAll, replaceState } from '$app/navigation';
-	import { resolve } from '$app/paths';
-	import { page } from '$app/state';
-	import { untrack } from 'svelte';
+	import { invalidateAll } from '$app/navigation';
 	import { createQuery, useQueryClient } from '@tanstack/svelte-query';
-	import ActivityIcon from '@lucide/svelte/icons/activity';
-	import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
 	import CircleArrowUpIcon from '@lucide/svelte/icons/circle-arrow-up';
 	import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
 	import CircleXIcon from '@lucide/svelte/icons/circle-x';
 	import CodeIcon from '@lucide/svelte/icons/code';
+	import GitBranchIcon from '@lucide/svelte/icons/git-branch';
 	import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
-	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
+	import ShieldAlertIcon from '@lucide/svelte/icons/shield-alert';
 	import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
-	import TimerIcon from '@lucide/svelte/icons/timer';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 	import WifiOffIcon from '@lucide/svelte/icons/wifi-off';
-	import type { SelfUpdateLog, SelfUpdateMethod, SelfUpdateStatus } from '@yoal/contracts';
-	import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js';
+	import type { SelfUpdateLog, SelfUpdateStatus } from '@yoal/contracts';
 	import { Button } from '#lib/components/ui/button/index.js';
 	import FormFeedback from '#lib/components/yoal/FormFeedback.svelte';
 	import Notice from '#lib/components/yoal/Notice.svelte';
 	import type { Tone } from '#lib/status.js';
 	import { fetchJson } from '#lib/query.js';
-	import Panel from '../../_lib/Panel.svelte';
 	import { formatDateTime, formatRelative } from '../../_lib/format.js';
 	import SettingsHeader from '../_lib/SettingsHeader.svelte';
-	import ChannelPicker from './ChannelPicker.svelte';
-	import FleetUpdates from './FleetUpdates.svelte';
-	import MethodPicker from './MethodPicker.svelte';
+	import ChannelSwitch from './ChannelSwitch.svelte';
+	import FleetSection from './FleetSection.svelte';
+	import LastUpdate from './LastUpdate.svelte';
+	import LogView from './LogView.svelte';
 	import MigrationApproval from './MigrationApproval.svelte';
-	import PreflightChecks from './PreflightChecks.svelte';
-	import UpdateHistory from './UpdateHistory.svelte';
-	import UpdateLog from './UpdateLog.svelte';
-	import UpdateStages from './UpdateStages.svelte';
+	import UpdateDialog from './UpdateDialog.svelte';
 	import UpdateSteps from './UpdateSteps.svelte';
-	import VersionHero from './VersionHero.svelte';
-	import type { FleetView, UpdateStage } from './fleet-ui.js';
-	import { formatElapsed, methodOption, updateSteps } from './update-ui.js';
+	import type { FleetView } from './fleet-ui.js';
+	import { checkLabel, formatElapsed, methodOption, toneTile, updateSteps } from './update-ui.js';
 	import type { PageProps } from './$types';
 
 	type StatusView = SelfUpdateStatus & { stale: boolean };
@@ -67,29 +58,7 @@
 	/** The updater never picked the request up; stop waiting and point at the server. */
 	let startTimedOut = $state(false);
 	let checking = $state(false);
-	let requesting = $state(false);
 	let confirmOpen = $state(false);
-	let updateForm = $state<HTMLFormElement | null>(null);
-
-	/**
-	 * A release reaches the control plane first and the nodes second; the page details one of the
-	 * two at a time. `?view=` keeps the choice across a reload; otherwise open on whichever is busy.
-	 */
-	let stage = $state<UpdateStage>(
-		untrack(() => {
-			const view = page.url.searchParams.get('view');
-			if (view === 'fleet' || view === 'control') return view;
-			return data.fleet.active && !data.inFlight ? 'fleet' : 'control';
-		})
-	);
-	function showStage(next: UpdateStage) {
-		stage = next;
-		// Keep a previewed channel in the address; nothing else lives in this page's query.
-		const channel = page.url.searchParams.get('channel');
-		const query = `view=${next}${channel ? `&channel=${encodeURIComponent(channel)}` : ''}`;
-		// eslint-disable-next-line svelte/no-navigation-without-resolve -- resolved route plus its query
-		replaceState(`${resolve('/(dashboard)/settings/updates')}?${query}`, page.state);
-	}
 
 	// Node versions and the running rollout, re-read on their own: quickly while nodes are
 	// updating, slowly otherwise. The page data wins again whenever it is newer (after an action).
@@ -107,9 +76,6 @@
 		fleetPoll.data && fleetPoll.data.at > data.fleet.at ? fleetPoll.data : data.fleet
 	);
 
-	let method = $state<SelfUpdateMethod>(untrack(() => data.defaultMethod));
-	const chosen = $derived(methodOption(method));
-
 	function beginFollowing(previousUpdatedAt: string | null) {
 		baseline = previousUpdatedAt;
 		startTimedOut = false;
@@ -123,7 +89,7 @@
 
 	// The page was opened (or reloaded) while a run was already queued or running.
 	$effect(() => {
-		if (requesting || following || !data.inFlight) return;
+		if (following || !data.inFlight) return;
 		beginFollowing(data.status?.updatedAt ?? null);
 	});
 
@@ -192,7 +158,7 @@
 
 	/** The run being shown, once the updater has reported on it. */
 	const activeRun = $derived(view.status?.running && !view.status.stale ? view.status : null);
-	const steps = $derived(updateSteps(activeRun?.method ?? method));
+	const steps = $derived(updateSteps(activeRun?.method ?? data.defaultMethod));
 	const currentPhase = $derived(activeRun?.phase ?? 'queued');
 	const rollingBack = $derived(currentPhase === 'rolling-back');
 	const currentStep = $derived(
@@ -236,109 +202,100 @@
 	/** The last run tried this same version and failed: lead with that, not the offer. */
 	const retrying = $derived(lastRunFailed && Boolean(target) && lastRun?.toVersion === target);
 
-	/** The headline card: one state, picked in priority order. */
+	/** Pre-update checks that are not passing; passed checks only show as a count. */
+	const problems = $derived(
+		[...data.preflight.checks]
+			.filter((check) => check.status !== 'ok')
+			.sort((a, b) => (a.status === 'error' ? 0 : 1) - (b.status === 'error' ? 0 : 1))
+	);
+	const passed = $derived(data.preflight.checks.filter((check) => check.status === 'ok'));
+
+	/** The one state this host is in, picked in priority order. */
 	const hero = $derived.by(
 		(): {
 			tone: Tone;
 			icon: typeof CircleCheckIcon;
 			spin?: boolean;
-			eyebrow: string;
 			title: string;
 			description: string;
-			target: string | null;
 		} => {
-			if (running && rollingBack && activeRun) {
-				const back = activeRun.fromVersion;
+			if (running && rollingBack && activeRun)
 				return {
 					tone: 'warning',
 					icon: RotateCcwIcon,
-					eyebrow: 'Rolling back',
-					title: back ? `Rolling back to v${back}` : 'Rolling back',
-					description: `${activeRun.toVersion ? `v${activeRun.toVersion}` : 'The new version'} failed its health checks after switching over. Yoal is restoring the previous version on its own.`,
-					target: null
+					title: activeRun.fromVersion
+						? `Rolling back to v${activeRun.fromVersion}`
+						: 'Rolling back',
+					description: `${activeRun.toVersion ? `v${activeRun.toVersion}` : 'The new version'} failed its health checks after switching over. The previous version is being restored.`
 				};
-			}
 			if (running) {
 				const to = activeRun?.toVersion ?? target;
 				return {
 					tone: 'info',
 					icon: LoaderCircleIcon,
 					spin: true,
-					eyebrow: activeRun ? 'Updating' : 'Queued',
 					title: to ? `Updating to v${to}` : 'Installing the newest version',
 					description: activeRun
 						? `Started ${formatRelative(activeRun.startedAt)} via ${methodOption(activeRun.method).short}. You can leave this page; the update carries on.`
-						: 'The request is with the server. systemd starts the updater in a moment.',
-					target: to && to !== view.version ? to : null
+						: 'Queued. systemd starts the updater in a moment.'
 				};
 			}
 			if (data.availability === 'unmanaged')
 				return {
 					tone: 'neutral',
 					icon: CodeIcon,
-					eyebrow: 'Development build',
 					title: "This host can't update itself",
 					description:
-						"The control plane isn't running from an installed release (for example a development server). Hosts installed with install.sh update from here.",
-					target: null
+						"It isn't running from an installed release (for example a development server). Hosts installed with install.sh update from here."
 				};
 			if (!data.latest.ok)
 				return {
 					tone: 'warning',
 					icon: TriangleAlertIcon,
-					eyebrow: 'Check failed',
 					title: "Couldn't check for updates",
 					description: ready
 						? `${data.latest.error} The updater can still check with its own GitHub credentials.`
-						: data.latest.error,
-					target: null
+						: data.latest.error
 				};
 			if (approval && needsApproval)
 				return {
 					tone: 'warning',
-					icon: TriangleAlertIcon,
-					eyebrow: 'Needs your approval',
-					title: `v${approval.version} is waiting for you`,
-					description: `It changes or removes existing data in the control database, so Yoal stopped before installing it. Review the migration below and approve it to continue. You're still on v${view.version}.`,
-					target: approval.version
+					icon: ShieldAlertIcon,
+					title: `v${approval.version} needs your approval`,
+					description: `It changes or removes existing data in the control database, so the updater stopped before installing it. Review the SQL below.`
 				};
 			if (data.comparison.available && retrying && lastRun)
 				return {
 					tone: 'warning',
 					icon: TriangleAlertIcon,
-					eyebrow: 'Last attempt failed',
 					title: `v${target} didn't install`,
-					description: `${lastRun.message} You're still on v${view.version}; fix the cause and try again.`,
-					target
+					description: `${lastRun.message} You're still on v${view.version}.`
 				};
 			if (data.comparison.available)
 				return {
 					tone: 'info',
 					icon: CircleArrowUpIcon,
-					eyebrow: `${data.comparison.bump ? `${data.comparison.bump} update` : 'Update available'} · ${data.channel}`,
-					title: `Yoal v${target} is available`,
-					description:
-						'Test-booted against a copy of your data before anything switches over, and rolled back on its own if anything fails.',
-					target
+					title: `v${target} is available`,
+					description: `${data.comparison.bump ? `A ${data.comparison.bump} update` : 'An update'} on ${data.channel}. Test-booted against a copy of your data first, and rolled back on its own if anything fails.`
 				};
 			if (switching)
 				return {
 					tone: 'info',
 					icon: ShieldCheckIcon,
-					eyebrow: `Switch to ${data.channel}`,
 					title: `This host is ahead of ${data.channel}`,
-					description: `The newest ${data.channel} release is v${data.comparison.latest}, older than the v${view.version} running here. Switching keeps v${view.version} (Yoal never downgrades) and installs the next ${data.channel} release once it is newer.`,
-					target: null
+					description: `The newest ${data.channel} release is v${data.comparison.latest}. Switching keeps v${view.version} (Yoal never downgrades) and installs the next ${data.channel} release once it is newer.`
 				};
 			return {
 				tone: 'success',
 				icon: CircleCheckIcon,
-				eyebrow: `Up to date · ${data.channel}`,
-				title: "You're on the latest version",
-				description: `v${view.version} is the newest ${data.channel} release of ${data.source.repo}.`,
-				target: null
+				title: "You're up to date",
+				description: `v${view.version} is the newest ${data.channel} release.`
 			};
 		}
+	);
+
+	const action = $derived(
+		target ? `Update to v${target}` : switching ? `Switch to ${data.channel}` : 'Check and install'
 	);
 </script>
 
@@ -369,319 +326,177 @@
 <div class="space-y-6">
 	<FormFeedback {result} />
 
-	<UpdateStages
-		selected={stage}
-		onselect={showStage}
-		control={{
-			tone: hero.tone,
-			label: hero.eyebrow,
-			version: view.version,
-			target: hero.target,
-			live: running
-		}}
-		{fleet}
-	/>
+	{#if data.availability === 'not-enabled'}
+		<Notice tone="warning" title="Dashboard updates aren't enabled on this host">
+			Run <code>sudo yoal-update-self check</code> on the server once. It installs the systemd trigger
+			this page uses to start an update.
+		</Notice>
+	{/if}
 
-	{#if stage === 'fleet'}
-		<div id="updates-panel-fleet" role="tabpanel" aria-labelledby="updates-tab-fleet">
-			<FleetUpdates
-				{fleet}
-				controlTarget={target}
-				controlRunning={running}
-				onshowcontrol={() => showStage('control')}
-			/>
+	{#if startTimedOut && !running && !data.inFlight}
+		<Notice tone="warning" title="The updater hasn't started">
+			The request is queued, but nothing has reported progress. Check
+			<code>systemctl status yoal-update-self.path</code> and
+			<code>journalctl -u yoal-update-self</code>.
+		</Notice>
+	{/if}
+
+	{#if !running && view.status?.stale}
+		<Notice tone="warning" title="The last update stopped reporting">
+			It last said “{view.status.message}” at {formatDateTime(view.status.updatedAt)} and probably crashed.
+			Check <code>journalctl -u yoal-update-self</code>. You can start a new update.
+		</Notice>
+	{/if}
+
+	<!-- The control plane: one card that is the state, the action and, while running, the progress. -->
+	<section
+		class="overflow-hidden rounded-xl border bg-card text-card-foreground shadow-xs"
+		aria-labelledby="update-title"
+	>
+		<div class="flex flex-col gap-4 p-5 sm:flex-row sm:items-center sm:gap-5 sm:p-6">
+			<span
+				class="flex size-10 shrink-0 items-center justify-center rounded-xl ring-1 ring-inset {toneTile[
+					hero.tone
+				]}"
+				aria-hidden="true"
+			>
+				<hero.icon class="size-5 {hero.spin ? 'animate-spin' : ''}" />
+			</span>
+			<div class="min-w-0 flex-1 space-y-1">
+				<h3 id="update-title" class="text-lg leading-tight font-semibold tracking-tight">
+					{hero.title}
+				</h3>
+				<p class="max-w-prose text-sm text-pretty text-muted-foreground" aria-live="polite">
+					{hero.description}
+				</p>
+			</div>
+			{#if canInstall && !needsApproval}
+				<Button class="shrink-0 self-start sm:self-center" onclick={() => (confirmOpen = true)}>
+					<CircleArrowUpIcon aria-hidden="true" />
+					{action}
+				</Button>
+			{:else if running && elapsed}
+				<span
+					class="shrink-0 self-start font-mono text-sm text-muted-foreground tabular-nums sm:self-center"
+					title="Time since the updater started">{elapsed}</span
+				>
+			{/if}
 		</div>
-	{:else}
-		<div
-			id="updates-panel-control"
-			role="tabpanel"
-			aria-labelledby="updates-tab-control"
-			class="space-y-6"
-		>
-			<VersionHero
-				tone={hero.tone}
-				icon={hero.icon}
-				spin={hero.spin}
-				eyebrow={hero.eyebrow}
-				title={hero.title}
-				description={hero.description}
-				current={view.version}
-				target={hero.target}
-				bump={data.comparison.bump}
-				latest={data.latest.ok ? data.latest.version : null}
-				checkedAt={data.latest.checkedAt}
-				source={data.source}
-			/>
 
+		{#if running}
+			<div class="space-y-4 border-t p-5 sm:p-6">
+				<UpdateSteps {steps} current={currentStep} {rollingBack} />
+				<p
+					class="flex items-start gap-2.5 text-sm text-pretty {rollingBack ? 'text-warning' : ''}"
+					aria-live="polite"
+				>
+					<span class="relative mt-1.5 flex size-2 shrink-0" aria-hidden="true">
+						<span
+							class="absolute size-full animate-ping rounded-full opacity-60 {rollingBack
+								? 'bg-warning'
+								: 'bg-info'}"
+						></span>
+						<span class="relative size-2 rounded-full {rollingBack ? 'bg-warning' : 'bg-info'}"
+						></span>
+					</span>
+					{activeRun ? activeRun.message : 'Waiting for systemd to start the updater…'}
+				</p>
+				{#if reconnecting}
+					<p class="flex items-center gap-2 text-xs text-muted-foreground" aria-live="polite">
+						<WifiOffIcon class="size-3.5" aria-hidden="true" />
+						The control plane is restarting; reconnecting…
+					</p>
+				{/if}
+				<LogView log={currentLog} running />
+			</div>
+		{:else if problems.length > 0 && data.availability !== 'unmanaged'}
+			<ul class="divide-y border-t px-5 sm:px-6" aria-label="Pre-update checks needing attention">
+				{#each problems as check (check.id + check.message)}
+					<li class="flex items-start gap-3 py-3 text-sm">
+						{#if check.status === 'error'}
+							<CircleXIcon
+								class="mt-0.5 size-4 shrink-0 text-destructive"
+								aria-label="Blocks the update"
+							/>
+						{:else}
+							<TriangleAlertIcon class="mt-0.5 size-4 shrink-0 text-warning" aria-label="Warning" />
+						{/if}
+						<p class="min-w-0 text-pretty break-words">
+							<span class="font-medium">{checkLabel(check.id)}</span>
+							<span class="text-muted-foreground">— {check.message}</span>
+						</p>
+					</li>
+				{/each}
+			</ul>
+		{/if}
+
+		<div
+			class="flex flex-wrap items-center gap-x-4 gap-y-2 border-t bg-muted/30 px-5 py-2.5 text-xs text-muted-foreground sm:px-6"
+		>
+			<span>Running <span class="font-mono font-medium text-foreground">v{view.version}</span></span
+			>
 			{#if data.availability !== 'unmanaged' && !running}
-				<ChannelPicker
+				<ChannelSwitch
 					selected={data.channel}
 					hostChannel={data.hostChannel}
 					latest={data.channels}
 				/>
-			{/if}
-
-			{#if data.availability === 'not-enabled'}
-				<Notice tone="warning" title="Dashboard updates aren't enabled on this host">
-					Run <code>sudo yoal-update-self check</code> on the server once. It installs the small systemd
-					trigger that lets this page start an update.
-				</Notice>
-			{/if}
-
-			{#if startTimedOut && !running && !data.inFlight}
-				<Notice tone="warning" title="The updater hasn't started">
-					The request is queued on the server, but nothing has reported progress yet. Check
-					<code>systemctl status yoal-update-self.path</code> and
-					<code>journalctl -u yoal-update-self</code>.
-				</Notice>
-			{/if}
-
-			{#if !running && view.status?.stale}
-				<Notice tone="warning" title="The last update stopped reporting">
-					It last reported “{view.status.message}” at {formatDateTime(view.status.updatedAt)} and probably
-					crashed. Check <code>journalctl -u yoal-update-self</code> on the server. You can start a new
-					update.
-				</Notice>
-			{/if}
-
-			{#if running}
-				<Panel
-					title="Progress"
-					icon={ActivityIcon}
-					description={rollingBack
-						? 'A check failed after the switch; restoring the previous version.'
-						: 'Each step must pass before the next starts.'}
-				>
-					{#snippet actions()}
-						{#if elapsed}
-							<span
-								class="inline-flex items-center gap-1.5 rounded-md border bg-muted/40 px-2 py-1 font-mono text-xs text-muted-foreground tabular-nums"
-								title="Time since the updater started"
-							>
-								<TimerIcon class="size-3.5" aria-hidden="true" />
-								{elapsed}
-							</span>
-						{/if}
-					{/snippet}
-
-					<UpdateSteps {steps} current={currentStep} {rollingBack} />
-
-					<div
-						class="mt-5 flex items-start gap-3 rounded-lg border px-3.5 py-3 {rollingBack
-							? 'border-warning/30 bg-warning/5'
-							: 'bg-muted/30'}"
+				{#if passed.length > 0}
+					<span
+						class="inline-flex items-center gap-1"
+						title={passed.map((check) => checkLabel(check.id)).join(', ')}
 					>
-						<span class="relative mt-1.5 flex size-2 shrink-0" aria-hidden="true">
-							<span
-								class="absolute size-full animate-ping rounded-full opacity-60 {rollingBack
-									? 'bg-warning'
-									: 'bg-info'}"
-							></span>
-							<span class="relative size-2 rounded-full {rollingBack ? 'bg-warning' : 'bg-info'}"
-							></span>
-						</span>
-						<p class="min-w-0 text-sm text-pretty" aria-live="polite">
-							{activeRun ? activeRun.message : 'Queued — systemd starts the updater in a moment.'}
-						</p>
-					</div>
-
-					{#if reconnecting}
-						<p
-							class="mt-3 flex items-center gap-2 text-xs text-muted-foreground"
-							aria-live="polite"
-						>
-							<WifiOffIcon class="size-3.5" aria-hidden="true" />
-							The control plane is restarting; reconnecting…
-						</p>
-					{/if}
-
-					{#snippet footer()}
-						Building can take a few minutes. The dashboard restarts for a few seconds near the end;
-						deployed sites keep serving.
-					{/snippet}
-				</Panel>
-
-				<UpdateLog log={currentLog} running />
-			{/if}
-
-			{#if approval && needsApproval && ready && !running}
-				<MigrationApproval
-					{approval}
-					currentVersion={view.version}
-					{method}
-					channel={data.channel}
-					previousUpdatedAt={data.status?.updatedAt ?? null}
-					onrequested={beginFollowing}
-				/>
-			{/if}
-
-			{#if canInstall && !needsApproval}
-				<Panel
-					title={target
-						? `Install v${target}${switching ? ` from ${data.channel}` : ''}`
-						: switching
-							? `Switch to ${data.channel}`
-							: 'Install the newest version'}
-					icon={CircleArrowUpIcon}
-					description={target || !switching
-						? 'Nothing on this host changes until the new version has passed a test boot.'
-						: `Nothing is installed now. The host remembers ${data.channel} and updates when it has a newer release.`}
-				>
-					<form
-						bind:this={updateForm}
-						method="POST"
-						action="?/update"
-						class="space-y-6"
-						use:enhance={() => {
-							// Capture the pre-request status before the action runs, so the first new
-							// timestamp proves the updater started this run rather than a previous one.
-							const previous = data.status?.updatedAt ?? null;
-							requesting = true;
-							confirmOpen = false;
-							return async ({ result, update }) => {
-								await update();
-								requesting = false;
-								if (result.type === 'success') beginFollowing(previous);
-							};
-						}}
-					>
-						<input type="hidden" name="channel" value={data.channel} />
-						<MethodPicker bind:value={method} defaultMethod={data.defaultMethod} />
-
-						<div class="space-y-3">
-							<p class="text-xs font-medium text-muted-foreground">What happens</p>
-							<UpdateSteps steps={steps.slice(1)} />
-						</div>
-
-						<div
-							class="flex flex-col gap-3 border-t pt-4 sm:flex-row sm:items-center sm:justify-between"
-						>
-							{#if data.preflight.ok}
-								<p class="flex items-center gap-2 text-sm text-muted-foreground">
-									<ShieldCheckIcon class="size-4 shrink-0 text-success" aria-hidden="true" />
-									Pre-update checks pass. Rolls back on its own if anything fails.
-								</p>
-							{:else}
-								<p class="flex items-start gap-2 text-sm text-pretty">
-									<CircleXIcon class="mt-0.5 size-4 shrink-0 text-destructive" aria-hidden="true" />
-									<span>
-										A pre-update check is failing, so the updater would stop before changing
-										anything.
-										<a href="#preflight" class="font-medium underline underline-offset-4"
-											>Review checks</a
-										>
-									</span>
-								</p>
-							{/if}
-							<Button
-								type="button"
-								class="shrink-0"
-								disabled={requesting}
-								onclick={() => (confirmOpen = true)}
-							>
-								{#if requesting}
-									<LoaderCircleIcon class="animate-spin" aria-hidden="true" />
-								{:else}
-									<CircleArrowUpIcon aria-hidden="true" />
-								{/if}
-								{target
-									? `Update to v${target}`
-									: switching
-										? `Switch to ${data.channel}`
-										: 'Check and install'}
-							</Button>
-						</div>
-					</form>
-				</Panel>
-
-				<AlertDialog.Root bind:open={confirmOpen}>
-					<AlertDialog.Content>
-						<AlertDialog.Header>
-							<AlertDialog.Media class="bg-info/10 text-info">
-								<CircleArrowUpIcon />
-							</AlertDialog.Media>
-							<AlertDialog.Title>
-								{target
-									? `Update Yoal to v${target}?`
-									: switching
-										? `Switch this host to ${data.channel}?`
-										: 'Install the newest version?'}
-							</AlertDialog.Title>
-							<AlertDialog.Description>
-								{target
-									? `The new version is test-booted against a copy of your database before anything switches over.${switching ? ` This host follows ${data.channel} from now on.` : ''}`
-									: switching
-										? `v${view.version} keeps running. The updater records ${data.channel} and installs its next release once it is newer.`
-										: 'The updater checks GitHub itself and installs the newest version, if there is one.'}
-							</AlertDialog.Description>
-						</AlertDialog.Header>
-
-						<div class="space-y-3 text-sm">
-							<div class="flex items-center gap-3 rounded-lg border bg-muted/30 px-3 py-2.5">
-								{#if target}
-									<span class="font-mono text-muted-foreground tabular-nums">v{view.version}</span>
-									<ArrowRightIcon class="size-3.5 text-muted-foreground" aria-label="to" />
-									<span class="font-mono font-semibold tabular-nums">v{target}</span>
-								{/if}
-								<span
-									class="ml-auto inline-flex items-center gap-1.5 text-xs text-muted-foreground"
-								>
-									<chosen.icon class="size-3.5" />
-									{chosen.label}
-								</span>
-							</div>
-							<ul class="space-y-1.5 text-muted-foreground">
-								<li class="flex gap-2">
-									<span class="mt-2 size-1 shrink-0 rounded-full bg-muted-foreground/60"></span>
-									The dashboard and API are unavailable for a few seconds; deployed sites keep serving.
-								</li>
-								<li class="flex gap-2">
-									<span class="mt-2 size-1 shrink-0 rounded-full bg-muted-foreground/60"></span>
-									{method === 'build'
-										? 'The source is compiled on this server, which needs disk space, memory and a few minutes.'
-										: 'The release is verified against its signed manifest and checksum before anything runs.'}
-								</li>
-								<li class="flex gap-2">
-									<span class="mt-2 size-1 shrink-0 rounded-full bg-muted-foreground/60"></span>
-									If health checks fail, Yoal rolls back to v{view.version} automatically.
-								</li>
-							</ul>
-							{#if !data.preflight.ok}
-								<Notice tone="danger" title="A pre-update check is failing">
-									The updater will most likely stop before changing anything.
-								</Notice>
-							{/if}
-						</div>
-
-						<AlertDialog.Footer>
-							<AlertDialog.Cancel disabled={requesting}>Cancel</AlertDialog.Cancel>
-							<Button disabled={requesting} onclick={() => updateForm?.requestSubmit()}>
-								{#if requesting}<LoaderCircleIcon class="animate-spin" aria-hidden="true" />{/if}
-								Start update
-							</Button>
-						</AlertDialog.Footer>
-					</AlertDialog.Content>
-				</AlertDialog.Root>
-			{/if}
-
-			{#if !running}
-				<PreflightChecks
-					checks={data.preflight.checks}
-					ok={data.preflight.ok}
-					updateAvailable={data.comparison.available}
-					description={data.preflight.versionChange === 'same'
-						? 'Checked against the running version, so an update is ready to go when one ships.'
-						: `Checked against v${data.preflight.targetVersion} before anything changes.`}
-				/>
-
-				{#if lastRun?.outcome || data.snapshots.length > 0}
-					<UpdateHistory {lastRun} snapshots={data.snapshots} />
-				{/if}
-
-				{#if currentLog.exists}
-					<UpdateLog log={currentLog} defaultOpen={lastRunFailed} />
+						<ShieldCheckIcon
+							class="size-3.5 {problems.length ? '' : 'text-success'}"
+							aria-hidden="true"
+						/>
+						{passed.length}/{data.preflight.checks.length} checks pass
+					</span>
 				{/if}
 			{/if}
+			<a
+				href="https://github.com/{data.source.repo}/tree/{data.source.ref}"
+				target="_blank"
+				rel="external noreferrer"
+				class="inline-flex min-w-0 items-center gap-1 font-mono hover:text-foreground sm:ml-auto"
+				title={data.latest.checkedAt
+					? `Checked ${formatDateTime(data.latest.checkedAt)}`
+					: undefined}
+			>
+				<GitBranchIcon class="size-3 shrink-0" aria-hidden="true" />
+				<span class="truncate">{data.source.repo}@{data.source.ref}</span>
+			</a>
 		</div>
+	</section>
+
+	{#if approval && needsApproval && ready && !running}
+		<MigrationApproval
+			{approval}
+			currentVersion={view.version}
+			method={data.defaultMethod}
+			channel={data.channel}
+			previousUpdatedAt={data.status?.updatedAt ?? null}
+			onrequested={beginFollowing}
+		/>
+	{/if}
+
+	<FleetSection {fleet} controlTarget={target} controlRunning={running} />
+
+	{#if !running && (lastRun?.outcome || data.snapshots.length > 0 || currentLog.exists)}
+		<LastUpdate {lastRun} log={currentLog} snapshots={data.snapshots} failed={lastRunFailed} />
 	{/if}
 </div>
+
+{#if canInstall && !needsApproval}
+	<UpdateDialog
+		bind:open={confirmOpen}
+		current={view.version}
+		{target}
+		channel={data.channel}
+		{switching}
+		defaultMethod={data.defaultMethod}
+		preflightOk={data.preflight.ok}
+		previousUpdatedAt={data.status?.updatedAt ?? null}
+		onrequested={beginFollowing}
+	/>
+{/if}

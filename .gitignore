@@ -26,3 +26,6 @@ reports/security/
 
 # Added by ggshield
 .cache_ggshield
+
+# function-suite e2e diagnostics
+tests/e2e/.out/

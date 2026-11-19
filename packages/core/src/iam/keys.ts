@@ -71,7 +71,7 @@ export const KEY_ROTATION_OVERLAP_MS = 24 * 60 * 60_000;
  * Purposes the maintenance sweep rotates on its own. `pool:<id>` keys are managed with their pool
  * (one key per pool), so they are never selected here.
  */
-export const AUTO_ROTATION_PURPOSES = ['registry', 'oidc', 'sts', 'workload'] as const;
+export const AUTO_ROTATION_PURPOSES = ['registry', 'oidc', 'sts', 'workload', 'kubernetes'] as const;
 export type AutoRotationPurpose = (typeof AUTO_ROTATION_PURPOSES)[number];
 
 /** Whether the monthly sweep may rotate this purpose without an explicit request. */

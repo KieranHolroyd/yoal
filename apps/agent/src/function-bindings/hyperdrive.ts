@@ -3,7 +3,12 @@ import type { BindingRenderer } from './types.ts';
 
 /**
  * Hyperdrive (docs/FUNCTIONS.md §4.5): workerd's native `hyperdrive` binding pointed at the
- * attached database's PgBouncer (or direct Postgres) loopback port.
+ * attached database's direct Postgres loopback port.
+ *
+ * Not PgBouncer: workerd's Hyperdrive client never sends an SSLRequest, and the pooler requires
+ * client TLS (`client_tls_sslmode = require`), so every query failed with "SSL required". Postgres
+ * itself takes a password login without TLS on this host-local hop. The pooler is only a fallback
+ * for an env that carries no direct values.
  *
  * **This config carries credentials.** workerd's Hyperdrive binding has no `fromEnvironment` form,
  * so user/password/database must be literals in the capnp text. The rendered config therefore
@@ -26,16 +31,16 @@ export const renderHyperdrive: BindingRenderer = ({ binding, env, index }) => {
 		}
 		return undefined;
 	};
-	// The pooled connection values when the attachment has a PgBouncer sidecar, else direct.
-	const host = pick(`${prefix}_POOL_HOST`, `${prefix}_HOST`);
-	const port = pick(`${prefix}_POOL_PORT`, `${prefix}_PORT`);
+	// The direct values; the pooler only when an env has nothing else (see above).
+	const host = pick(`${prefix}_HOST`, `${prefix}_POOL_HOST`);
+	const port = pick(`${prefix}_PORT`, `${prefix}_POOL_PORT`);
 	const user = pick(`${prefix}_USER`);
 	const password = pick(`${prefix}_PASSWORD`);
 	const database = pick(`${prefix}_NAME`);
 
 	const missing = [
-		...(host === undefined ? [`${prefix}_POOL_HOST (or ${prefix}_HOST)`] : []),
-		...(port === undefined ? [`${prefix}_POOL_PORT (or ${prefix}_PORT)`] : []),
+		...(host === undefined ? [`${prefix}_HOST`] : []),
+		...(port === undefined ? [`${prefix}_PORT`] : []),
 		...(user === undefined ? [`${prefix}_USER`] : []),
 		...(password === undefined ? [`${prefix}_PASSWORD`] : []),
 		...(database === undefined ? [`${prefix}_NAME`] : []),

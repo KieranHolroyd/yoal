@@ -34,11 +34,15 @@ import {
 	DATABASE_PGDATA,
 	containerUnitName,
 	networkUnitName,
+	CONTAINER_USERNS,
+	WORKLOAD_SLICE,
 	poolerServiceName,
 	poolerUnitName,
 	renderContainerEnvFile,
 	renderContainerUnit,
 	renderEnvFile,
+	functionNeedsOrgNetwork,
+	parseOrgSubnets,
 	renderFunctionUnit,
 	renderKeyValueConfig,
 	renderNatsConfig,
@@ -71,6 +75,25 @@ import {
 	type ReplicationSlotStatus,
 } from './replication.ts';
 import { ensureContainerSubids, type SubidFiles } from './userns.ts';
+import {
+	installKubernetesComponent,
+	removeKubernetesComponent,
+	type KubernetesComponentJob,
+} from './kubernetes-component.ts';
+import {
+	K3S_ENTRYPOINT,
+	KUBERNETES_MACHINE_NETWORK,
+	renderMachineNetworkUnit,
+	K3S_MANIFESTS_SUBDIR,
+	K3S_VOLUMES,
+	TRAEFIK_CONFIG_MANIFEST,
+	renderMeminfo,
+	KUBERNETES_COMPONENT_ROOT,
+	KubernetesOps,
+	kubernetesEnv,
+	renderAuthConfig,
+	renderKubernetesUnit,
+} from './kubernetes.ts';
 import { AppVolumeData, type AppVolumeDataOptions } from './app-volumes.ts';
 import {
 	BROKER_ENGINES,
@@ -595,6 +618,7 @@ export class SystemdDriver {
 				`A point-in-time restore into ${workload.id} is in progress; the helper starts it when the restore ends.`,
 			);
 		if (workload.runtime === 'compose') return this.applyCompose(workload, activation);
+		if (workload.kubernetes) return this.applyKubernetes(workload, activation);
 
 		// Resolve everything that can fail before writing a secret or a unit to disk.
 		let releaseDir: string | null = null;
@@ -689,7 +713,7 @@ export class SystemdDriver {
 			if (socketPath) {
 				const long = Buffer.byteLength(socketPath);
 				if (long > 100) throw new ValidationError(`Unix socket path is too long (${long} bytes)`);
-				await fs.mkdir(dirname(socketPath), { recursive: true, mode: 0o755 });
+				await this.ensureRuntimeRoot();
 			}
 			const service = renderProcessUnit({
 				workload,
@@ -768,7 +792,13 @@ export class SystemdDriver {
 			const socketPath = join(this.runtimeDir, `${workload.id}.sock`);
 			const long = Buffer.byteLength(socketPath);
 			if (long > 100) throw new ValidationError(`Unix socket path is too long (${long} bytes)`);
-			await fs.mkdir(dirname(socketPath), { recursive: true, mode: 0o755 });
+			await this.ensureRuntimeRoot();
+			// Hyperdrive, queue and R2 bindings reach Podman containers through published loopback
+			// ports, which DNAT to the org network; the unit's IP filter must let that subnet through.
+			const allowSubnets =
+				workload.orgId && functionNeedsOrgNetwork(workload.function!)
+					? await this.orgNetworkSubnets(workloadNetworkName(workload))
+					: [];
 
 			changed =
 				(await this.writeIfChanged(
@@ -785,6 +815,8 @@ export class SystemdDriver {
 						modulePaths,
 						files: extraFiles,
 						durableStorage: functionNeedsDurableStorage(workload.function!),
+						allowSubnets,
+						socketGroup: this.socketGroup,
 					}),
 					0o644,
 				)) || changed;
@@ -946,6 +978,141 @@ export class SystemdDriver {
 		}
 
 		return this.status(workload.id);
+	}
+
+	/**
+	 * A Kubernetes machine (docs/KUBERNETES.md §5.1). The env file carries only the join token; the
+	 * server's authentication config is rendered here from the profile, never taken from the wire.
+	 * Manifests reach the server through `kubernetesOps().syncManifests`, so attaching a database or
+	 * revoking an access key never restarts the machine (and its pods).
+	 */
+	private async applyKubernetes(workload: WorkloadDesired, activation: WorkloadActivation): Promise<HelperWorkloadStatus> {
+		const kubernetes = workload.kubernetes!;
+		if (Object.keys(activation.files).length > 0) throw new ValidationError('Kubernetes machines take no activation files');
+		const runtimeDir = join(this.runtimeDir, workload.id);
+		await fs.mkdir(this.runtimeDir, { recursive: true, mode: 0o755 });
+		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+		await fs.chmod(runtimeDir, 0o700).catch(() => undefined);
+		const envFile = join(runtimeDir, 'env');
+		await this.writeAtomic(envFile, renderContainerEnvFile(kubernetesEnv(workload, activation.env.YOAL_K8S_TOKEN)), 0o400);
+
+		let changed = false;
+		const networkName = workloadNetworkName(workload);
+		changed = (await this.ensureNetworkUnit(networkName)) || changed;
+		const dataDir = await this.resolveDataDir(workload);
+		await this.ensureStateRoot();
+		if (workload.volumeId) await fs.mkdir(dirname(dataDir), { recursive: true, mode: 0o755 });
+		await fs.mkdir(dataDir, { recursive: true, mode: 0o700 });
+		if (!(await fs.lstat(dataDir)).isDirectory()) throw new ValidationError(`${dataDir} is not a directory`);
+		// Remember where the data dir is, so manifest sync finds it on a disk too.
+		await this.writeAtomic(join(runtimeDir, 'data-dir'), dataDir, 0o600);
+		if (kubernetes.tier === 'userns' && this.containerSubids) await ensureContainerSubids(this.containerSubids);
+
+		// The image's VOLUMEs, each a directory of its own under the data dir (S1).
+		for (const [sub] of K3S_VOLUMES) await fs.mkdir(join(dataDir, sub), { recursive: true, mode: 0o700 });
+		const yoalDir = join(runtimeDir, 'k8s');
+		await fs.mkdir(yoalDir, { recursive: true, mode: 0o755 });
+		await fs.chmod(yoalDir, 0o755).catch(() => undefined);
+		changed = (await this.writeIfChanged(join(yoalDir, 'entrypoint.sh'), K3S_ENTRYPOINT, 0o755)) || changed;
+		const hostMeminfo = await fs.readFile('/proc/meminfo', 'utf8').catch(() => 'MemTotal: 0 kB\nMemFree: 0 kB\nMemAvailable: 0 kB\n');
+		changed = (await this.writeIfChanged(join(yoalDir, 'meminfo'), renderMeminfo(hostMeminfo, workload.memoryMb), 0o644)) || changed;
+		let authConfig = false;
+		if (kubernetes.role === 'server') {
+			const config = renderAuthConfig({ issuer: kubernetes.issuer, clusterId: kubernetes.clusterId, orgId: workload.orgId! });
+			const authPath = join(yoalDir, 'auth.yaml');
+			if (config) {
+				changed = (await this.writeIfChanged(authPath, config, 0o644)) || changed;
+				authConfig = true;
+			} else {
+				changed = (await this.removeIfExists(authPath)) || changed;
+			}
+			// Traefik must bind the machine's port 80 before any manifest sync (S1).
+			const manifests = join(dataDir, K3S_MANIFESTS_SUBDIR);
+			await fs.mkdir(manifests, { recursive: true, mode: 0o700 });
+			const traefikPath = join(manifests, 'yoal-traefik.yaml');
+			if (kubernetes.traefik) await this.writeIfChanged(traefikPath, TRAEFIK_CONFIG_MANIFEST, 0o644);
+			else await this.removeIfExists(traefikPath);
+		}
+		const airgapDir = join(KUBERNETES_COMPONENT_ROOT, kubernetes.minor, 'images');
+		const hasAirgap = await fs
+			.stat(airgapDir)
+			.then((info) => info.isDirectory())
+			.catch(() => false);
+		// Multi-node machines sit on the node's routed machine subnet (K6).
+		let machineNetworkUnit: string | null = null;
+		if (kubernetes.overlayIp && kubernetes.machineSubnet) {
+			machineNetworkUnit = `${KUBERNETES_MACHINE_NETWORK}.network`;
+			changed =
+				(await this.writeIfChanged(join(this.quadletDir, machineNetworkUnit), renderMachineNetworkUnit(kubernetes.machineSubnet), 0o644)) || changed;
+		}
+		const paths = this.unitPaths(workload.id);
+		const unit = renderKubernetesUnit({
+			machineNetworkUnit,
+			workload,
+			envFile,
+			dataDir,
+			yoalDir,
+			airgapDir: hasAirgap ? airgapDir : null,
+			networkUnit: networkUnitName(networkName),
+			userns: CONTAINER_USERNS,
+			slice: WORKLOAD_SLICE,
+			authConfig,
+		});
+		changed = (await this.writeIfChanged(paths.container, unit, 0o644)) || changed;
+		changed = (await this.removeIfExists(paths.service)) || changed;
+		changed = (await this.removeIfExists(paths.socket)) || changed;
+		if (changed) await this.daemonReload();
+		await this.systemctl(['reset-failed', serviceUnitName(workload.id)], { allowFailure: true });
+		// The first start pulls the image and imports the airgap bundle; the agent probes readiness.
+		await this.systemctl(['restart', '--no-block', serviceUnitName(workload.id)]);
+		await this.ensureNetworkMembership(workload, networkName);
+		return this.status(workload.id);
+	}
+
+	/**
+	 * Start installing or removing the optional Kubernetes component (minutes: image pulls, airgap
+	 * bundles, the tier probe). It runs in the background, one at a time; `kubernetesComponentJob`
+	 * reports progress, so no request has to stay open for the whole run.
+	 */
+	kubernetesComponent(action: 'install' | 'remove', purge: boolean): KubernetesComponentJob {
+		if (this.componentJob.running) return this.componentJob;
+		const job: KubernetesComponentJob = { running: true, action, startedAt: new Date().toISOString(), finishedAt: null, error: null, report: null };
+		this.componentJob = job;
+		const options = { runner: this.runner, podmanPath: this.podmanPath, log: (message: string) => console.log(`[k8s-component] ${message}`) };
+		void (async () => {
+			try {
+				if (action === 'remove') await removeKubernetesComponent({ ...options, purge });
+				else job.report = await installKubernetesComponent(options);
+			} catch (error) {
+				job.error = error instanceof Error ? error.message : String(error);
+			} finally {
+				job.running = false;
+				job.finishedAt = new Date().toISOString();
+			}
+		})();
+		return job;
+	}
+
+	kubernetesComponentJob(): KubernetesComponentJob {
+		return this.componentJob;
+	}
+
+	private componentJob: KubernetesComponentJob = { running: false, action: null, startedAt: null, finishedAt: null, error: null, report: null };
+
+	/** Fixed operations on a running Kubernetes machine (manifest sync, status). */
+	kubernetesOps(): KubernetesOps {
+		return new KubernetesOps({
+			runner: this.runner,
+			podmanPath: this.podmanPath,
+			resolveDataDir: async (id) => {
+				const info = await fs.readFile(join(this.runtimeDir, id, 'data-dir'), 'utf8').catch(() => null);
+				return info?.trim() || join(this.stateDir, id);
+			},
+			chownLike: async (path, reference) => {
+				const info = await fs.stat(reference);
+				await this.chown(path, info.uid, info.gid);
+			},
+		});
 	}
 
 	/** Where a compose stack records the service names it rendered, for stale-unit cleanup. */
@@ -2986,6 +3153,21 @@ END $$;`];
 	}
 
 	/**
+	 * Workload sockets live directly in the runtime root (`/run/yoal-workloads/<id>.sock`), and
+	 * Caddy dials them as the `caddy` user. With the root at 0700 every socket-activated route
+	 * hangs until Caddy gives up with a 503, while the socket itself answers root. A root left at
+	 * 0700 by a recursive `mkdir` of a secrets subdirectory, or by the skiff→yoal rename, is
+	 * therefore opened to 0711: traversable, not listable. Each workload's own directory (env
+	 * files, secrets, function config) stays 0700. A symlinked root is left alone.
+	 */
+	async ensureRuntimeRoot(): Promise<void> {
+		await fs.mkdir(this.runtimeDir, { recursive: true, mode: 0o711 });
+		const stat = await fs.lstat(this.runtimeDir);
+		if (!stat.isDirectory()) return;
+		if ((stat.mode & 0o011) !== 0o011) await fs.chmod(this.runtimeDir, (stat.mode & 0o7777) | 0o011);
+	}
+
+	/**
 	 * A command that names Bun bare (`bun server.js`) runs the node's pinned Bun, not whatever
 	 * `/usr/bin/env` finds: Yoal installs Bun under its own prefix, so a bare `bun` is not on the
 	 * system PATH at all (D225). Other names (`node`, `bunx`, `./bin/app`) resolve through PATH,
@@ -3033,6 +3215,19 @@ END $$;`];
 			renderNetworkUnit(networkName),
 			0o644,
 		);
+	}
+
+	/**
+	 * Private subnets of a Podman network, or none when it does not exist yet. A function with a
+	 * Hyperdrive, queue or R2 binding is only deployable once that resource runs, so its org
+	 * network is there by then.
+	 */
+	private async orgNetworkSubnets(networkName: string): Promise<string[]> {
+		const inspect = await this.runner
+			.run([this.podmanPath, 'network', 'inspect', networkName, '--format', '{{json .Subnets}}'])
+			.catch(() => null);
+		if (!inspect || inspect.code !== 0) return [];
+		return parseOrgSubnets(inspect.stdout);
 	}
 
 	/**

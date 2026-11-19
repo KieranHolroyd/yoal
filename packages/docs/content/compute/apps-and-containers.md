@@ -336,7 +336,7 @@ The terminal survives switching to another section and back, and a page reload, 
 
 The deployer role has all four. A viewer has only `container:inspect`. Default agent scopes leave out `container:files` and `container:exec`, so an API key or MCP client holds them only when you grant them explicitly. MCP clients never get a shell, even with `container:exec`: an agent reads untrusted text, so running commands in production stays with people. Opening or closing a shell and reading or downloading a file are audited; the keystrokes, file contents and secret values never are.
 
-The same calls are on the REST API under `/api/v1/projects/:slug/container/` (see the CLI's [`container`](/clients/cli#container) command and the [REST API](/clients/rest-api)).
+The same calls are on the REST API under `/api/v1/projects/:slug/container/` (see the CLI's [`container`](/cli/compute#container) command and the [REST API](/clients/rest-api)).
 
 ## Security properties
 

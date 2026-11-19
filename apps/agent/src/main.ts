@@ -1,4 +1,4 @@
-import { existsSync, promises as fs, readdirSync } from 'node:fs';
+import { existsSync, promises as fs, readdirSync, readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import {
 	desiredStateSchema,
@@ -51,7 +51,7 @@ import { JobRunner } from './jobs.ts';
 import { HelperClient } from './helper-client.ts';
 import { formatEnv, JOIN_USAGE, joinNode, nodeFilePath, parseJoinArgs } from './join.ts';
 import { WorkloadLogDrain } from './log-drain.ts';
-import { ReleaseManager } from './releases.ts';
+import { ReleaseManager, servesReleaseLocally } from './releases.ts';
 import { databaseTlsHeartbeat, WorkloadRuntime, workloadHeartbeat } from './runtime.ts';
 import { HardwareCollector } from './hardware.ts';
 import { ServiceForwarder } from './endpoints.ts';
@@ -62,6 +62,7 @@ import { StorageRequester } from './storage.ts';
 import { StorageStatsSampler, STORAGE_STATS_INTERVAL_MS } from './storage-stats.ts';
 import { StorageReplicator } from './storage-replicator.ts';
 import { BROKER_STATS_INTERVAL_MS, BrokerStatsSampler } from './broker-stats.ts';
+import { KubernetesSync, kubernetesCapabilities, readKubernetesComponent } from './kubernetes.ts';
 import { DesiredStateStore, desiredStateEtag, desiredStateRequest } from './state.ts';
 import { postTelemetryBatch, TelemetryClient } from './telemetry.ts';
 import { handleSiteRequest, normalizeHost, UsedTokenCache } from './verify.ts';
@@ -157,6 +158,8 @@ class AgentRuntime {
 	private readonly storageStats: StorageStatsSampler;
 	private readonly storageReplicator: StorageReplicator;
 	private readonly brokerStats: BrokerStatsSampler;
+	/** Manifest sync and status samples for Kubernetes machines (docs/KUBERNETES.md). */
+	private readonly kubernetes: KubernetesSync;
 	private readonly functions: FunctionScheduler;
 	private readonly functionQueues: FunctionQueueConsumers;
 	private readonly eventPublisher: EventPublisher;
@@ -281,6 +284,7 @@ class AgentRuntime {
 			socketDir: config.workloadSocketDir,
 			healthTimeoutMs: config.workloadHealthTimeoutMs,
 			statePath: join(config.dataDir, 'workloads-state.json'),
+			bootId: readBootId(),
 			log,
 			onIdentity: (workload, identity) => {
 				if (identity) this.identity.hold(workload.id, identity);
@@ -368,6 +372,12 @@ class AgentRuntime {
 			statePath: join(config.dataDir, 'function-cron-state.json'),
 			// Without the access log there is no request signal; never idle-stop a serving host.
 			activityEnabled: Boolean(config.caddyAccessLog),
+			log,
+		});
+		this.kubernetes = new KubernetesSync({
+			helper: this.helper,
+			fetchManifests: (machineId, signal) => this.fetchKubernetesManifests(machineId, signal),
+			isRunning: (machineId) => this.workloads.currentReports().some((report) => report.id === machineId && report.status === 'running'),
 			log,
 		});
 		// Function queues on managed brokers (D112): pull batches and deliver them to the shim.
@@ -517,6 +527,7 @@ class AgentRuntime {
 			this.storageStatsLoop(),
 			this.storageReplicator.run(this.shutdownController.signal),
 			this.brokerStatsLoop(),
+			this.kubernetesLoop(),
 			this.functions.run(() => this.desired, this.shutdownController.signal),
 			this.functionQueues.run(() => this.desired, this.shutdownController.signal),
 			this.eventPublisher.run(() => this.desired, this.shutdownController.signal),
@@ -808,8 +819,9 @@ class AgentRuntime {
 		this.lastReconcileAttemptAt = started;
 
 		const specs = new Map(state.releases.map((release) => [release.sha256, release]));
-		// Worker-placed routes are proxied over WireGuard; their releases live on the worker.
-		const localRoutes = state.routes.filter((route) => !route.upstream);
+		// Worker-placed routes are proxied over WireGuard; their releases live on the worker. A
+		// function on this node has an upstream (its socket) but serves its assets from here.
+		const localRoutes = state.routes.filter(servesReleaseLocally);
 		for (const release of state.releases) {
 			try {
 				const downloaded = await this.releases.ensureRelease(release, this.shutdownController.signal);
@@ -1306,6 +1318,11 @@ class AgentRuntime {
 		const purgedDatabases = this.workloads.pendingPurgedDatabases();
 		const purgedStorage = this.workloads.pendingPurgedStorage();
 		const purgedBrokers = this.workloads.pendingPurgedBrokers();
+		const purgedKubernetes = this.workloads.pendingPurgedKubernetes();
+		const kubernetesComponent = readKubernetesComponent();
+		const kubernetesStatus = this.kubernetes.pending();
+		const kubernetesComponentResult = this.kubernetes.pendingComponentResult();
+		const kubernetesBackupResults = this.kubernetes.pendingBackupResults();
 		const appVolumeReport = this.appVolumes.pending();
 		const shareMountReport = this.shareMounts.report();
 		const diskMountReport = this.diskMounts.report();
@@ -1364,6 +1381,11 @@ class AgentRuntime {
 			...(purgedDatabases.length > 0 ? { purgedDatabases } : {}),
 			...(purgedStorage.length > 0 ? { purgedStorage } : {}),
 			...(purgedBrokers.length > 0 ? { purgedBrokers } : {}),
+			...(purgedKubernetes.length > 0 ? { purgedKubernetes } : {}),
+			...(kubernetesComponent ? { kubernetes: kubernetesComponent } : {}),
+			...(kubernetesStatus.length > 0 ? { kubernetesStatus } : {}),
+			...(kubernetesComponentResult ? { kubernetesComponentResult } : {}),
+			...(kubernetesBackupResults.length > 0 ? { kubernetesBackupResults } : {}),
 			...(appVolumeReport.purged.length > 0 ? { purgedAppVolumes: appVolumeReport.purged } : {}),
 			...(appVolumeReport.usage.length > 0 ? { appVolumeUsage: appVolumeReport.usage } : {}),
 			...(appVolumeReport.results.length > 0 ? { appVolumeTaskResults: appVolumeReport.results } : {}),
@@ -1416,6 +1438,10 @@ class AgentRuntime {
 		this.workloads.acknowledgePurgedDatabases(purgedDatabases);
 		this.workloads.acknowledgePurgedStorage(purgedStorage);
 		this.workloads.acknowledgePurgedBrokers(purgedBrokers);
+		this.workloads.acknowledgePurgedKubernetes(purgedKubernetes);
+		this.kubernetes.acknowledge(kubernetesStatus);
+		this.kubernetes.acknowledgeComponentResult(kubernetesComponentResult);
+		this.kubernetes.acknowledgeBackupResults(kubernetesBackupResults);
 		this.appVolumes.acknowledge(appVolumeReport);
 		this.shareMounts.acknowledgeUnmounted(shareMountReport.unmountedShares);
 		this.diskMounts.acknowledgeUnmounted(diskMountReport.unmountedDisks);
@@ -1583,6 +1609,42 @@ class AgentRuntime {
 	}
 
 	/** Managed broker samples and stream listings (D123), riding the telemetry batch. */
+	/** Kubernetes manifests (on change) and status samples (once a minute). Idle without machines. */
+	private async kubernetesLoop(): Promise<void> {
+		while (this.running) {
+			await sleep(15_000, this.shutdownController.signal);
+			if (!this.running) break;
+			const state = this.desired;
+			await this.kubernetes.componentTick(state, this.shutdownController.signal);
+			if (!state || !state.workloads.some((workload) => workload.kubernetes)) continue;
+			// Snapshots run in the background so a long upload never delays status or manifests.
+			void this.kubernetes.backupTick(state, this.shutdownController.signal);
+			await this.kubernetes.tick(state, this.shutdownController.signal);
+		}
+	}
+
+	/** A server machine's manifests (they can carry attachment passwords; never cached on disk). */
+	private async fetchKubernetesManifests(
+		machineId: string,
+		signal: AbortSignal,
+	): Promise<{ generation: string; files: Record<string, string> }> {
+		const response = await fetch(
+			`${this.config.controlUrl}/api/agent/kubernetes/manifests/${encodeURIComponent(machineId)}`,
+			{ headers: { authorization: `Bearer ${this.config.nodeToken}`, accept: 'application/json' }, signal },
+		);
+		if (!response.ok) {
+			const text = await response.text().catch(() => '');
+			throw new Error(`kubernetes manifests -> ${response.status}${text ? `: ${text}` : ''}`);
+		}
+		const body = (await response.json()) as { generation?: unknown; files?: unknown };
+		if (typeof body.generation !== 'string' || typeof body.files !== 'object' || body.files === null)
+			throw new Error('kubernetes manifests: malformed response');
+		const files: Record<string, string> = {};
+		for (const [name, content] of Object.entries(body.files as Record<string, unknown>))
+			if (typeof content === 'string') files[name] = content;
+		return { generation: body.generation, files };
+	}
+
 	private async brokerStatsLoop(): Promise<void> {
 		while (this.running) {
 			await sleep(BROKER_STATS_INTERVAL_MS, this.shutdownController.signal);
@@ -1873,5 +1935,17 @@ export function advertisedCapabilities(
 	if (python) capabilities.push(FUNCTIONS_PYTHON_CAPABILITY);
 	// Node.js process apps (D125) need the pinned node the installer links onto every unit's PATH.
 	if (existsSync(nodeBinary)) capabilities.push(PROCESS_NODE_CAPABILITY);
+	// The optional Kubernetes component (docs/KUBERNETES.md K2): only while its marker says it works.
+	capabilities.push(...kubernetesCapabilities(readKubernetesComponent()));
 	return capabilities;
+}
+
+/** The kernel's id for this boot, or null off Linux (the workload diff cache then never expires). */
+function readBootId(): string | null {
+	try {
+		const id = readFileSync('/proc/sys/kernel/random/boot_id', 'utf8').trim();
+		return /^[0-9a-f-]{36}$/.test(id) ? id : null;
+	} catch {
+		return null;
+	}
 }

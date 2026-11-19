@@ -5,6 +5,8 @@ import { renderHyperdrive } from './hyperdrive.ts';
 
 const SHA = 'c'.repeat(64);
 const ENV = {
+	DATABASE_HOST: '127.0.0.1',
+	DATABASE_PORT: '15432',
 	DATABASE_POOL_HOST: '127.0.0.1',
 	DATABASE_POOL_PORT: '16432',
 	DATABASE_USER: 'app',
@@ -53,7 +55,7 @@ describe('renderHyperdrive', () => {
 		const rendered = render(ENV);
 		expect(rendered.files).toEqual({});
 		expect(rendered.services).toEqual([
-			'    ( name = "hyperdrive-0",\n      external = ( address = "127.0.0.1:16432", tcp = () ) )',
+			'    ( name = "hyperdrive-0",\n      external = ( address = "127.0.0.1:15432", tcp = () ) )',
 		]);
 		expect(rendered.mainBindings).toEqual([
 			'        ( name = "DB", hyperdrive = ( designator = "hyperdrive-0", database = "app_db", user = "app", password = "hunter2", scheme = "postgres" ) )',
@@ -61,17 +63,11 @@ describe('renderHyperdrive', () => {
 		expect(rendered.requiresDurableStorage).toBeUndefined();
 	});
 
-	test('prefers the pooler values and falls back to the direct ones', () => {
-		const direct = {
-			DATABASE_HOST: '127.0.0.1',
-			DATABASE_PORT: '15432',
-			DATABASE_USER: 'app',
-			DATABASE_PASSWORD: 'hunter2',
-			DATABASE_NAME: 'app_db',
-		};
-		expect(render(direct).services[0]).toContain('address = "127.0.0.1:15432"');
-		const mixed = { ...direct, DATABASE_POOL_PORT: '20000' };
-		expect(render(mixed).services[0]).toContain('address = "127.0.0.1:20000"');
+	test('dials direct Postgres, never the TLS-only pooler, which falls back only without direct values', () => {
+		// workerd's Hyperdrive client never asks for TLS; PgBouncer requires it ("SSL required").
+		expect(render(ENV).services[0]).toContain('address = "127.0.0.1:15432"');
+		const poolOnly = { ...ENV, DATABASE_HOST: '', DATABASE_PORT: '' };
+		expect(render(poolOnly).services[0]).toContain('address = "127.0.0.1:16432"');
 	});
 
 	test('names the service by the supplied stable index', () => {
@@ -82,16 +78,16 @@ describe('renderHyperdrive', () => {
 
 	test('refuses when any credential variable is missing, naming every one', () => {
 		expect(() => render({})).toThrow(
-			/Hyperdrive binding "DB" cannot be rendered: the activation env is missing .*DATABASE_POOL_HOST.*DATABASE_POOL_PORT.*DATABASE_USER.*DATABASE_PASSWORD.*DATABASE_NAME/,
+			/Hyperdrive binding "DB" cannot be rendered: the activation env is missing DATABASE_HOST, DATABASE_PORT, DATABASE_USER, DATABASE_PASSWORD, DATABASE_NAME/,
 		);
 		const partial = { ...ENV, DATABASE_USER: '' };
 		expect(() => render(partial)).toThrow(/missing DATABASE_USER/);
 	});
 
 	test('refuses an invalid port', () => {
-		expect(() => render({ ...ENV, DATABASE_POOL_PORT: '0' })).toThrow(/invalid DATABASE_PORT "0"/);
-		expect(() => render({ ...ENV, DATABASE_POOL_PORT: '65536' })).toThrow(/invalid DATABASE_PORT "65536"/);
-		expect(() => render({ ...ENV, DATABASE_POOL_PORT: '1.5' })).toThrow(/invalid DATABASE_PORT "1.5"/);
+		expect(() => render({ ...ENV, DATABASE_PORT: '0' })).toThrow(/invalid DATABASE_PORT "0"/);
+		expect(() => render({ ...ENV, DATABASE_PORT: '65536' })).toThrow(/invalid DATABASE_PORT "65536"/);
+		expect(() => render({ ...ENV, DATABASE_PORT: '1.5' })).toThrow(/invalid DATABASE_PORT "1.5"/);
 	});
 
 	test('escapes every literal, including hostile credential bytes', () => {

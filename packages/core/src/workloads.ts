@@ -1482,6 +1482,7 @@ export class WorkloadService {
 		if (this.ctx.databases.isDatabaseId(desiredId)) return this.ctx.databases.activation(nodeId, desiredId);
 		if (this.ctx.storage.isStorageId(desiredId)) return this.ctx.storage.activation(nodeId, desiredId);
 		if (this.ctx.brokers.isBrokerId(desiredId)) return this.ctx.brokers.activation(nodeId, desiredId);
+		if (this.ctx.kubernetes.isMachineId(desiredId)) return this.ctx.kubernetes.activation(nodeId, desiredId);
 		if (this.ctx.registry.isRegistryId(desiredId)) return this.ctx.registry.activation(nodeId, desiredId);
 		const { workloadId, replica } = parseWorkloadReplicaId(desiredId);
 		const row = this.ctx.db.select().from(workloads).where(eq(workloads.id, workloadId)).get();
@@ -2303,6 +2304,8 @@ export class WorkloadService {
 		for (const [nodeId, total] of this.ctx.storage.reservedByNode())
 			reserved.set(nodeId, (reserved.get(nodeId) ?? 0) + total);
 		for (const [nodeId, total] of this.ctx.brokers.reservedByNode())
+			reserved.set(nodeId, (reserved.get(nodeId) ?? 0) + total);
+		for (const [nodeId, total] of this.ctx.kubernetes.reservedByNode())
 			reserved.set(nodeId, (reserved.get(nodeId) ?? 0) + total);
 		return reserved;
 	}

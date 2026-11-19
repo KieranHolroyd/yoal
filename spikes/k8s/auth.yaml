@@ -1,0 +1,23 @@
+# S5-lite: structured authentication with a JWT issuer (Yoal ES256). The issuer is unreachable in
+# the spike; the point is that the API server accepts the file and starts.
+apiVersion: apiserver.config.k8s.io/v1
+kind: AuthenticationConfiguration
+jwt:
+- issuer:
+    url: https://control.yoal.invalid
+    discoveryURL: https://control.yoal.invalid/.well-known/openid-configuration
+    audiences: ["k8s:cl_spike"]
+    audienceMatchPolicy: MatchAny
+  claimValidationRules:
+  - expression: "claims.org_id == 'org_spike'"
+    message: token is for another org
+  claimMappings:
+    username:
+      expression: "'yoal:' + claims.sub"
+    groups:
+      expression: "has(claims.groups) ? claims.groups : []"
+    uid:
+      expression: "claims.sub"
+  userValidationRules:
+  - expression: "!user.username.startsWith('system:')"
+    message: "username cannot use the reserved system: prefix"

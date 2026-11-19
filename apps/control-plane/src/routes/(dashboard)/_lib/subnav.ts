@@ -6,6 +6,7 @@ import { docsSubnav } from '../docs/_lib/subnav.js';
 import { emailSubnav } from '../email/_lib/subnav.js';
 import { errorsSubnav } from '../errors/_lib/subnav.js';
 import { functionDeploymentSubnav, functionSubnav } from '../functions/_lib/subnav.js';
+import { clusterSubnav } from '../kubernetes/_lib/subnav.js';
 import { deploymentSubnav, projectSubnav } from '../projects/[slug]/_components/project-subnav.js';
 import { settingsSubnav } from '../settings/_lib/subnav.js';
 import { storageSubnav } from '../storage/_lib/subnav.js';
@@ -69,6 +70,11 @@ export function subnavFor(
 			return has('broker') ? brokerSubnav(d, url, null) : null;
 		case '/(dashboard)/brokers/[name]/logs':
 			return has('broker') ? brokerSubnav(d, url, 'logs') : null;
+
+		case '/(dashboard)/kubernetes/[name]':
+			return has('cluster') ? clusterSubnav(d, url, null) : null;
+		case '/(dashboard)/kubernetes/[name]/logs':
+			return has('cluster') ? clusterSubnav(d, url, 'logs') : null;
 	}
 	return null;
 }

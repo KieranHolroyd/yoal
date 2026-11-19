@@ -24,8 +24,10 @@ decision log with rationale, and [ROADMAP.md](./ROADMAP.md) for v1/v2 scope.
   HA level, and put each service on hardware that suits it (D107, [CLUSTERING.md](./CLUSTERING.md)).
 
 **Non-goals**
-- Kubernetes, a continuously rebalancing scheduler, or a distributed filesystem. Redundancy lives
-  in the data services (CLUSTERING.md §1).
+- Kubernetes as Yoal's own scheduler, a continuously rebalancing scheduler, or a distributed
+  filesystem. Redundancy lives in the data services (CLUSTERING.md §1). Managed clusters that
+  tenants create on opted-in nodes are a hosted product, not how Yoal runs (D226,
+  [KUBERNETES.md](./KUBERNETES.md)).
 - A multi-writer control plane. There is one active control plane, with warm standbys (D5).
 
 ---

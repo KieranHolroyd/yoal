@@ -28,6 +28,7 @@
 	import SettingsIcon from '@lucide/svelte/icons/settings';
 	import ShieldAlertIcon from '@lucide/svelte/icons/shield-alert';
 	import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
+	import ShipWheelIcon from '@lucide/svelte/icons/ship-wheel';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import UserRoundIcon from '@lucide/svelte/icons/user-round';
 	import WorkflowIcon from '@lucide/svelte/icons/workflow';
@@ -86,6 +87,7 @@
 			| '/(dashboard)/databases'
 			| '/(dashboard)/storage'
 			| '/(dashboard)/brokers'
+			| '/(dashboard)/kubernetes'
 			| '/(dashboard)/email'
 			| '/(dashboard)/deployments'
 			| '/(dashboard)/pipelines'
@@ -146,6 +148,13 @@
 					path: '/brokers',
 					icon: InboxIcon,
 					feature: 'brokers'
+				},
+				{
+					label: 'Kubernetes',
+					href: '/(dashboard)/kubernetes',
+					path: '/kubernetes',
+					icon: ShipWheelIcon,
+					feature: 'kubernetes'
 				},
 				{
 					label: 'Email',

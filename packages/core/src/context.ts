@@ -21,6 +21,7 @@ import type { DatabaseStudioService } from './database-studio.ts';
 import type { ContainerConsoleService } from './container-console.ts';
 import type { StorageService } from './storage-instances.ts';
 import type { BrokerService } from './brokers.ts';
+import type { KubernetesService } from './kubernetes.ts';
 import type { EmailService } from './email.ts';
 import type { EventService } from './events.ts';
 import type { NodeTaskService } from './node-tasks.ts';
@@ -117,6 +118,8 @@ export interface CoreContext {
 	storage: StorageService;
 	/** Managed queue brokers (D111). */
 	brokers: BrokerService;
+	/** Managed Kubernetes clusters (docs/KUBERNETES.md). */
+	kubernetes: KubernetesService;
 	/** Email: Yoal's self-hosted SES (docs/EMAIL.md). */
 	email: EmailService;
 	/** Event notifications into function queues (D122). */

@@ -1,4 +1,5 @@
 import {
+	DEFAULT_K8S_MACHINE_CIDR,
 	DEFAULT_OVERLAY_CIDR,
 	DEFAULT_WG_MTU,
 	DEFAULT_WG_PORT,
@@ -30,6 +31,10 @@ export interface OverlayNode {
 	lanEndpoint: string | null;
 	/** A named private network (D215); optional so callers that predate it keep the zone rule. */
 	privateNetwork?: string | null;
+	/** The node runs multi-node Kubernetes machines on its routed /24 (docs/KUBERNETES.md §10). */
+	machineSubnet?: string | null;
+	/** Its helper accepts /24 entries (`wg-subnets`); older nodes only ever get /32s. */
+	acceptsSubnets?: boolean;
 }
 
 /** How traffic between two overlay nodes travels underneath WireGuard. */
@@ -78,6 +83,8 @@ export function buildWireguardState(
 			mtu: options.mtu ?? DEFAULT_WG_MTU,
 			listenPort: options.listenPort ?? DEFAULT_WG_PORT,
 			peers: [],
+			routes: [],
+			machineSubnet: null,
 		};
 	}
 
@@ -142,13 +149,27 @@ export function buildWireguardState(
 		}
 	}
 
+	// Machine subnets ride with the /32 of the node that owns them, on nodes that understand them.
+	const withSubnets = self.acceptsSubnets
+		? peers.map((peer) => {
+				const extra: string[] = [];
+				for (const ip of peer.allowedIps) {
+					const owner = managed.find((node) => `${node.privateAddress}/32` === ip);
+					if (owner?.machineSubnet) extra.push(owner.machineSubnet);
+				}
+				return extra.length > 0 ? { ...peer, allowedIps: [...peer.allowedIps, ...extra] } : peer;
+			})
+		: peers;
+	const anySubnets = self.acceptsSubnets && managed.some((node) => node.machineSubnet);
 	return {
 		mode: self.networkMode,
 		address: self.privateAddress,
 		cidr,
 		mtu: options.mtu ?? DEFAULT_WG_MTU,
 		listenPort: options.listenPort ?? DEFAULT_WG_PORT,
-		peers: dedupePeers(peers),
+		peers: dedupePeers(withSubnets),
+		routes: anySubnets ? [DEFAULT_K8S_MACHINE_CIDR] : [],
+		machineSubnet: self.acceptsSubnets ? (self.machineSubnet ?? null) : null,
 	};
 }
 

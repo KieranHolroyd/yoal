@@ -6,6 +6,16 @@ import { limits, type DesiredState, type ReleaseSpec } from '@yoal/contracts';
 import { isProductionRoute } from './caddy-config.ts';
 
 /**
+ * Whether this node serves the route's release files itself. A plain static route has no
+ * upstream. A function route on its own node also carries an upstream (its workerd socket), but
+ * its assets are served from the release first, so it needs the release and the production
+ * symlink too. The edge never adds `function` to a route it proxies to another node.
+ */
+export function servesReleaseLocally(route: DesiredState['routes'][number]): boolean {
+	return !route.upstream || Boolean(route.function);
+}
+
+/**
  * Release cache. Artifacts are zips in R2; the agent downloads each missing artifact once,
  * validates it, extracts it into an immutable content-addressed directory and then flips the
  * project symlink. Serving never depends on R2 (DESIGN §4, §9).
@@ -526,7 +536,7 @@ export class ReleaseManager {
 	/** Keep every release in desired state plus two older ones; delete stale site symlinks. */
 	async gc(desired: DesiredState): Promise<void> {
 		const keep = new Set<string>(desired.releases.map((release) => release.sha256));
-		for (const route of desired.routes) if (!route.upstream) keep.add(route.release);
+		for (const route of desired.routes) if (servesReleaseLocally(route)) keep.add(route.release);
 
 		const candidates: Array<{ sha: string; mtimeMs: number }> = [];
 		for (const entry of await fs.readdir(this.releasesDir, { withFileTypes: true })) {
@@ -543,7 +553,7 @@ export class ReleaseManager {
 		// Only production routes go through `sites/<projectId>`; previews are rooted at releases.
 		const projects = new Set(
 			desired.routes
-				.filter((route) => !route.upstream && isProductionRoute(route, desired.contentDomain))
+				.filter((route) => servesReleaseLocally(route) && isProductionRoute(route, desired.contentDomain))
 				.map((route) => route.projectId),
 		);
 		for (const entry of await fs.readdir(this.sitesDir, { withFileTypes: true })) {

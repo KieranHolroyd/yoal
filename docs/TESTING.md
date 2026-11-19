@@ -6,6 +6,9 @@ Two layers matter for managed data:
 2. **`tests/e2e/managed-data.e2e.ts`** — disposable Postgres 17 + RustFS 1.0.4 containers on a
    private network. It asserts the wire-level contract the helper, agent and object browser use.
 
+Functions have a third, whole-node layer: **`tests/e2e/function-suite.e2e.ts`** (below) installs
+a real node and runs the `examples/function-suite` checks against it.
+
 The Debian 13 wrapper is `scripts/e2e/debian13.sh`. It verifies the real host prerequisites and
 runs the container lane; the privileged helper/Quadlet path is a documented manual checklist
 below, not something the harness pretends to do.
@@ -143,6 +146,41 @@ is green, on the node that will run managed data:
    - `pg_dump`/`pg_restore` succeed through the helper's fixed verbs (not a shell from the wire).
 
 Record the kernel, `podman --version` and `podman info` with the result.
+
+---
+
+## Function suite on a real node
+
+`tests/e2e/function-suite.e2e.ts` is the one lane with nothing faked. On a disposable Debian or
+Ubuntu machine it:
+
+1. installs Yoal from this checkout, uncommitted changes included, with `install.sh` and
+   ClickHouse (`YOAL_SOURCE_DIR`, IP-only, so sites are `http://<name>.<ip>.sslip.io`)
+2. claims the instance through the setup wizard's own form actions: setup token → owner → TOTP
+   enrolment with a computed code → API key (`tests/e2e/function-suite/bootstrap.ts`)
+3. runs `examples/function-suite/scripts/provision.ts`, which creates storage, Postgres, broker,
+   queues, event rule, secret and app errors, then deploys both functions with the real CLI
+4. runs `examples/function-suite/scripts/suite.ts --cold-start`: every binding, Durable Objects,
+   queues with retries and dead letters, storage events, cron, static assets, egress policy, app
+   errors, load, control-plane tools and scale to zero
+
+```sh
+bun tests/e2e/function-suite.e2e.ts                      # Lima VM yoal-fn-e2e (Debian 13, created if missing)
+bun tests/e2e/function-suite.e2e.ts --fresh              # recreate the VM first
+bun tests/e2e/function-suite.e2e.ts --target ssh:root@host
+bun tests/e2e/function-suite.e2e.ts --no-cold-start -- --skip egress
+```
+
+A second run against the same VM upgrades the install from the checkout (`install.sh --upgrade`),
+keeps the owner key and re-runs everything, so a fix can be re-tested in minutes. Diagnostics
+(the suite report, journals of every `yoal-*` unit and Caddy, the rendered workload units,
+containers and `/run/yoal-workloads`) are copied to `tests/e2e/.out/function-suite` whatever
+the result. The node-side steps are `tests/e2e/function-suite/node.sh`.
+
+In CI the `function-e2e` job runs it with `--target local` on an `ubuntu-24.04` runner: the runner
+VM is the node, after Docker is stopped. It runs on `main` and on pull requests touching the
+helper, agent, CLI, control plane, packages, installer, the example or the lane, and uploads the
+diagnostics as the `function-suite-e2e` artifact.
 
 ---
 

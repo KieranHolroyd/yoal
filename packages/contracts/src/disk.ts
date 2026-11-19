@@ -40,7 +40,7 @@ export const DISK_ID_PREFIX = 'dsk_';
 /** Keep this share of a disk free after placing a service on it. */
 export const DISK_MIN_FREE_PERCENT = 10;
 
-export const storageKinds = ['databases', 'object-storage', 'brokers', 'app-volumes', 'builds', 'site-data'] as const;
+export const storageKinds = ['databases', 'object-storage', 'brokers', 'kubernetes', 'app-volumes', 'builds', 'site-data'] as const;
 export type StorageKind = (typeof storageKinds)[number];
 
 /** Kinds resolved per node from desired state (D48 directories) rather than per resource. */
@@ -50,6 +50,7 @@ export const storageKindInfo: Record<StorageKind, { label: string; description: 
 	databases: { label: 'Databases', description: 'Managed databases, read replicas and move targets.', suggested: 'fast' },
 	'object-storage': { label: 'Object storage', description: 'S3-compatible storage instances.', suggested: 'bulk' },
 	brokers: { label: 'Queues', description: 'Message broker data.', suggested: 'fast' },
+	kubernetes: { label: 'Kubernetes', description: 'Kubernetes cluster state and local-path volumes.', suggested: 'fast' },
 	'app-volumes': { label: 'App volumes', description: 'Persistent directories mounted into apps.', suggested: 'fast' },
 	builds: { label: 'Builds', description: 'Builder scratch space for git builds. Local disks only.', suggested: 'bulk' },
 	'site-data': {

@@ -364,7 +364,7 @@ async function waitFor(client: ApiClient, project: string, run: JobRunView): Pro
 }
 
 /** Print new lines every second; the agent drains a run's last lines before it reports the exit. */
-export async function follow(client: ApiClient, project: string, run: JobRunView, sleep = (ms: number) => Bun.sleep(ms)): Promise<JobRunView> {
+export async function follow(client: ApiClient, project: string, run: JobRunView, sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms))): Promise<JobRunView> {
 	let cursor: number | undefined;
 	let current = run;
 	let announced = false;

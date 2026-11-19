@@ -1,7 +1,7 @@
 import { requireMcpAuth } from '@better-auth/mcp';
 import { WORKLOAD_IDENTITY_AUDIENCE } from '@yoal/contracts';
 import { auth } from '#lib/server/auth.js';
-import { mcpResource } from '#lib/server/config.js';
+import { mcpAvailable, mcpResource } from '#lib/server/config.js';
 import { core } from '#lib/server/core.js';
 import { mcpHandler } from '#lib/server/mcp.js';
 import { grantRevokedResponse } from '#lib/server/mcp-grant.js';
@@ -70,6 +70,16 @@ async function handleWithYoalToken(request: Request): Promise<Response> {
 	});
 }
 
-export const POST: RequestHandler = ({ request }) => handleWithYoalToken(request);
-export const GET: RequestHandler = ({ request }) => handleWithYoalToken(request);
-export const DELETE: RequestHandler = ({ request }) => handleWithYoalToken(request);
+/** An install without HTTPS has no MCP (config.ts `mcpAvailable`): say why instead of a challenge. */
+function unavailable(): Response {
+	return Response.json(
+		{ error: 'MCP needs HTTPS. Install with a platform domain and TLS to use it.' },
+		{ status: 404 },
+	);
+}
+
+const serve = (request: Request) => (mcpAvailable ? handleWithYoalToken(request) : unavailable());
+
+export const POST: RequestHandler = ({ request }) => serve(request);
+export const GET: RequestHandler = ({ request }) => serve(request);
+export const DELETE: RequestHandler = ({ request }) => serve(request);

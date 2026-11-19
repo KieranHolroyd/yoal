@@ -37,6 +37,7 @@ yoal deploy ./dist --project my-site --json
 | `profile [list\|add\|use\|remove\|show\|current]` | Manage profiles for multiple deployments |
 | `deploy [dir]` | Zip a directory and deploy it (`--project`, `--name`, `--no-promote`, `--message`, `--spa`, `--no-create`) |
 | `status [project]` | Fleet health, or one project's status |
+| `docs [list\|search\|read\|context]` | Search and read the Yoal docs offline (bundled, no login); `--json` and help written for AI agents |
 | `projects` | List projects |
 | `projects delete\|restore\|purge <slug…>` | Bulk actions: plan, confirm, apply (see below) |
 | `projects trash` | List deleted projects and when each is purged |

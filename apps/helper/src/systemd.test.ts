@@ -1207,6 +1207,16 @@ describe('process runtime guards (D225)', () => {
 		expect((await fs.stat(f.stateDir)).mode & 0o777).toBe(0o711);
 	});
 
+	test('the runtime root is made traversable, so Caddy can dial a workload socket', async () => {
+		const f = await fixture();
+		await fs.mkdir(f.runtimeDir, { recursive: true, mode: 0o700 });
+		await fs.chmod(f.runtimeDir, 0o700);
+		await f.driver.apply(workload(), activation());
+		expect((await fs.stat(f.runtimeDir)).mode & 0o777).toBe(0o711);
+		// The workload's own directory still holds secrets: owner-only.
+		expect((await fs.stat(join(f.runtimeDir, 'wld_abc123'))).mode & 0o777).toBe(0o700);
+	});
+
 	test('a container data dir created first does not leave the state root at 0700', async () => {
 		const f = await fixture();
 		await f.driver.apply(

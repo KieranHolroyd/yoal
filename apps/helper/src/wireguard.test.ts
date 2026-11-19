@@ -2,7 +2,7 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { renderConfig, WireguardManager, type CommandResult, type CommandRunner } from './wireguard.ts';
+import { parseWireguardState, renderConfig, WireguardManager, type CommandResult, type CommandRunner } from './wireguard.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'yoal-wireguard-'));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -22,6 +22,8 @@ const state = {
 			persistentKeepalive: 25,
 		},
 	],
+	routes: [] as string[],
+	machineSubnet: null as string | null,
 };
 
 function fakeRunner(calls: string[][]): CommandRunner {
@@ -118,5 +120,20 @@ describe('renderConfig', () => {
 		expect(config).toContain('[Interface]');
 		expect(config).not.toContain('Address =');
 		expect(config).not.toContain('PostUp');
+	});
+});
+
+describe('kubernetes machine subnets', () => {
+	test('peers may carry /24 machine subnets and the state its routes', () => {
+		const parsed = parseWireguardState({
+			...state,
+			peers: [{ ...state.peers[0], allowedIps: ['10.47.1.1/32', '10.48.1.0/24'] }],
+			routes: ['10.48.0.0/16'],
+			machineSubnet: '10.48.5.0/24',
+		});
+		expect(parsed.routes).toEqual(['10.48.0.0/16']);
+		expect(parsed.machineSubnet).toBe('10.48.5.0/24');
+		expect(() => parseWireguardState({ ...state, routes: ['0.0.0.0/0'] })).toThrow(/route/);
+		expect(() => parseWireguardState({ ...state, peers: [{ ...state.peers[0], allowedIps: ['10.0.0.0/8'] }] })).toThrow();
 	});
 });

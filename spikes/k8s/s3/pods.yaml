@@ -1,0 +1,45 @@
+# S3 cross-node pods: one busybox httpd pinned to each node, plus a ClusterIP Service per server pod.
+# Each serves /small (1300 B) and /big (20 MiB) from random data, and records md5 sums.
+apiVersion: v1
+kind: Namespace
+metadata: {name: s3}
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: web-sa, namespace: s3, labels: {app: web-sa}}
+spec:
+  nodeName: sa
+  containers:
+  - name: c
+    image: docker.io/library/busybox:1.37
+    command: [sh, -c, 'mkdir /www; head -c 1300 /dev/urandom > /www/small; dd if=/dev/urandom of=/www/big bs=1M count=20 2>/dev/null; md5sum /www/* > /www/sums; echo ready; exec httpd -f -vv -p 8080 -h /www']
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: web-ab, namespace: s3, labels: {app: web-ab}}
+spec:
+  nodeName: ab
+  containers:
+  - name: c
+    image: docker.io/library/busybox:1.37
+    command: [sh, -c, 'mkdir /www; head -c 1300 /dev/urandom > /www/small; dd if=/dev/urandom of=/www/big bs=1M count=20 2>/dev/null; md5sum /www/* > /www/sums; echo ready; exec httpd -f -vv -p 8080 -h /www']
+---
+apiVersion: v1
+kind: Pod
+metadata: {name: web-sb, namespace: s3, labels: {app: web-sb}}
+spec:
+  nodeName: sb
+  containers:
+  - name: c
+    image: docker.io/library/busybox:1.37
+    command: [sh, -c, 'mkdir /www; head -c 1300 /dev/urandom > /www/small; dd if=/dev/urandom of=/www/big bs=1M count=20 2>/dev/null; md5sum /www/* > /www/sums; echo ready; exec httpd -f -vv -p 8080 -h /www']
+---
+apiVersion: v1
+kind: Service
+metadata: {name: web-ab, namespace: s3}
+spec: {selector: {app: web-ab}, ports: [{port: 80, targetPort: 8080}]}
+---
+apiVersion: v1
+kind: Service
+metadata: {name: web-sa, namespace: s3}
+spec: {selector: {app: web-sa}, ports: [{port: 80, targetPort: 8080}]}

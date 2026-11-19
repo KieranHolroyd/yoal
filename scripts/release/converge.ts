@@ -338,6 +338,22 @@ export async function convergeHost(input: ConvergeInput): Promise<ConvergeReport
 				return result === 'installed';
 			});
 		}
+		// The Kubernetes component (docs/KUBERNETES.md K2) is opt-in too: only a node with its marker
+		// pulls newly pinned k3s minors and bundles. The tier probe is not re-run on every release.
+		const kubernetesModule = join(release, 'repo', 'scripts', 'install', 'kubernetes.ts');
+		if (existsSync(kubernetesModule)) {
+			await step(report, 'kubernetes', async () => {
+				const { installKubernetesComponent, readMarker, spawnComponentRunner } = await import(kubernetesModule);
+				const marker = readMarker();
+				if (!marker || marker.error) return false;
+				const before = [...marker.minors].sort().join(',');
+				const result = await installKubernetesComponent({ runner: spawnComponentRunner, probeTiers: [], log });
+				// Keep the tiers the original probe accepted.
+				const { writeFileSync } = await import('node:fs');
+				writeFileSync('/usr/lib/yoal/k3s/installed.json', `${JSON.stringify({ ...result, tiers: marker.tiers, error: null }, null, 2)}\n`);
+				return [...result.minors].sort().join(',') !== before;
+			});
+		}
 		// PHP process apps run on a pinned FrankenPHP (D121). It is opt-in, so only a node that
 		// already has Yoal's install (the PATH link into /usr/lib/yoal/frankenphp) follows a pin
 		// bump; nothing is downloaded on a node that never asked for PHP.

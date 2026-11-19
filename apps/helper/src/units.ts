@@ -505,7 +505,10 @@ export interface FunctionUnitOptions {
 	shimPath: string;
 	/** Absolute path of the pinned workerd binary. */
 	workerdPath: string;
-	/** Absolute release file paths, in manifest module order (module-0, module-1, …). */
+	/**
+	 * Absolute release file paths, in manifest module order. They are not credentials: workerd reads
+	 * them itself through `--import-path <release root>` (a credential is capped at 1 MiB).
+	 */
 	modulePaths: string[];
 	/**
 	 * Extra systemd credentials holding binding-service worker modules, in stable name order. The
@@ -517,7 +520,33 @@ export interface FunctionUnitOptions {
 	 * Objects, KV, cache). Adds the writable state directories and workerd's `--directory-path`.
 	 */
 	durableStorage: boolean;
+	/**
+	 * Subnets of the workload's own org container network. Podman publishes a managed service's
+	 * loopback port (PgBouncer, NATS, RustFS) by DNAT to the container's address on that network,
+	 * so the packets a Hyperdrive, queue or R2 binding sends leave the unit addressed to it. Every
+	 * entry must be a private CIDR (checked by `orgNetworkSubnets`).
+	 */
+	allowSubnets?: string[];
+	/**
+	 * Group that owns workload sockets (`caddy`), granted only when the function has an `app`
+	 * binding so workerd can dial the other project's socket. The paths that group otherwise
+	 * opens (Caddy's admin socket, every tenant's access logs) are hidden from the unit.
+	 */
+	socketGroup?: string | null;
 }
+
+/**
+ * Paths the workload-socket group can reach besides the sockets: Caddy's state directory (its
+ * admin socket is 0660 group `caddy`) and its access logs. A function granted the group must
+ * never see them; the `-` prefix keeps the unit valid on a node without them.
+ */
+export const SOCKET_GROUP_HIDDEN_PATHS = ['/var/lib/caddy', '/var/log/caddy'] as const;
+
+/** Bindings whose backing service is a container on the org network, reached via a published loopback port. */
+export const ORG_NETWORK_FUNCTION_BINDING_TYPES = ['hyperdrive', 'queue', 'r2'] as const;
+
+/** Binding that dials another workload's socket. */
+export const SOCKET_FUNCTION_BINDING_TYPES = ['app'] as const;
 
 /**
  * The Pyodide bundle cache for one pinned workerd: `<dir of the binary>/pyodide`, written by the
@@ -572,14 +601,16 @@ export function renderFunctionUnit(options: FunctionUnitOptions): string {
 	lines.push(`WorkingDirectory=${options.releaseDir}`);
 	lines.push(`EnvironmentFile=-${options.envFile}`);
 	lines.push(`Environment=PATH=${DEFAULT_PATH}`);
-	// The config names these credentials (`function-shim`, `module-0`, …); keep the order fixed.
+	// The config names these credentials (`function-shim`, binding files); keep the order fixed.
 	lines.push(`LoadCredential=function-config:${options.configPath}`);
 	lines.push(`LoadCredential=function-shim:${options.shimPath}`);
 	// Binding-service modules come next, in stable name order, so the rendered config's `embed`
 	// names always match a credential the helper wrote.
 	for (const file of options.files ?? []) lines.push(`LoadCredential=${file.name}:${file.path}`);
-	for (const [index, path] of options.modulePaths.entries())
-		lines.push(`LoadCredential=module-${index}:${path}`);
+	// The user's modules are not credentials: systemd caps each one at 1 MiB, and a larger bundle
+	// failed with "Failed to set up credentials: Argument list too long". The config embeds them as
+	// `/<release>/<module>`, which workerd resolves against `--import-path` below.
+	const importRoot = releaseImportRoot(options.releaseDir, workload.release!, options.modulePaths);
 	for (const secret of options.secrets) {
 		lines.push(`LoadCredential=${secret.name}:${secret.path}`);
 		lines.push(`Environment=${secret.name}_FILE=%d/${secret.name}`);
@@ -603,7 +634,9 @@ export function renderFunctionUnit(options: FunctionUnitOptions): string {
 	const pythonArgs = fn.modules.some((module) => module.name === fn.main && module.type === 'python')
 		? ` --experimental --pyodide-bundle-disk-cache-dir ${pyodideCacheDir(options.workerdPath)}`
 		: '';
-	lines.push(`ExecStart=${options.workerdPath} serve %d/function-config --socket-fd http=3${durableArg}${pythonArgs}`);
+	lines.push(
+		`ExecStart=${options.workerdPath} serve %d/function-config --socket-fd http=3 --import-path ${importRoot}${durableArg}${pythonArgs}`,
+	);
 	lines.push('Restart=on-failure');
 	lines.push('RestartSec=2');
 	lines.push('TimeoutStopSec=30');
@@ -631,9 +664,85 @@ export function renderFunctionUnit(options: FunctionUnitOptions): string {
 	lines.push('CapabilityBoundingSet=');
 	lines.push('AmbientCapabilities=');
 	lines.push('UMask=0077');
-	lines.push('IPAddressAllow=127.0.0.0/8 ::1/128');
+	const appBinding = fn.bindings.some((binding) =>
+		(SOCKET_FUNCTION_BINDING_TYPES as readonly string[]).includes(binding.type),
+	);
+	if (appBinding && options.socketGroup) {
+		lines.push(`SupplementaryGroups=${options.socketGroup}`);
+		lines.push(`InaccessiblePaths=${SOCKET_GROUP_HIDDEN_PATHS.map((path) => `-${path}`).join(' ')}`);
+	}
+	// An address on both lists is allowed (systemd.resource-control), so the org subnet is
+	// reachable and every other private range stays blocked. workerd itself only dials the
+	// loopback externals the config declares; user `fetch()` still goes through `internet`,
+	// which refuses private addresses.
+	lines.push(`IPAddressAllow=${['127.0.0.0/8', '::1/128', ...(options.allowSubnets ?? [])].join(' ')}`);
 	lines.push('IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 fc00::/7 fe80::/10');
 	return `${lines.join('\n')}\n`;
+}
+
+/**
+ * The directory workerd searches for the config's absolute module embeds: the parent of the
+ * release directory, which must be named after the release sha256. Every module path must sit
+ * inside the release, so an embed can never reach past it.
+ */
+export function releaseImportRoot(releaseDir: string, release: string, modulePaths: string[]): string {
+	if (!/^[a-f0-9]{64}$/.test(release)) throw new ValidationError('A function release must be a sha256 digest');
+	if (!releaseDir.startsWith('/') || releaseDir.endsWith('/') || !releaseDir.endsWith(`/${release}`))
+		throw new ValidationError(`The function release directory ${releaseDir} is not named after release ${release}`);
+	const root = releaseDir.slice(0, -release.length - 1) || '/';
+	if (/[\s"'\\%$;]/.test(root)) throw new ValidationError(`The release root ${root} cannot appear in a unit file`);
+	for (const path of modulePaths)
+		if (!path.startsWith(`${releaseDir}/`)) throw new ValidationError(`Function module ${path} is outside its release`);
+	return root;
+}
+
+/** True when the function reaches a container on its org network (Hyperdrive, queues, R2). */
+export function functionNeedsOrgNetwork(fn: { bindings: Array<{ type: string }> }): boolean {
+	return fn.bindings.some((binding) =>
+		(ORG_NETWORK_FUNCTION_BINDING_TYPES as readonly string[]).includes(binding.type),
+	);
+}
+
+/**
+ * Parse `podman network inspect --format '{{json .Subnets}}'` into CIDRs that are safe to allow:
+ * private IPv4 (RFC 1918) or IPv6 ULA ranges only, never wider than the private range itself.
+ * Anything else (public, link-local, malformed) is dropped rather than widening the filter.
+ */
+export function parseOrgSubnets(stdout: string): string[] {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout);
+	} catch {
+		return [];
+	}
+	if (!Array.isArray(parsed)) return [];
+	const out: string[] = [];
+	for (const entry of parsed) {
+		const subnet = entry && typeof entry === 'object' ? (entry as Record<string, unknown>).subnet : undefined;
+		if (typeof subnet === 'string' && isPrivateCidr(subnet) && !out.includes(subnet)) out.push(subnet);
+	}
+	return out;
+}
+
+function isPrivateCidr(cidr: string): boolean {
+	const v4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})\/(\d{1,2})$/.exec(cidr);
+	if (v4) {
+		const octets = v4.slice(1, 5).map(Number);
+		const prefix = Number(v4[5]);
+		if (octets.some((octet) => octet > 255) || prefix > 32) return false;
+		const [a, b] = octets as [number, number, number, number];
+		if (a === 10) return prefix >= 8;
+		if (a === 172 && b >= 16 && b <= 31) return prefix >= 12;
+		if (a === 192 && b === 168) return prefix >= 16;
+		return false;
+	}
+	const v6 = /^([0-9a-f:]+)\/(\d{1,3})$/i.exec(cidr);
+	if (v6 && v6[1]!.includes(':')) {
+		const prefix = Number(v6[2]);
+		const first = Number.parseInt(v6[1]!.split(':')[0] || '0', 16);
+		return prefix >= 7 && prefix <= 128 && (first & 0xfe00) === 0xfc00;
+	}
+	return false;
 }
 
 export interface SocketUnitOptions {

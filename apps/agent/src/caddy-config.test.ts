@@ -652,7 +652,7 @@ describe('function routes (D110)', () => {
 			},
 		});
 		expect(proxy.transport).toEqual({ protocol: 'http', response_header_timeout: '5m' });
-		expect(JSON.stringify(proxy.handle_response)).toContain('"status_code":503');
+		expect(proxy.handle_response).toBeUndefined();
 	});
 
 	test('without an assets directory only the function proxy remains', () => {
@@ -735,7 +735,7 @@ describe('function routes (D110)', () => {
 			expect(proxy.upstreams).toEqual(replicas.map((dial) => ({ dial })));
 			expect(((proxy.headers as Json).request as Json).set).toMatchObject({ 'X-Yoal-Internal': ['0'] });
 			expect((proxy.transport as Json).response_header_timeout).toBe('5m');
-			expect(JSON.stringify(proxy.handle_response)).toContain('"status_code":503');
+			expect(proxy.handle_response).toBeUndefined();
 		}
 	});
 

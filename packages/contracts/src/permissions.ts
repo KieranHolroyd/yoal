@@ -40,6 +40,7 @@ export const roles = {
 		'database:create', 'database:read', 'database:update', 'database:credentials', 'database:console',
 		'storage:create', 'storage:read', 'storage:update', 'storage:credentials',
 		'broker:create', 'broker:read', 'broker:update', 'broker:credentials',
+		'kubernetes:create', 'kubernetes:read', 'kubernetes:update', 'kubernetes:view', 'kubernetes:edit',
 		'email:read', 'email:send', 'email:update', 'email:credentials',
 		'shareLink:create', 'shareLink:read', 'shareLink:revoke',
 		'logs:read', 'metrics:read',
@@ -52,6 +53,7 @@ export const roles = {
 	viewer: pick(
 		'project:read', 'deployment:read', 'domain:read', 'secret:read-metadata',
 		'build:read', 'database:read', 'storage:read', 'broker:read', 'email:read', 'shareLink:read', 'logs:read', 'metrics:read',
+		'kubernetes:read', 'kubernetes:view',
 		'container:inspect', 'image:pull',
 		'environment:read', 'pipeline:read', 'alert:read', 'dashboard:read', 'volume:read',
 	),

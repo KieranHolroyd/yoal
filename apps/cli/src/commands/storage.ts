@@ -495,7 +495,7 @@ async function storageLogs(argv: string[]): Promise<void> {
 		}
 		cursor = page.cursor;
 		if (!follow) return;
-		await Bun.sleep(2_000);
+		await new Promise<void>((resolve) => setTimeout(resolve, 2_000));
 	} while (follow);
 }
 

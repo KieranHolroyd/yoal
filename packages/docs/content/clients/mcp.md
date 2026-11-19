@@ -177,7 +177,7 @@ There are 171 tools. The permission column lists every scope a call checks, and 
 
 ### Documentation
 
-These two tools search and read this documentation, as it shipped with the platform version you are connected to. The index is built from the docs inside the running build, so it is always current after an update, and results link to the matching page in your dashboard. They need no permission.
+These two tools search and read this documentation, as it shipped with the platform version you are connected to. The index is built from the docs inside the running build, so it is always current after an update, and results link to the matching page in your dashboard. They need no permission. Agents with a shell can search the same pages offline with [`yoal docs`](/clients/agent-docs).
 
 | Tool | What it does | Permission |
 |---|---|---|

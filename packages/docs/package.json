@@ -9,7 +9,9 @@
 		"./prose.css": "./src/prose.css",
 		"./disk": "./src/disk.ts",
 		"./diagrams": "./src/diagrams.ts",
-		"./database": "./src/database.ts"
+		"./database": "./src/database.ts",
+		"./sections": "./src/sections.ts",
+		"./manifest": "./src/manifest.ts"
 	},
 	"scripts": {
 		"check": "tsc -p . --noEmit",

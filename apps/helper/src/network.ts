@@ -58,16 +58,29 @@ export class NetworkManager {
 		this.runner = options.runner ?? defaultRunner;
 	}
 
-	/** Open the underlay port and restrict overlay TCP to the served ports. Idempotent. */
-	async apply(): Promise<{ backend: FirewallBackend; opened: number }> {
+	/**
+	 * Open the underlay port and restrict overlay TCP to the served ports. Idempotent.
+	 *
+	 * `forwardCidrs` are routed prefixes behind this node (the Kubernetes machine supernet, docs/
+	 * KUBERNETES.md §10): traffic from the overlay to a machine container is forwarded, not
+	 * delivered locally, so it needs a forward allowance rather than an input port.
+	 */
+	async apply(options: { forwardCidrs?: string[] } = {}): Promise<{ backend: FirewallBackend; opened: number }> {
+		const forward = (options.forwardCidrs ?? []).filter((cidr) => /^(?:\d{1,3}\.){3}\d{1,3}\/\d{1,2}$/.test(cidr));
 		const ufw = await this.runner([this.paths.ufwPath, 'status']);
 		if (ufw.code === 0 && /Status:\s*active/i.test(ufw.stdout)) {
 			await this.expect([this.paths.ufwPath, 'allow', `${this.paths.wireguardPort}/udp`], 'ufw allow wireguard');
+			for (const cidr of forward)
+				await this.expect(
+					[this.paths.ufwPath, 'route', 'allow', 'in', 'on', this.paths.interface, 'to', cidr],
+					'ufw route allow machines',
+				);
 			for (const port of this.paths.overlayTcpPorts)
 				await this.expect(
 					[this.paths.ufwPath, 'allow', 'in', 'on', this.paths.interface, 'to', 'any', 'port', portSpec(port, ':'), 'proto', 'tcp'],
 					'ufw allow overlay',
 				);
+			await this.applyMachineNat(forward);
 			return { backend: 'ufw', opened: 1 + this.paths.overlayTcpPorts.length };
 		}
 
@@ -82,16 +95,53 @@ export class NetworkManager {
 				'firewalld trusted overlay',
 			);
 			await this.expect([this.paths.firewallCmdPath, '--reload'], 'firewalld reload');
+			await this.applyMachineNat(forward);
 			return { backend: 'firewalld', opened: 1 + this.paths.overlayTcpPorts.length };
 		}
 
 		// No host manager detected: a dedicated table with a default-drop overlay chain.
+		await this.applyMachineNat(forward);
 		await fs.mkdir(dirname(this.paths.configPath), { recursive: true, mode: 0o755 });
-		await fs.writeFile(this.paths.configPath, this.renderNftables(), { mode: 0o644 });
+		await fs.writeFile(this.paths.configPath, this.renderNftables(forward), { mode: 0o644 });
 		const check = await this.runner([this.paths.nftPath, '-c', '-f', this.paths.configPath]);
 		if (check.code !== 0) throw new Error(`nftables check failed: ${check.stderr.trim()}`);
 		await this.expect([this.paths.nftPath, '-f', this.paths.configPath], 'nftables apply');
 		return { backend: 'nftables', opened: this.paths.overlayTcpPorts.length };
+	}
+
+	/**
+	 * Kubernetes machine traffic between nodes (docs/KUBERNETES.md §10, S3). netavark masquerades
+	 * everything leaving a bridge, so a machine on node B would see machine A's traffic coming from
+	 * A's `wg0` address, and etcd's peer check (source IP against the peer certificate) refuses the
+	 * join. A source NAT to itself, before netavark's chain, keeps machine-to-machine traffic on its
+	 * real addresses. Its own table, so it applies whichever firewall backend the host uses.
+	 */
+	async applyMachineNat(cidrs: string[]): Promise<void> {
+		const path = this.paths.configPath.replace(/yoal\.nft$/, 'yoal-k8s.nft');
+		if (cidrs.length === 0) {
+			const exists = await this.runner([this.paths.nftPath, 'list', 'table', 'inet', 'yoal-k8s']);
+			if (exists.code === 0) await this.runner([this.paths.nftPath, 'delete', 'table', 'inet', 'yoal-k8s']);
+			await fs.rm(path, { force: true });
+			return;
+		}
+		await fs.mkdir(dirname(path), { recursive: true, mode: 0o755 });
+		await fs.writeFile(path, this.renderMachineNat(cidrs), { mode: 0o644 });
+		const check = await this.runner([this.paths.nftPath, '-c', '-f', path]);
+		if (check.code !== 0) throw new Error(`nftables check failed: ${check.stderr.trim()}`);
+		await this.expect([this.paths.nftPath, '-f', path], 'nftables machine nat');
+	}
+
+	renderMachineNat(cidrs: string[]): string {
+		const rules = cidrs.map((cidr) => `\t\tip saddr ${cidr} ip daddr ${cidr} snat ip to ip saddr`).join('\n');
+		return `table inet yoal-k8s
+delete table inet yoal-k8s
+table inet yoal-k8s {
+\tchain postrouting {
+\t\ttype nat hook postrouting priority srcnat - 10; policy accept;
+${rules}
+\t}
+}
+`;
 	}
 
 	/**
@@ -102,8 +152,16 @@ export class NetworkManager {
 	 * node opened over the overlay come back to an ephemeral port, so established and related
 	 * traffic is accepted before the port allowlist; without it an ingress could not reach a worker.
 	 */
-	renderNftables(): string {
+	renderNftables(forwardCidrs: string[] = []): string {
 		const iface = this.paths.interface;
+		const forward =
+			forwardCidrs.length > 0
+				? `\tchain forward {
+\t\ttype filter hook forward priority -10; policy accept;
+${forwardCidrs.map((cidr) => `\t\tiifname "${iface}" ip daddr ${cidr} accept`).join('\n')}
+\t}
+`
+				: '';
 		const accept = this.paths.overlayTcpPorts
 			.map((port) => `\t\tiifname "${iface}" tcp dport ${portSpec(port, '-')} accept`)
 			.join('\n');
@@ -117,7 +175,7 @@ table inet yoal {
 ${accept}
 \t\tiifname "${iface}" drop
 \t}
-}
+${forward}}
 `;
 	}
 

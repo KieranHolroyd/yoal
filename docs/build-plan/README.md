@@ -36,7 +36,7 @@ Every plan must preserve these. A PR that breaks one is rejected even if the fea
 6. **The control plane never reaches node loopback.** Backups, object listing, and restores execute
    on the node; the control plane schedules and records.
 7. **≤250 MB edge baseline.** A new always-on daemon needs an explicit budget and an opt-in.
-8. **No Kubernetes, no Docker daemon.** Rootless Podman/Quadlet and systemd only.
+8. **No Kubernetes as Yoal's scheduler, no Docker daemon.** Rootless Podman/Quadlet and systemd only. Managed clusters that tenants create (D226, docs/KUBERNETES.md) are a product Yoal hosts on opted-in nodes, not how Yoal runs.
 9. **One wildcard level** (`<slug>--<env>.<contentDomain>`) unless a plan explicitly changes it.
 10. **Every destructive data action is audited and confirmed.** Restore, force bucket delete, purge,
     credential reveal, and preview teardown.

@@ -45,6 +45,7 @@ import { DatabaseStudioService } from './database-studio.ts';
 import { ContainerConsoleService } from './container-console.ts';
 import { StorageService } from './storage-instances.ts';
 import { BrokerService } from './brokers.ts';
+import { KubernetesService } from './kubernetes.ts';
 import { EmailService, type EmailServiceOptions } from './email.ts';
 import { cloudflareConfigFromEnv, HttpCloudflareClient } from './domains.ts';
 import { EventService } from './events.ts';
@@ -162,6 +163,9 @@ export * from './database-studio.ts';
 export * from './container-console.ts';
 export * from './storage-instances.ts';
 export * from './brokers.ts';
+export * from './kubernetes.ts';
+export * from './kubernetes-manifests.ts';
+export * from './kubernetes-api.ts';
 export * from './email.ts';
 export * from './events.ts';
 export * from './node-tasks.ts';
@@ -243,6 +247,7 @@ export interface Core {
 	containerConsole: ContainerConsoleService;
 	storage: StorageService;
 	brokers: BrokerService;
+	kubernetes: KubernetesService;
 	events: EventService;
 	nodeTasks: NodeTaskService;
 	/** App cron jobs and one-off commands (plan 09). */
@@ -414,6 +419,7 @@ export function createCore(options: CoreOptions): Core {
 	ctx.containerConsole = new ContainerConsoleService(ctx);
 	ctx.storage = new StorageService(ctx);
 	ctx.brokers = new BrokerService(ctx);
+	ctx.kubernetes = new KubernetesService(ctx);
 	ctx.email = new EmailService(ctx, options.email ?? defaultEmailOptions());
 	// Pool mail (verification, magic link, reset and invite) uses the platform's sender or the
 	// mail node; tests replace this hook with a capture.
@@ -497,6 +503,7 @@ export function createCore(options: CoreOptions): Core {
 		containerConsole: ctx.containerConsole,
 		storage: ctx.storage,
 		brokers: ctx.brokers,
+		kubernetes: ctx.kubernetes,
 		email: ctx.email,
 		events: ctx.events,
 		nodeTasks: ctx.nodeTasks,

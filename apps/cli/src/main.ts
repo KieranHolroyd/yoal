@@ -9,6 +9,7 @@ import { configCommand } from './commands/config.ts';
 import { dbCommand } from './commands/db.ts';
 import { storageCommand } from './commands/storage.ts';
 import { brokerCommand } from './commands/broker.ts';
+import { k8sCommand } from './commands/k8s.ts';
 import { eventsCommand } from './commands/events.ts';
 import { emailCommand } from './commands/email.ts';
 import { functionCommand } from './commands/function.ts';
@@ -38,6 +39,7 @@ import { importCommand } from './commands/import.ts';
 import { volumeCommand } from './commands/volume.ts';
 import { deployCommand } from './commands/deploy.ts';
 import { deploymentsCommand } from './commands/deployments.ts';
+import { docsCommand } from './commands/docs.ts';
 import { domainsCommand } from './commands/domains.ts';
 import { environmentsCommand } from './commands/environments.ts';
 import { loginCommand } from './commands/login.ts';
@@ -69,6 +71,8 @@ const commands: Record<string, (argv: string[]) => Promise<void>> = {
 	deploy: deployCommand,
 	status: statusCommand,
 	usage: usageCommand,
+	docs: docsCommand,
+	doc: docsCommand,
 	projects: projectsCommand,
 	deployments: deploymentsCommand,
 	workload: workloadCommand,
@@ -97,6 +101,8 @@ const commands: Record<string, (argv: string[]) => Promise<void>> = {
 	broker: brokerCommand,
 	brokers: brokerCommand,
 	queue: brokerCommand,
+	k8s: k8sCommand,
+	kubernetes: k8sCommand,
 	function: functionCommand,
 	functions: functionCommand,
 	fn: functionCommand,
@@ -170,6 +176,7 @@ Commands:
   profile [list|add|use|remove|show|current] Manage profiles for multiple deployments
   deploy [dir] [options]                     Zip and deploy a directory (wrangler-aware)
   wrangler <args…>                           Run wrangler locally (installs it if needed)
+  docs [list|search|read|context]            Search and read the Yoal docs offline; built for AI agents (\`yoal docs --help\`)
   status [project]                           Fleet health, or one project's status
   usage [project]                            Usage and quota percentages (showback)
   projects                                   List projects
@@ -196,6 +203,7 @@ Commands:
   storage [list|create|info|buckets|…]       Managed S3-compatible object storage (\`yoal storage --help\`)
   broker [list|create|info|attach|…]         Managed queue brokers, NATS with JetStream (\`yoal broker --help\`)
                                              Queue tools: send, peek, redrive, queue-purge, …
+  k8s [list|create|get|kubeconfig|token|…]   Managed Kubernetes (k3s) clusters; kubectl via \`yoal k8s kubeconfig\` (\`yoal k8s --help\`)
   function [invoke|cron]                     Test a function on its node: a request, or a cron run now (\`yoal function --help\`)
   jobs [list|create|run|runs|logs|…]       Cron jobs and manual commands on an app (\`yoal jobs --help\`)
   run <project> -- <command…>               Run a one-off command against the app's current release

@@ -118,7 +118,14 @@ export class ProjectService {
 			.where(gt(slugRedirects.expiresAt, this.ctx.now()))
 			.all()
 			.map((row) => row.slug);
-		return [...slugs, ...redirects];
+		// Kubernetes ingress hosts claim single labels from the same namespace (docs/KUBERNETES.md K11).
+		const suffix = `.${this.contentDomain}`;
+		const clusterHosts = this.ctx.sqlite
+			.query<{ host: string }, []>('SELECT host FROM k8s_routes')
+			.all()
+			.filter((row) => row.host.endsWith(suffix))
+			.map((row) => row.host.slice(0, -suffix.length));
+		return [...slugs, ...redirects, ...clusterHosts];
 	}
 
 	deriveSlug(name: string): string {

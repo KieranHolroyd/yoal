@@ -29,6 +29,7 @@ import PlugIcon from '@lucide/svelte/icons/plug';
 import PackageIcon from '@lucide/svelte/icons/package';
 import WaypointsIcon from '@lucide/svelte/icons/waypoints';
 import WrenchIcon from '@lucide/svelte/icons/wrench';
+import ShipWheelIcon from '@lucide/svelte/icons/ship-wheel';
 import type { Permission } from '@yoal/contracts';
 
 /**
@@ -81,6 +82,7 @@ export type SectionId =
 	| 'storage'
 	| 'shares'
 	| 'clustering'
+	| 'kubernetes'
 	| 'maintenance'
 	| 'updates'
 	| 'usage-analytics';
@@ -433,6 +435,17 @@ export const SECTIONS: Section[] = [
 		href: '/(dashboard)/settings/clustering',
 		path: '/settings/clustering',
 		icon: NetworkIcon,
+		platform: 'administer'
+	},
+	{
+		// docs/KUBERNETES.md §3: the optional node component and trusted-tier grants.
+		id: 'kubernetes',
+		group: 'infrastructure',
+		label: 'Kubernetes',
+		summary: 'Install the optional Kubernetes component on nodes, and grant orgs the trusted tier.',
+		href: '/(dashboard)/settings/kubernetes' as unknown as SectionHref,
+		path: '/settings/kubernetes',
+		icon: ShipWheelIcon,
 		platform: 'administer'
 	},
 	{

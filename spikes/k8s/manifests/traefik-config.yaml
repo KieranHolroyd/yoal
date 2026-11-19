@@ -1,0 +1,16 @@
+# servicelb is disabled, so nothing would bind :80 in the machine's netns. Bind Traefik's web
+# entrypoint to hostPort 80 (portmap CNI) so the machine's published 127.0.0.1:<ingressPort>:80 works.
+apiVersion: helm.cattle.io/v1
+kind: HelmChartConfig
+metadata:
+  name: traefik
+  namespace: kube-system
+spec:
+  valuesContent: |-
+    service:
+      type: ClusterIP
+    ports:
+      web:
+        hostPort: 80
+      websecure:
+        hostPort: 443

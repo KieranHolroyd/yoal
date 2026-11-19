@@ -1,0 +1,21 @@
+{
+	"name": "@yoal/example-function-suite",
+	"private": true,
+	"version": "0.0.0",
+	"type": "module",
+	"scripts": {
+		"dev": "wrangler dev -c wrangler.jsonc -c companion/wrangler.jsonc --var SUITE_LOCAL:1 --test-scheduled",
+		"pg:local": "docker run -d --rm --name function-suite-pg -e POSTGRES_USER=suite -e POSTGRES_PASSWORD=suite -e POSTGRES_DB=suite -p 127.0.0.1:55432:5432 postgres:18-alpine",
+		"pg:down": "docker stop function-suite-pg",
+		"provision": "bun scripts/provision.ts",
+		"suite": "bun scripts/suite.ts",
+		"check": "tsc -p . && tsc -p scripts"
+	},
+	"dependencies": {
+		"postgres": "3.4.8"
+	},
+	"devDependencies": {
+		"@cloudflare/workers-types": "^4.20250101.0",
+		"wrangler": "4.158.0"
+	}
+}

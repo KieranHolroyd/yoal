@@ -49,6 +49,9 @@ const MAX_REQUEST_METADATA_BYTES = 32 * 1024;
 const DEFAULT_REGION = 'us-east-1';
 
 const EMPTY_SHA256 = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855';
+/** Reserved metadata name holding the original spelling of mixed-case custom metadata keys. */
+const CASE_NAMES_META = 'yoal-names';
+
 /** RFC 7230 token: what an S3 `x-amz-meta-*` header name can carry. */
 const HEADER_NAME_PATTERN = /^[A-Za-z0-9!#$%&'*+.^_`|~-]+$/;
 
@@ -90,6 +93,9 @@ export default {
 		try {
 			return await handleRequest(request, env);
 		} catch (error) {
+			// R2Errors are expected answers; anything else is a bug that the caller only sees as
+			// 10001, so leave its cause in the function's logs.
+			if (!(error instanceof R2Error)) console.error('R2 binding internal error:', error);
 			return errorResponse(error);
 		}
 	},
@@ -201,7 +207,10 @@ function readConfig(env) {
 		// Path-style is the only addressing RustFS exposes (docs/OBJECT-STORAGE.md); the injected
 		// FORCE_PATH_STYLE value is accepted for parity with the shared S3 env and otherwise unused.
 		keyPrefix: typeof env.KEY_PREFIX === 'string' ? env.KEY_PREFIX : '',
-		fetchImpl: typeof env.FETCH === 'function' ? env.FETCH : fetch,
+		// Never store the global `fetch` itself: called as `config.fetchImpl(…)` it runs with
+		// `this === config`, and workerd rejects that ("Illegal invocation"), so every R2 call failed
+		// with a bare 10001. Bun does not care, which is why the unit tests never saw it.
+		fetchImpl: typeof env.FETCH === 'function' ? env.FETCH : (input, init) => fetch(input, init),
 		now: () => Date.now(),
 	};
 }
@@ -339,9 +348,24 @@ async function putObject(config, metadata, value) {
 		if (typeof http.cacheExpiry === 'number' && Number.isFinite(http.cacheExpiry))
 			headers.expires = new Date(http.cacheExpiry).toUTCString();
 	}
+	// S3 metadata names are case-insensitive (RustFS stores them lower-cased); R2 keeps the case a
+	// Worker wrote. Remember the original spelling of any mixed-case name in one reserved header so
+	// `customMetadata.runId` reads back as `runId`, not `runid`.
+	const caseNames = [];
+	const seen = new Set();
+	for (const name of Object.keys(customMetadata)) {
+		const lower = name.toLowerCase();
+		if (lower === CASE_NAMES_META)
+			throw new R2Error(400, `Custom metadata key "${name}" is reserved by the Yoal R2 binding.`, R2_ERROR_CODES.invalidArgument);
+		if (seen.has(lower))
+			throw new R2Error(400, `Custom metadata keys must differ by more than letter case (${name}).`, R2_ERROR_CODES.invalidArgument);
+		seen.add(lower);
+		if (name !== lower) caseNames.push(name);
+	}
 	try {
 		for (const [name, metadataValue] of Object.entries(customMetadata))
 			headers[`x-amz-meta-${name.toLowerCase()}`] = metadataValue;
+		if (caseNames.length) headers[`x-amz-meta-${CASE_NAMES_META}`] = caseNames.join(',');
 		headers['content-md5'] = base64FromBytes(md5);
 	} catch {
 		throw new R2Error(400, 'Custom metadata values must be header-safe.', R2_ERROR_CODES.metadataTooLarge);
@@ -603,10 +627,19 @@ function httpMetadataFromHeaders(headers) {
 }
 
 function customMetadataFromHeaders(headers) {
+	const original = new Map(
+		(headers.get(`x-amz-meta-${CASE_NAMES_META}`) ?? '')
+			.split(',')
+			.filter(Boolean)
+			.map((name) => [name.toLowerCase(), name]),
+	);
 	const custom = {};
 	for (const [name, value] of headers.entries()) {
-		if (!name.toLowerCase().startsWith('x-amz-meta-')) continue;
-		custom[name.slice('x-amz-meta-'.length)] = value;
+		const lower = name.toLowerCase();
+		if (!lower.startsWith('x-amz-meta-')) continue;
+		const key = lower.slice('x-amz-meta-'.length);
+		if (key === CASE_NAMES_META) continue;
+		custom[original.get(key) ?? key] = value;
 	}
 	return custom;
 }

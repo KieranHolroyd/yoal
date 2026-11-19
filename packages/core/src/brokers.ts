@@ -646,6 +646,23 @@ export class BrokerService {
 		return items.length === 0 ? '' : sha256Hex(JSON.stringify({ brokers: items }));
 	}
 
+	/** Connection values for a Kubernetes attachment Secret (docs/KUBERNETES.md K12), over the org network. */
+	connectionValuesForCluster(brokerId: string): Record<string, string> | null {
+		const row = this.rowById(brokerId);
+		if (!row || row.deletedAt) return null;
+		const info = brokerEngineRegistry[row.engine];
+		const user = brokerIdentifier(row.name);
+		const pass = this.ctx.secrets.open(row.orgId, row.ownerSecret);
+		const host = brokerAlias(row.id);
+		return {
+			URL: brokerConnectionUrl({ scheme: info.scheme, user, pass, host, port: info.containerPort }),
+			HOST: host,
+			PORT: String(info.containerPort),
+			USER: user,
+			PASSWORD: pass,
+		};
+	}
+
 	// ---------------------------------------------------------------- node protocol
 
 	/** Live brokers placed on a node, as container workloads with the broker profile. */

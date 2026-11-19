@@ -613,7 +613,9 @@ export class QuotaService {
 		const dbMb = this.databaseRows(orgId, projectId).reduce((total, row) => total + row.memoryMb, 0);
 		const stMb = this.storageRows(orgId, projectId).reduce((total, row) => total + row.memoryMb, 0);
 		const mqMb = this.ctx.brokers?.reservedMemoryForOrg(orgId, projectId) ?? 0;
-		return (workloadMb?.total ?? 0) + dbMb + stMb + mqMb;
+		// Clusters belong to the org, not a project.
+		const k8sMb = projectId ? 0 : (this.ctx.kubernetes?.reservedMemoryForOrg(orgId) ?? 0);
+		return (workloadMb?.total ?? 0) + dbMb + stMb + mqMb + k8sMb;
 	}
 
 	/**

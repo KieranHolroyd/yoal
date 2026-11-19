@@ -59,7 +59,7 @@ Bindings map onto services Yoal already runs:
 | Workers binding | Yoal backing |
 |---|---|
 | R2 | Managed RustFS (D62) |
-| Hyperdrive | Managed Postgres through PgBouncer (D85) |
+| Hyperdrive | Managed Postgres, direct (not through the TLS-only PgBouncer, D85) |
 | Analytics Engine | The ClickHouse telemetry store (D101) |
 | Durable Objects | workerd's own SQLite storage on the node's disk (D72) |
 | Secrets | The existing activation path (D18) |
@@ -176,8 +176,13 @@ WorkloadSpec { runtime: "function", function: { compatibilityDate, compatibility
 - The helper renders the same unit shape process apps get: `DynamicUser=yes`,
   `ProtectSystem=strict`, `NoNewPrivileges`, `MemoryMax`, `CPUQuota`, `TasksMax`, the
   `yoal-workloads.slice` and a `.socket` unit at `/run/yoal-workloads/<id>.sock`.
-  `ExecStart` is the pinned workerd binary: `workerd serve <config> --socket-fd http=3`. Only the
-  config path varies, and it is a fixed location under the workload directory.
+  `ExecStart` is the pinned workerd binary: `workerd serve <config> --socket-fd http=3
+  --import-path <release root>`. Only the config path varies, and it is a fixed location under the
+  workload directory. The config, the shim and binding files reach workerd as systemd
+  credentials. The user's modules do not: systemd caps each credential at 1 MiB, so the config
+  embeds them as `/<release sha>/<module>` and workerd reads them from the release (files 0644)
+  through `--import-path`. The import root holds only sha-named release directories, so nothing
+  in a release can shadow workerd's own `/workerd/workerd.capnp`.
 - The **agent** (unprivileged) renders the Cap'n Proto config into the workload directory from
   desired state and the activation payload. It is data, not a command: the helper validates the
   path, and workerd runs it as the dynamic user.
@@ -201,7 +206,7 @@ client ─▶ Cloudflare ─▶ ingress Caddy ──(static asset hit? serve it)
                      ┌───────────────┬──────────────────────┼──────────────────────┐
                      ▼               ▼                      ▼                      ▼
               DO / KV / D1     R2-gateway worker      Hyperdrive binding     Analytics Engine
-              SQLite on the    ─▶ RustFS (D62)        ─▶ PgBouncer (D85)     ─▶ agent ─▶ ClickHouse
+              SQLite on the    ─▶ RustFS (D62)        ─▶ Postgres (direct)   ─▶ agent ─▶ ClickHouse
               project volume
 ```
 
@@ -286,7 +291,7 @@ start; see §4.7.
 | Bindings to Yoal apps | 1 | An `external` service to the app's socket or loopback port | The way to reach containers (§1.1 fact 5) |
 | Durable Objects (SQLite) | 2 | Native `durableObjectStorage.localDisk` on the project's node, on its disk (D72, D169) | Single node until phase 4. Alarms and hibernating WebSockets work in-process. |
 | R2 | 2 | An `r2Bucket` binding to an R2-gateway service that speaks S3 to a managed RustFS instance, using an attachment-scoped key (D66) | Port R2 semantics from Miniflare's `r2/bucket.worker.ts` |
-| Hyperdrive | 2 | workerd's `hyperdrive` binding pointing at an `external` server for the database's PgBouncer (`127.0.0.1:<port>`) | The connection string comes from the attachment |
+| Hyperdrive | 2 | workerd's `hyperdrive` binding pointing at an `external` server for the database's direct Postgres port (`127.0.0.1:<port>`) | The connection string comes from the attachment. Not PgBouncer: workerd's Hyperdrive client never sends an SSLRequest, and the pooler requires client TLS |
 | KV | 2 | A KV binding service backed by Durable Object SQLite (from Miniflare's `kv/namespace.worker.ts`) | Strongly consistent on one node, which exceeds Cloudflare's guarantee, so it is safe |
 | D1 | 2 | A D1 binding service over a Durable Object's SQLite (Miniflare's `d1/database.worker.ts`) | Backups use the D83 path, as SQLite snapshots |
 | Analytics Engine | 2 | workerd forwards events to a Yoal service, which hands them to the agent's telemetry batch, which writes to ClickHouse (D101) | Queryable in the user dashboards |
@@ -551,7 +556,7 @@ advertises `process-node` while the binary exists; placement refuses Node apps e
 |---|---|---|---|---|
 | **0. Spikes** | De-risk before any contract change | S1–S8 below | S | A results row per spike in [SPIKES.md](./SPIKES.md) |
 | **1. Fetch functions** | Ship stateless `fetch` functions | Runtime `function` in contracts and admission; bundle and manifest validation; helper unit plus pinned binary; agent config renderer and shim; vars and secrets; assets-first routing; egress policy; journald logs; preview, promote and rollback; `yoal deploy` with `wrangler.jsonc`; dashboard card; MCP | M–L | A `wrangler init` hello-world plus a Hono API deploy unchanged; previews and rollback work; the SSRF suite (loopback, overlay, metadata IPs) is blocked; feature flag on by default |
-| **2. Bindings** | Durable data | Durable Objects on a volume; R2 → RustFS; Hyperdrive → PgBouncer; KV; D1; Analytics Engine → ClickHouse; Cache; SQLite backups and restore | L | A chat-room Durable Object with hibernating WebSockets survives a host restart; an R2 put/get round-trips to RustFS; a D1 backup restores to a new project |
+| **2. Bindings** | Durable data | Durable Objects on a volume; R2 → RustFS; Hyperdrive → Postgres; KV; D1; Analytics Engine → ClickHouse; Cache; SQLite backups and restore | L | A chat-room Durable Object with hibernating WebSockets survives a host restart; an R2 put/get round-trips to RustFS; a D1 backup restores to a new project |
 | **3. Triggers and economics** | Lambda-style | Cron timers; queues; scale to zero with idle stop; the runaway watchdog; tail workers → OTLP; cross-project service bindings | M | A cron fires exactly once per occurrence across agent restarts; an idle function holds 0 MB; cold-start p50 is within the S2 target |
 | **4. HA** | Survive node loss | Multi-node stateless replicas; workerd cluster mode per stateful project; Workflows | L | The CLUSTERING §11 failure matrix rows for functions pass, including killing the owner of a Durable Object |
 | **5. Later bets** | — | Worker Loader for user code and the assistant's code mode; a gVisor tier; Python memory snapshots for faster cold starts. Python Workers and Wasm languages shipped as D121 (§4.13). | — | Each needs its own FN or D decision |
@@ -584,7 +589,7 @@ advertises `process-node` while the binary exists; placement refuses Node apps e
 | FN7 | **Default-deny private egress**: workerd `network` `allow=["public"]` plus systemd IP filtering. Private targets exist only as declared `external` bindings. | SSRF into the overlay and loopback is the main new risk | Relying on either layer alone |
 | FN8 | **`wrangler.jsonc` is the source config.** Clients bundle with Yoal's own pinned bundler (D113); Yoal maps bindings by name and validates a `yoal-function.json` manifest. Unsupported bindings fail the deploy. | Code ports both ways, `wrangler dev` is the local loop, and D2 holds | A Yoal-only config format; building on the control plane; silently dropping bindings; running the user's Wrangler to bundle |
 | FN9 | **Cron fires on the node** through a systemd timer and an internal shim route. Phase 4 adds run leases. | Pull, not push (invariant 1). No control plane in the trigger path. | The control-plane scheduler pushing invocations |
-| FN10 | **Binding services run inside the function's own host**, ported from Miniflare where possible (Apache-2.0 notices kept). R2 maps to RustFS, Hyperdrive to PgBouncer, Analytics Engine to ClickHouse. | No new daemon. Tenant data stays in the tenant's sandbox. Reuses managed services. | A node-wide binding daemon; a control-plane KV |
+| FN10 | **Binding services run inside the function's own host**, ported from Miniflare where possible (Apache-2.0 notices kept). R2 maps to RustFS, Hyperdrive to the database's direct Postgres port, Analytics Engine to ClickHouse. Not PgBouncer: workerd's Hyperdrive client never sends an SSLRequest, and the pooler requires client TLS (D85), so every query failed with "SSL required"; Postgres accepts a password login without TLS on this host-local hop. | No new daemon. Tenant data stays in the tenant's sandbox. Reuses managed services. | A node-wide binding daemon; a control-plane KV |
 | FN11 | **Stateful functions are single-node until workerd cluster mode passes S8.** Each project is then its own cluster on its own bucket prefix, over `wg0`, with Yoal-rendered configs. The shared `workerd deploy` catalog is not used. | Adopts upstream's design rather than inventing one. Upstream's authority model is wrong for tenants. | A Yoal-built Durable Object router; running celld alongside workerd |
 | FN12 | **Feature flag `YOAL_FEATURE_FUNCTIONS`, on by default; `0` disables the tier.** It shipped on once phases 1–3 passed; a disabling flag remains for operators. | Standard for risky work, now shipped | — |
 

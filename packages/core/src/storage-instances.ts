@@ -111,11 +111,15 @@ const RUSTFS_ENV: Record<string, string> = {
 
 /**
  * RustFS's `yoal` webhook target (D122), set only while a rule watches a bucket on the instance.
- * The endpoint is the control plane's public URL: RustFS refuses private webhook addresses (spiked
- * on 1.0.4). The queue dir keeps undelivered events on the data disk across restarts and outages.
+ * The endpoint is the control plane's URL. RustFS refuses private webhook addresses unless the
+ * origin is listed in `RUSTFS_OUTBOUND_ALLOW_ORIGINS`, so a control plane on a private address (a
+ * LAN or IP-only install) never received an event and every bucket-notification update failed:
+ * the endpoint is operator-owned, so it is always listed (origin only, as RustFS requires). The
+ * queue dir keeps undelivered events on the data disk across restarts and outages.
  */
 function rustfsNotifyEnv(endpoint: string): Record<string, string> {
 	return {
+		RUSTFS_OUTBOUND_ALLOW_ORIGINS: new URL(endpoint).origin,
 		RUSTFS_NOTIFY_ENABLE: 'true',
 		[`RUSTFS_NOTIFY_WEBHOOK_ENABLE_${STORAGE_NOTIFY_TARGET.toUpperCase()}`]: 'on',
 		[`RUSTFS_NOTIFY_WEBHOOK_ENDPOINT_${STORAGE_NOTIFY_TARGET.toUpperCase()}`]: endpoint,

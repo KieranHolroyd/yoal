@@ -1,10 +1,10 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { createHandler, type HelperRuntime } from './server.ts';
 import { SystemdDriver, type CommandRunner, type RunResult } from './systemd.ts';
-import { renderFunctionUnit } from './units.ts';
+import { parseOrgSubnets, releaseImportRoot, renderFunctionUnit } from './units.ts';
 // Test-only: the shipped helper never imports the contracts, but a drift check against them must.
 import { functionBindingTypes } from '../../../packages/contracts/src/function.ts';
 import {
@@ -448,7 +448,16 @@ describe('parseApplyRequest: function files', () => {
 });
 
 describe('renderFunctionUnit', () => {
-	test('renders the fixed workerd unit with one credential per module', () => {
+	test('releaseImportRoot is the parent of a sha-named release and keeps modules inside it', () => {
+		const release = `/srv/yoal/releases/${SHA}`;
+		expect(releaseImportRoot(release, SHA, [`${release}/index.js`])).toBe('/srv/yoal/releases');
+		expect(() => releaseImportRoot('/srv/yoal/releases/other', SHA, [])).toThrow(/not named after release/);
+		expect(() => releaseImportRoot(release, 'not-a-sha', [])).toThrow(/sha256/);
+		expect(() => releaseImportRoot(release, SHA, ['/etc/passwd'])).toThrow(/outside its release/);
+		expect(() => releaseImportRoot(`/srv/my releases/${SHA}`, SHA, [])).toThrow(/cannot appear in a unit file/);
+	});
+
+	test('renders the fixed workerd unit; modules come from the release through --import-path', () => {
 		const workload = functionWorkload();
 		const configPath = '/run/yoal-workloads/wld_abc123/function/config.capnp';
 		const shimPath = '/run/yoal-workloads/wld_abc123/function/shim.mjs';
@@ -470,21 +479,16 @@ describe('renderFunctionUnit', () => {
 		});
 		const lines = unit.split('\n');
 
-		expect(lines).toContain(`ExecStart=${workerdPath} serve %d/function-config --socket-fd http=3`);
+		expect(lines).toContain(
+			`ExecStart=${workerdPath} serve %d/function-config --socket-fd http=3 --import-path /srv/yoal/releases`,
+		);
 		// Without these a plain `systemctl restart` starts workerd with no fd 3 and it exits.
 		expect(lines).toContain(`Requires=yoal-workload-${workload.id}.socket`);
 		expect(lines).toContain(`After=yoal-workload-${workload.id}.socket`);
 		expect(lines).toContain(`LoadCredential=function-config:${configPath}`);
 		expect(lines).toContain(`LoadCredential=function-shim:${shimPath}`);
-		expect(lines).toContain(
-			`LoadCredential=module-0:/srv/yoal/releases/${SHA}/index.js`,
-		);
-		expect(lines).toContain(
-			`LoadCredential=module-1:/srv/yoal/releases/${SHA}/lib/util.js`,
-		);
-		expect(lines.indexOf(`LoadCredential=module-0:/srv/yoal/releases/${SHA}/index.js`)).toBeLessThan(
-			lines.indexOf(`LoadCredential=module-1:/srv/yoal/releases/${SHA}/lib/util.js`),
-		);
+		// Modules are read through --import-path, never as credentials (capped at 1 MiB each).
+		expect(lines.some((line) => line.startsWith('LoadCredential=module-'))).toBe(false);
 		expect(lines).toContain('Type=simple');
 		expect(lines).toContain('DynamicUser=yes');
 		expect(lines).toContain('StateDirectory=yoal-workloads/wld_abc123');
@@ -553,13 +557,62 @@ describe('renderFunctionUnit', () => {
 			'StateDirectory=yoal-workloads/wld_abc123/do',
 		]);
 		expect(lines).toContain(
-			`ExecStart=${workerdPath} serve %d/function-config --socket-fd http=3 --directory-path do-storage=/var/lib/yoal-workloads/wld_abc123/do`,
+			`ExecStart=${workerdPath} serve %d/function-config --socket-fd http=3 --import-path /srv/yoal/releases --directory-path do-storage=/var/lib/yoal-workloads/wld_abc123/do`,
 		);
 		expect(lines).toContain(
 			'LoadCredential=binding-kv:/run/yoal-workloads/wld_abc123/function/binding-kv',
 		);
 		expect(unit).not.toContain('ExecStartPre');
 		expect(unit).not.toContain('[Install]');
+	});
+
+	test('an app binding gets the socket group with Caddy state and logs hidden', () => {
+		const base = {
+			releaseDir: '/srv/yoal/releases/' + SHA,
+			envFile: '/run/yoal-workloads/wld_abc123/env',
+			secrets: [],
+			configPath: '/run/yoal-workloads/wld_abc123/function/config.capnp',
+			shimPath: '/run/yoal-workloads/wld_abc123/function/shim.mjs',
+			workerdPath: `/usr/lib/yoal/workerd/${WORKERD_VERSION}/workerd`,
+			modulePaths: ['/srv/yoal/releases/' + SHA + '/index.js', '/srv/yoal/releases/' + SHA + '/lib/util.js'],
+			durableStorage: false,
+			socketGroup: 'caddy',
+		};
+		// The default spec binds OTHER as an app.
+		const lines = renderFunctionUnit({ ...base, workload: functionWorkload() }).split('\n');
+		expect(lines).toContain('SupplementaryGroups=caddy');
+		expect(lines).toContain('InaccessiblePaths=-/var/lib/caddy -/var/log/caddy');
+
+		const noApp = renderFunctionUnit({
+			...base,
+			workload: functionWorkload({
+				function: { ...fnSpec(), bindings: [{ name: 'API_KEY', type: 'secret' }] },
+			}),
+		});
+		expect(noApp).not.toContain('SupplementaryGroups');
+		expect(noApp).not.toContain('InaccessiblePaths');
+		// No group configured: nothing to grant.
+		const noGroup = renderFunctionUnit({ ...base, socketGroup: null, workload: functionWorkload() });
+		expect(noGroup).not.toContain('SupplementaryGroups');
+	});
+
+	test('allowed org subnets join the loopback allow list; the private deny list stays', () => {
+		const lines = renderFunctionUnit({
+			workload: functionWorkload(),
+			releaseDir: '/srv/yoal/releases/' + SHA,
+			envFile: '/run/yoal-workloads/wld_abc123/env',
+			secrets: [],
+			configPath: '/run/yoal-workloads/wld_abc123/function/config.capnp',
+			shimPath: '/run/yoal-workloads/wld_abc123/function/shim.mjs',
+			workerdPath: `/usr/lib/yoal/workerd/${WORKERD_VERSION}/workerd`,
+			modulePaths: ['/srv/yoal/releases/' + SHA + '/index.js', '/srv/yoal/releases/' + SHA + '/lib/util.js'],
+			durableStorage: false,
+			allowSubnets: ['10.89.2.0/24'],
+		}).split('\n');
+		expect(lines).toContain('IPAddressAllow=127.0.0.0/8 ::1/128 10.89.2.0/24');
+		expect(lines).toContain(
+			'IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 fc00::/7 fe80::/10',
+		);
 	});
 
 	test('requires one module path per module and a function workload', () => {
@@ -589,13 +642,45 @@ describe('renderFunctionUnit', () => {
 	});
 });
 
+describe('parseOrgSubnets', () => {
+	test('keeps private IPv4 and ULA subnets and drops anything wider or public', () => {
+		expect(
+			parseOrgSubnets(
+				JSON.stringify([
+					{ subnet: '10.89.2.0/24', gateway: '10.89.2.1' },
+					{ subnet: 'fd12:3456::/64', gateway: 'fd12:3456::1' },
+					{ subnet: '172.20.0.0/16' },
+					{ subnet: '192.168.10.0/24' },
+					{ subnet: '10.89.2.0/24' },
+					{ subnet: '0.0.0.0/0' },
+					{ subnet: '8.8.8.0/24' },
+					{ subnet: '172.32.0.0/16' },
+					{ subnet: '169.254.0.0/16' },
+					{ subnet: 'fe80::/64' },
+					{ subnet: '10.0.0.0/7' },
+					{ subnet: '10.89.2.0/24 10.0.0.0/8' },
+					{ subnet: 42 },
+				]),
+			),
+		).toEqual(['10.89.2.0/24', 'fd12:3456::/64', '172.20.0.0/16', '192.168.10.0/24']);
+		expect(parseOrgSubnets('null')).toEqual([]);
+		expect(parseOrgSubnets('not json')).toEqual([]);
+	});
+});
+
 class FakeRunner implements CommandRunner {
 	calls: string[][] = [];
 	show = '';
+	/** `podman network inspect … {{json .Subnets}}` answer; null means the network is missing. */
+	subnets: string | null = null;
 
 	async run(argv: string[]): Promise<RunResult> {
 		this.calls.push(argv);
 		if (argv[1] === 'show') return { code: 0, stdout: this.show, stderr: '' };
+		if (argv[1] === 'network' && argv[2] === 'inspect' && argv.includes('{{json .Subnets}}'))
+			return this.subnets === null
+				? { code: 125, stdout: '', stderr: 'network not found' }
+				: { code: 0, stdout: this.subnets, stderr: '' };
 		return { code: 0, stdout: '', stderr: '' };
 	}
 
@@ -654,6 +739,53 @@ async function fixture(options: { modules?: boolean; workerd?: boolean } = {}): 
 }
 
 describe('SystemdDriver.apply: function', () => {
+	test('a runtime root left at 0700 is opened to 0711 so Caddy reaches the function socket', async () => {
+		const f = await fixture();
+		await fs.mkdir(f.runtimeDir, { recursive: true, mode: 0o700 });
+		await fs.chmod(f.runtimeDir, 0o700);
+		await f.driver.apply(functionWorkload(), activation(), functionFiles());
+		expect((await fs.stat(f.runtimeDir)).mode & 0o777).toBe(0o711);
+		expect((await fs.stat(join(f.runtimeDir, 'wld_abc123/function'))).mode & 0o777).toBe(0o700);
+	});
+
+	test('a Hyperdrive/queue/R2 binding allows the org network subnet Podman DNATs to', async () => {
+		const f = await fixture();
+		f.runner.subnets = JSON.stringify([{ subnet: '10.89.2.0/24', gateway: '10.89.2.1' }]);
+		const workload = functionWorkload({
+			orgId: 'org_c4caff',
+			function: { ...fnSpec(), bindings: [{ name: 'DB', type: 'hyperdrive', envPrefix: 'DATABASE' }] },
+		});
+		await f.driver.apply(workload, activation(), functionFiles());
+		const unit = await fs.readFile(join(f.unitDir, 'yoal-workload-wld_abc123.service'), 'utf8');
+		expect(unit).toContain('IPAddressAllow=127.0.0.0/8 ::1/128 10.89.2.0/24\n');
+		expect(f.runner.calls.some((argv) => argv.includes('yoal-org-org_c4caff'))).toBe(true);
+		// No app binding here, so no socket group.
+		expect(unit).not.toContain('SupplementaryGroups');
+	});
+
+	test('no org-network binding, or no org network yet, keeps the loopback-only allow list', async () => {
+		const f = await fixture();
+		f.runner.subnets = JSON.stringify([{ subnet: '10.89.2.0/24' }]);
+		await f.driver.apply(functionWorkload({ orgId: 'org_c4caff' }), activation(), functionFiles());
+		let unit = await fs.readFile(join(f.unitDir, 'yoal-workload-wld_abc123.service'), 'utf8');
+		expect(unit).toContain('IPAddressAllow=127.0.0.0/8 ::1/128\n');
+		expect(f.runner.calls.some((argv) => argv.includes('{{json .Subnets}}'))).toBe(false);
+		// The default spec's app binding gets the configured socket group.
+		expect(unit).toContain('SupplementaryGroups=caddy\n');
+
+		f.runner.subnets = null;
+		await f.driver.apply(
+			functionWorkload({
+				orgId: 'org_c4caff',
+				function: { ...fnSpec(), bindings: [{ name: 'JOBS', type: 'queue', namespaceId: 'prj_1-JOBS' }] },
+			}),
+			activation(),
+			functionFiles(),
+		);
+		unit = await fs.readFile(join(f.unitDir, 'yoal-workload-wld_abc123.service'), 'utf8');
+		expect(unit).toContain('IPAddressAllow=127.0.0.0/8 ::1/128\n');
+	});
+
 	test('writes config and shim, renders the unit and socket, and starts the host', async () => {
 		const f = await fixture();
 		const files = functionFiles();
@@ -670,11 +802,10 @@ describe('SystemdDriver.apply: function', () => {
 
 		const unit = await fs.readFile(join(f.unitDir, 'yoal-workload-wld_abc123.service'), 'utf8');
 		const binary = join(f.workerdDir, WORKERD_VERSION, 'workerd');
-		expect(unit).toContain(`ExecStart=${binary} serve %d/function-config --socket-fd http=3`);
+		expect(unit).toContain(`ExecStart=${binary} serve %d/function-config --socket-fd http=3 --import-path ${dirname(f.releaseDir)}`);
 		expect(unit).toContain(`LoadCredential=function-config:${configPath}`);
 		expect(unit).toContain(`LoadCredential=function-shim:${shimPath}`);
-		expect(unit).toContain(`LoadCredential=module-0:${join(f.releaseDir, 'index.js')}`);
-		expect(unit).toContain(`LoadCredential=module-1:${join(f.releaseDir, 'lib/util.js')}`);
+		expect(unit).not.toContain('LoadCredential=module-');
 		expect(unit).not.toContain('[Install]');
 
 		const socket = await fs.readFile(join(f.unitDir, 'yoal-workload-wld_abc123.socket'), 'utf8');

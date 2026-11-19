@@ -133,6 +133,8 @@ describe('event notifications', () => {
 			RUSTFS_NOTIFY_ENABLE: 'true',
 			RUSTFS_NOTIFY_WEBHOOK_ENABLE_YOAL: 'on',
 			RUSTFS_NOTIFY_WEBHOOK_ENDPOINT_YOAL: `https://control.test/api/webhooks/storage/${storageId}`,
+			// RustFS refuses private webhook hosts unless listed; the control plane is operator-owned.
+			RUSTFS_OUTBOUND_ALLOW_ORIGINS: 'https://control.test',
 		});
 		// Switching notifications on restarts the instance once; the token is a secret.
 		expect(after.activationVersion).not.toBe(before.activationVersion);

@@ -79,6 +79,13 @@ export interface WorkloadRuntimeOptions {
 	retryDelayMs?: number;
 	/** Optional non-secret diff cache (`<dataDir>/workloads-state.json`). */
 	statePath?: string | null;
+	/**
+	 * The kernel's boot id (`/proc/sys/kernel/random/boot_id`), or null when unknown. A diff cache
+	 * written under another boot keeps its ids (so removal still works) but no fingerprints: the
+	 * helper's files under `/run` (env files, secrets, a function's config and shim, a pooler's
+	 * TLS dir) are gone after a reboot, so every workload must be applied once again.
+	 */
+	bootId?: string | null;
 	/** How long after an apply a stopped runner is assumed to be still starting (default 20 s). */
 	runnerSettleMs?: number;
 	/**
@@ -143,6 +150,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	private readonly log: WorkloadLog;
 	private readonly retryDelayMs: number;
 	private readonly statePath: string | null;
+	private readonly bootId: string | null;
 	private readonly runnerSettleMs: number;
 	private readonly onIdentity: WorkloadRuntimeOptions['onIdentity'];
 	private readonly ensureIdentity: WorkloadRuntimeOptions['ensureIdentity'];
@@ -165,6 +173,8 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	private readonly purgedStoragePending = new Set<string>();
 	/** Purged broker ids not yet acknowledged by a heartbeat (D111). */
 	private readonly purgedBrokerPending = new Set<string>();
+	/** Purged Kubernetes machine ids not yet acknowledged by a heartbeat (docs/KUBERNETES.md). */
+	private readonly purgedKubernetesPending = new Set<string>();
 	private retryAt = 0;
 	private pendingFailure = false;
 	/** Desired workloads from the last converge, for the runner recycler (plan 21). */
@@ -199,6 +209,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 		this.log = options.log ?? (() => undefined);
 		this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
 		this.statePath = options.statePath ?? null;
+		this.bootId = options.bootId ?? null;
 		this.runnerSettleMs = options.runnerSettleMs ?? RUNNER_SETTLE_MS;
 		this.onIdentity = options.onIdentity;
 		this.ensureIdentity = options.ensureIdentity;
@@ -412,6 +423,15 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 		for (const id of ids) this.purgedBrokerPending.delete(id);
 	}
 
+	/** Purged Kubernetes machine ids for the next heartbeat's `purgedKubernetes`. */
+	pendingPurgedKubernetes(): string[] {
+		return [...this.purgedKubernetesPending].sort();
+	}
+
+	acknowledgePurgedKubernetes(ids: readonly string[]): void {
+		for (const id of ids) this.purgedKubernetesPending.delete(id);
+	}
+
 	/** Purged database ids for the next heartbeat's `purgedDatabases`. */
 	pendingPurgedDatabases(): string[] {
 		return [...this.purgedPending].sort();
@@ -485,7 +505,8 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 		const databasePurgeFailed = await this.purgeManaged('database', state.databasePurges ?? [], listedIds, signal);
 		const storagePurgeFailed = await this.purgeManaged('storage', state.storagePurges ?? [], listedIds, signal);
 		const brokerPurgeFailed = await this.purgeManaged('broker', state.brokerPurges ?? [], listedIds, signal);
-		const purgeFailed = databasePurgeFailed || storagePurgeFailed || brokerPurgeFailed;
+		const kubernetesPurgeFailed = await this.purgeManaged('kubernetes', state.kubernetesPurges ?? [], listedIds, signal);
+		const purgeFailed = databasePurgeFailed || storagePurgeFailed || brokerPurgeFailed || kubernetesPurgeFailed;
 
 		if (desired.length === 0) {
 			if (purgeFailed) this.scheduleRetry();
@@ -540,13 +561,19 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	 * its heartbeat is not purged twice. Returns true when a purge failed and needs a retry.
 	 */
 	private async purgeManaged(
-		kind: 'database' | 'storage' | 'broker',
+		kind: 'database' | 'storage' | 'broker' | 'kubernetes',
 		ids: readonly string[],
 		listedIds: ReadonlySet<string>,
 		signal: AbortSignal,
 	): Promise<boolean> {
 		const pending =
-			kind === 'database' ? this.purgedPending : kind === 'storage' ? this.purgedStoragePending : this.purgedBrokerPending;
+			kind === 'database'
+				? this.purgedPending
+				: kind === 'storage'
+					? this.purgedStoragePending
+					: kind === 'broker'
+						? this.purgedBrokerPending
+						: this.purgedKubernetesPending;
 		let failed = false;
 		for (const id of new Set(ids)) {
 			if (signal.aborted) return true;
@@ -779,8 +806,8 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	/**
 	 * FN2: a function is a process workload whose unit runs the pinned workerd binary. The helper
 	 * writes `config` and `shim` beside the workload and embeds them as `function-config` and
-	 * `function-shim`; the modules are embedded from the release directory under `module-<i>`
-	 * (PLAN.md). Phase-2 binding services add extra embedded modules (`files`) under their own
+	 * `function-shim`; the modules are embedded straight from the release directory by absolute
+	 * path (`/<release>/<module>`, resolved against the helper's `--import-path`). Phase-2 binding services add extra embedded modules (`files`) under their own
 	 * credential names. Rendering is pure, so an unchanged desired state is caught by the
 	 * fingerprint before this runs; the activation env only feeds bindings that embed credentials
 	 * (Hyperdrive), never the phase-1 output.
@@ -854,8 +881,13 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 			return;
 		}
 		try {
-			const parsed = JSON.parse(text) as { applied?: unknown };
+			const parsed = JSON.parse(text) as { applied?: unknown; bootId?: unknown };
 			if (!Array.isArray(parsed.applied)) return;
+			// Another boot (or a cache from before boot ids were recorded): keep every id for removal,
+			// but drop the fingerprints so each workload is applied again and the helper rewrites
+			// what lived under /run.
+			const sameBoot = this.bootId === null || parsed.bootId === this.bootId;
+			if (!sameBoot) this.log('info', 'The node rebooted since the last apply; every workload is applied again');
 			for (const entry of parsed.applied) {
 				if (typeof entry !== 'object' || entry === null) continue;
 				const record = entry as Record<string, unknown>;
@@ -866,7 +898,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 						? record.restarts
 						: 0;
 				this.applied.set(record.id, {
-					fingerprint: record.fingerprint,
+					fingerprint: sameBoot ? record.fingerprint : '',
 					activationVersion: record.activationVersion,
 					restarts,
 				});
@@ -887,6 +919,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 				this.statePath,
 				`${JSON.stringify({
 					version: 1,
+					...(this.bootId ? { bootId: this.bootId } : {}),
 					applied: [...this.applied.entries()].map(([id, entry]) => ({ id, ...entry })),
 				})}\n`,
 			);
@@ -946,6 +979,9 @@ export async function probeWorkloadHealth(
 	if (workload.database) return probeDatabasePort(workload.port, signal, { engine: workload.database.engine });
 	if (workload.broker)
 		return probeDatabasePort(workload.port, signal, { handshake: brokerProbeHandshake(workload.broker.engine) });
+	// Agent machines publish nothing; on another node the server's port is not theirs to probe.
+	if (workload.kubernetes?.role === 'agent') return true;
+	if (workload.kubernetes) return probeKubernetesApi(workload.port, signal, fetcher);
 	const healthPath = workload.objectStorage ? STORAGE_HEALTH_PATH : workload.healthPath;
 	// A function host is socket-activated like a process app, but its socket is named after the
 	// desired-state id: the workload id for replica 0, `<id>-r<n>` for the rest (phase 4). A process
@@ -1038,6 +1074,27 @@ export function probeHandshake(engine: DatabaseEngine): ProbeHandshake {
 				send: CLICKHOUSE_PING,
 				accept: (data) => /^HTTP\/1\.[01] 200 /.test(new TextDecoder().decode(data.subarray(0, 16))),
 			};
+	}
+}
+
+/**
+ * A Kubernetes machine is up when its API server answers HTTP on the loopback port (docs/KUBERNETES.md
+ * §5.3). Podman's forwarder accepts a TCP connect before k3s listens, so a bare connect proves nothing.
+ * `/livez` is open to anonymous callers; a 401 (anonymous auth off on a plain-http dev install) still
+ * means the server is serving. Agent machines probe their server's port too.
+ */
+export async function probeKubernetesApi(port: number, signal: AbortSignal, fetcher: typeof fetch = fetch): Promise<boolean> {
+	if (signal.aborted) return false;
+	try {
+		const response = await fetcher(`https://127.0.0.1:${port}/livez`, {
+			signal: AbortSignal.any([signal, AbortSignal.timeout(5_000)]),
+			// The machine's CA is its own; this is a loopback liveness check, not a trust decision.
+			tls: { rejectUnauthorized: false },
+		} as RequestInit);
+		await response.body?.cancel().catch(() => undefined);
+		return response.status < 500;
+	} catch {
+		return false;
 	}
 }
 
@@ -1194,6 +1251,8 @@ export function workloadFingerprint(workload: WorkloadDesired): string {
 			: {}),
 		// Only present for brokers; the store cap is written into the rendered config.
 		...(workload.broker ? { broker: workload.broker } : {}),
+		// Kubernetes machines: minor, role, tier and API host are all rendered into the unit.
+		...(workload.kubernetes ? { kubernetes: workload.kubernetes } : {}),
 		// A function's bindings, compatibility date and assets are part of the rendered workerd
 		// config, so a change must re-render and restart the host.
 		...(workload.function ? { function: workload.function } : {}),

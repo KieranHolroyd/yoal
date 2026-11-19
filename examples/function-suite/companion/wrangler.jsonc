@@ -1,0 +1,10 @@
+{
+	// The other end of function-suite's COMPANION binding: a second, stateless Yoal Function that
+	// must be deployed (as project `function-suite-companion`) before function-suite.
+	"$schema": "../node_modules/wrangler/config-schema.json",
+	"name": "function-suite-companion",
+	"main": "src/index.ts",
+	"compatibility_date": "2026-11-01",
+	"vars": { "COMPANION_NAME": "function-suite-companion" },
+	"yoal": { "idleStopSeconds": 120, "memoryMb": 128 }
+}

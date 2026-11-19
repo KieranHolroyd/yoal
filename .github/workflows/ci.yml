@@ -18,6 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       managed_data: ${{ steps.filter.outputs.managed_data }}
+      functions: ${{ steps.filter.outputs.functions }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -41,6 +42,14 @@ jobs:
             echo "managed_data=true" >> "$GITHUB_OUTPUT"
           else
             echo "managed_data=false" >> "$GITHUB_OUTPUT"
+          fi
+          # The function-suite lane installs a whole node, so it runs only when something on the
+          # function path changed (and always on main).
+          if [ "${{ github.event_name }}" != "pull_request" ] ||
+            grep -Eq '^(apps/helper/|apps/agent/|apps/cli/|apps/control-plane/|packages/|scripts/install/|install\.sh|examples/function-suite/|tests/e2e/function-suite|\.github/workflows/ci\.yml)' /tmp/changed-files; then
+            echo "functions=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "functions=false" >> "$GITHUB_OUTPUT"
           fi
 
   test:
@@ -189,6 +198,38 @@ jobs:
 
       - name: Managed-data container lane
         run: YOAL_E2E_ENGINE=podman bun tests/e2e/managed-data.e2e.ts
+
+  function-e2e:
+    name: Function suite e2e (real node)
+    needs: changes
+    if: needs.changes.outputs.functions == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.4.4'
+
+      - name: Free the runner for a Yoal node
+        # The runner's Docker owns iptables policy and port 80 helpers; Yoal brings Podman + Caddy.
+        run: |
+          sudo systemctl stop docker.socket docker.service containerd.service || true
+          df -h /
+
+      - name: Install a node from this checkout and run function-suite
+        # The runner is a disposable VM: the installer, agent, helper, Caddy, Podman and workerd
+        # run exactly as on a customer node. tests/e2e/function-suite.e2e.ts documents the lane.
+        run: sudo -E "$(command -v bun)" tests/e2e/function-suite.e2e.ts --target local --out "$RUNNER_TEMP/function-suite"
+
+      - name: Upload diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: function-suite-e2e
+          path: ${{ runner.temp }}/function-suite
+          if-no-files-found: ignore
 
   e2e:
     name: End-to-end (REST + MCP)

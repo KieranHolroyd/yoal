@@ -56,6 +56,9 @@ import {
 	type WorkloadSpec,
 	IDENTITY_CAPABILITY,
 	selectIdentityNode,
+	KUBERNETES_CAPABILITY,
+	WG_SUBNETS_CAPABILITY,
+	machineSubnetFor,
 } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, UnauthorizedError, ValidationError } from './errors.ts';
@@ -545,6 +548,7 @@ export class NodeService {
 			this.ctx.databases.applyHeartbeat(node.id, input.workloads);
 			this.ctx.storage.applyHeartbeat(node.id, input.workloads);
 			this.ctx.brokers.applyHeartbeat(node.id, input.workloads);
+			this.ctx.kubernetes.applyHeartbeat(node.id, input.workloads);
 			this.ctx.registry.applyHeartbeat(node.id, input.workloads);
 			this.ctx.databaseReplicas.applyWorkloadReports(node.id, input.workloads);
 		}
@@ -572,6 +576,11 @@ export class NodeService {
 		}
 		if (input.purgedStorage?.length) this.ctx.storage.applyPurged(node.id, input.purgedStorage);
 		if (input.purgedBrokers?.length) this.ctx.brokers.applyPurged(node.id, input.purgedBrokers);
+		if (input.purgedKubernetes?.length) this.ctx.kubernetes.applyPurged(node.id, input.purgedKubernetes);
+		if (input.kubernetesStatus?.length) this.ctx.kubernetes.ingestStatus(node.id, input.kubernetesStatus);
+		this.ctx.kubernetes.applyComponentReport(node.id, input.kubernetes);
+		if (input.kubernetesBackupResults?.length) this.ctx.kubernetes.applyBackupResults(node.id, input.kubernetesBackupResults);
+		if (input.kubernetesComponentResult) this.ctx.kubernetes.applyComponentResult(node.id, input.kubernetesComponentResult);
 		if (input.appVolumeUsage?.length) this.ctx.appVolumes.lifecycle.applyUsage(node.id, input.appVolumeUsage);
 		if (input.appVolumeTaskResults?.length)
 			this.ctx.appVolumes.lifecycle.applyTaskResults(node.id, input.appVolumeTaskResults);
@@ -1176,6 +1185,11 @@ export class NodeService {
 				wgEndpoint: row.wgEndpoint,
 				lanEndpoint: row.lanEndpoint,
 				privateNetwork: row.privateNetwork,
+				// Only nodes with the Kubernetes component carry a machine subnet (docs/KUBERNETES.md §10).
+				machineSubnet: capabilities(row.capabilitiesJson).includes(KUBERNETES_CAPABILITY)
+					? machineSubnetFor(row.privateAddress)
+					: null,
+				acceptsSubnets: capabilities(row.capabilitiesJson).includes(WG_SUBNETS_CAPABILITY),
 			}));
 	}
 
@@ -1621,6 +1635,8 @@ export class NodeService {
 			...this.ctx.databaseReplicas.desiredForNode(node.id),
 			...this.ctx.storage.desiredForNode(node.id),
 			...this.ctx.brokers.desiredForNode(node.id),
+			// Kubernetes machines (docs/KUBERNETES.md).
+			...this.ctx.kubernetes.desiredForNode(node.id),
 			// The platform registry (docs/REGISTRY.md G1) on its node.
 			...this.ctx.registry.desiredForNode(node.id),
 		];
@@ -1716,6 +1732,11 @@ export class NodeService {
 			registryMirror: this.ctx.registry.mirrorForNodes(),
 			storagePurges: this.ctx.storage.purgesForNode(node.id),
 			brokerPurges: this.ctx.brokers.purgesForNode(node.id),
+			kubernetesPurges: this.ctx.kubernetes.purgesForNode(node.id),
+			kubernetesRoutes: this.ctx.kubernetes.routesForNode(node.id, isEdge, (id) => nodeById.get(id)?.publicAddress ?? null),
+			kubernetesManifests: this.ctx.kubernetes.manifestsForNode(node.id),
+			kubernetesComponentRequest: this.ctx.kubernetes.componentRequestForNode(node.id),
+			kubernetesBackupTasks: await this.ctx.kubernetes.backupTasksForNode(node.id),
 			mail: this.ctx.email.desiredForNode(node.id),
 			identity: node.id === identityNodeId ? identityDesiredForNode(this.ctx, node.id) : null,
 			domains: this.ctx.domains.desiredForProjects(servedProjectIds),

@@ -31,13 +31,15 @@
  *   --no-python               skip warming the Pyodide cache Python functions need (D121; ~36 MB)
  *   --with-php                install the pinned FrankenPHP runtime for PHP process apps (D121;
  *                             ~175 MB; or YOAL_INSTALL_PHP=1)
+ *   --with-kubernetes         install the optional Kubernetes component (k3s images, airgap
+ *                             bundles, tier probe; docs/KUBERNETES.md; or YOAL_INSTALL_KUBERNETES=1)
  *   --no-node                 skip the pinned Node.js LTS for Node.js process apps (D125; ~190 MB;
  *                             or YOAL_NO_NODE=1)
  *   --version <label>         release label (default: the repository VERSION file)
  *   --canary                  follow the canary channel (install.sh then builds main instead of
  *                             the newest stable release; D128)
  */
-import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { confirm } from './confirm.ts';
@@ -51,9 +53,11 @@ import { readEnvFile, writeEnvFile } from './env-file.ts';
 import { ensureVapidKeys } from '../../packages/contracts/src/vapid.ts';
 import { ensureWorkerd, pinnedWorkerdVersion, workerdArch } from './workerd.ts';
 import { ensureFrankenphp, frankenphpArch, FRANKENPHP_LINK, FRANKENPHP_PINNED_VERSION } from './frankenphp.ts';
+import { installKubernetesComponent, spawnComponentRunner } from './kubernetes.ts';
 import { ensureNode, nodeArch, NODE_OPT_OUT_MARKER, NODE_PINNED_VERSION } from './node.ts';
 import { pythonBundleEras, warmPyodideCache } from './pyodide.ts';
 import { checkDns, digLookup, dnsTargets, parseServerAddresses, resolverLookup, type DnsResult } from './dns-check.ts';
+import { shouldDisableCrunProfile } from './apparmor.ts';
 import { parseGetentGroupId, processHasGroup } from './caddy-access.ts';
 import { probeServedCertificate, tlsPortFromListen, wildcardProbeHost } from './tls-check.ts';
 import {
@@ -161,6 +165,8 @@ interface Options {
 	noAgent: boolean;
 	/** Install the pinned FrankenPHP binary for PHP process apps (D121). Opt-in: it is large. */
 	withPhp: boolean;
+	/** The optional Kubernetes component (docs/KUBERNETES.md K2). */
+	withKubernetes: boolean;
 	/** Skip the Pyodide cache for Python functions (D121). */
 	noPython: boolean;
 	/** Skip the pinned Node.js for Node.js process apps (D125). */
@@ -263,6 +269,7 @@ const options: Options = {
 	objectStore: (setting('--object-store', ['YOAL_OBJECT_STORE'], 'local') as 'local' | 'r2') || 'local',
 	noAgent: has('--no-agent'),
 	withPhp: has('--with-php') || process.env.YOAL_INSTALL_PHP === '1',
+	withKubernetes: has('--with-kubernetes') || process.env.YOAL_INSTALL_KUBERNETES === '1',
 	noPython: has('--no-python') || process.env.YOAL_NO_PYTHON === '1',
 	noNode: has('--no-node') || process.env.YOAL_NO_NODE === '1',
 	clickhouse: has('--no-clickhouse')
@@ -656,7 +663,9 @@ function resolveDomains(): void {
 }
 
 const CADDY_DNS_MODULE = 'github.com/caddy-dns/cloudflare';
-const PODMAN_PACKAGES = ['podman', 'uidmap', 'passt', 'netavark', 'aardvark-dns'];
+// netavark >= 1.12 (Debian 13) drives the firewall through the `nft` binary, which no Podman
+// package depends on: without `nftables` every container with a network fails to start.
+const PODMAN_PACKAGES = ['podman', 'uidmap', 'passt', 'netavark', 'aardvark-dns', 'nftables'];
 /**
  * Storage tools (docs/STORAGE.md §5): fio profiles volumes, nfs-common and cifs-utils mount network
  * shares. Keep in step with STORAGE_TOOL_PACKAGES in apps/helper/src/storage-tools.ts, which
@@ -777,6 +786,24 @@ function ensureBootstrapCaddyfile(listen: string, bind?: string): boolean {
 	return true;
 }
 
+/** See apparmor.ts: Debian's stacked crun profile breaks signals inside every container. */
+function ensureContainerAppArmor(): void {
+	const profilePath = '/etc/apparmor.d/crun';
+	const disabledPath = '/etc/apparmor.d/disable/crun';
+	const os = existsSync('/etc/os-release') ? readFileSync('/etc/os-release', 'utf8') : '';
+	const osId = /^ID=(.*)$/m.exec(os)?.[1]?.replace(/"/g, '') ?? '';
+	const profile = existsSync(profilePath) ? readFileSync(profilePath, 'utf8') : null;
+	if (!shouldDisableCrunProfile({ osId, profile, disabled: existsSync(disabledPath) })) return;
+	if (options.dryRun) {
+		log(`would disable the AppArmor profile ${profilePath} (it stacks onto containers and blocks their signals)`);
+		return;
+	}
+	mkdirSync('/etc/apparmor.d/disable', { recursive: true });
+	symlinkSync(profilePath, disabledPath);
+	run('apparmor_parser', ['-R', profilePath], { allowFailure: true });
+	log(`disabled the AppArmor profile ${profilePath}: it stacked onto every container and blocked signals between its processes`);
+}
+
 function installPodman(): void {
 	log(`installing ${PODMAN_PACKAGES.join(' ')}`);
 	if (aptInstall(PODMAN_PACKAGES)) return;
@@ -870,6 +897,24 @@ async function installAgentRuntimes(): Promise<void> {
 			);
 		}
 	}
+	// Kubernetes clusters run only on nodes with the optional component (docs/KUBERNETES.md K2).
+	// Opt-in; a failure is a warning, and Nodes → node → Components (or the script) retries it.
+	if (options.withKubernetes) {
+		if (options.dryRun) log('would install the Kubernetes component');
+		else
+			try {
+				const report = await installKubernetesComponent({ runner: spawnComponentRunner, log });
+				if (report.error) log(color.yellow(`warning: Kubernetes component: ${report.error}`));
+				else log(`Kubernetes component ready (minors ${report.minors.join(', ')}; tiers ${report.tiers.join(', ') || 'none'})`);
+			} catch (error) {
+				log(
+					color.yellow(
+						`warning: could not install the Kubernetes component (${error instanceof Error ? error.message : String(error)}); ` +
+							'retry with `sudo bun scripts/install/kubernetes.ts`',
+					),
+				);
+			}
+	}
 }
 
 async function preflight(): Promise<void> {
@@ -892,6 +937,7 @@ async function preflight(): Promise<void> {
 	log(`${arch}, bun ${Bun.version}`);
 
 	installPrerequisites();
+	if (!options.noAgent) ensureContainerAppArmor();
 
 	if (!options.noAgent) await installAgentRuntimes();
 	if (!options.noAgent) {
@@ -899,7 +945,7 @@ async function preflight(): Promise<void> {
 			log(
 				color.yellow(
 					'warning: podman is not installed; managed databases and object storage cannot start. ' +
-						'Install it with: apt-get install podman uidmap passt netavark aardvark-dns',
+						'Install it with: apt-get install podman uidmap passt netavark aardvark-dns nftables',
 				),
 			);
 		else if (!existsSync('/usr/lib/systemd/system-generators/podman-system-generator'))
@@ -1239,6 +1285,14 @@ function ensureCaddyAccess(): void {
 	);
 	run('systemctl', ['daemon-reload'], { allowFailure: true });
 	if (existsSync(socket)) run('chmod', ['0660', socket], { allowFailure: true });
+	// The socket lives in Caddy's home, which Debian 13's caddy package creates 0700: group rw on
+	// the socket is useless if the group cannot reach it, and every agent reconcile then fails with
+	// a connection error. Add group search (not read) so `caddy` members can open the socket only.
+	const socketDir = dirname(socket);
+	if (existsSync(socketDir)) {
+		const mode = statSync(socketDir).mode & 0o7777;
+		if ((mode & 0o010) === 0) run('chmod', ['g+x', socketDir], { allowFailure: true });
+	}
 	// `systemctl show -p SupplementaryGroups` reports the unit file, which already lists yoal once
 	// the drop-in is written, so it cannot tell whether the running process has it. A Caddy started
 	// before this drop-in does not, and then it cannot read release artifacts: every site is a 403
@@ -1904,6 +1958,7 @@ async function joinWorker(join_: NonNullable<Options['join']>): Promise<void> {
 		return;
 	}
 	installPrerequisites();
+	ensureContainerAppArmor();
 	if (!hasCommand('wg')) fail('wg is missing; install wireguard-tools.');
 	await installAgentRuntimes();
 	ensureUsersAndDirs();

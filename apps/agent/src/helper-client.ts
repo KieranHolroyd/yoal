@@ -1,3 +1,13 @@
+/** The helper's background Kubernetes component job (docs/KUBERNETES.md K2). */
+export interface KubernetesComponentJob {
+	running: boolean;
+	action: 'install' | 'remove' | null;
+	startedAt: string | null;
+	finishedAt: string | null;
+	error: string | null;
+	report: unknown;
+}
+
 import {
 	databaseReplicationSlotStatusSchema,
 	type DatabaseReplicationSlotStatus,
@@ -257,6 +267,74 @@ export class HelperClient
 
 	async purge(id: string): Promise<void> {
 		await this.request('POST', `/v1/workloads/${encodeURIComponent(id)}/purge`, undefined, PURGE_TIMEOUT_MS);
+	}
+
+	/** Kubernetes machine status through the helper's fixed `kubectl` reads (docs/KUBERNETES.md). */
+	async kubernetesStatus(
+		id: string,
+		signal?: AbortSignal,
+		keep: readonly string[] = [],
+	): Promise<{ apiReady: boolean; nodesReady: number; nodesTotal: number; deprecatedApis: string[] }> {
+		const payload = (await this.request('POST', `/v1/kubernetes/${encodeURIComponent(id)}/status`, { keep }, 60_000, signal)) as {
+			status?: { apiReady?: unknown; nodesReady?: unknown; nodesTotal?: unknown; deprecatedApis?: unknown };
+		} | null;
+		const status = payload?.status ?? {};
+		return {
+			apiReady: status.apiReady === true,
+			nodesReady: typeof status.nodesReady === 'number' ? status.nodesReady : 0,
+			nodesTotal: typeof status.nodesTotal === 'number' ? status.nodesTotal : 0,
+			deprecatedApis: Array.isArray(status.deprecatedApis)
+				? status.deprecatedApis.filter((entry): entry is string => typeof entry === 'string')
+				: [],
+		};
+	}
+
+	/** Start installing or removing the Kubernetes component (a background job in the helper). */
+	async startKubernetesComponent(action: 'install' | 'remove', purge: boolean, signal?: AbortSignal): Promise<KubernetesComponentJob> {
+		const payload = (await this.request('POST', '/v1/components/kubernetes', { action, purge }, 30_000, signal)) as { job?: KubernetesComponentJob } | null;
+		if (!payload?.job) throw new HelperError('helper returned no component job');
+		return payload.job;
+	}
+
+	async kubernetesComponentJob(signal?: AbortSignal): Promise<KubernetesComponentJob> {
+		const payload = (await this.request('GET', '/v1/components/kubernetes', undefined, 30_000, signal)) as { job?: KubernetesComponentJob } | null;
+		if (!payload?.job) throw new HelperError('helper returned no component job');
+		return payload.job;
+	}
+
+	/** A datastore snapshot as a gzipped tar (K14). */
+	async kubernetesSnapshot(id: string, datastore: 'sqlite' | 'etcd'): Promise<ReadableStream<Uint8Array>> {
+		const response = await fetch(`http://localhost/v1/kubernetes/${encodeURIComponent(id)}/snapshot?datastore=${datastore}`, {
+			method: 'GET',
+			unix: this.socketPath,
+			signal: AbortSignal.timeout(60 * 60_000),
+		});
+		if (!response.ok || !response.body) {
+			const text = await response.text().catch(() => '');
+			throw new HelperError(`helper snapshot ${id} -> ${response.status}${text ? `: ${text}` : ''}`);
+		}
+		return response.body;
+	}
+
+	/** Unpack a snapshot into a machine that has not started yet (K14). */
+	async kubernetesRestore(id: string, body: ReadableStream<Uint8Array>): Promise<void> {
+		const response = await fetch(`http://localhost/v1/kubernetes/${encodeURIComponent(id)}/restore`, {
+			method: 'POST',
+			unix: this.socketPath,
+			signal: AbortSignal.timeout(60 * 60_000),
+			headers: { 'content-type': 'application/gzip' },
+			body: body as never,
+			duplex: 'half',
+		} as RequestInit & { duplex: 'half' });
+		if (!response.ok) {
+			const text = await response.text().catch(() => '');
+			throw new HelperError(`helper restore ${id} -> ${response.status}${text ? `: ${text}` : ''}`);
+		}
+	}
+
+	/** Replace the helper-owned manifests in a server machine's auto-deploy directory. */
+	async kubernetesManifests(id: string, files: Record<string, string>, signal?: AbortSignal): Promise<void> {
+		await this.request('POST', `/v1/kubernetes/${encodeURIComponent(id)}/manifests`, { files }, 120_000, signal);
 	}
 
 	async dumpDatabase(id: string): Promise<{ body: ReadableStream<Uint8Array>; sizeBytes: number | null }> {

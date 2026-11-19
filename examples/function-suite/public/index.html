@@ -1,0 +1,129 @@
+<!doctype html>
+<html lang="en" data-suite-marker="function-suite">
+<head>
+	<meta charset="utf-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1" />
+	<title>Function Suite</title>
+	<style>
+		:root {
+			--bg: #f7f7f5; --panel: #fff; --text: #1c1c1a; --muted: #6b6b66; --line: #e3e3de;
+			--pass: #1f7a3d; --fail: #b3261e; --skip: #8a6d00; --accent: #2b59c3;
+		}
+		@media (prefers-color-scheme: dark) {
+			:root { --bg: #141413; --panel: #1d1d1b; --text: #ecebe6; --muted: #9b9a93; --line: #2f2f2c;
+				--pass: #5cc282; --fail: #f2766b; --skip: #e0c050; --accent: #7aa2ff; }
+		}
+		* { box-sizing: border-box; }
+		body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.5 system-ui, sans-serif; }
+		main { max-width: 980px; margin: 0 auto; padding: 24px 16px 64px; }
+		h1 { font-size: 22px; margin: 0 0 4px; }
+		p.lead { color: var(--muted); margin: 0 0 20px; }
+		section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px; margin-bottom: 16px; }
+		h2 { font-size: 15px; margin: 0 0 12px; }
+		button { font: inherit; padding: 6px 14px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+		button.primary { background: var(--accent); color: #fff; border-color: transparent; }
+		button:disabled { opacity: .6; cursor: progress; }
+		table { width: 100%; border-collapse: collapse; font-size: 14px; }
+		th, td { text-align: left; padding: 6px 8px; border-top: 1px solid var(--line); vertical-align: top; }
+		th { color: var(--muted); font-weight: 500; border-top: 0; }
+		td.status { font-weight: 600; text-transform: uppercase; font-size: 12px; }
+		.pass { color: var(--pass); } .fail { color: var(--fail); } .skip { color: var(--skip); }
+		code, pre { font: 12px/1.4 ui-monospace, monospace; }
+		pre { white-space: pre-wrap; word-break: break-word; margin: 0; color: var(--muted); }
+		.row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+		input { font: inherit; padding: 6px 8px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); min-width: 0; flex: 1; }
+		#chat { height: 160px; overflow-y: auto; background: var(--bg); border-radius: 6px; padding: 8px; margin: 8px 0; }
+		.summary { margin-left: auto; color: var(--muted); }
+		.table-wrap { overflow-x: auto; }
+	</style>
+</head>
+<body>
+<main>
+	<h1>Function Suite</h1>
+	<p class="lead">One Yoal Function that touches every binding: vars, secrets, assets, KV, D1, R2, Cache, Durable Objects (SQL, alarms, WebSockets), Hyperdrive, Analytics Engine, queues with retries and a dead-letter queue, storage events, cron, service and app bindings, egress policy, auth and app errors. This page is a static asset served by Caddy; <code>/api/*</code> runs the Worker.</p>
+
+	<section>
+		<div class="row">
+			<h2 style="margin:0">Checks</h2>
+			<button class="primary" id="run">Run all checks</button>
+			<span class="summary" id="summary"></span>
+		</div>
+		<div class="table-wrap">
+			<table>
+				<thead><tr><th>Check</th><th>System</th><th>Status</th><th>ms</th><th>Detail</th></tr></thead>
+				<tbody id="results"><tr><td colspan="5" class="skip">Not run yet.</td></tr></tbody>
+			</table>
+		</div>
+	</section>
+
+	<section>
+		<h2>Durable Object WebSocket room</h2>
+		<div class="row">
+			<input id="room" value="lobby" aria-label="Room" />
+			<input id="name" value="browser" aria-label="Name" />
+			<button id="join">Join</button>
+		</div>
+		<div id="chat" aria-live="polite"></div>
+		<div class="row">
+			<input id="message" placeholder="Say something" aria-label="Message" />
+			<button id="send" disabled>Send</button>
+		</div>
+	</section>
+
+	<section>
+		<h2>Durable Object counter</h2>
+		<div class="row">
+			<button id="increment">Increment</button>
+			<span id="counter">–</span>
+		</div>
+	</section>
+</main>
+<script>
+	const $ = (id) => document.getElementById(id);
+	const escape = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]);
+
+	$('run').addEventListener('click', async () => {
+		$('run').disabled = true;
+		$('summary').textContent = 'Running… (queue and event checks wait for delivery)';
+		try {
+			const response = await fetch('/api/suite');
+			const body = await response.json();
+			const counts = { pass: 0, fail: 0, skip: 0 };
+			$('results').innerHTML = body.results.map((r) => {
+				counts[r.status] += 1;
+				const detail = r.error ?? JSON.stringify(r.detail ?? '');
+				return `<tr><td><code>${escape(r.name)}</code></td><td>${escape(r.system)}</td><td class="status ${r.status}">${r.status}</td><td>${r.ms}</td><td><pre>${escape(detail)}</pre></td></tr>`;
+			}).join('');
+			$('summary').textContent = `${counts.pass} pass · ${counts.fail} fail · ${counts.skip} skip · ${body.durationMs} ms · ${body.runId}`;
+		} catch (error) {
+			$('summary').textContent = `Failed: ${error}`;
+		} finally {
+			$('run').disabled = false;
+		}
+	});
+
+	let socket = null;
+	const line = (text) => { const div = document.createElement('div'); div.textContent = text; $('chat').append(div); $('chat').scrollTop = 1e9; };
+	$('join').addEventListener('click', () => {
+		socket?.close();
+		const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+		socket = new WebSocket(`${proto}://${location.host}/api/room/${encodeURIComponent($('room').value)}/ws?name=${encodeURIComponent($('name').value)}`);
+		socket.onopen = () => { $('send').disabled = false; line('connected'); };
+		socket.onclose = () => { $('send').disabled = true; line('disconnected'); };
+		socket.onmessage = (event) => {
+			const m = JSON.parse(event.data);
+			line(m.type === 'message' ? `${m.from}: ${m.text}` : m.type === 'welcome' ? `joined as ${m.name} (${m.peers} here)` : JSON.stringify(m));
+		};
+	});
+	const send = () => { if (socket && $('message').value) { socket.send($('message').value); $('message').value = ''; } };
+	$('send').addEventListener('click', send);
+	$('message').addEventListener('keydown', (e) => { if (e.key === 'Enter') send(); });
+
+	$('increment').addEventListener('click', async () => {
+		const r = await fetch('/api/counter/page', { method: 'POST' });
+		$('counter').textContent = (await r.json()).value;
+	});
+	fetch('/api/counter/page').then((r) => r.json()).then((b) => { $('counter').textContent = b.value; }).catch(() => {});
+</script>
+</body>
+</html>

@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { building } from '$app/env';
 import { parseFeatureFlags, parseSmsRecipients, retiredFeatureFlagsSet } from '@yoal/contracts';
 import { isSharedDomain } from './domains';
+import { mcpCapableOrigin } from './mcp-origin';
 import { loadLocalSettings } from './local-settings';
 
 // Runtime config comes from the process environment (systemd EnvironmentFile / credentials in production).
@@ -40,8 +41,17 @@ export const sharedDomain = (() => {
 	}
 })();
 
-/** Canonical MCP protected-resource URL; tokens are audience-bound to it. */
-export const mcpResource = `${platformOrigin}/mcp`;
+/** MCP needs an HTTPS (or loopback) origin; see mcp-origin.ts. */
+export const mcpAvailable = mcpCapableOrigin(platformOrigin);
+
+/**
+ * Canonical MCP protected-resource URL; tokens are audience-bound to it. Without MCP it is the
+ * HTTPS form of the same URL: a placeholder that lets the OAuth provider load (it serves sign-in
+ * for the dashboard too) while `/mcp` answers 404, so no token can ever be bound to it.
+ */
+export const mcpResource = mcpAvailable
+	? `${platformOrigin}/mcp`
+	: `${platformOrigin.replace(/^http:/, 'https:')}/mcp`;
 
 export const dataDir = required('YOAL_DATA_DIR', '.data');
 
