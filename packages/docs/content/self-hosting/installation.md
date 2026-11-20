@@ -155,6 +155,7 @@ These flags are passed to the installer. Each one is also available as an enviro
 | `--acme-email <email>` | Let's Encrypt account email. Turns on HTTPS when both domains are real. | `YOAL_ACME_EMAIL` |
 | `--public-address <ipv4>` | This server's IPv4 address for installs without a dashboard domain. Default: detected. | `YOAL_PUBLIC_HOST` |
 | `--skip-deps` | Don't install Caddy, Podman or the storage tools. Caddy must already be installed. | `YOAL_SKIP_DEPS=1` |
+| `--replace-caddyfile` | On an existing install, back up `/etc/caddy/Caddyfile` and replace it with the bootstrap file even if it isn't the package's own. | |
 | `--admin-email <email>` | Pre-fills the owner's email in the setup wizard. It does not create an account. | `YOAL_ADMIN_EMAIL` |
 | `--cloudflare-token-file <path>` | Cloudflare token file for DNS-01, used only if the file exists and HTTPS is on. Default `/etc/caddy/cloudflare.token`. | `YOAL_CLOUDFLARE_TOKEN_FILE` |
 | `--skip-dns-check` | Don't check that the domains resolve before installing. | none |
@@ -248,7 +249,7 @@ flowchart TD
 | `/var/lib/yoal/data/yoal.db` | The SQLite database. Local objects are in `data/objects`. |
 | `/var/lib/yoal/backups` | Pre-upgrade snapshots. |
 | `/var/lib/yoal/clickhouse` | Telemetry data, with ClickHouse only. Not backed up. |
-| `/etc/caddy/Caddyfile` | Caddy configuration. The installer writes a bootstrap version and the agent replaces it. Your original is kept as `Caddyfile.dist`. |
+| `/etc/caddy/Caddyfile` | Caddy configuration. The installer writes a bootstrap version and the agent replaces it. On a first install this happens even when Caddy was already installed, so its admin API is never on TCP. On an existing install it replaces only the package's own Caddyfile, unless you pass `--replace-caddyfile`. Your original is kept as `Caddyfile.dist`, with its permissions, and the installer prints the backup's path. |
 | `/var/lib/caddy` | Caddy's data, certificates and admin socket. |
 | `/var/log/caddy/yoal-access.log` | Caddy's JSON access log, read by the agent. |
 | `/run/yoal` | Runtime sockets, including `control.sock`. Recreated at boot. |

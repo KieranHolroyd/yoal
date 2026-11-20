@@ -11,6 +11,7 @@ import { DEFAULT_SUBID_FILES } from './userns.ts';
 import { JobDriver } from './jobs.ts';
 import { PipelineJobDriver, resolveBuildsRoot } from './pipeline-jobs.ts';
 import { ensureStorageTools } from './storage-tools.ts';
+import { ensureCaddyRestartDropIn } from './caddy-restart.ts';
 import { dirname, join } from 'node:path';
 
 /**
@@ -158,6 +159,18 @@ export async function runHelper(options: RunHelperOptions = {}): Promise<void> {
 			log: (level, message) => log(level, `storage tools: ${message}`),
 		});
 	}
+
+	// Every node's caddy.service restarts on failure (F10). Workers update through `node/update`,
+	// which never runs release convergence, so the helper makes sure of it on each start. Fixed
+	// content, off the request path; Caddy is not restarted.
+	void ensureCaddyRestartDropIn({
+		unitDir: config.unitDir,
+		systemctlPath: config.systemctlPath,
+		runner: spawnRunner(),
+		log: (level, message) => log(level, `caddy: ${message}`),
+	}).catch((error: unknown) =>
+		log('warn', `caddy: could not write the restart drop-in: ${error instanceof Error ? error.message : String(error)}`),
+	);
 
 	// D96 retired the D60 studio console; clear any console sidecar a node kept from before the upgrade. Best
 	// effort and off the request path: a failure is logged and retried on the next helper start.

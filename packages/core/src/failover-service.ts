@@ -216,6 +216,7 @@ export class FailoverService {
 				holds: () => this.#store.holdsSync(this.holderId, epoch, this.ctx.now()),
 			};
 			const facts = this.#nodeFacts(now, config);
+			this.#markOffline(now, facts);
 			try {
 				this.#replicaTick(now, config, fence, facts, report, alerts);
 				// Rollouts and autoscaling are this controller's too: one holder, so two control
@@ -278,6 +279,24 @@ export class FailoverService {
 	}
 
 	// ------------------------------------------------------------------ nodes
+
+	/**
+	 * Mark an `online` node silent past `OFFLINE_AFTER_MS` offline on every tick, rather than only
+	 * in the 60 s maintenance sweep, which made "offline at 30 s" anything up to 90 s (HA-PLAN
+	 * Wave 1 F9). Silence counts from the last heartbeat, or from the join for a node that has not
+	 * sent one yet. Only the status changes: the grace, flap and rate rules read heartbeat age.
+	 */
+	#markOffline(now: number, facts: Map<string, NodeFact>): void {
+		for (const fact of facts.values()) {
+			if (fact.status !== 'online' || !fact.unreachable) continue;
+			this.ctx.db
+				.update(nodes)
+				.set({ status: 'offline', updatedAt: now })
+				.where(and(eq(nodes.id, fact.id), eq(nodes.status, 'online')))
+				.run();
+			fact.status = 'offline';
+		}
+	}
 
 	#nodeFacts(now: number, config: ClusterConfig): Map<string, NodeFact> {
 		const graceMs = config.failover.graceSeconds * 1000;

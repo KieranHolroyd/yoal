@@ -582,3 +582,27 @@ describe('measured usage', () => {
 	});
 });
 
+
+describe('health probes of protected copies (F7 review)', () => {
+	test('a node holding a copy of a spread app gets its health path on every route of that app', async () => {
+		const f = fleet(['edge', 'a', 'b']);
+		await f.app('web', { healthPath: '/healthz' });
+		// One copy: no node needs it, so routes are unchanged (the single-node shape).
+		for (const name of f.names)
+			for (const route of (await f.core.nodes.desiredState(f.node[name]!.token)).routes.filter((entry) => entry.slug === 'web'))
+				if (!route.upstreams) expect(route.healthPath).toBeUndefined();
+
+		f.core.scaling.scale(principal, f.project('web'), { replicas: 3 });
+		await f.settle('web');
+		const holders = new Set(f.copies('web').map((copy) => copy.node));
+		for (const name of f.names) {
+			const routes = (await f.core.nodes.desiredState(f.node[name]!.token)).routes.filter((entry) => entry.slug === 'web');
+			if (!holders.has(name)) continue;
+			expect(routes.length).toBeGreaterThan(0);
+			// The production route is public and the preview route is `platform`: both carry the
+			// path, which the node's Caddy lets an overlay probe reach without a session.
+			expect(routes.some((route) => route.accessMode !== 'public')).toBe(true);
+			for (const route of routes) expect(route.healthPath).toBe('/healthz');
+		}
+	});
+});
