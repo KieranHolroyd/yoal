@@ -569,6 +569,16 @@ export class NodeService {
 			this.ctx.databaseReplicas.applyReplicationReports(node.id, input.databaseReplication);
 		if (input.databaseReplicaPromotionResults?.length)
 			this.ctx.databaseReplicas.applyPromotionResults(node.id, input.databaseReplicaPromotionResults);
+		// W10: member roles, sync steps, switchover drain/resume and rewind outcomes.
+		if (input.databaseMembers?.length) this.ctx.databaseMembers.applyMemberReports(node.id, input.databaseMembers);
+		if (input.databaseSyncResults?.length)
+			void this.ctx.databaseMembers
+				.applySyncResults(node.id, input.databaseSyncResults)
+				.catch((error: unknown) => console.error(`[database-members] sync result: ${(error as Error).message}`));
+		if (input.databaseSwitchoverResults?.length)
+			this.ctx.databaseMembers.applySwitchoverResults(node.id, input.databaseSwitchoverResults);
+		if (input.databaseRewindResults?.length)
+			this.ctx.databaseMembers.applyRewindResults(node.id, input.databaseRewindResults);
 		if (input.databaseBackupResults?.length)
 			this.ctx.databases.applyBackupResults(node.id, input.databaseBackupResults);
 		if (input.databasePitrResults?.length)

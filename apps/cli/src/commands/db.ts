@@ -18,6 +18,7 @@ import { authenticatedClient } from './common.ts';
 import { credentialsCommand, credentialsUsage, isCredentialVerb } from './db-credentials.ts';
 import { pitrBackupCommand, pitrCommand, restoreToCommand } from './db-pitr.ts';
 import { replicaCommand } from './db-replicas.ts';
+import { durabilityCommand } from './db-durability.ts';
 import { confirmOrRefuse } from './run-operation.ts';
 
 /** Managed databases (docs/DATABASES.md). Every check lives on the server; this is a thin client. */
@@ -52,6 +53,9 @@ Commands:
   restore-to <name>            Restore to a moment into a new database (--time <ISO> --as <new-name>)
   replica list|add|remove|promote <name> …
                                Postgres read replicas; see \`yoal db replica --help\`
+  durability <name>            Requested durability, the effective mode and any open sync change;
+                               --sync/--async/--timeout/--on-sync-loss (see \`yoal db durability -h\`)
+  switchover <name> <replica>  Planned switchover to a replica (checkpoint, stop writes, LSN check)
 
 Create options:
   -p, --project <slug>         Attach to this project right away (placed on its node)
@@ -203,6 +207,8 @@ const subcommands: Record<string, (argv: string[]) => Promise<void>> = {
 	'restore-to': restoreToCommand,
 	replica: replicaCommand,
 	replicas: replicaCommand,
+	durability: durabilityCommand,
+	switchover: durabilityCommand,
 	restart: restartDatabase,
 	rotate: rotateCredentials,
 	upgrade: upgradeDatabase,

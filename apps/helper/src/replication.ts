@@ -283,3 +283,171 @@ export function renderPromoteArgs(podmanPath: string, workloadId: string): strin
 	assertReplicaWorkloadId(workloadId, 'replica id');
 	return [podmanPath, 'exec', `yoal-workload-${workloadId}`, 'pg_ctl', 'promote', '-D', '/data/pgdata', '-w', '-t', '60'];
 }
+
+// ---------------------------------------------------------------- synchronous set (H23, W10)
+
+/** The one table the barrier writes; created once, one row. */
+export const SYNC_BARRIER_TABLE = 'yoal_sync_barrier';
+/** At most this many synchronous standbys (one is the H23 default). */
+export const SYNC_MEMBERS_MAX = 3;
+
+/**
+ * `synchronous_standby_names` for one named replica (`synchronous_commit = on`), or empty to clear
+ * it. Names are `application_name`s, which the replica unit sets to its physical slot name, so they
+ * are validated by the same pattern; nothing else can reach the setting.
+ */
+export function syncStandbyNames(members: readonly string[]): string {
+	for (const member of members) assertSlot(member, 'sync member');
+	if (new Set(members).size !== members.length) throw new ValidationError('sync members must not repeat');
+	if (members.length > SYNC_MEMBERS_MAX) throw new ValidationError(`sync members allow at most ${SYNC_MEMBERS_MAX} entries`);
+	// `ANY 1 (...)` keeps a second member as slack once there is more than one; one named replica is
+	// the H23 shape and needs no list syntax.
+	if (members.length === 0) return '';
+	if (members.length === 1) return members[0]!;
+	return `ANY 1 (${members.join(', ')})`;
+}
+
+/** Set (or clear) the synchronous set and turn `synchronous_commit` on. Reload, no restart. */
+export function renderSyncConfigureSql(members: readonly string[]): string {
+	const names = syncStandbyNames(members);
+	return [
+		`ALTER SYSTEM SET synchronous_commit = 'on';`,
+		`ALTER SYSTEM SET synchronous_standby_names = '${names}';`,
+		'SELECT pg_reload_conf();',
+		'',
+	].join('\n');
+}
+
+/**
+ * The barrier write (W9-SPEC §5.5): a real commit that follows the setting. With
+ * `synchronous_commit = on` and the new member named, this statement only returns once the member
+ * has flushed it; the LSN it reports is then the position the member must have replayed.
+ */
+export function renderBarrierSql(): string {
+	return [
+		`CREATE TABLE IF NOT EXISTS ${SYNC_BARRIER_TABLE} (id integer PRIMARY KEY, at timestamptz NOT NULL DEFAULT now());`,
+		`INSERT INTO ${SYNC_BARRIER_TABLE} (id, at) VALUES (1, now()) ON CONFLICT (id) DO UPDATE SET at = excluded.at;`,
+		'SELECT pg_current_wal_lsn()::text;',
+		'',
+	].join('\n');
+}
+
+/** Parse the barrier's LSN from psql `-tA`; anything unexpected is a failure, never a guess. */
+export function parseBarrierLsn(stdout: string): string {
+	const lines = stdout.trim().split('\n').map((line) => line.trim()).filter(Boolean);
+	const last = lines.at(-1) ?? '';
+	if (!LSN.test(last)) throw new ValidationError('The barrier write did not report a valid WAL position.');
+	return last;
+}
+
+/** Stop accepting writes without stopping Postgres, so its final LSN stays readable. */
+export function renderStopWritesSql(): string {
+	return [
+		`ALTER SYSTEM SET default_transaction_read_only = on;`,
+		'SELECT pg_reload_conf();',
+		'',
+	].join('\n');
+}
+
+/** Resume writes after a refused switchover. */
+export function renderResumeWritesSql(): string {
+	return [
+		`ALTER SYSTEM RESET default_transaction_read_only;`,
+		'SELECT pg_reload_conf();',
+		'',
+	].join('\n');
+}
+
+/**
+ * The member probe (W9-SPEC §5.6): role, generation are decided by the control plane; this is the
+ * database's own view — recovery state, replay/current LSN and whether its receiver is up.
+ */
+export const MEMBER_STATUS_SQL = `SELECT json_build_object(
+  'inRecovery', pg_is_in_recovery(),
+  'lsn', CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn()::text ELSE pg_current_wal_lsn()::text END,
+  'streaming', CASE WHEN pg_is_in_recovery() THEN coalesce((SELECT status = 'streaming' FROM pg_stat_wal_receiver LIMIT 1), false) ELSE true END
+)::text`;
+
+export interface MemberStatus {
+	inRecovery: boolean;
+	lsn: string | null;
+	streaming: boolean;
+}
+
+/** Parse `MEMBER_STATUS_SQL` strictly. */
+export function parseMemberStatus(stdout: string): MemberStatus {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(stdout.trim());
+	} catch {
+		throw new ValidationError('The member status query did not return JSON.');
+	}
+	if (!parsed || typeof parsed !== 'object') throw new ValidationError('The member status query did not return an object.');
+	const row = parsed as Record<string, unknown>;
+	return {
+		inRecovery: row.inRecovery === true,
+		lsn: typeof row.lsn === 'string' && LSN.test(row.lsn) ? row.lsn : null,
+		streaming: row.streaming === true,
+	};
+}
+
+// ---------------------------------------------------------------- rewind (W10, §9.3)
+
+export interface RewindSource {
+	host: string;
+	port: number;
+	user: string;
+	database: string;
+}
+
+function assertSource(source: RewindSource): string {
+	if (typeof source.host !== 'string' || !/^[A-Za-z0-9._:-]{1,253}$/.test(source.host))
+		throw new ValidationError('rewind source host is not a hostname or address');
+	if (!Number.isInteger(source.port) || source.port < 1 || source.port > 65_535)
+		throw new ValidationError('rewind source port is out of range');
+	if (typeof source.user !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(source.user))
+		throw new ValidationError('rewind source user is not a Postgres role');
+	if (typeof source.database !== 'string' || !/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(source.database))
+		throw new ValidationError('rewind source database is not a Postgres database');
+	return `host=${source.host} port=${source.port} user=${source.user} dbname=${source.database} connect_timeout=10`;
+}
+
+/**
+ * `pg_rewind` in a one-shot container sharing the data volume (the server must be stopped first).
+ * The password rides `PGPASSWORD` in the environment, never argv. `--write-recovery-conf` writes
+ * `primary_conninfo` plus `standby.signal`, so the next start follows the new primary.
+ */
+export function renderRewindArgs(options: {
+	podmanPath: string;
+	image: string;
+	dataDir: string;
+	source: RewindSource;
+	network?: string;
+}): string[] {
+	const source = assertSource(options.source);
+	const args = [
+		options.podmanPath,
+		'run',
+		'--rm',
+		'--user',
+		'999:999',
+		...(options.network ? ['--network', options.network] : []),
+		'-v',
+		`${options.dataDir}:/data:Z`,
+		options.image,
+		'pg_rewind',
+		'--target-pgdata=/data/pgdata',
+		`--source-server=${source}`,
+		'--write-recovery-conf',
+		'--progress',
+	];
+	return args;
+}
+
+/** The reverse: a rewind that failed is a rebuild, never a partial merge (CLUSTERING §9.3). */
+export function rewindOutcome(code: number): 'rewound' | 'rebuild' {
+	return code === 0 ? 'rewound' : 'rebuild';
+}
+
+/** `initdb --data-checksums` for new databases, so `pg_rewind` works without `wal_log_hints`. */
+export const POSTGRES_INITDB_ARGS_CHECKSUMS = '--data-checksums';

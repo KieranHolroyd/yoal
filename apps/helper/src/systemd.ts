@@ -61,17 +61,27 @@ import {
 } from './units.ts';
 import { NODE_LISTEN_CREDENTIAL, NODE_LISTEN_SOURCE } from './node-listen.ts';
 import {
+	MEMBER_STATUS_SQL,
 	REPLICATION_STATUS_SQL,
 	assertPrimaryDatabaseId,
 	assertReplicaWorkloadId,
+	parseBarrierLsn,
+	parseMemberStatus,
 	parseReplicationPassword,
 	parseReplicationStatus,
 	parseSlots,
+	renderBarrierSql,
 	renderPromoteArgs,
 	renderReplicaStartScript,
 	renderReplicationConfigureSql,
 	renderReplicationTeardownSql,
+	renderResumeWritesSql,
+	renderRewindArgs,
+	renderStopWritesSql,
+	renderSyncConfigureSql,
+	rewindOutcome,
 	withReplicationHba,
+	type MemberStatus,
 	type ReplicationSlotStatus,
 } from './replication.ts';
 import { ensureContainerSubids, type SubidFiles } from './userns.ts';
@@ -1405,6 +1415,151 @@ export class SystemdDriver {
 			await fs.rm(join(source, 'pgdata', marker), { force: true });
 		await fs.rename(source, target);
 		return { databaseId, lsn: lsn && /^[0-9A-F]{1,8}\/[0-9A-F]{1,8}$/i.test(lsn) ? lsn : null };
+	}
+
+	// ------------------------------------------------------- synchronous set (H23, W10)
+
+	/** Apply `synchronous_standby_names` and `synchronous_commit = on` (or clear the set). */
+	async syncConfigure(id: string, raw: { members?: unknown }): Promise<{ members: string[] }> {
+		const databaseId = assertPrimaryDatabaseId(id);
+		const members = Array.isArray(raw.members) ? raw.members : [];
+		const sql = renderSyncConfigureSql(members.map((member, index) => {
+			if (typeof member !== 'string') throw new ValidationError(`members[${index}] must be a slot name`);
+			return member;
+		}));
+		const env = await this.readPostgresEnv(databaseId);
+		const result = await this.runner.run(this.psqlArgs(databaseId, env, ['-v', 'ON_ERROR_STOP=1']), {
+			env: { PGPASSWORD: env.password },
+			stdin: sql,
+		});
+		if (result.code !== 0)
+			throw new Error(`sync configure failed (${result.code}): ${result.stderr.trim().slice(0, 500) || 'no detail'}`);
+		return { members: Array.isArray(raw.members) ? raw.members.map(String) : [] };
+	}
+
+	/** Write the barrier commit and report the position the target must replay. */
+	async syncBarrier(id: string): Promise<{ lsn: string }> {
+		const databaseId = assertPrimaryDatabaseId(id);
+		const env = await this.readPostgresEnv(databaseId);
+		const result = await this.runner.run(this.psqlArgs(databaseId, env, ['-tA', '-v', 'ON_ERROR_STOP=1']), {
+			env: { PGPASSWORD: env.password },
+			stdin: renderBarrierSql(),
+		});
+		if (result.code !== 0)
+			throw new Error(`sync barrier failed (${result.code}): ${result.stderr.trim().slice(0, 500) || 'no detail'}`);
+		return { lsn: parseBarrierLsn(result.stdout) };
+	}
+
+	/** Stop accepting writes without stopping the server (switchover step 2). */
+	async writesStop(id: string): Promise<void> {
+		await this.#writeToggle(id, renderStopWritesSql(), 'stop writes');
+	}
+
+	/** Resume writes after a refused switchover. */
+	async writesResume(id: string): Promise<void> {
+		await this.#writeToggle(id, renderResumeWritesSql(), 'resume writes');
+	}
+
+	/**
+	 * Fence a deposed primary (H22, W9-SPEC §5.3): stop it, or make it read-only where reads must
+	 * keep working. The member machine asks; this fixed verb never takes a command.
+	 */
+	async fenceWorkload(id: string, mode: 'stop' | 'readonly'): Promise<void> {
+		const databaseId = assertPrimaryDatabaseId(id);
+		if (mode === 'readonly') {
+			await this.#writeToggle(databaseId, renderStopWritesSql(), 'fence (read-only)');
+			return;
+		}
+		await this.systemctl(['stop', serviceUnitName(databaseId)], { allowFailure: true });
+	}
+
+	/** What the database itself says about role, replay state and receiver health (§5.6). */
+	async memberStatus(id: string): Promise<MemberStatus> {
+		// A replica workload (`db_dbr_…`) answers the same probe; role discovery asks both kinds.
+		const databaseId = assertDatabaseId(id, 'database id');
+		const env = await this.readPostgresEnv(databaseId);
+		const result = await this.runner.run(this.psqlArgs(databaseId, env, ['-tA', '-c', MEMBER_STATUS_SQL]), {
+			env: { PGPASSWORD: env.password },
+		});
+		if (result.code !== 0)
+			throw new Error(`member status failed (${result.code}): ${result.stderr.trim().slice(0, 500) || 'no detail'}`);
+		return parseMemberStatus(result.stdout);
+	}
+
+	async #writeToggle(id: string, sql: string, label: string): Promise<void> {
+		const databaseId = assertPrimaryDatabaseId(id);
+		const env = await this.readPostgresEnv(databaseId);
+		const result = await this.runner.run(this.psqlArgs(databaseId, env, ['-v', 'ON_ERROR_STOP=1']), {
+			env: { PGPASSWORD: env.password },
+			stdin: sql,
+		});
+		if (result.code !== 0)
+			throw new Error(`${label} failed (${result.code}): ${result.stderr.trim().slice(0, 500) || 'no detail'}`);
+	}
+
+	/**
+	 * Re-attach an old primary (W10, §9.3): stop its unit, run `pg_rewind` in a one-shot container
+	 * against the new primary, then start it as a standby. A failed rewind is reported as
+	 * `rebuild`; the control plane removes the copy and bootstraps a fresh replica. Never a merge.
+	 */
+	async replicaRewind(
+		id: string,
+		raw: { databaseId?: unknown; source?: unknown; password?: unknown; image?: unknown },
+	): Promise<{ status: 'rewound' | 'rebuild'; error?: string }> {
+		const replicaId = assertReplicaWorkloadId(id, 'replica id');
+		const databaseId = assertPrimaryDatabaseId(raw.databaseId, 'databaseId');
+		if (typeof raw.password !== 'string' || !/^[A-Za-z0-9_-]{16,200}$/.test(raw.password))
+			throw new ValidationError('password must be base64url (16–200 characters)');
+		const image =
+			typeof raw.image === 'string' && /^[a-z0-9][a-z0-9._/:@-]{0,199}$/.test(raw.image)
+				? raw.image
+				: await this.#imageFor(databaseId).catch(() => this.#imageFor(replicaId));
+		const source = raw.source;
+		if (!source || typeof source !== 'object') throw new ValidationError('source is required');
+		const record = source as Record<string, unknown>;
+		const host = typeof record.host === 'string' ? record.host : '';
+		const port = typeof record.port === 'number' ? record.port : 0;
+		const user = typeof record.user === 'string' ? record.user : '';
+		const database = typeof record.database === 'string' ? record.database : '';
+		const oldDir = await this.dataDirFor(databaseId);
+		const targetDir = await this.dataDirFor(replicaId);
+		// Both units must be stopped: the old primary is being replaced, and the replica unit must
+		// not run its first-start base backup into the directory the rewind is about to fill.
+		await this.systemctl(['stop', serviceUnitName(databaseId)], { allowFailure: true });
+		await this.systemctl(['stop', serviceUnitName(replicaId)], { allowFailure: true });
+		const sourceExists = await fs.lstat(oldDir).then((stat) => stat.isDirectory()).catch(() => false);
+		const targetExists = await fs.lstat(targetDir).then((stat) => stat.isDirectory()).catch(() => false);
+		if (sourceExists && !targetExists) {
+			await fs.mkdir(dirname(targetDir), { recursive: true });
+			try {
+				await fs.rename(oldDir, targetDir);
+			} catch {
+				// Volume-backed old copy on another filesystem: copy, then remove the source.
+				await fs.cp(oldDir, targetDir, { recursive: true });
+				await fs.rm(oldDir, { recursive: true, force: true });
+			}
+		} else if (!targetExists) {
+			return { status: 'rebuild', error: 'The old primary has no data directory on this node.' };
+		}
+		const result = await this.runner.run(
+			renderRewindArgs({ podmanPath: this.podmanPath, image, dataDir: targetDir, source: { host, port, user, database } }),
+			{ env: { PGPASSWORD: raw.password } },
+		);
+		const outcome = rewindOutcome(result.code);
+		if (outcome === 'rebuild') {
+			// Never a partial merge: the replica unit's standby script copies the new primary.
+			await fs.rm(targetDir, { recursive: true, force: true }).catch(() => undefined);
+			return { status: 'rebuild', error: `pg_rewind failed (${result.code}): ${result.stderr.trim().slice(0, 500) || 'no detail'}` };
+		}
+		return { status: 'rewound' };
+	}
+
+	/** The image a workload's unit runs, for a one-shot beside a stopped container. */
+	async #imageFor(id: string): Promise<string> {
+		const unit = await fs.readFile(join(this.unitDir, serviceUnitName(id)), 'utf8').catch(() => null);
+		const match = unit ? /^Image=(.+)$/m.exec(unit) : null;
+		if (!match?.[1]?.trim()) throw new ValidationError(`Workload ${id} has no rendered unit with an image.`);
+		return match[1].trim();
 	}
 
 	/** `podman exec` psql as the database owner over the container's loopback; no secret in argv. */

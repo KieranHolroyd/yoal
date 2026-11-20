@@ -49,6 +49,17 @@ import {
 	databaseReplicationTaskSchema,
 } from './database-replication.ts';
 import {
+	DB_MEMBER_CAPABILITY,
+	databaseMemberReportSchema,
+	databaseMembersDesiredSchema,
+	databaseRewindResultSchema,
+	databaseRewindTaskSchema,
+	databaseSwitchoverResultSchema,
+	databaseSwitchoverTaskSchema,
+	databaseSyncResultSchema,
+	databaseSyncTaskSchema,
+} from './database-member.ts';
+import {
 	databaseCredentialResultSchema,
 	databaseCredentialTaskSchema,
 	databaseRotationResultSchema,
@@ -275,6 +286,17 @@ export const desiredStateSchema = z.object({
 	databaseReplicaLinks: z.array(databaseReplicaLinkSchema).default([]),
 	/** Replicas on this node to promote and hand over to their database id (§9.3). */
 	databaseReplicaPromotions: z.array(databaseReplicaPromotionTaskSchema).default([]),
+	/**
+	 * Members of every database on this node, for role discovery (W9-SPEC §5.6) and for the
+	 * primary's node to keep the sync setting in force. No secret rides here.
+	 */
+	databaseMembers: z.array(databaseMembersDesiredSchema).default([]),
+	/** Sync-set steps the primary's node must apply (H23). Fixed verbs, never SQL. */
+	databaseSyncTasks: z.array(databaseSyncTaskSchema).default([]),
+	/** The old primary of a switchover to rewind against the new primary (§5.4, W10). */
+	databaseRewindTasks: z.array(databaseRewindTaskSchema).default([]),
+	/** Drain/resume steps of a planned switchover on the old primary's node (W10). */
+	databaseSwitchovers: z.array(databaseSwitchoverTaskSchema).default([]),
 	/** Disks this node must know about, so disk-backed data dirs can be verified (D76, D169). */
 	volumes: z.array(nodeVolumeDesiredSchema).default([]),
 	/** Network shares this node keeps mounted under `/mnt/yoal-shares` (docs/STORAGE.md §3, D143). */
@@ -466,6 +488,8 @@ export const nodeCapabilities = [
 	'app-volumes',
 	'jobs',
 	'database-replicas',
+	// W10: applies the sync set, barrier, switchover drain/resume, rewind and member probes.
+	DB_MEMBER_CAPABILITY,
 	'share-mounts',
 	'volume-profiles',
 	'disk-mounts',
@@ -621,6 +645,14 @@ export const heartbeatSchema = z.object({
 	databaseReplication: z.array(databaseReplicationReportSchema).max(100).optional(),
 	/** Outcomes of `databaseReplicaPromotions` since the last heartbeat. */
 	databaseReplicaPromotionResults: z.array(databaseReplicaPromotionResultSchema).max(20).optional(),
+	/** Role, generation and replay position of each member on this node (W9-SPEC §5.6). */
+	databaseMembers: z.array(databaseMemberReportSchema).max(50).optional(),
+	/** Outcomes of `databaseSyncTasks` since the last heartbeat. */
+	databaseSyncResults: z.array(databaseSyncResultSchema).max(20).optional(),
+	/** Outcomes of `databaseRewindTasks` since the last heartbeat. */
+	databaseRewindResults: z.array(databaseRewindResultSchema).max(20).optional(),
+	/** Outcomes of `databaseSwitchovers` since the last heartbeat. */
+	databaseSwitchoverResults: z.array(databaseSwitchoverResultSchema).max(20).optional(),
 	/**
 	 * Retired with the D60 studio console (D96). 0.7.x agents may still send console results;
 	 * they are accepted and ignored. Remove once no 0.7.x agents remain.

@@ -493,6 +493,19 @@ export const databaseFailovers = sqliteTable(
 		finishedAt: integer('finished_at'),
 		/** The replica being promoted (0069). */
 		replicaId: text('replica_id'),
+		/** `failover` for an unplanned promotion, `switchover` for a planned one (0127). */
+		kind: text('kind', { enum: ['failover', 'switchover'] }).notNull().default('failover'),
+		/** The primary's LSN after writes stopped (planned switchover, 0127). */
+		drainLsn: text('drain_lsn'),
+		/** `drain` | `resume` | `promote`, for the switchover surface (0127). */
+		switchoverStep: text('switchover_step'),
+		switchoverStartedAt: integer('switchover_started_at'),
+		/** The old primary was rewound (or rebuilt) and no longer needs handling (0127). */
+		rewoundAt: integer('rewound_at'),
+		/** `rewound` re-attached the old copy; `rebuild` needs a fresh replica there (0127). */
+		rewindStatus: text('rewind_status', { enum: ['rewound', 'rebuild'] }),
+		/** The replica row on the old primary's node that receives the rewound copy (0127). */
+		rewindReplicaId: text('rewind_replica_id'),
 		/** State version the fence was issued at; the old node confirms at or after it. */
 		fenceVersion: integer('fence_version'),
 		fencedAt: integer('fenced_at'),
@@ -1256,6 +1269,17 @@ export const databases = sqliteTable(
 		onSyncLoss: text('on_sync_loss', { enum: ['downgrade', 'block'] }).notNull().default('downgrade'),
 		/** The node the lease currently names as synchronous (display cache; the lease is authority). */
 		syncReplicaNodeId: text('sync_replica_node_id'),
+		/** The lease's transition flag (0127): `changing` makes the database non-promotable. */
+		syncState: text('sync_state', { enum: ['steady', 'changing'] }).notNull().default('steady'),
+		/** What is in force, which is `async` after an on-sync-loss downgrade (0127). */
+		durabilityEffective: text('durability_effective', { enum: ['async', 'sync'] }).notNull().default('async'),
+		syncSetAt: integer('sync_set_at'),
+		/** When the open change started, so a stuck one can time out (0127). */
+		syncChangeStartedAt: integer('sync_change_started_at'),
+		/** The member a failed switch falls back to (0127). */
+		syncPreviousNodeId: text('sync_previous_node_id'),
+		/** First observed loss of the synchronous standby, for the downgrade timer (0127). */
+		syncLostAt: integer('sync_lost_at'),
 		/** Set while a pooler-only restart is waiting for the node to acknowledge it. */
 		poolerRestartRequestedAt: integer('pooler_restart_requested_at'),
 		status: text('status', { enum: ['pending', 'starting', 'running', 'failed', 'stopped'] })

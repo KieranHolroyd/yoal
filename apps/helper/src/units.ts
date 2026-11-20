@@ -15,7 +15,7 @@ import {
 	type WorkloadDesired,
 } from './validate.ts';
 import { CLICKHOUSE_CONFIG_DIR } from './clickhouse-config.ts';
-import { REPLICA_START_SCRIPT, REPLICA_UPSTREAM_DIR, replicaPostgresArgs } from './replication.ts';
+import { POSTGRES_INITDB_ARGS_CHECKSUMS, REPLICA_START_SCRIPT, REPLICA_UPSTREAM_DIR, replicaPostgresArgs } from './replication.ts';
 import { PITR_CONTAINER_CONFIG_DIR, PITR_CONTAINER_CONFIG_PATH, PITR_NEEDS_INIT } from './pitr.ts';
 import { NODE_LISTEN_CREDENTIAL } from './node-listen.ts';
 
@@ -1122,6 +1122,9 @@ export function renderDatabaseUnit(options: DatabaseUnitOptions): string {
 	// A replica starts through the helper's standby script, which runs pg_basebackup on first
 	// start and then execs the same entrypoint with the slot name stripped (replication.ts).
 	lines.push(`Entrypoint=${replica ? REPLICA_START_SCRIPT : '/usr/local/bin/docker-entrypoint.sh'}`);
+	// Data checksums on a fresh initdb (W10, CLUSTERING §9.2). Existing data dirs already have a
+	// PG_VERSION, so the entrypoint ignores this and their files are untouched.
+	lines.push(`Environment=POSTGRES_INITDB_ARGS=${POSTGRES_INITDB_ARGS_CHECKSUMS}`);
 	const execArgs = [
 		...(replica ? [replica.slot] : []),
 		'postgres',
@@ -1129,6 +1132,10 @@ export function renderDatabaseUnit(options: DatabaseUnitOptions): string {
 		`shared_preload_libraries=${database.variant === 'pg_cron' ? 'pg_stat_statements,pg_cron' : 'pg_stat_statements'}`,
 		'-c',
 		'pg_stat_statements.track=all',
+		// `pg_rewind` on an old primary (W10). New databases are initialised with data checksums
+		// (POSTGRES_INITDB_ARGS below); hint bits keep rewind possible for copies created before it.
+		'-c',
+		'wal_log_hints=on',
 	];
 	if (database.variant === 'pg_cron') {
 		// pg_cron's launcher lives in one database, and `CREATE EXTENSION pg_cron` only works there:

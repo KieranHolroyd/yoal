@@ -10,8 +10,17 @@ import {
 	assertReplicaWorkloadId,
 	parseReplicationPassword,
 	parseReplicationStatus,
+	parseBarrierLsn,
+	parseMemberStatus,
 	parseSlots,
+	renderBarrierSql,
 	renderPromoteArgs,
+	renderResumeWritesSql,
+	renderRewindArgs,
+	renderStopWritesSql,
+	renderSyncConfigureSql,
+	rewindOutcome,
+	syncStandbyNames,
 	renderReplicaStartScript,
 	renderReplicationConfigureSql,
 	renderReplicationTeardownSql,
@@ -315,5 +324,86 @@ describe('SystemdDriver replication verbs', () => {
 			}),
 		);
 		expect(promote.status).toBe(400);
+		const fence = await handler(
+			new Request(`http://helper/v1/workloads/${PRIMARY}/fence`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ mode: 'drop' }),
+			}),
+		);
+		expect(fence.status).toBe(400);
+		const sync = await handler(
+			new Request(`http://helper/v1/workloads/${PRIMARY}/sync/configure`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ members: [SLOT], command: 'rm -rf /' }),
+			}),
+		);
+		expect(sync.status).toBe(400);
+		const rewind = await handler(
+			new Request(`http://helper/v1/workloads/${PRIMARY}/replica/rewind`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ databaseId: PRIMARY, source: { host: 'x; rm -rf /', port: 1, user: 'yoal_repl', database: 'postgres' }, password: PASSWORD }),
+			}),
+		);
+		expect(rewind.status).toBe(400);
+	});
+});
+
+describe('synchronous set and rewind (H23, W10)', () => {
+	test('the sync setting names one replica, or ANY 1 for several, and never an unvalidated name', () => {
+		expect(syncStandbyNames([])).toBe('');
+		expect(syncStandbyNames([SLOT])).toBe(SLOT);
+		expect(syncStandbyNames([SLOT, 'yoal_second'])).toBe(`ANY 1 (${SLOT}, yoal_second)`);
+		expect(() => syncStandbyNames(["a'; DROP ROLE x; --"])).toThrow();
+		expect(() => syncStandbyNames([SLOT, SLOT])).toThrow(/repeat/);
+		expect(renderSyncConfigureSql([SLOT])).toContain(`synchronous_standby_names = '${SLOT}'`);
+		expect(renderSyncConfigureSql([SLOT])).toContain("synchronous_commit = 'on'");
+		expect(renderSyncConfigureSql([])).toContain("synchronous_standby_names = ''");
+	});
+
+	test('the barrier is a real write whose LSN is parsed strictly', () => {
+		const sql = renderBarrierSql();
+		expect(sql).toContain('INSERT INTO yoal_sync_barrier');
+		expect(sql).toContain('pg_current_wal_lsn()');
+		expect(parseBarrierLsn('0/15D4A20\n')).toBe('0/15D4A20');
+		expect(() => parseBarrierLsn('not an lsn')).toThrow();
+	});
+
+	test('stop and resume writes are read-only toggles, not a restart', () => {
+		expect(renderStopWritesSql()).toContain('default_transaction_read_only = on');
+		expect(renderResumeWritesSql()).toContain('ALTER SYSTEM RESET default_transaction_read_only');
+		expect(renderStopWritesSql()).not.toContain('pg_ctl');
+	});
+
+	test('the member probe parses role, recovery and replay position', () => {
+		expect(parseMemberStatus('{"inRecovery":true,"lsn":"0/3000148","streaming":true}')).toEqual({
+			inRecovery: true,
+			lsn: '0/3000148',
+			streaming: true,
+		});
+		expect(() => parseMemberStatus('nope')).toThrow();
+	});
+
+	test('rewind runs in a container against the new primary, password only in the environment', () => {
+		const args = renderRewindArgs({
+			podmanPath: '/usr/bin/podman',
+			image: 'postgres:18',
+			dataDir: '/var/lib/yoal/state/db_abc',
+			source: { host: '10.47.1.2', port: 15432, user: 'yoal_repl', database: 'postgres' },
+		});
+		expect(args).toContain('pg_rewind');
+		expect(args).toContain('--write-recovery-conf');
+		expect(args.join(' ')).toContain('host=10.47.1.2 port=15432 user=yoal_repl dbname=postgres');
+		expect(args.join(' ')).not.toContain('password=');
+		expect(() => renderRewindArgs({
+			podmanPath: '/usr/bin/podman',
+			image: 'postgres:18',
+			dataDir: '/data',
+			source: { host: 'x; rm -rf /', port: 1, user: 'yoal_repl', database: 'postgres' },
+		})).toThrow();
+		expect(rewindOutcome(0)).toBe('rewound');
+		expect(rewindOutcome(1)).toBe('rebuild');
 	});
 });

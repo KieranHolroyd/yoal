@@ -111,6 +111,18 @@ export interface HelperApi {
 	replicationConfigure(id: string, input: { slots: string[]; password: string | null }): Promise<void>;
 	replicationStatus(id: string): Promise<DatabaseReplicationSlotStatus[]>;
 	replicaPromote(replicaId: string, databaseId: string): Promise<{ lsn: string | null }>;
+	/** Set or clear the synchronous set (H23); validated names only. */
+	syncConfigure(id: string, members: string[]): Promise<void>;
+	/** Write the barrier commit; returns the position the target must replay. */
+	syncBarrier(id: string): Promise<string>;
+	writesStop(id: string): Promise<void>;
+	writesResume(id: string): Promise<void>;
+	fenceWorkload(id: string, mode: 'stop' | 'readonly'): Promise<void>;
+	memberStatus(id: string): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean }>;
+	replicaRewind(
+		id: string,
+		input: { databaseId: string; source: { host: string; port: number; user: string; database: string }; password: string; image: string },
+	): Promise<{ status: 'rewound' | 'rebuild'; error?: string }>;
 	/** Write the 0400 pgBackRest config for PITR (docs/PITR.md). */
 	pitrConfigure(
 		id: string,
@@ -384,6 +396,55 @@ export class HelperClient
 			240_000,
 		)) as { lsn?: unknown };
 		return { lsn: typeof body.lsn === 'string' ? body.lsn : null };
+	}
+
+	async syncConfigure(id: string, members: string[]): Promise<void> {
+		await this.request('POST', `/v1/workloads/${encodeURIComponent(id)}/sync/configure`, { members }, 30_000);
+	}
+
+	async syncBarrier(id: string): Promise<string> {
+		const body = (await this.request('POST', `/v1/workloads/${encodeURIComponent(id)}/sync/barrier`, undefined, 30_000)) as {
+			lsn?: unknown;
+		};
+		if (typeof body.lsn !== 'string') throw new Error('The barrier write did not report a WAL position.');
+		return body.lsn;
+	}
+
+	async writesStop(id: string): Promise<void> {
+		await this.request('POST', `/v1/workloads/${encodeURIComponent(id)}/writes/stop`, undefined, 30_000);
+	}
+
+	async writesResume(id: string): Promise<void> {
+		await this.request('POST', `/v1/workloads/${encodeURIComponent(id)}/writes/resume`, undefined, 30_000);
+	}
+
+	async fenceWorkload(id: string, mode: 'stop' | 'readonly'): Promise<void> {
+		await this.request('POST', `/v1/workloads/${encodeURIComponent(id)}/fence`, { mode }, 60_000);
+	}
+
+	async memberStatus(id: string): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean }> {
+		const body = (await this.request('GET', `/v1/workloads/${encodeURIComponent(id)}/member`, undefined, 15_000)) as {
+			inRecovery?: unknown;
+			lsn?: unknown;
+			streaming?: unknown;
+		};
+		return {
+			inRecovery: body.inRecovery === true,
+			lsn: typeof body.lsn === 'string' ? body.lsn : null,
+			streaming: body.streaming === true,
+		};
+	}
+
+	async replicaRewind(
+		id: string,
+		input: { databaseId: string; source: { host: string; port: number; user: string; database: string }; password: string; image: string },
+	): Promise<{ status: 'rewound' | 'rebuild'; error?: string }> {
+		const body = (await this.request('POST', `/v1/workloads/${encodeURIComponent(id)}/replica/rewind`, input, 180_000)) as {
+			status?: unknown;
+			error?: unknown;
+		};
+		if (body.status !== 'rewound' && body.status !== 'rebuild') throw new Error('The helper returned no rewind outcome.');
+		return { status: body.status, ...(typeof body.error === 'string' ? { error: body.error } : {}) };
 	}
 
 	async studioStart(): Promise<void> {

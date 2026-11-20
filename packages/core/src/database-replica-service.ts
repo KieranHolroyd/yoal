@@ -32,6 +32,7 @@ import {
 	type DatabaseFailoverView,
 	type DatabaseReplicaCreate,
 	type DatabaseReplicaLink,
+	type DatabaseReplicaMode,
 	type DatabaseReplicaPromote,
 	type DatabaseReplicaPromotionResult,
 	type DatabaseReplicaPromotionTask,
@@ -121,9 +122,13 @@ export class DatabaseReplicaService {
 			throw new ValidationError(
 				`${databaseEngineRegistry[database.engine].label} replicas are not available yet; only Postgres streaming replicas are.`,
 			);
-		if (input.mode === 'sync')
+		if (input.mode === 'sync' && !featureEnabled(this.ctx.config, 'SYNC_REPLICA'))
 			throw new ValidationError(
-				'Synchronous replicas are not available yet: Yoal has no automatic downgrade when the sync replica is lost, so a sync replica could block every write. Use mode "async".',
+				'Synchronous replicas are off: enable SYNC_REPLICA first (HA-PLAN H23), or add an "async" replica.',
+			);
+		if (input.mode === 'sync' && database.durability !== 'sync')
+			throw new ValidationError(
+				`"${database.name}" is async. Set its durability to sync first (\`yoal db durability ${database.name} --sync\`), then add a sync-capable replica.`,
 			);
 		if (this.pitrEnabled(database.id))
 			throw new ValidationError(
@@ -179,7 +184,7 @@ export class DatabaseReplicaService {
 		const disk = this.ctx.disks.pick(plan, node.id, database.storageMb);
 		this.ctx.quota.assertCanAdmitMemory(database.orgId, null, database.memoryMb);
 
-		const view = this.insertReplica(database, node.id, disk?.id ?? null);
+		const view = this.insertReplica(database, node.id, disk?.id ?? null, input.mode);
 		this.ctx.audit.record({
 			principal,
 			action: 'database.replica.add',
@@ -401,6 +406,75 @@ export class DatabaseReplicaService {
 	/** True when a database has a replica that is not being removed (moves and upgrades refuse). */
 	hasReplicas(databaseId: string): boolean {
 		return this.rowsFor(databaseId).some((row) => !row.removingAt);
+	}
+
+	/**
+	 * A switchover leaves the old primary's copy on its node (W10). Create the replica row that
+	 * keeps it in desired state; the node moves the old data dir into this replica's directory and
+	 * rewinds it. Creating the row first also gives the new primary a slot to stream to.
+	 */
+	prepareRewindReplica(databaseId: string, nodeId: string): string | null {
+		const database = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
+		if (!database || database.deletedAt || database.nodeId === nodeId) return null;
+		const existing = this.rowsFor(databaseId).find((row) => row.nodeId === nodeId && !row.removingAt);
+		if (existing) return existing.id;
+		try {
+			const view = this.insertReplica(database, nodeId, null);
+			// No slot yet, so `desiredForNode` does not start a replica unit that would run
+			// `pg_basebackup` into the directory the rewind is about to fill. `activateRewindReplica`
+			// adds the slot once the node has moved and rewound the old copy.
+			this.ctx.db
+				.update(databaseReplicas)
+				.set({ slot: null, updatedAt: this.ctx.now() })
+				.where(eq(databaseReplicas.id, view.id))
+				.run();
+			return view.id;
+		} catch {
+			return null;
+		}
+	}
+
+	/** The rewound (or rebuilt) copy is in place: give the replica its slot so desired state starts it. */
+	activateRewindReplica(replicaId: string): void {
+		const row = this.ctx.db.select().from(databaseReplicas).where(eq(databaseReplicas.id, replicaId)).get();
+		if (!row || row.removingAt || row.slot) return;
+		this.ctx.db
+			.update(databaseReplicas)
+			.set({ slot: slotName(row.id), status: 'pending', updatedAt: this.ctx.now() })
+			.where(eq(databaseReplicas.id, row.id))
+			.run();
+		this.ctx.projects.bump();
+	}
+
+	/**
+	 * A failed `pg_rewind` after a switchover falls back to a rebuild (W10): add a fresh replica on
+	 * the same node, whose standby script copies the new primary. The old divergent copy is purged
+	 * by `purgesForNode`.
+	 */
+	addRebuiltReplica(databaseId: string, nodeId: string): DatabaseReplicaView | null {
+		const database = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
+		if (!database || database.deletedAt || database.nodeId === nodeId) return null;
+		if (this.rowsFor(databaseId).some((row) => row.nodeId === nodeId && !row.removingAt)) return null;
+		const node = this.ctx.db.select().from(nodes).where(eq(nodes.id, nodeId)).get();
+		if (!node || node.status === 'offline') return null;
+		try {
+			const view = this.insertReplica(database, nodeId, null);
+			this.ctx.audit.record({
+				orgId: database.orgId,
+				action: 'database.replica.rebuild',
+				resource: 'database',
+				resourceId: database.id,
+				args: { name: database.name, replicaId: view.id, node: nodeId, reason: 'rewind failed' },
+				result: 'ok',
+			});
+			this.ctx.endpoints.reconcileForDatabase(database.id);
+			this.ctx.projects.bump(database.orgId);
+			return view;
+		} catch {
+			// Capacity or an in-flight removal: the alert from applyRewindResults stays; an operator
+			// can add the replica by hand.
+			return null;
+		}
 	}
 
 	isReplicaWorkloadId(id: string): boolean {
@@ -729,7 +803,10 @@ export class DatabaseReplicaService {
 				failover.status === 'completed' &&
 				failover.fromNodeId === nodeId &&
 				failover.oldPurgedAt === null &&
-				currentNode !== nodeId
+				currentNode !== nodeId &&
+				// A planned switchover rewinds the old primary back into service (W10); only a failed
+				// rewind's rebuild deletes the divergent copy.
+				(failover.kind !== 'switchover' || failover.rewindStatus === 'rebuild')
 			)
 				ids.add(failover.databaseId);
 		}
@@ -996,7 +1073,7 @@ export class DatabaseReplicaService {
 
 	// ---------------------------------------------------------------- internals
 
-	private insertReplica(database: DatabaseRow, nodeId: string, diskId: string | null): DatabaseReplicaView {
+	private insertReplica(database: DatabaseRow, nodeId: string, diskId: string | null, mode: DatabaseReplicaMode = 'async'): DatabaseReplicaView {
 		const now = this.ctx.now();
 		const id = newId('dbr_');
 		const hostPort = this.ctx.databases.allocatePort(nodeId);
@@ -1022,7 +1099,7 @@ export class DatabaseReplicaService {
 					primaryGeneration: database.primaryGeneration,
 					hostPort,
 					diskId,
-					mode: 'async',
+					mode,
 					createdAt: now,
 					updatedAt: now,
 				})
@@ -1206,12 +1283,33 @@ export class DatabaseReplicaService {
 				.where(eq(databaseFailovers.id, failover.id))
 				.run();
 		})();
+		// A switchover keeps the old primary's copy: the old node gets a replica row, moves the
+		// divergent data dir into it and rewinds it against the new primary (W10). A failover
+		// purges it as before.
+		const rewindReplicaId =
+			failover.kind === 'switchover' && failover.fromNodeId
+				? this.prepareRewindReplica(database.id, failover.fromNodeId)
+				: null;
+		if (rewindReplicaId)
+			this.ctx.db
+				.update(databaseFailovers)
+				.set({ rewindReplicaId })
+				.where(eq(databaseFailovers.id, failover.id))
+				.run();
 		this.ctx.audit.record({
 			orgId: database.orgId,
 			action: 'database.failover.repoint',
 			resource: 'database',
 			resourceId: database.id,
-			args: { name: database.name, from: failover.fromNodeId, to: replica.nodeId, generation: failover.generation, lsn, rebuilt: others.map((row) => row.id) },
+			args: {
+				name: database.name,
+				from: failover.fromNodeId,
+				to: replica.nodeId,
+				generation: failover.generation,
+				lsn,
+				rebuilt: others.map((row) => row.id),
+				rewindReplicaId,
+			},
 			result: 'ok',
 		});
 		this.ctx.endpoints.reconcileForDatabase(database.id);

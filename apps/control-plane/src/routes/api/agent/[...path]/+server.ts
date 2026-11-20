@@ -251,6 +251,15 @@ const handler: RequestHandler = async (event) => {
 			return core.databaseReplicas.replicationActivation(node.id, replication[1]!);
 		}
 
+		// The new primary's `yoal_repl` password for rewinding an old primary (W10); only the old
+		// primary's node may fetch it.
+		const rewind = /^database-rewind\/([^/]+)$/.exec(action);
+		if (rewind) {
+			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+			const node = core.nodes.authenticate(token);
+			return core.databaseMembers.rewindActivation(node.id, rewind[1]!);
+		}
+
 		const pitrTask = /^database-pitr\/([^/]+)$/.exec(action);
 		if (pitrTask) {
 			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);

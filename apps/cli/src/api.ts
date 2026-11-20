@@ -10,8 +10,10 @@
 import { platformOrigin } from './config.ts';
 import { ApiError, CliError } from './errors.ts';
 import type {
+	DatabaseDurabilityStatus,
 	DatabaseFailoverView,
 	DatabaseReplicaView,
+	DatabaseSwitchoverView,
 	DatabaseAttachmentView,
 	DatabaseBackupAllResult,
 	DatabaseBackupView,
@@ -1487,6 +1489,32 @@ export class ApiClient {
 			`/api/v1/databases/${encodeURIComponent(name)}/replicas/${encodeURIComponent(replicaId)}`,
 		);
 		return { replica: asRecord(raw)?.replica as unknown as DatabaseReplicaView, raw };
+	}
+
+	async databaseDurability(name: string): Promise<{ durability: DatabaseDurabilityStatus; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/databases/${encodeURIComponent(name)}/durability`);
+		return { durability: asRecord(raw)?.durability as unknown as DatabaseDurabilityStatus, raw };
+	}
+
+	async setDatabaseDurability(
+		name: string,
+		input: { durability?: 'async' | 'sync'; syncTimeoutSeconds?: number; onSyncLoss?: 'downgrade' | 'block' },
+	): Promise<{ durability: DatabaseDurabilityStatus; raw: unknown }> {
+		const raw = await this.request('PUT', `/api/v1/databases/${encodeURIComponent(name)}/durability`, { body: input });
+		return { durability: asRecord(raw)?.durability as unknown as DatabaseDurabilityStatus, raw };
+	}
+
+	async databaseSwitchovers(name: string): Promise<{ switchovers: DatabaseSwitchoverView[]; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/databases/${encodeURIComponent(name)}/switchover`);
+		const record = asRecord(raw);
+		return { switchovers: (Array.isArray(record?.switchovers) ? record.switchovers : []) as DatabaseSwitchoverView[], raw };
+	}
+
+	async switchoverDatabase(name: string, replicaId: string): Promise<{ switchover: DatabaseSwitchoverView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/databases/${encodeURIComponent(name)}/switchover`, {
+			body: { replicaId, confirm: true },
+		});
+		return { switchover: asRecord(raw)?.switchover as unknown as DatabaseSwitchoverView, raw };
 	}
 
 	async promoteDatabaseReplica(

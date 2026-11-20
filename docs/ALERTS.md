@@ -25,7 +25,8 @@ admins only.
 | Metric rules, silences, acknowledgements, history | Alerts → Rules, Silences, Active and History (org members, §1–§5) |
 
 **System alert settings.** Every built-in kind (`node_offline`, `disk`, `cert`, `promote_5xx`,
-`backup`, `database_storage`, `database_connections`, `database_pool`, `storage_usage`,
+`backup`, `database_storage`, `database_connections`, `database_pool`, `database_replica`,
+`storage_usage`,
 `broker_store`, `quota`, `telemetry`) can be turned off or sent to particular channels. The routing is stored as one JSON
 row in `settings` (`system_alert_routing`). A kind that is not listed is on and goes to every
 channel. Thresholds are platform policies: `nodeAlertMinutes`, `diskAlertPercent` (85),

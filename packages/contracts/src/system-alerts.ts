@@ -19,6 +19,7 @@ export const systemAlertKinds = [
 	'database_storage',
 	'database_connections',
 	'database_pool',
+	'database_replica',
 	'storage_usage',
 	'broker_store',
 	'quota',
@@ -108,6 +109,14 @@ export const systemAlertCatalog: SystemAlertInfo[] = [
 		description: 'A database’s PgBouncer pool is nearly full, so clients wait.',
 		severity: 'warning; critical at 95%',
 		thresholds: [{ key: 'poolSaturationAlertPercent', label: 'Above', unit: 'percent', min: 50, max: 100 }],
+	},
+	{
+		kind: 'database_replica',
+		label: 'Database replica and durability',
+		description:
+			'A replica stopped streaming or fell behind, its slot was lost, a switchover was refused on a WAL gap, or a synchronous database downgraded to async (HA-PLAN W10).',
+		severity: 'warning for lag; critical for a lost replica, a lost slot, a refused switchover or a sync downgrade',
+		thresholds: [],
 	},
 	{
 		kind: 'storage_usage',

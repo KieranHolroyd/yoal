@@ -1,4 +1,5 @@
 import type { DesiredState } from '@yoal/contracts';
+import { featureEnabled } from '../config.ts';
 import { DesiredStatePart } from './context.ts';
 
 type DatabaseFields =
@@ -13,11 +14,14 @@ type DatabaseFields =
 	| 'databaseReplicaLinks'
 	| 'databaseReplicaPromotions';
 
+/** W10 fields, omitted entirely while SYNC_REPLICA is off so the golden desired state is unchanged. */
+type DurabilityFields = 'databaseMembers' | 'databaseSyncTasks' | 'databaseRewindTasks' | 'databaseSwitchovers';
+
 /** Databases: purges, backups, PITR, rotations, credentials, pooler restarts and replication (C7). */
 export class DatabaseState extends DesiredStatePart {
-	async tasks(): Promise<Pick<DesiredState, DatabaseFields>> {
+	async tasks(): Promise<Pick<DesiredState, DatabaseFields | DurabilityFields>> {
 		const { node } = this.state;
-		return {
+		const base: Pick<DesiredState, DatabaseFields> = {
 			// Trashed databases plus the old copy a finished (or rolled-back) move left here.
 			databasePurges: [
 				...new Set([
@@ -36,6 +40,17 @@ export class DatabaseState extends DesiredStatePart {
 			databaseReplication: this.ctx.databaseReplicas.replicationTasksForNode(node.id),
 			databaseReplicaLinks: this.ctx.databaseReplicas.linksForNode(node.id),
 			databaseReplicaPromotions: this.ctx.databaseReplicas.promotionsForNode(node.id),
+		};
+		// W10 (SYNC_REPLICA): the keys are absent, not empty, with the flag off. That keeps every
+		// existing desired state byte-identical (the golden test) and an older agent unaffected.
+		// The cast is deliberate: the type carries the keys, the flag-off runtime value does not.
+		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA')) return base as Pick<DesiredState, DatabaseFields | DurabilityFields>;
+		return {
+			...base,
+			databaseMembers: this.ctx.databaseMembers.membersDesiredAll(),
+			databaseSyncTasks: this.ctx.databaseMembers.syncTasksForNode(node.id),
+			databaseRewindTasks: this.ctx.databaseMembers.rewindTasksForNode(node.id),
+			databaseSwitchovers: this.ctx.databaseMembers.switchoverTasksForNode(node.id),
 		};
 	}
 }

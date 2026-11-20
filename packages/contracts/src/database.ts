@@ -2,6 +2,7 @@ import * as z from 'zod';
 import { SLUG_PATTERN } from './slugs.ts';
 import type { DatabaseBackupSummary } from './database-backup.ts';
 import { storageTargetSchema, type DiskSummary } from './disk.ts';
+import type { DatabaseDurability, SyncLossPolicy, SyncState } from './database-member.ts';
 
 /**
  * Managed databases (docs/DATABASES.md, D55–D61).
@@ -1061,6 +1062,17 @@ export interface DatabaseView {
 	primaryGeneration: number;
 	/** Read replicas not being removed (docs/CLUSTERING.md §9.2). */
 	replicaCount: number;
+	/** Requested durability and what the lease says is in force (HA-PLAN H23, W10). */
+	durability: {
+		configured: DatabaseDurability;
+		effective: DatabaseDurability;
+		syncState: SyncState;
+		/** The node the lease currently names as synchronous, or null. */
+		syncReplicaNodeId: string | null;
+		syncTimeoutSeconds: number;
+		onSyncLoss: SyncLossPolicy;
+		syncSetAt: string | null;
+	};
 	memoryMb: number;
 	cpus: number;
 	storageMb: number;

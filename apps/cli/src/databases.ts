@@ -395,6 +395,46 @@ export interface DatabaseReplicaView {
 	createdAt: string;
 }
 
+/** Mirrors `DatabaseDurabilityStatus` in @yoal/contracts (HA-PLAN H23, W10). */
+export interface DatabaseDurabilityStatus {
+	databaseId: string;
+	generation: number;
+	durability: 'async' | 'sync';
+	durabilityEffective: 'async' | 'sync';
+	syncState: 'steady' | 'changing';
+	sync: string[];
+	syncSetAt: string | null;
+	syncTimeoutSeconds: number;
+	onSyncLoss: 'downgrade' | 'block';
+	transition: {
+		phase: 'opening' | 'switching' | 'waiting-barrier' | 'closing';
+		target: string | null;
+		previous: string[];
+		openedAt: string;
+		deadline: string;
+		barrierLsn: string | null;
+	} | null;
+	lease: unknown;
+	note: string | null;
+}
+
+/** Mirrors `DatabaseSwitchoverView` in @yoal/contracts (HA-PLAN W10). */
+export interface DatabaseSwitchoverView {
+	databaseId: string;
+	replicaId: string;
+	fromNodeId: string;
+	toNodeId: string;
+	generation: number;
+	step: 'checkpoint' | 'stop-writes' | 'wait-lsn' | 'promote' | 'repoint' | 'done';
+	primaryLsn: string | null;
+	replayLsn: string | null;
+	gapBytes: number | null;
+	startedAt: string;
+	finishedAt: string | null;
+	durationMs: number | null;
+	message: string | null;
+}
+
 /** Mirrors `DatabaseFailoverView` in @yoal/contracts (docs/CLUSTERING.md §9.3). */
 export interface DatabaseFailoverView {
 	id: string;

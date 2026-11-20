@@ -23,7 +23,7 @@ import {
 } from './validate.ts';
 import type { HelperLogResult, HelperWorkloadStatus, LogReadOptions } from './systemd.ts';
 import type { HelperPitrStatus } from './pitr.ts';
-import type { ReplicationSlotStatus } from './replication.ts';
+import { assertPrimaryDatabaseId, type ReplicationSlotStatus } from './replication.ts';
 import { parseStudioPrincipalRequest, STUDIO_PRINCIPAL_USER } from './studio-principal.ts';
 import type { HelperInventory, VerifyResult } from './volumes.ts';
 import {
@@ -104,6 +104,16 @@ export interface HelperRuntime {
 	replicationConfigure?(id: string, input: { slots?: unknown; password?: unknown }): Promise<{ slots: string[] }>;
 	replicationStatus?(id: string): Promise<{ slots: ReplicationSlotStatus[] }>;
 	replicaPromote?(id: string, input: { databaseId?: unknown }): Promise<{ databaseId: string; lsn: string | null }>;
+	/** The synchronous set (H23, W10): setting, barrier, stop/resume writes and the member probe. */
+	syncConfigure?(id: string, input: { members?: unknown }): Promise<{ members: string[] }>;
+	syncBarrier?(id: string): Promise<{ lsn: string }>;
+	writesStop?(id: string): Promise<void>;
+	writesResume?(id: string): Promise<void>;
+	/** Fence a deposed primary: `stop`, or `readonly` where reads must continue (H22). */
+	fenceWorkload?(id: string, mode: 'stop' | 'readonly'): Promise<void>;
+	memberStatus?(id: string): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean }>;
+	/** Rewind an old primary against the new primary; a failure reports `rebuild` (W10). */
+	replicaRewind?(id: string, input: { databaseId?: unknown; source?: unknown; password?: unknown; image?: unknown }): Promise<{ status: 'rewound' | 'rebuild'; error?: string }>;
 	/** `systemctl start yoal-studio.service` (plan 22). The unit name is fixed; no arguments. */
 	/** Remove images no unit or container needs (docs/REGISTRY.md R3). Optional for test fakes. */
 	pruneImages?(): Promise<ImagePruneResult>;
@@ -779,6 +789,61 @@ export function createHandler(
 				for (const key of Object.keys(body))
 					if (key !== 'databaseId') throw new ValidationError(`request.${key} is not supported`);
 				return json({ ok: true, ...(await runtime.replicaPromote(id, body)) });
+			}
+
+			// --- Synchronous set, switchover steps and rewind (H23, W10): fixed verbs ---
+			const syncMatch = /^\/v1\/workloads\/([^/]+)\/sync\/(configure|barrier)$/.exec(path);
+			if (syncMatch) {
+				const id = assertDatabaseId(decodeURIComponent(syncMatch[1]!), 'database id');
+				if (syncMatch[2] === 'configure') {
+					if (method !== 'POST' || !runtime.syncConfigure) return methodNotAllowed('POST');
+					const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
+					for (const key of Object.keys(body))
+						if (key !== 'members') throw new ValidationError(`request.${key} is not supported`);
+					return json({ ok: true, ...(await runtime.syncConfigure(id, body)) });
+				}
+				if (method !== 'POST' || !runtime.syncBarrier) return methodNotAllowed('POST');
+				return json({ ok: true, ...(await runtime.syncBarrier(id)) });
+			}
+			const writesMatch = /^\/v1\/workloads\/([^/]+)\/writes\/(stop|resume)$/.exec(path);
+			if (writesMatch) {
+				if (method !== 'POST') return methodNotAllowed('POST');
+				const id = assertDatabaseId(decodeURIComponent(writesMatch[1]!), 'database id');
+				const action = writesMatch[2] === 'stop' ? runtime.writesStop : runtime.writesResume;
+				if (!action) return json({ error: 'not supported by this helper' }, 501);
+				await action.call(runtime, id);
+				return json({ ok: true, writes: writesMatch[2] === 'stop' ? 'stopped' : 'resumed' });
+			}
+			const fenceMatch = /^\/v1\/workloads\/([^/]+)\/fence$/.exec(path);
+			if (fenceMatch) {
+				if (method !== 'POST') return methodNotAllowed('POST');
+				if (!runtime.fenceWorkload) return json({ error: 'not supported by this helper' }, 501);
+				const id = assertPrimaryDatabaseId(decodeURIComponent(fenceMatch[1]!), 'database id');
+				const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
+				for (const key of Object.keys(body))
+					if (key !== 'mode') throw new ValidationError(`request.${key} is not supported`);
+				const mode = body.mode === 'stop' || body.mode === 'readonly' ? body.mode : null;
+				if (!mode) throw new ValidationError('mode must be stop or readonly');
+				await runtime.fenceWorkload(id, mode);
+				return json({ ok: true, fenced: mode });
+			}
+			const memberMatch = /^\/v1\/workloads\/([^/]+)\/member$/.exec(path);
+			if (memberMatch) {
+				if (method !== 'GET') return methodNotAllowed('GET');
+				if (!runtime.memberStatus) return json({ error: 'not supported by this helper' }, 501);
+				const id = assertDatabaseId(decodeURIComponent(memberMatch[1]!), 'database id');
+				return json({ ok: true, ...(await runtime.memberStatus(id)) });
+			}
+			const rewindMatch = /^\/v1\/workloads\/([^/]+)\/replica\/rewind$/.exec(path);
+			if (rewindMatch) {
+				if (method !== 'POST') return methodNotAllowed('POST');
+				if (!runtime.replicaRewind) return json({ error: 'not supported by this helper' }, 501);
+				const id = assertPrimaryDatabaseId(decodeURIComponent(rewindMatch[1]!), 'database id');
+				const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
+				for (const key of Object.keys(body))
+					if (key !== 'databaseId' && key !== 'source' && key !== 'password' && key !== 'image')
+						throw new ValidationError(`request.${key} is not supported`);
+				return json({ ok: true, ...(await runtime.replicaRewind(id, body)) });
 			}
 
 			const rotateMatch = /^\/v1\/workloads\/([^/]+)\/rotate$/.exec(path);

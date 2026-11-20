@@ -51,6 +51,7 @@ import { IdentityBridge } from './identity-bridge.ts';
 import { NodeUpdateRunner } from './node-update.ts';
 import { DatabasePoolerRestartRunner } from './database-pooler-restarts.ts';
 import { DatabaseReplicationRunner } from './database-replication.ts';
+import { DatabaseDurabilityRunner } from './database-durability.ts';
 import { ReplicaLinkForwarder } from './replica-links.ts';
 import { DatabaseRotationRunner } from './database-rotations.ts';
 import { DATABASE_STATS_INTERVAL_MS, DatabaseStatsSampler } from './database-stats.ts';
@@ -174,6 +175,8 @@ class AgentRuntime {
 	private readonly databasePoolerRestarts: DatabasePoolerRestartRunner;
 	/** Primary-side configure/sample and replica promotion (C7). */
 	private readonly databaseReplication: DatabaseReplicationRunner;
+	/** W10: sync set, switchover drain/resume, rewind and member probes. */
+	private readonly databaseDurability: DatabaseDurabilityRunner;
 	/** Unix sockets the replica containers stream through (C7). */
 	private readonly replicaLinks: ReplicaLinkForwarder;
 	private readonly storageAdmin: StorageReconciler;
@@ -396,6 +399,13 @@ class AgentRuntime {
 			runtime: this.workloads,
 			log,
 		});
+		this.databaseDurability = new DatabaseDurabilityRunner({
+			controlUrl: config.controlUrl,
+			nodeToken: config.nodeToken,
+			nodeId: config.nodeId,
+			helper: this.helper,
+			log,
+		});
 		// Must equal the helper's YOAL_HELPER_REPLICATION_DIR (the installer uses /var/lib/yoal/agent).
 		this.replicaLinks = new ReplicaLinkForwarder({
 			root: join(config.dataDir, 'replication'),
@@ -612,6 +622,7 @@ class AgentRuntime {
 			this.databaseCredentialLoop(),
 			this.databasePoolerRestartLoop(),
 			this.databaseReplicationLoop(),
+			this.databaseDurabilityLoop(),
 			this.nodeUpdateLoop(),
 			this.storageAdminLoop(),
 			this.storageStatsLoop(),
@@ -1506,6 +1517,20 @@ class AgentRuntime {
 		}
 	}
 
+	private async databaseDurabilityLoop(): Promise<void> {
+		while (this.running) {
+			await sleep(2_000, this.shutdownController.signal).catch(() => undefined);
+			if (!this.running) break;
+			const state = this.desired;
+			if (!state) continue;
+			try {
+				await this.databaseDurability.runOnce(state, this.shutdownController.signal);
+			} catch (error) {
+				log('warn', `Database durability task failed: ${errorText(error)}`);
+			}
+		}
+	}
+
 	private async databaseRotationLoop(): Promise<void> {
 		while (this.running) {
 			await sleep(5_000, this.shutdownController.signal).catch(() => undefined);
@@ -1639,6 +1664,10 @@ class AgentRuntime {
 		const poolerRestarted = this.databasePoolerRestarts.pending();
 		const databaseReplication = this.databaseReplication.reports();
 		const promotionResults = this.databaseReplication.pendingPromotionResults();
+		const memberReports = this.desired ? await this.databaseDurability.memberReports(this.desired) : [];
+		const syncResults = this.databaseDurability.pendingSyncResults();
+		const switchoverResults = this.databaseDurability.pendingSwitchoverResults();
+		const rewindResults = this.databaseDurability.pendingRewindResults();
 		const nodeUpdateResult = this.nodeUpdate.pendingResult();
 		const databaseTls = databaseTlsHeartbeat(reports);
 		// Release commands this node ran or refused; re-sent until the control plane drops the task.
@@ -1686,6 +1715,10 @@ class AgentRuntime {
 			...(poolerRestarted.length > 0 ? { databasePoolerRestarted: poolerRestarted } : {}),
 			...(databaseReplication.length > 0 ? { databaseReplication } : {}),
 			...(promotionResults.length > 0 ? { databaseReplicaPromotionResults: promotionResults } : {}),
+			...(memberReports.length > 0 ? { databaseMembers: memberReports } : {}),
+			...(syncResults.length > 0 ? { databaseSyncResults: syncResults } : {}),
+			...(switchoverResults.length > 0 ? { databaseSwitchoverResults: switchoverResults } : {}),
+			...(rewindResults.length > 0 ? { databaseRewindResults: rewindResults } : {}),
 			...(nodeUpdateResult ? { nodeUpdateResult } : {}),
 			...(releaseCommandResults.length > 0 ? { releaseCommandResults } : {}),
 			...(databaseTls.length > 0 ? { databaseTls } : {}),

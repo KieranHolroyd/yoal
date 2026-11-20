@@ -4,7 +4,7 @@ import type { Notifier, CoreConfig } from './config.ts';
 import type { AuditService } from './audit.ts';
 import type { QuotaService } from './quota.ts';
 import type { UsageService } from './usage.ts';
-import type { ObjectStore } from './object-store.ts';
+import type { ConditionalStore, ObjectStore } from './object-store.ts';
 import type { TelemetryStore } from './telemetry.ts';
 import type { MetricsExporter } from './metrics-export.ts';
 import type { PlatformPolicyService } from './platform-policies.ts';
@@ -98,6 +98,11 @@ export interface CoreContext {
 	sqlite: Database;
 	config: CoreConfig;
 	objectStore: ObjectStore;
+	/**
+	 * The arbiter with conditional writes (H21). Null or a store without conditional PUT means no
+	 * database lease can be written, so `sync` fails closed. Tests inject a memory store.
+	 */
+	arbiter: ConditionalStore | null;
 	audit: AuditService;
 	quota: QuotaService;
 	usage: UsageService;

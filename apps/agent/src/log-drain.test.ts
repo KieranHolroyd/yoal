@@ -74,6 +74,27 @@ class FakeHelper implements HelperApi {
 	async replicaPromote(): Promise<never> {
 		throw new Error('replicaPromote not used in this test');
 	}
+	async syncConfigure(): Promise<never> {
+		throw new Error('syncConfigure not used in this test');
+	}
+	async syncBarrier(): Promise<never> {
+		throw new Error('syncBarrier not used in this test');
+	}
+	async writesStop(): Promise<never> {
+		throw new Error('writesStop not used in this test');
+	}
+	async writesResume(): Promise<never> {
+		throw new Error('writesResume not used in this test');
+	}
+	async memberStatus(): Promise<never> {
+		throw new Error('memberStatus not used in this test');
+	}
+	async fenceWorkload(): Promise<never> {
+		throw new Error('fenceWorkload not used in this test');
+	}
+	async replicaRewind(): Promise<never> {
+		throw new Error('replicaRewind not used in this test');
+	}
 	async pitrConfigure(): Promise<never> {
 		throw new Error('pitrConfigure not used in this test');
 	}

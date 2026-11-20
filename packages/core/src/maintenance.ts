@@ -92,6 +92,8 @@ export class MaintenanceService {
 		this.ctx.moves.tick();
 		// Abandon a replica promotion whose fence the old primary's node never confirmed (C7).
 		this.ctx.databaseReplicas.tick();
+		// W10: a sync-set change that timed out, and a sync database whose standby went away.
+		await this.ctx.databaseMembers.tick().catch((error: unknown) => console.error('[maintenance] database durability:', error));
 		this.ctx.databaseStudio.tick();
 		// Fleet node updates (CLUSTERING §3.11): start the automatic rollout after the control plane
 		// updated itself, and fail a rollout whose flow is gone.

@@ -3,6 +3,7 @@ import type { YoalDb } from '@yoal/db';
 import type { CoreConfig } from './config.ts';
 import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
+import type { ConditionalStore } from './object-store.ts';
 import { AuditService } from './audit.ts';
 import { QuotaService } from './quota.ts';
 import { UsageService } from './usage.ts';
@@ -222,6 +223,12 @@ export interface CoreOptions {
 	db: YoalDb;
 	sqlite: Database;
 	config: CoreConfig;
+	/**
+	 * The arbiter with conditional writes (HA-PLAN H21). Defaults to the object store when it
+	 * implements `ConditionalStore`; tests inject `MemoryConditionalStore`. Without one, `sync`
+	 * fails closed and no database lease is written.
+	 */
+	arbiter?: ConditionalStore | null;
 	version?: string;
 	/** Email DNS/Cloudflare seams (docs/EMAIL.md); defaults read `YOAL_CLOUDFLARE_*` and `YOAL_MAIL_DOMAIN`. */
 	email?: EmailServiceOptions;
@@ -393,6 +400,11 @@ export function createCore(options: CoreOptions): Core {
 		sqlite: options.sqlite,
 		config: options.config,
 		objectStore: options.config.objectStore,
+		arbiter:
+			options.arbiter ??
+			('readVersioned' in options.config.objectStore && 'writeConditional' in options.config.objectStore
+				? (options.config.objectStore as unknown as ConditionalStore)
+				: null),
 		notifiers: options.config.notifiers ?? [],
 		now: options.config.now ?? (() => Date.now())
 	} as unknown as CoreContext;
