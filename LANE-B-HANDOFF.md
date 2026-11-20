@@ -34,7 +34,7 @@ Branch `ha/w1-b-attach-core`, based on `ha/integration` `1cd872e9`.
 ## Verified
 
 - `bun run check` — all workspaces, 0 errors (one pre-existing svelte warning outside this lane).
-- `bun test` — full suite: **6152 passed, 0 failed** (73 skipped). One earlier run had an unrelated
+- `bun test` — full suite: **6153 passed, 0 failed** (73 skipped). One earlier run had an unrelated
   timing failure in `apps/helper/src/faults.test.ts`; it passed in isolation and in the final run.
 - `bun test tests/ha` — 66 passed, 0 failed.
 - `node_modules/.bin/tsc -p tests/ha` — clean.
@@ -79,5 +79,8 @@ Branch `ha/w1-b-attach-core`, based on `ha/integration` `1cd872e9`.
 
 ## Final commits
 
-`407d0fcb` (read-endpoint stability + docs) on top of `c5e1b4e8`/`81009dc0`. The branch head after
-the hand-off file is committed is the final SHA reported in the lane message.
+- `81009dc0` — W4 core: endpoint roles, gateway placement, pool/read endpoints, node CA, tests.
+- `407d0fcb` — read-endpoint port/URL stability across a promotion, plus the docs truth pass.
+- `7953a2c9` — the `0121` backfill migration test and the first hand-off file.
+- The commit that adds this version of the file is the final branch head; the lane message names
+  its SHA, because a file cannot contain the SHA of the commit that adds it.
