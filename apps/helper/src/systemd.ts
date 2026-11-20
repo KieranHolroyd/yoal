@@ -726,6 +726,9 @@ export class SystemdDriver {
 				...(nodeListen ? { nodeListen } : {}),
 				...(identityPath ? { identityPath } : {}),
 				pathDirs: this.runtimePathDirs(),
+				...(workload.stopTimeoutSeconds !== undefined
+					? { stopTimeoutSeconds: workload.stopTimeoutSeconds }
+					: {}),
 			});
 			changed = (await this.writeIfChanged(paths.service, service, 0o644)) || changed;
 
@@ -817,6 +820,9 @@ export class SystemdDriver {
 						durableStorage: functionNeedsDurableStorage(workload.function!),
 						allowSubnets,
 						socketGroup: this.socketGroup,
+						...(workload.stopTimeoutSeconds !== undefined
+							? { stopTimeoutSeconds: workload.stopTimeoutSeconds }
+							: {}),
 					}),
 					0o644,
 				)) || changed;
@@ -907,6 +913,9 @@ export class SystemdDriver {
 				apparmorProfile: this.apparmorProfile,
 				...(identityDirectory ? { identityDir: identityDirectory } : {}),
 				...(replica ? { replica: replica.paths } : {}),
+				...(workload.stopTimeoutSeconds !== undefined
+					? { stopTimeoutSeconds: workload.stopTimeoutSeconds }
+					: {}),
 			});
 			changed = (await this.writeIfChanged(paths.container, container, 0o644)) || changed;
 			changed = (await this.removeIfExists(paths.service)) || changed;
@@ -1246,6 +1255,9 @@ export class SystemdDriver {
 						afterUnits: service.dependsOn.map((name) => units.get(name)!),
 						publish: ingress?.hostPort ? { hostPort: ingress.hostPort, containerPort: ingress.port } : null,
 						...(service.command ? { exec: service.command } : {}),
+						...(workload.stopTimeoutSeconds !== undefined
+							? { stopTimeoutSeconds: workload.stopTimeoutSeconds }
+							: {}),
 					}),
 					0o644,
 				)) || changed;

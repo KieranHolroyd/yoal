@@ -136,6 +136,41 @@ describe('compileSiteRoute', () => {
 		expect(json).not.toContain('"Host":["{');
 	});
 
+	test('readiness path drives active checks and Caddy keeps in-flight requests for the drain', () => {
+		const route = compileSiteRoute({
+			...base,
+			upstreams: ['10.47.1.2:8080', '10.47.1.3:8080'],
+			healthPath: '/healthz',
+			readinessPath: '/readyz',
+			drainSeconds: 10,
+		});
+		const json = JSON.stringify(route);
+		expect(json).toContain('"uri":"/readyz"');
+		expect(json).not.toContain('"uri":"/healthz"');
+		// Two passes rejoin, three failures eject; each probe times out in 2 s.
+		expect(json).toContain('"timeout":"2s","passes":2,"fails":3');
+		// A copy leaves the upstream list one desired-state version before it restarts.
+		expect(json).toContain('"stream_close_delay":"10s"');
+		expect(json).not.toContain('drain_timeout');
+		expect(json).toContain('"transport":{"protocol":"http","dial_timeout":"5s","response_header_timeout":"5m","keepalive":"30s"}');
+	});
+
+	test('a single copy with a readiness path is still checked, so it takes no traffic until ready', () => {
+		const route = compileSiteRoute({ ...base, upstream: '10.47.1.2:8080', readinessPath: '/readyz' });
+		const json = JSON.stringify(route);
+		expect(json).toContain('"health_checks":{"active":{"uri":"/readyz"');
+		expect(json).not.toContain('"load_balancing"');
+	});
+
+	test('without release-phase fields the route is exactly as before', () => {
+		const route = compileSiteRoute({ ...base, upstreams: ['10.47.1.2:8080', '10.47.1.3:8080'], healthPath: '/health' });
+		const json = JSON.stringify(route);
+		expect(json).not.toContain('readiness');
+		expect(json).not.toContain('drain_timeout');
+		expect(json).not.toContain('stream_close_delay');
+		expect(json).not.toContain('"transport"');
+	});
+
 	test('the active health-check interval follows replicas.healthIntervalSeconds', () => {
 		const route = (healthIntervalSeconds?: number) =>
 			JSON.stringify(

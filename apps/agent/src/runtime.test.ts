@@ -197,7 +197,7 @@ interface Fixture {
 	errors: string[];
 }
 
-function fixture(options: { healthy?: boolean } = {}): Fixture {
+function fixture(options: { healthy?: boolean; now?: () => number } = {}): Fixture {
 	const helper = new FakeHelper();
 	const releases = new FakeReleases();
 	const activations = new Map<string, WorkloadActivation>();
@@ -217,6 +217,7 @@ function fixture(options: { healthy?: boolean } = {}): Fixture {
 		healthTimeoutMs: 5,
 		probeHealth: async () => health.healthy,
 		sleep: async () => undefined,
+		...(options.now ? { now: options.now } : {}),
 		log: (level, message) => {
 			if (level === 'error') errors.push(message);
 		},
@@ -297,6 +298,40 @@ describe('WorkloadRuntime.converge', () => {
 		expect(f.runtime.currentReports()).toEqual([]);
 		// The slice is only applied when there is something to run.
 		expect(f.helper.sliceCalls).toEqual([1024]);
+	});
+
+	test('HA-PLAN H25: a copy waits drainSeconds after leaving desired state before it is stopped', async () => {
+		let clock = 1_000_000;
+		const f = fixture({ now: () => clock });
+		f.activations.set('app', activationFor('app'));
+		await f.runtime.converge(state([workload('app', { drainSeconds: 10 })]));
+
+		// The first version without the copy has already taken it out of every upstream list.
+		await f.runtime.converge(state([], 2));
+		expect(f.helper.removed).toEqual([]);
+		expect(f.runtime.needsRetry(clock)).toBe(false);
+		expect(f.runtime.needsRetry(clock + 9_999)).toBe(false);
+
+		clock += 9_999;
+		await f.runtime.converge(state([], 2));
+		expect(f.helper.removed).toEqual([]);
+
+		clock += 1;
+		await f.runtime.converge(state([], 2));
+		expect(f.helper.removed).toEqual(['app']);
+	});
+
+	test('a stop that leaves and comes back during its drain is not stopped', async () => {
+		let clock = 1_000_000;
+		const f = fixture({ now: () => clock });
+		f.activations.set('app', activationFor('app'));
+		const desired = workload('app', { drainSeconds: 10 });
+		await f.runtime.converge(state([desired]));
+		await f.runtime.converge(state([], 2));
+		await f.runtime.converge(state([desired], 3));
+		clock += 11_000;
+		await f.runtime.converge(state([desired], 4));
+		expect(f.helper.removed).toEqual([]);
 	});
 
 	test('one bad workload does not stop the others or throw', async () => {
@@ -1155,5 +1190,20 @@ describe('compose workloads (level 4)', () => {
 		);
 		expect(healthy).toBe(true);
 		expect(urls).toEqual(['http://127.0.0.1:30001/healthz']);
+	});
+
+	test('readiness gates traffic: the probe uses readinessPath, not the liveness healthPath', async () => {
+		const urls: string[] = [];
+		const healthy = await probeWorkloadHealth(
+			workload('app', { healthPath: '/healthz', readinessPath: '/readyz', port: 30001, socketActivation: false }),
+			'/run/yoal-workloads',
+			AbortSignal.timeout(1000),
+			(async (input: string | URL | Request) => {
+				urls.push(String(input));
+				return new Response('ok');
+			}) as typeof fetch,
+		);
+		expect(healthy).toBe(true);
+		expect(urls).toEqual(['http://127.0.0.1:30001/readyz']);
 	});
 });

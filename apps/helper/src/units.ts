@@ -388,6 +388,17 @@ export interface ProcessUnitOptions {
 	 * bare `bun` or a package script that calls `bun` finds the runtime Yoal installed (D225).
 	 */
 	pathDirs?: string[];
+	/**
+	 * HA-PLAN H25: `TimeoutStopSec=`, from the app's `stopTimeoutSeconds`. Absent keeps today's
+	 * fixed 30 s, so a workload that never sets it renders the same unit as before.
+	 */
+	stopTimeoutSeconds?: number;
+}
+
+/** systemd's stop deadline for a copy: the app's value, or today's fixed 30 s. */
+function stopTimeoutSeconds(options: { stopTimeoutSeconds?: number }): number {
+	const value = options.stopTimeoutSeconds;
+	return value !== undefined && Number.isInteger(value) && value >= 1 && value <= 3_600 ? value : 30;
 }
 
 /**
@@ -460,7 +471,7 @@ export function renderProcessUnit(options: ProcessUnitOptions): string {
 	lines.push(`ExecStart=${renderExecStart(options.command)}`);
 	lines.push('Restart=on-failure');
 	lines.push('RestartSec=2');
-	lines.push('TimeoutStopSec=30');
+	lines.push(`TimeoutStopSec=${stopTimeoutSeconds(options)}`);
 	lines.push('KillSignal=SIGTERM');
 	lines.push(`MemoryMax=${workload.memoryMb}M`);
 	lines.push(`CPUQuota=${cpuQuota(workload.cpus)}`);
@@ -533,6 +544,8 @@ export interface FunctionUnitOptions {
 	 * opens (Caddy's admin socket, every tenant's access logs) are hidden from the unit.
 	 */
 	socketGroup?: string | null;
+	/** HA-PLAN H25: `TimeoutStopSec=`, from the app's `stopTimeoutSeconds`; absent keeps 30 s. */
+	stopTimeoutSeconds?: number;
 }
 
 /**
@@ -639,7 +652,7 @@ export function renderFunctionUnit(options: FunctionUnitOptions): string {
 	);
 	lines.push('Restart=on-failure');
 	lines.push('RestartSec=2');
-	lines.push('TimeoutStopSec=30');
+	lines.push(`TimeoutStopSec=${stopTimeoutSeconds(options)}`);
 	lines.push('KillSignal=SIGTERM');
 	lines.push(`MemoryMax=${workload.memoryMb}M`);
 	lines.push(`CPUQuota=${cpuQuota(workload.cpus)}`);
@@ -818,6 +831,11 @@ export interface ContainerUnitOptions {
 	dataMount?: boolean;
 	/** Compose: override the image command (argv, never a shell string). */
 	exec?: string[];
+	/**
+	 * HA-PLAN H25: `TimeoutStopSec=`, from the app's `stopTimeoutSeconds`. Absent leaves the
+	 * container unit exactly as it is today (Quadlet's default), so flag-off installs do not change.
+	 */
+	stopTimeoutSeconds?: number;
 }
 
 /** Quote one argv entry for a Quadlet `Exec=` line. `%` is a systemd specifier, so escape it. */
@@ -946,6 +964,8 @@ export function renderContainerUnit(options: ContainerUnitOptions): string {
 	} else {
 		lines.push('Restart=on-failure');
 		lines.push('RestartSec=2');
+		if (options.stopTimeoutSeconds !== undefined)
+			lines.push(`TimeoutStopSec=${stopTimeoutSeconds(options)}`);
 	}
 	lines.push(`MemoryMax=${workload.memoryMb}M`);
 	lines.push(`CPUQuota=${cpuQuota(workload.cpus)}`);

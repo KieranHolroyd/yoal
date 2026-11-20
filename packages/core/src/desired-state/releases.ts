@@ -1,6 +1,14 @@
 import { and, eq } from 'drizzle-orm';
-import { deployments, releases } from '@yoal/db';
-import type { DesiredState } from '@yoal/contracts';
+import { deployments, releases, workloads } from '@yoal/db';
+import {
+	parseWorkloadReplicaId,
+	resolvedStopSettings,
+	workloadSpecSchema,
+	type DesiredState,
+	type WorkloadDesired,
+} from '@yoal/contracts';
+import { featureEnabled } from '../config.ts';
+import { parseJson } from '../util.ts';
 import { DesiredStatePart } from './context.ts';
 
 /** Releases and workloads: what this node downloads and runs, and the volumes it mounts for them. */
@@ -39,7 +47,7 @@ export class ReleaseState extends DesiredStatePart {
 	workloads(): DesiredState['workloads'] {
 		const { node } = this.state;
 		// Managed databases ride the workload list as container workloads with a database profile.
-		return [
+		const all = [
 			...this.ctx.workloads.desiredForNode(node.id),
 			...this.ctx.databases.desiredForNode(node.id),
 			// Postgres read replicas are their own database-profile workloads (C7).
@@ -51,6 +59,28 @@ export class ReleaseState extends DesiredStatePart {
 			// The platform registry (docs/REGISTRY.md G1) on its node.
 			...this.ctx.registry.desiredForNode(node.id),
 		];
+		if (!featureEnabled(this.ctx.config, 'RELEASE_PHASE')) return all;
+		// HA-PLAN H25: readiness, drain and stop fields are rendered only while the flag is on (and
+		// the capability gate then removes them for a node without `release-phase`). Defaults are
+		// materialised here, so the agent never has to guess whether a missing field means "off"
+		// or "today's value": off has no field, on has one.
+		const specs = new Map<string, ReturnType<typeof workloadSpecSchema.parse>>();
+		for (const row of this.ctx.db.select({ id: workloads.id, specJson: workloads.specJson }).from(workloads).all()) {
+			const parsed = workloadSpecSchema.safeParse(parseJson<unknown>(row.specJson, null));
+			if (parsed.success) specs.set(row.id, parsed.data);
+		}
+		return all.map((workload) => {
+			const spec = specs.get(parseWorkloadReplicaId(workload.id).workloadId);
+			if (!spec) return workload;
+			const stop = resolvedStopSettings(spec);
+			const decorated: WorkloadDesired = {
+				...workload,
+				...(spec.readinessPath ? { readinessPath: spec.readinessPath } : {}),
+				drainSeconds: stop.drainSeconds,
+				stopTimeoutSeconds: stop.stopTimeoutSeconds,
+			};
+			return decorated;
+		});
 	}
 
 	/** Disks, shares and their mounts. */

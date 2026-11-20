@@ -210,6 +210,20 @@ describe('buildCaddyConfig', () => {
 		expect(() => tlsSubjects('bad domain')).toThrow(/Invalid content domain/);
 	});
 
+	test('passes the route readiness path and the app drain window to the compiler', () => {
+		const route = state().routes[0]!;
+		const input = toSiteCompileInput(
+			{ ...route, readinessPath: '/readyz' },
+			{ dataDir: '/data', agentSocket: '/sock', drainSeconds: 12 },
+		);
+		expect(input.readinessPath).toBe('/readyz');
+		expect(input.drainSeconds).toBe(12);
+		// Absent fields stay absent, so flag-off configs are unchanged.
+		const untouched = toSiteCompileInput(route, { dataDir: '/data', agentSocket: '/sock' });
+		expect(untouched.readinessPath).toBeUndefined();
+		expect(untouched.drainSeconds).toBeUndefined();
+	});
+
 	test('toSiteCompileInput refuses unsafe project ids', () => {
 		const route = state().routes[0]!;
 		expect(() =>

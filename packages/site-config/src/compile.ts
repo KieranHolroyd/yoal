@@ -34,6 +34,16 @@ export interface SiteCompileInput {
 	upstreams?: string[];
 	/** Health path for active checks across those upstreams. */
 	healthPath?: string;
+	/**
+	 * HA-PLAN H25: the path active checks use to decide whether a copy takes traffic. Absent means
+	 * `healthPath` (one path set is both, as today); `healthPath` itself stays liveness.
+	 */
+	readinessPath?: string;
+	/**
+	 * HA-PLAN H25: seconds Caddy keeps in-flight requests after an upstream leaves the list. Only
+	 * rendered when the release phase renders it, so flag-off configs are unchanged.
+	 */
+	drainSeconds?: number;
 	/** Seconds between active checks (cluster `replicas.healthIntervalSeconds`); 5 when absent. */
 	healthIntervalSeconds?: number;
 	/**
@@ -243,8 +253,9 @@ export function compileSiteRoute(input: SiteCompileInput): CaddyRoute {
 	const routes: CaddyRoute[] = [];
 
 	const upstreams = input.upstreams?.length ? input.upstreams : input.upstream ? [input.upstream] : [];
+	const readinessPath = input.readinessPath ?? input.healthPath;
 	if (protectedSite && input.agentSocket) {
-		const probe = healthProbeRoute(input.healthPath, input.healthProbeCidr, upstreams);
+		const probe = healthProbeRoute(readinessPath, input.healthProbeCidr, upstreams);
 		if (probe) routes.push(probe);
 		routes.push(authRoute(input.agentSocket));
 	}
@@ -298,6 +309,35 @@ export function compileSiteRoute(input: SiteCompileInput): CaddyRoute {
 	if (upstreams.length > 0) {
 		// Homelab/worker placement: the edge terminates TLS and proxies over WireGuard. If the
 		// worker is unreachable, serve a branded 503 with Retry-After instead of a bare error.
+		const balanced = Boolean(input.upstreams && input.upstreams.length > 1);
+		// HA-PLAN H25: readiness gates traffic. `healthPath` stays liveness, so a single copy with a
+		// readiness path is checked too (a failed check empties the upstream set and Caddy serves
+		// the branded 503); the older multi-upstream routes keep their health path as before.
+		const checkedPath = input.readinessPath ?? input.healthPath;
+		const healthChecks = checkedPath && (balanced || input.readinessPath)
+			? {
+				active: input.readinessPath
+					? {
+						uri: checkedPath,
+						interval: `${healthInterval(input.healthIntervalSeconds)}s`,
+						timeout: '2s',
+						// Two passes rejoin, three failures eject (CLUSTERING §8.6).
+						passes: 2,
+						fails: 3,
+						// Caddy probes with the dial address as Host unless told otherwise. A copy on
+						// another node sits behind that node's Caddy, which routes by Host, so the
+						// probe must carry the route's host just as a proxied request does (Caddy
+						// keeps the client's Host on proxied requests by default).
+						headers: { Host: [input.host] },
+					}
+					: {
+						uri: checkedPath,
+						interval: `${healthInterval(input.healthIntervalSeconds)}s`,
+						headers: { Host: [input.host] },
+					},
+				passive: { fail_duration: '30s' },
+			}
+			: null;
 		routes.push({
 			handle: [
 				{
@@ -305,28 +345,31 @@ export function compileSiteRoute(input: SiteCompileInput): CaddyRoute {
 					upstreams: upstreams.map((upstream) => ({ dial: upstream.replace(/^https?:\/\//, '') })),
 					// JSON config field names, not the Caddyfile's `lb_policy`/`health_uri`: Caddy
 					// refuses unknown fields, and one bad route fails the node's whole config load.
-					...(input.upstreams && input.upstreams.length > 1
+					...(balanced
 						? {
 							// A copy that refuses the connection (it is restarting, or its node just went) is
 							// retried on another copy instead of failing the request (SCALING §4).
 							load_balancing: { selection_policy: { policy: 'least_conn' }, try_duration: '3s', try_interval: '250ms' },
-							...(input.healthPath
-								? {
-									health_checks: {
-										active: {
-											uri: input.healthPath,
-											interval: `${healthInterval(input.healthIntervalSeconds)}s`,
-											// Caddy probes with the dial address as Host unless told otherwise. A copy on
-											// another node sits behind that node's Caddy, which routes by Host, so the
-											// probe must carry the route's host just as a proxied request does (Caddy
-											// keeps the client's Host on proxied requests by default).
-											headers: { Host: [input.host] },
-										},
-										passive: { fail_duration: '30s' },
-									},
-								}
-								: {}),
 						}
+						: {}),
+					...(healthChecks ? { health_checks: healthChecks } : {}),
+					// HA-PLAN H25 "Caddy timeouts": the ingress→copy hop gets the documented bounds
+					// when the release phase renders readiness/drain, so nothing waits forever on a
+					// wedged copy and long AI requests still finish.
+					...(input.readinessPath !== undefined || input.drainSeconds !== undefined
+						? {
+							transport: {
+								protocol: 'http',
+								dial_timeout: '5s',
+								response_header_timeout: '5m',
+								keepalive: '30s',
+							},
+						}
+						: {}),
+					// A copy leaves the upstream list one desired-state version before it restarts;
+					// this keeps long-lived streams alive for the drain window after that removal.
+					...(input.drainSeconds !== undefined && input.drainSeconds > 0
+						? { stream_close_delay: `${input.drainSeconds}s` }
 						: {}),
 					headers: { request: { set: { 'X-Forwarded-Host': ['{http.request.host}'] } } },
 					handle_response: [
