@@ -19,14 +19,11 @@ const overlay = z.object({
 	mtu: int(1280, 1420).default(1420),
 	listenPort: int(1, 65_535).default(51_820),
 	keepaliveSeconds: int(0, 65_535).default(25),
-	maxHubs: int(1, 16).default(4),
 });
 
 const endpoints = z.object({
 	portMin: int(10_000, 60_000).default(21_000),
 	portMax: int(10_001, 61_000).default(21_999),
-	requireMtls: z.boolean().default(true),
-	forwarder: z.enum(['auto', 'bun', 'caddy-l4']).default('auto'),
 });
 
 const replicas = z.object({
@@ -43,7 +40,6 @@ const database = z.object({
 	/** A replica further behind than either limit is never picked for promotion (§9.3). */
 	maxLagBytes: int(0, 10_000_000_000).default(67_108_864),
 	maxLagSeconds: int(0, 86_400).default(60),
-	defaultMode: z.enum(['async', 'sync']).default('async'),
 });
 
 const storage = z.object({
@@ -136,10 +132,6 @@ const updates = nodeRolloutOptionsSchema.extend({
 	autoRollout: z.boolean().default(false),
 });
 
-const shares = z.object({
-	mountRoot: z.string().trim().regex(/^\/(?:[A-Za-z0-9._-]+\/?)*$/).default('/run/yoal-shares'),
-});
-
 export const clusterConfigSchema = z.object({
 	overlay,
 	endpoints,
@@ -150,22 +142,61 @@ export const clusterConfigSchema = z.object({
 	failover,
 	scheduling,
 	updates,
-	shares,
 });
 export type ClusterConfig = z.infer<typeof clusterConfigSchema>;
 
+/**
+ * Keys earlier releases accepted that no code reads (HA-PLAN F6). They are not part of the
+ * configuration any more, so they are not stored or shown. An update may still carry one at its
+ * old default, which is what the platform does anyway, so a saved JSON document keeps saving; any
+ * other value is refused with the reason, rather than stored and silently ignored. A workstream
+ * that wires one moves it back into its section.
+ */
+export const UNWIRED_CLUSTER_KEYS = [
+	{ section: 'overlay', key: 'maxHubs', inert: 4, reason: 'the hub count is not configurable yet (CLUSTERING C1)' },
+	{ section: 'endpoints', key: 'requireMtls', inert: true, reason: 'service endpoints always require mTLS' },
+	{
+		section: 'endpoints',
+		key: 'forwarder',
+		inert: 'auto',
+		reason: "endpoints always use the agent's forwarder until spike S10 settles caddy-l4 (HA-PLAN W4)",
+	},
+	{ section: 'database', key: 'defaultMode', inert: 'async', reason: 'synchronous replication is not built (HA-PLAN W10)' },
+	{ section: 'shares', key: 'mountRoot', inert: '/run/yoal-shares', reason: 'shares always mount under /mnt/yoal-shares' },
+] as const;
+
+const unwired = (section: string) =>
+	Object.fromEntries(
+		UNWIRED_CLUSTER_KEYS.filter((item) => item.section === section).map((item) => [item.key, z.unknown().optional()]),
+	);
+
 const sectionUpdates = {
-	overlay: overlay.partial().optional(),
-	endpoints: endpoints.partial().optional(),
+	overlay: overlay.partial().extend(unwired('overlay')).optional(),
+	endpoints: endpoints.partial().extend(unwired('endpoints')).optional(),
 	replicas: replicas.partial().optional(),
-	database: database.partial().optional(),
+	database: database.partial().extend(unwired('database')).optional(),
 	storage: storage.partial().optional(),
 	controlPlane: controlPlane.partial().optional(),
 	failover: failover.partial().optional(),
 	scheduling: scheduling.partial().optional(),
 	updates: updates.partial().optional(),
-	shares: shares.partial().optional(),
+	/** Only ever held `mountRoot`; kept so an older saved document still parses. */
+	shares: z.object(unwired('shares')).optional(),
 };
 
-export const clusterConfigUpdateSchema = z.object(sectionUpdates).strict();
+export const clusterConfigUpdateSchema = z
+	.object(sectionUpdates)
+	.strict()
+	.superRefine((value, ctx) => {
+		for (const item of UNWIRED_CLUSTER_KEYS) {
+			const section = (value as Record<string, Record<string, unknown> | undefined>)[item.section];
+			if (!section || !(item.key in section) || section[item.key] === undefined) continue;
+			if (section[item.key] === item.inert) continue;
+			ctx.addIssue({
+				code: 'custom',
+				path: [item.section, item.key],
+				message: `${item.section}.${item.key} cannot be changed: ${item.reason}.`,
+			});
+		}
+	});
 export type ClusterConfigUpdate = z.infer<typeof clusterConfigUpdateSchema>;

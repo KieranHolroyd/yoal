@@ -41,7 +41,6 @@ export class ClusterConfigService {
 			failover: {},
 			scheduling: {},
 			updates: {},
-			shares: {},
 			...(raw && typeof raw === 'object' ? raw : {}),
 		});
 		return this.#cache;
@@ -86,7 +85,6 @@ export class ClusterConfigService {
 			failover: { ...current.failover, ...sent('failover') },
 			scheduling: { ...current.scheduling, ...sent('scheduling') },
 			updates: { ...current.updates, ...sent('updates') },
-			shares: { ...current.shares, ...sent('shares') },
 		});
 		if (!merged.success) throw new ValidationError('Invalid cluster configuration.', merged.error.issues);
 		if (merged.data.endpoints.portMin >= merged.data.endpoints.portMax)

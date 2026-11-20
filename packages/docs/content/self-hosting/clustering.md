@@ -189,7 +189,7 @@ A storage replication target is a real copy: the source's node copies every buck
 
 ## Settings → Clustering
 
-**Settings → Clustering** is a JSON editor for cluster tunables. It is available to platform owners only. The JSON is validated against the schema, and unknown keys are rejected. Changes apply to the next join, placement, failover check or maintenance sweep.
+**Settings → Clustering** is a JSON editor for cluster tunables. It is available to platform owners only. The JSON is validated against the schema. An unknown section is rejected; an unknown key inside a section is ignored. Changes apply to the next join, placement, failover check or maintenance sweep.
 
 These are the keys that code reads today:
 
@@ -209,12 +209,12 @@ These are the keys that code reads today:
 | `controlPlane.leaseTtlSeconds` | `30` | How long the failover lease lasts without renewal: the longest a stopped control plane holds up the next one |
 | `controlPlane.renewSeconds` | `5` | How often the controller checks the fleet and renews its lease (at most a third of the TTL) |
 | `database.maxLagBytes`, `database.maxLagSeconds` | `67108864`, `60` | A replica further behind than either is never picked for promotion |
-| `database.maxReplicas` | `2` | Replicas allowed per database (at most 8) |
+| `database.maxReplicas` | `2` | Replicas allowed per database (0 to 5) |
 | `storage.maxTargets` | `2` | Replication targets allowed per storage instance |
 | `storage.syncIntervalMinutes` | `15` | Minutes between bucket replication passes |
 
 > [!NOTE]
-> The schema also accepts `overlay.maxHubs`, `endpoints.requireMtls`, `endpoints.forwarder`, `database.defaultMode` and `shares.mountRoot`. No code reads them yet, so changing them has no effect.
+> Earlier releases also accepted `overlay.maxHubs`, `endpoints.requireMtls`, `endpoints.forwarder`, `database.defaultMode` and `shares.mountRoot`, but nothing read them. They are no longer part of the configuration. A saved document that still has them at their old defaults saves as before, and the keys are dropped. Any other value is rejected with the reason.
 
 ## Settings → High availability
 
