@@ -157,50 +157,81 @@ describe('compileSiteRoute', () => {
 	});
 
 	describe('health probes of a protected copy (F7 review)', () => {
-		const authOf = (input: SiteCompileInput) => {
-			const route = compileSiteRoute(input) as { handle: Array<{ routes: Array<{ match?: unknown; handle: Array<Record<string, unknown>> }> }> };
-			return route.handle[0]!.routes.find((sub) => JSON.stringify(sub.handle).includes('/_yoal/verify'));
+		type Sub = { match?: unknown; terminal?: boolean; handle: Array<Record<string, unknown>> };
+		const subroutes = (input: SiteCompileInput) =>
+			(compileSiteRoute(input) as { handle: Array<{ routes: Sub[] }> }).handle[0]!.routes;
+		const authOf = (input: SiteCompileInput) => subroutes(input).find((sub) => JSON.stringify(sub.handle).includes('/_yoal/verify'));
+		const probeOf = (input: SiteCompileInput) => subroutes(input).find((sub) => JSON.stringify(sub.match ?? '').includes('remote_ip'));
+		const protectedCopy: SiteCompileInput = {
+			...base,
+			accessMode: 'platform',
+			upstream: '127.0.0.1:19001',
+			healthPath: '/healthz',
+			healthProbeCidr: '10.47.0.0/16',
 		};
-		const protectedCopy: SiteCompileInput = { ...base, accessMode: 'platform', healthPath: '/healthz', healthProbeCidr: '10.47.0.0/16' };
 
-		test('only GET or HEAD of exactly the health path from the overlay skips the access check', () => {
-			const auth = authOf(protectedCopy)!;
-			// The access check runs unless every condition holds together (one matcher set: AND).
-			expect(auth.match).toEqual([
+		test('an overlay GET or HEAD of exactly the health path gets the app\'s status for that path and nothing else', () => {
+			const routes = subroutes(protectedCopy);
+			const probe = probeOf(protectedCopy)!;
+			// It runs first and ends the chain, so the access check after it is never consulted for it.
+			expect(routes[0]).toEqual(probe);
+			expect(probe.terminal).toBe(true);
+			expect(probe.match).toEqual([
 				{
-					not: [
-						{
-							method: ['GET', 'HEAD'],
-							path: ['/healthz'],
-							// Caddy's `path` is case-insensitive; the anchored regexp is not.
-							path_regexp: { pattern: '^/healthz$' },
-							// The connection's own peer address, never a forwarded header.
-							remote_ip: { ranges: ['10.47.0.0/16'] },
-						},
-					],
+					method: ['GET', 'HEAD'],
+					path: ['/healthz'],
+					// Caddy's `path` is case-insensitive; the anchored regexp is not.
+					path_regexp: { pattern: '^/healthz$' },
+					// The connection's own peer address, never a forwarded header.
+					remote_ip: { ranges: ['10.47.0.0/16'] },
 				},
 			]);
-			expect(JSON.stringify(auth)).not.toContain('client_ip');
+			// Matchers see a cleaned path, the proxy forwards the raw one (`/admin/../healthz`,
+			// `//healthz`, `/healthz?x=1`): the upstream request is rewritten to exactly the health
+			// path, with the query emptied.
+			const [rewrite, proxy] = probe.handle;
+			expect(rewrite).toEqual({ handler: 'rewrite', uri: '/healthz?' });
+			expect(proxy!.handler).toBe('reverse_proxy');
+			expect(proxy!.upstreams).toEqual([{ dial: '127.0.0.1:19001' }]);
+			// Only the upstream's status comes back: no body, no upstream header.
+			expect(proxy!.handle_response).toEqual([
+				{ routes: [{ handle: [{ handler: 'static_response', status_code: '{http.reverse_proxy.status_code}' }] }] },
+			]);
+			expect(probe.handle).toHaveLength(2);
+			expect(JSON.stringify(probe)).not.toMatch(/client_ip|copy_response|X-Forwarded-For/);
+			// The access check itself has no exceptions any more.
+			expect(authOf(protectedCopy)!.match).toBeUndefined();
 		});
 
-		test('without a known overlay, a health path, or protection, nothing is exempt', () => {
-			expect(authOf({ ...protectedCopy, healthProbeCidr: undefined })!.match).toBeUndefined();
+		test('every copy upstream is a target, as for real traffic', () => {
+			const probe = probeOf({ ...protectedCopy, upstreams: ['127.0.0.1:19001', '10.47.1.3:8080'] })!;
+			expect(probe.handle[1]!.upstreams).toEqual([{ dial: '127.0.0.1:19001' }, { dial: '10.47.1.3:8080' }]);
+		});
+
+		test('without a known overlay, a health path, an upstream or protection, nothing is exempt', () => {
+			for (const input of [
+				{ ...protectedCopy, healthProbeCidr: undefined },
+				{ ...protectedCopy, healthProbeCidr: null },
+				{ ...protectedCopy, healthPath: undefined },
+				{ ...protectedCopy, upstream: null },
+				{ ...protectedCopy, accessMode: 'public' as const },
+			])
+				expect(probeOf(input)).toBeUndefined();
 			expect(authOf({ ...protectedCopy, healthProbeCidr: null })!.match).toBeUndefined();
-			expect(authOf({ ...protectedCopy, healthPath: undefined })!.match).toBeUndefined();
-			expect(authOf({ ...protectedCopy, accessMode: 'public' })).toBeUndefined();
 		});
 
 		test('a health path that is a pattern, an escape or a placeholder is never exempt', () => {
-			for (const healthPath of ['/*', '/health*', '/a%2Fb', '/{http.request.uri}', '/a b', 'healthz'])
-				expect(authOf({ ...protectedCopy, healthPath })!.match).toBeUndefined();
+			for (const healthPath of ['/*', '/health*', '/a%2Fb', '/{http.request.uri}', '/a b', 'healthz', '/a?b'])
+				expect(probeOf({ ...protectedCopy, healthPath })).toBeUndefined();
 			// A malformed CIDR would fail the node's whole Caddy load: no exemption instead.
-			expect(authOf({ ...protectedCopy, healthProbeCidr: '0.0.0.0/0 ' })!.match).toBeUndefined();
-			expect(authOf({ ...protectedCopy, healthProbeCidr: 'any' })!.match).toBeUndefined();
+			expect(probeOf({ ...protectedCopy, healthProbeCidr: '0.0.0.0/0 ' })).toBeUndefined();
+			expect(probeOf({ ...protectedCopy, healthProbeCidr: 'any' })).toBeUndefined();
 		});
 
 		test('regexp metacharacters in the path are escaped', () => {
-			const auth = authOf({ ...protectedCopy, healthPath: '/v1.0/health-check_x~' })!;
-			expect(JSON.stringify(auth.match)).toContain('"pattern":"^/v1\\\\.0/health-check_x~$"');
+			const probe = probeOf({ ...protectedCopy, healthPath: '/v1.0/health-check_x~' })!;
+			expect(JSON.stringify(probe.match)).toContain('"pattern":"^/v1\\\\.0/health-check_x~$"');
+			expect(probe.handle[0]).toEqual({ handler: 'rewrite', uri: '/v1.0/health-check_x~?' });
 		});
 	});
 

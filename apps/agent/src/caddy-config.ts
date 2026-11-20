@@ -549,7 +549,8 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 		const site = toSiteCompileInput(route, {
 			...options,
 			contentDomain: options.state.contentDomain,
-			// Only a managed overlay has a CIDR; a bring-your-own network exempts nothing.
+			// Only a managed overlay has a CIDR. A bring-your-own network exempts nothing: its desired
+			// state does not list the ingress addresses (a known gap, OPS.md §7.3).
 			healthProbeCidr: options.state.wireguard?.mode !== 'external' ? (options.state.wireguard?.cidr ?? null) : null,
 		});
 		entries.push({ site, route });

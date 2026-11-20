@@ -39,8 +39,9 @@ export interface SiteCompileInput {
 	/**
 	 * The fleet's overlay CIDR, on a node that holds a copy of a spread app. An ingress probes the
 	 * copy's `healthPath` through this node's Caddy with no session cookie, so on a protected site a
-	 * GET or HEAD of exactly that path from an overlay address skips the access check (F7). Null or
-	 * absent: nothing is exempt.
+	 * GET or HEAD of exactly that path from an overlay address is answered before the access check,
+	 * with the app's status for exactly that path and nothing else (F7). Null or absent: nothing is
+	 * exempt.
 	 */
 	healthProbeCidr?: string | null;
 }
@@ -65,32 +66,46 @@ const LITERAL_HEALTH_PATH = /^\/[A-Za-z0-9._~/-]*$/;
 const IPV4_CIDR = /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\/(?:3[0-2]|[12]?\d)$/;
 
 /**
- * The only requests a protected site lets through unauthenticated: an ingress's active health
- * probe of a copy. Method, exact path (Caddy's case-insensitive `path` and a case-sensitive
- * anchored regexp) and the connection's own peer address (`remote_ip`, never a forwarded header)
- * must all match. Null when anything is missing or not plainly literal, so nothing is exempt.
+ * An ingress's active health probe of a copy on a protected site (F7). The probe has no session,
+ * so it is answered before the access check, but only when method, exact path (Caddy's
+ * case-insensitive `path` and a case-sensitive anchored regexp) and the connection's own peer
+ * address (`remote_ip`, never a forwarded header) all match.
+ *
+ * Matchers compare a cleaned path while `reverse_proxy` forwards the raw one, so `//healthz`,
+ * `/admin/../healthz` or `/healthz?x=1` would match and still reach the app as sent. The upstream
+ * request is therefore rewritten to exactly the health path with an empty query, and only the
+ * upstream's status comes back: an empty body and none of its headers. What a caller in the
+ * fleet learns is "this app's health path is up or down". Null (no exemption) when anything is
+ * missing or not plainly literal.
  */
-function healthProbeMatcher(healthPath: string | undefined, cidr: string | null | undefined): unknown[] | null {
-	if (!healthPath || !cidr || !LITERAL_HEALTH_PATH.test(healthPath) || !IPV4_CIDR.test(cidr)) return null;
+function healthProbeRoute(
+	healthPath: string | undefined,
+	cidr: string | null | undefined,
+	upstreams: string[],
+): CaddyRoute | null {
+	if (!healthPath || !cidr || upstreams.length === 0) return null;
+	if (!LITERAL_HEALTH_PATH.test(healthPath) || !IPV4_CIDR.test(cidr)) return null;
 	const pattern = `^${healthPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`;
-	return [
-		{
-			not: [
-				{
-					method: ['GET', 'HEAD'],
-					path: [healthPath],
-					path_regexp: { pattern },
-					remote_ip: { ranges: [cidr] },
-				},
-			],
-		},
-	];
+	return {
+		match: [{ method: ['GET', 'HEAD'], path: [healthPath], path_regexp: { pattern }, remote_ip: { ranges: [cidr] } }],
+		terminal: true,
+		handle: [
+			// A `?` with nothing after it empties the query as well as replacing the path.
+			{ handler: 'rewrite', uri: `${healthPath}?` },
+			{
+				handler: 'reverse_proxy',
+				upstreams: upstreams.map((upstream) => ({ dial: upstream.replace(/^https?:\/\//, '') })),
+				handle_response: [
+					{ routes: [{ handle: [{ handler: 'static_response', status_code: '{http.reverse_proxy.status_code}' }] }] },
+				],
+			},
+		],
+	};
 }
 
 /** forward_auth against the local agent; the agent verifies the host-only HMAC cookie statelessly. */
-function authRoute(agentSocket: string, match?: unknown[] | null): CaddyRoute {
+function authRoute(agentSocket: string): CaddyRoute {
 	return {
-		...(match ? { match } : {}),
 		handle: [
 			{
 				handler: 'reverse_proxy',
@@ -227,8 +242,12 @@ export function compileSiteRoute(input: SiteCompileInput): CaddyRoute {
 	const protectedSite = input.accessMode !== 'public';
 	const routes: CaddyRoute[] = [];
 
-	if (protectedSite && input.agentSocket)
-		routes.push(authRoute(input.agentSocket, healthProbeMatcher(input.healthPath, input.healthProbeCidr)));
+	const upstreams = input.upstreams?.length ? input.upstreams : input.upstream ? [input.upstream] : [];
+	if (protectedSite && input.agentSocket) {
+		const probe = healthProbeRoute(input.healthPath, input.healthProbeCidr, upstreams);
+		if (probe) routes.push(probe);
+		routes.push(authRoute(input.agentSocket));
+	}
 
 	routes.push({
 		handle: [
@@ -276,7 +295,6 @@ export function compileSiteRoute(input: SiteCompileInput): CaddyRoute {
 	// Site `_headers` come after the defaults so they can override cache policy for a path.
 	for (const rule of input.headers) routes.push(headersRoute(rule, protectedSite));
 
-	const upstreams = input.upstreams?.length ? input.upstreams : input.upstream ? [input.upstream] : [];
 	if (upstreams.length > 0) {
 		// Homelab/worker placement: the edge terminates TLS and proxies over WireGuard. If the
 		// worker is unreachable, serve a branded 503 with Retry-After instead of a bare error.

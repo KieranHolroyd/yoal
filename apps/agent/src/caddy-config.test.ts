@@ -411,7 +411,7 @@ describe('per-deployment roots, worker routes and logging', () => {
 		// The node holding a copy of a spread app: its route has the app's health path but no
 		// upstreams, and its desired state carries the overlay it is on.
 		const value = state();
-		value.routes[1] = { ...value.routes[1]!, healthPath: '/healthz' };
+		value.routes[1] = { ...value.routes[1]!, upstream: '127.0.0.1:19002', healthPath: '/healthz' };
 		value.wireguard = {
 			mode: 'yoal',
 			address: '10.47.1.3',
@@ -426,10 +426,15 @@ describe('per-deployment roots, worker routes and logging', () => {
 			const route = routes(compiled).find((entry) => JSON.stringify(entry.match).includes('secret.example.com'))!;
 			const subroutes = ((route.handle as Json[])[0]!.routes as Json[]);
 			const auth = subroutes.find((sub) => JSON.stringify(sub.handle).includes('/_yoal/verify'))!;
-			if (!auth.match) return true;
-			// Caddy: a route runs when any matcher set matches; `not` negates one AND-ed set.
-			const [set] = (auth.match as Json[]) as Array<{ not: Array<Record<string, any>> }>;
-			const inner = set!.not[0]!;
+			// The access check itself has no exceptions: only a terminal probe route before it can answer.
+			expect(auth.match).toBeUndefined();
+			const probeRoute = subroutes.find((sub) => JSON.stringify(sub.match ?? '').includes('remote_ip'));
+			if (!probeRoute) return true;
+			expect(subroutes.indexOf(probeRoute)).toBeLessThan(subroutes.indexOf(auth));
+			expect(probeRoute.terminal).toBe(true);
+			// Whatever matched, the app is asked for exactly the health path and only its status returns.
+			expect((probeRoute.handle as Json[])[0]).toEqual({ handler: 'rewrite', uri: '/healthz?' });
+			const [inner] = probeRoute.match as Array<Record<string, any>>;
 			const inCidr = (ip: string, cidr: string) => {
 				const [base, bits] = cidr.split('/');
 				const toInt = (value: string) => value.split('.').reduce((acc, part) => (acc << 8) + Number(part), 0) >>> 0;
@@ -437,10 +442,10 @@ describe('per-deployment roots, worker routes and logging', () => {
 				return (toInt(ip) & mask) === (toInt(base!) & mask);
 			};
 			const matched =
-				inner.method.includes(request.method) &&
-				inner.path.some((path: string) => path.toLowerCase() === request.path.toLowerCase()) &&
-				new RegExp(inner.path_regexp.pattern).test(request.path) &&
-				inner.remote_ip.ranges.some((range: string) => inCidr(request.remoteIp, range));
+				inner!.method.includes(request.method) &&
+				inner!.path.some((path: string) => path.toLowerCase() === request.path.toLowerCase()) &&
+				new RegExp(inner!.path_regexp.pattern).test(request.path) &&
+				inner!.remote_ip.ranges.some((range: string) => inCidr(request.remoteIp, range));
 			return !matched;
 		};
 		const compiled = config(value);

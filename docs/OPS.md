@@ -1928,20 +1928,31 @@ journalctl -u yoal-litestream -n 100 --no-pager
 An app spread over several nodes with a `healthPath` is probed by every ingress every
 `replicas.healthIntervalSeconds`: a copy on another node is reached through that node's Caddy,
 with the route's own `Host` and no session cookie. On a protected route (`platform`, `password`,
-a policy; preview routes are `platform` by default) the node holding the copy therefore lets one
-request shape skip the access check: a `GET` or `HEAD` of exactly the app's `healthPath`
-(case-sensitive, no wildcard), from a source address inside the managed overlay CIDR. The address
-is the connection's own peer (Caddy `remote_ip`); `X-Forwarded-For` and other headers are never
-consulted. Everything else on the route, including any other method, path or query of the app,
-still needs a session.
+a policy; preview routes are `platform` by default) the node holding the copy answers such a probe
+before its access check when all of these hold: the method is `GET` or `HEAD`; the cleaned path is
+exactly the app's `healthPath` (case-sensitive, no wildcard); and the connection's own peer address
+(Caddy `remote_ip`; `X-Forwarded-For` and other headers are never consulted) is inside the managed
+overlay CIDR. Caddy's matchers compare a cleaned path, so `//healthz`, `/./healthz`,
+`/admin/../healthz`, `%2F` and `%2e%2e` spellings and `/healthz?x=1` all match. None of them
+reaches the app as sent: the request is rewritten to exactly `healthPath` with an empty query, and
+only the app's status code comes back, with an empty body and none of the app's headers.
 
-**Consequence:** the health path of a protected app is readable without signing in by anything
-that can open a connection from an overlay address: every fleet node, and any process or
-container on one that uses the node's overlay address as its source. Keep the health path free of
-data (`200 ok`, not a status page with versions or user counts). A path that is not a plain
-literal (it contains `*`, `%`, `{`, spaces) gets no exemption, and a node on a bring-your-own
-network (`network_mode: external`) has no overlay CIDR, so its protected copies are never exempt
-and an ingress marks them unhealthy.
+**What is exposed:** whether this app's health path is up or down (its status code), and only to
+fleet nodes: anything that can open a connection from an overlay address, which includes every
+process app and container on any node, since they send from the node's overlay address. No
+path, query, body or header of the app is readable this way; everything else on the route needs
+a session. The probe's request headers and method (`GET` or `HEAD`) do reach the app, so a health
+path should not change its status based on them.
+
+A health path that is not a plain literal (it contains `*`, `%`, `{`, `?` or a space) gets no
+exemption.
+
+**Known gap: bring-your-own networks.** A node with `network_mode: external` has no overlay CIDR,
+and its desired state does not list the ingress addresses that probe it (no peers, and only an
+ingress carries `upstreams`). Its protected copies are never exempt, so the ingress marks them
+unhealthy and sends them no traffic: a protected app spread over an external-network fleet serves
+only from a copy on the ingress itself, if it has one. Public apps are unaffected. Closing this needs the ingress
+addresses in desired state, which is not built.
 
 ---
 
