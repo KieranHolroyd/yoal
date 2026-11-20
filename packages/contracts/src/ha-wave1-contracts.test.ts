@@ -286,6 +286,16 @@ describe('desired state', () => {
 		expect(releaseCommandTaskSchema.safeParse({ ...task, runId: 'jr_1' }).success).toBe(false);
 		expect(releaseCommandTaskSchema.safeParse({ ...task, command: 'bin/migrate' }).success).toBe(false);
 	});
+
+	test('lane C additions: per-upstream counters in the heartbeat and image pre-pulls in desired state are optional', () => {
+		const beat = { nodeId: 'nod_1', agentVersion: '0.15.3', actualStateVersion: 1, status: 'online', caddyOk: true };
+		expect('upstreamCounters' in heartbeatSchema.parse(beat)).toBe(false);
+		const counter = { projectId: 'prj_1', upstream: 'http://10.47.0.2', from: 1, to: 2, requests: 10, status5xx: 1, durationP95Ms: 12.5 };
+		expect(heartbeatSchema.parse({ ...beat, upstreamCounters: [counter] }).upstreamCounters).toEqual([counter]);
+		expect(heartbeatSchema.safeParse({ ...beat, upstreamCounters: [{ ...counter, requests: -1 }] }).success).toBe(false);
+		const minimal = desiredStateSchema.parse({ version: 1, nodeId: 'nod_1', agentVersion: '0.1.0', generatedAt: 'x', contentDomain: 'd', platformOrigin: 'https://p', releases: [], routes: [], revocations: [] });
+		expect('imagePrePulls' in minimal).toBe(false);
+	});
 });
 
 describe('per-install CA (H24 "Trust")', () => {

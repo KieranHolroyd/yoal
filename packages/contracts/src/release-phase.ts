@@ -187,6 +187,44 @@ export type ReleaseCommandResult = z.infer<typeof releaseCommandResultSchema>;
 
 // -------------------------------------------------------------------- canary
 
+/**
+ * Per-upstream request counters an ingress reports in its heartbeat (`heartbeatSchema.upstreamCounters`),
+ * so the canary judge reads the edge's own numbers and never depends on ClickHouse (H28).
+ *
+ * One entry per (project, upstream) that served requests since the previous heartbeat's entry: the
+ * agent counts its Caddy access log lines by the route's project and the upstream that answered
+ * (`upstream` exactly as desired state rendered it in `routes[].upstreams`, or the route's own
+ * `upstream` for a local copy). Windows do not overlap; a lost heartbeat loses its window, which
+ * only makes the judge wait longer. Sent only by an agent that declares `release-phase`.
+ */
+export const upstreamCounterSchema = z.object({
+	projectId: z.string().min(1).max(100),
+	upstream: z.string().min(1).max(512),
+	/** Epoch ms, as the node saw them: the window these counts cover. */
+	from: z.number().int().nonnegative(),
+	to: z.number().int().nonnegative(),
+	requests: z.number().int().nonnegative(),
+	status5xx: z.number().int().nonnegative(),
+	/** 95th percentile of the request durations in the window, in ms; 0 with no requests. */
+	durationP95Ms: z.number().nonnegative(),
+});
+export type UpstreamCounter = z.infer<typeof upstreamCounterSchema>;
+
+/**
+ * `imagePrePulls` in desired state: container images this node should pull now, so a rollout or a
+ * failover onto it does not wait for the pull (H25 "image pre-pull", H28). Pulled with the node's
+ * existing image pull path under the app's own identity; nothing runs. Rendered for the nodes that
+ * hold a copy (the spread set) and the failover reserve, only to an agent that declares
+ * `release-phase`. An entry that disappears needs no action: the image ages out with normal pruning.
+ */
+export const imagePrePullSchema = z.object({
+	/** The app workload whose identity and registry credentials the pull uses. */
+	workloadId: z.string().min(1).max(128),
+	/** Pinned by digest when the deployment resolved one. */
+	image: z.string().min(1).max(512),
+});
+export type ImagePrePull = z.infer<typeof imagePrePullSchema>;
+
 /** Edge counters for one copy over a soak window (from the edge, not from ClickHouse: H28). */
 export interface CanarySample {
 	requests: number;
