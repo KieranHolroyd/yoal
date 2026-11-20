@@ -43,6 +43,7 @@ export class ClusterConfigService {
 			failover: {},
 			scheduling: {},
 			updates: {},
+			ingress: {},
 			...(raw && typeof raw === 'object' ? raw : {}),
 		});
 		return this.#cache;

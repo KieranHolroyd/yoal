@@ -16,8 +16,8 @@ below starts from it). No HA branch merges to `main`; the owner merges.
 
 | Plan | Worktree | Branch | Migration reservation |
 |---|---|---|---|
-| Opening: `ingressNodes()` refactor | agent worktree | `ha/w2-ingress-refactor` | none |
-| Opening: foundation PR 2 | agent worktree | `ha/w2-foundation` | `0122_w2_ingress.sql`, `0123_w2_certificates.sql` |
+| Opening: `ingressNodes()` refactor | agent worktree | `ha/w2-ingress-refactor` | none — **merged** (`7c7deb57`), golden byte-identical |
+| Opening: foundation PR 2 | `ha/integration` (single author) | `ha/w2-foundation` | **`0122_ingress_certificates.sql` used**; `0123` remains spare |
 | A — W6 payload: full route tables, releases and placeholders on every ingress; worker public listeners/TLS; shared secrets through activation; redeemed-token cache; drift from `actualStateVersion` | agent worktree | `ha/w2-a-ingress-payload` | `0124` spare |
 | B — W7 certificates: ACME lease, custody sealed with the master key, distribution through activation, fingerprint in heartbeat, HTTP-01 relay, BYO certificates, reissue on removal | agent worktree | `ha/w2-b-certificates` | `0125` spare |
 | C — W8 health, lame duck, PROXY, trusted proxies | agent worktree | `ha/w2-c-edge-health` | `0126` spare |

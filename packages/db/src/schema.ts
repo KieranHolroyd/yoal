@@ -3222,3 +3222,38 @@ export const schema = {
 };
 
 export { primaryKey };
+
+/** Ingress certificates (HA-PLAN H20, Wave 2): one live row per host, key sealed at rest. */
+export const ingressCertificates = sqliteTable(
+	'ingress_certificates',
+	{
+		id: text('id').primaryKey(),
+		host: text('host').notNull(),
+		serial: text('serial').notNull(),
+		fingerprint: text('fingerprint').notNull(),
+		certPem: text('cert_pem').notNull(),
+		keySealed: text('key_sealed').notNull(),
+		source: text('source', { enum: ['acme', 'byo'] }).notNull().default('acme'),
+		notAfter: integer('not_after').notNull(),
+		renewedAt: integer('renewed_at'),
+		revokedAt: integer('revoked_at'),
+		createdAt: integer('created_at').notNull(),
+	},
+	(t) => [
+		uniqueIndex('ingress_certificates_host_fingerprint_idx').on(t.host, t.fingerprint),
+		index('ingress_certificates_host_idx').on(t.host, t.notAfter),
+	],
+);
+
+/** The one ingress that holds an ACME challenge for a host (HA-PLAN H20). */
+export const acmeLeases = sqliteTable(
+	'acme_leases',
+	{
+		host: text('host').primaryKey(),
+		nodeId: text('node_id').notNull(),
+		token: text('token').notNull(),
+		expiresAt: integer('expires_at').notNull(),
+		createdAt: integer('created_at').notNull(),
+	},
+	(t) => [index('acme_leases_node_idx').on(t.nodeId)],
+);

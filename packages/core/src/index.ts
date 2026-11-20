@@ -41,6 +41,7 @@ import { ScalingService } from './scaling-service.ts';
 import { ReleaseCommandScheduler } from './release-commands.ts';
 import { RelocationService } from './relocation-service.ts';
 import { ClusterConfigService } from './cluster-config-service.ts';
+import { CertificateService, IngressSetService, SteeringService } from './ingress-service.ts';
 import { WorkloadService } from './workloads.ts';
 import { DatabaseService } from './databases.ts';
 import { DatabaseStudioService } from './database-studio.ts';
@@ -325,6 +326,9 @@ export interface Core {
 	relocations: RelocationService;
 	/** Cluster tunables (CLUSTERING). */
 	cluster: ClusterConfigService;
+	ingressSet: IngressSetService;
+	steering: SteeringService;
+	certificates: CertificateService;
 	/** Identity and access management (IAM.md I1). */
 	iam: IamService;
 	/** Guardrails and just-in-time access (IAM.md I11/I22, §9.2–§9.4). */
@@ -479,6 +483,9 @@ export function createCore(options: CoreOptions): Core {
 	ctx.releaseCommands = new ReleaseCommandScheduler(ctx);
 	ctx.relocations = new RelocationService(ctx);
 	ctx.cluster = new ClusterConfigService(ctx);
+	ctx.ingressSet = new IngressSetService(ctx);
+	ctx.steering = new SteeringService(ctx);
+	ctx.certificates = new CertificateService(ctx);
 	// Flow definitions register once every service exists, so their steps can call any of them.
 	ctx.flows.register(ctx.moves.databaseMoveFlow());
 	ctx.flows.register(ctx.nodeRollouts.rolloutFlow());
@@ -563,6 +570,9 @@ export function createCore(options: CoreOptions): Core {
 		releaseCommands: ctx.releaseCommands,
 		relocations: ctx.relocations,
 		cluster: ctx.cluster,
+		ingressSet: ctx.ingressSet,
+		steering: ctx.steering,
+		certificates: ctx.certificates,
 		iam: ctx.iam,
 		governance: ctx.governance,
 		authPolicy: ctx.authPolicy,

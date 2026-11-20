@@ -66,6 +66,7 @@ import type { ScalingService } from './scaling-service.ts';
 import type { ReleaseCommandScheduler } from './release-commands.ts';
 import type { RelocationService } from './relocation-service.ts';
 import type { ClusterConfigService } from './cluster-config-service.ts';
+import type { CertificateService, IngressSetService, SteeringService } from './ingress-service.ts';
 import type { IamService } from './iam/service.ts';
 import type { GovernanceService } from './iam/governance.ts';
 import type { AuthPolicyService } from './iam/auth-policy.ts';
@@ -183,6 +184,12 @@ export interface CoreContext {
 	failover: FailoverService;
 	/** Cluster tunables (CLUSTERING). */
 	cluster: ClusterConfigService;
+	/** The nodes that serve the edge payload (HA-PLAN H17). */
+	ingressSet: IngressSetService;
+	/** Steering drivers (HA-PLAN H18). */
+	steering: SteeringService;
+	/** Shared certificates (HA-PLAN H20). */
+	certificates: CertificateService;
 	/** Fleet scheduling: utilisation, rebalance and workload moves (CLUSTERING §3.10). */
 	scheduling: SchedulingService;
 	/** Fleet node updates in waves (CLUSTERING §3.11, D217). */

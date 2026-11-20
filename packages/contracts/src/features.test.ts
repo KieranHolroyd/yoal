@@ -41,7 +41,10 @@ describe('feature registry', () => {
 			'ENDPOINTS_GATEWAY',
 			'RELEASE_PHASE',
 			'OBJECT_STORE_AZURE',
-			'OBJECT_STORE_GCS'
+			'OBJECT_STORE_GCS',
+			'INGRESS_SET',
+			'SHARED_CERTIFICATES',
+			'STEERING'
 		]);
 		for (const name of FEATURE_FLAG_NAMES) {
 			expect(FEATURE_FLAGS[name].name).toBe(name);
@@ -61,13 +64,25 @@ describe('feature registry', () => {
 		expect(OPT_IN_FEATURES.has('DB_AUTO_PROMOTE')).toBe(true);
 	});
 
+	test('HA Wave 2 flags are opt-in and cite their H-section (HA-WAVE-2.md)', () => {
+		expect(FEATURE_FLAGS.INGRESS_SET.default).toBe(false);
+		expect(FEATURE_FLAGS.SHARED_CERTIFICATES.default).toBe(false);
+		expect(FEATURE_FLAGS.STEERING.default).toBe(false);
+		expect(FEATURE_FLAGS.INGRESS_SET.description).toContain('H17');
+		expect(FEATURE_FLAGS.SHARED_CERTIFICATES.description).toContain('H20');
+		expect(FEATURE_FLAGS.STEERING.description).toContain('H18');
+	});
+
 	test('HA Wave 1 flags are opt-in and cite their H-section (HA-WAVE-1.md)', () => {
 		expect([...OPT_IN_FEATURES]).toEqual([
 			'DB_AUTO_PROMOTE',
 			'ENDPOINTS_GATEWAY',
 			'RELEASE_PHASE',
 			'OBJECT_STORE_AZURE',
-			'OBJECT_STORE_GCS'
+			'OBJECT_STORE_GCS',
+			'INGRESS_SET',
+			'SHARED_CERTIFICATES',
+			'STEERING'
 		]);
 		expect(FEATURE_FLAGS.ENDPOINTS_GATEWAY.description).toContain('H24');
 		expect(FEATURE_FLAGS.RELEASE_PHASE.description).toContain('H25');

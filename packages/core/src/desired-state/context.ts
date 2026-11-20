@@ -49,7 +49,7 @@ export class DesiredStateContext {
 			})
 			.from(nodes)
 			.all();
-		const ingressIds = ingressNodeIds(allNodes, this.ctx.config.edgeNodeId ?? null);
+		const ingressIds = this.ctx.ingressSet.nodes();
 		// The compatibility answer to "the edge": the configured id, else the first `mode: 'edge'`.
 		const ingressId = firstIngress(allNodes, this.ctx.config.edgeNodeId ?? null);
 		const isIngress = isIngressNode(node.id, ingressIds);

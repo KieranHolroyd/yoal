@@ -305,7 +305,7 @@ describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () =
 			 VALUES ('bt_local', 'org_1', 'local-main', 'local', '/var/lib/yoal/backups', 1, 1)`,
 		);
 
-		expect(migrate(sqlite)).toEqual(wave1);
+		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql']);
 
 		const rows = sqlite
 			.query<{ id: string; kind: string; store_kind: string | null; store_options_json: string; object_lock: number; immutable_retention_days: number | null; secret_sealed: string | null }, []>(

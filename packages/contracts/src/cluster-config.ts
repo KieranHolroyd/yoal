@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { ingressSettingsSchema } from './ingress.ts';
 import { nodeRolloutOptionsSchema } from './node-rollout.ts';
 import { replicaSpreads } from './replica.ts';
 
@@ -142,6 +143,7 @@ export const clusterConfigSchema = z.object({
 	failover,
 	scheduling,
 	updates,
+	ingress: ingressSettingsSchema,
 });
 export type ClusterConfig = z.infer<typeof clusterConfigSchema>;
 
@@ -180,6 +182,7 @@ const sectionUpdates = {
 	failover: failover.partial().optional(),
 	scheduling: scheduling.partial().optional(),
 	updates: updates.partial().optional(),
+	ingress: ingressSettingsSchema.partial().optional(),
 	/** Only ever held `mountRoot`; kept so an older saved document still parses. */
 	shares: z.object(unwired('shares')).optional(),
 };

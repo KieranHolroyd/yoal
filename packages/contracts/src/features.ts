@@ -240,6 +240,28 @@ export const FEATURE_FLAGS = {
 		default: false,
 		area: 'storage',
 		description: 'Google Cloud Storage as a backup target, PITR repository and platform store (HA-PLAN W3, G17).'
+	},
+	INGRESS_SET: {
+		name: 'INGRESS_SET',
+		// HA Wave 2, W6. Opt-in: every node with the `ingress` role starts serving the full edge
+		// payload, so a second ingress changes what those nodes serve. Off until M2's lab passes.
+		default: false,
+		area: 'networking',
+		description: 'Every node with the ingress role serves the whole edge payload, not only the first ingress (HA-PLAN H17).'
+	},
+	SHARED_CERTIFICATES: {
+		name: 'SHARED_CERTIFICATES',
+		// HA Wave 2, W7. Opt-in: one ACME issue and fleet-wide distribution replace per-node issuance.
+		default: false,
+		area: 'networking',
+		description: 'Issue each host certificate once, seal it and distribute it to every ingress by fingerprint (HA-PLAN H20).'
+	},
+	STEERING: {
+		name: 'STEERING',
+		// HA Wave 2, W8. Opt-in: a driver starts deciding which ingress nodes receive traffic.
+		default: false,
+		area: 'networking',
+		description: 'Steering drivers (external-lb, dns-failover, vip, webhook) decide which ingress nodes receive traffic (HA-PLAN H18).'
 	}
 } as const satisfies Record<string, FeatureFlagDefinition>;
 
@@ -260,7 +282,10 @@ export const OPT_IN_FEATURES: ReadonlySet<FeatureName> = new Set<FeatureName>([
 	'ENDPOINTS_GATEWAY',
 	'RELEASE_PHASE',
 	'OBJECT_STORE_AZURE',
-	'OBJECT_STORE_GCS'
+	'OBJECT_STORE_GCS',
+	'INGRESS_SET',
+	'SHARED_CERTIFICATES',
+	'STEERING'
 ]);
 
 export type FeatureFlags = {
