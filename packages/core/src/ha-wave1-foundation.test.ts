@@ -13,13 +13,6 @@ import {
 	objectStoreKindAllowed,
 } from './capability-gate.ts';
 import { assertReleasePhaseSpec } from './release-phase-gate.ts';
-<<<<<<< HEAD
-=======
-import { computeHaLevel } from './ha-level.ts';
-import { judgeCanary } from './canary-judge.ts';
-import { createAzureObjectStore, createGcsObjectStore, createObjectStore } from './object-store-factory.ts';
-import { ReleaseCommandScheduler } from './release-commands.ts';
->>>>>>> ha/w1-b-attach-core
 import { S3ObjectStore, LocalObjectStore, storageKindForDb } from './object-store.ts';
 import { buildPrincipal } from './orgs.ts';
 import { createCore, type Core } from './index.ts';

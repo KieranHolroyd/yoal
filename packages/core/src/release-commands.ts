@@ -189,8 +189,13 @@ export class ReleaseCommandScheduler {
 		const unleasedLimitMs = this.ctx.cluster.get().scheduling.rolloutTimeoutSeconds * 1000;
 		for (const row of rows) {
 			if (row.nodeId === null) {
+				// Waiting behind another release command of the same app is not a failure: the
+				// one-at-a-time rule is the intended reason it is unleased.
+				const blocked = rows.some(
+					(other) => other.id !== row.id && other.workloadId === row.workloadId && other.nodeId !== null,
+				);
 				// Never handed to a node, so nothing can be running: safe to give up on.
-				if (now - row.createdAt >= unleasedLimitMs)
+				if (!blocked && now - row.createdAt >= unleasedLimitMs)
 					this.finish(row, 'failed', now, null, `No node could run the release command within ${Math.round(unleasedLimitMs / 1000)} s: none of the nodes that hold this app's copies is online with an agent that declares "${RELEASE_PHASE_CAPABILITY}".`);
 				else this.lease(row, now);
 				continue;
@@ -409,13 +414,19 @@ export class ReleaseCommandScheduler {
 		if (busy) return;
 		const nodeId = this.pickNode(row.workloadId, now);
 		if (!nodeId) return;
-		const changed = this.ctx.db
-			.update(releaseCommandRuns)
-			.set({ nodeId, startBy: now + RELEASE_START_WINDOW_MS, updatedAt: now })
-			.where(and(eq(releaseCommandRuns.id, row.id), eq(releaseCommandRuns.status, 'queued'), isNull(releaseCommandRuns.nodeId)))
-			.returning({ id: releaseCommandRuns.id })
-			.all();
-		if (changed.length > 0) this.ctx.projects.bump(row.orgId);
+		// The CAS pins this row; the NOT EXISTS makes "one leased run per app" hold under two
+		// writers (a promoted standby, a retry) instead of trusting the SELECT above.
+		const changed = this.ctx.sqlite.run(
+			`UPDATE release_command_runs SET node_id = ?, start_by = ?, updated_at = ?
+			  WHERE id = ? AND status = 'queued' AND node_id IS NULL
+			    AND NOT EXISTS (
+			      SELECT 1 FROM release_command_runs other
+			       WHERE other.workload_id = ? AND other.id <> ?
+			         AND other.node_id IS NOT NULL AND other.status IN ('queued', 'running')
+			    )`,
+			[nodeId, now + RELEASE_START_WINDOW_MS, now, row.id, row.workloadId, row.id],
+		);
+		if (changed.changes > 0) this.ctx.projects.bump(row.orgId);
 	}
 
 	private pickNode(workloadId: string, now: number): string | null {

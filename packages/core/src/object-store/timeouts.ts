@@ -116,6 +116,9 @@ export async function stallGuardedUpload(
 		return response;
 	} catch (cause) {
 		timer.stop();
+		// Cancel the wrapper too: the caller's finally may then cancel the source, and a producer
+		// (pg_dump, a file stream) is not left running after a failed upload.
+		await guarded.cancel(cause).catch(() => undefined);
 		if (controller.signal.aborted) throw error;
 		throw cause;
 	}

@@ -169,7 +169,8 @@ export type ContainerAddHost = z.infer<typeof containerAddHostSchema>;
 
 /** The `AddHost` name a container uses for a database (`NetworkAlias` on its own network today). */
 export function databaseHostAlias(databaseId: string): string {
-	return `db-${databaseId}`;
+	// Exactly the name the app is given in its environment (`databaseAlias`): `db_<hex>` → `db-<hex>`.
+	return `db-${databaseId.replace(/^db_/, '').toLowerCase().replace(/[^a-z0-9-]/g, '')}`;
 }
 
 /** A public node certificate stored by the control plane; the private key never arrives here. */

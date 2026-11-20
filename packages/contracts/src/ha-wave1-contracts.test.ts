@@ -241,7 +241,7 @@ describe('desired state', () => {
 				},
 			],
 		});
-		expect(parsed.workloads[0]!.addHosts).toEqual([{ host: 'db-db_1', address: '10.89.0.1' }]);
+		expect(parsed.workloads[0]!.addHosts).toEqual([{ host: databaseHostAlias('db_1'), address: '10.89.0.1' }]);
 		// Trust is per upstream: a mixed-version replica set keeps an older replica pinned.
 		expect(parsed.readEndpoints?.[0]?.upstreams.map((u) => u.trust)).toEqual(['pinned', 'install-ca']);
 		expect(parsed.readEndpoints?.[0]?.upstreams[0]?.tlsFingerprint).toBeNull();

@@ -234,9 +234,15 @@ export class AzureObjectStore implements ObjectStore, ConditionalStore {
 				await response.body?.cancel().catch(() => undefined);
 			});
 		};
-		await putBlock(firstPart);
-		await putBlock(second.value);
-		for (let next = await parts.next(); !next.done; next = await parts.next()) await putBlock(next.value);
+		try {
+			await putBlock(firstPart);
+			await putBlock(second.value);
+			for (let next = await parts.next(); !next.done; next = await parts.next()) await putBlock(next.value);
+		} catch (error) {
+			// Close the source generator; the service garbage-collects uncommitted blocks.
+			await parts.return(undefined).catch(() => undefined);
+			throw error;
+		}
 		const xml = `<?xml version="1.0" encoding="utf-8"?><BlockList>${ids.map((id) => `<Latest>${id}</Latest>`).join('')}</BlockList>`;
 		const data = new TextEncoder().encode(xml);
 		const url = this.blobUrl(key);

@@ -456,7 +456,22 @@ function readRoute(endpoint: ReadEndpoint, gatewayAllowed: boolean): ConsumerRou
 }
 
 function binds(gatewayAddress: string | undefined, gatewayAllowed: boolean): string[] {
-	return gatewayAddress && gatewayAllowed && gatewayAddress !== LOOPBACK ? [LOOPBACK, gatewayAddress] : [LOOPBACK];
+	if (!gatewayAddress || !gatewayAllowed || gatewayAddress === LOOPBACK || !isGatewayAddress(gatewayAddress)) return [LOOPBACK];
+	return [LOOPBACK, gatewayAddress];
+}
+
+/**
+ * A container-gateway address is private (10/8, 172.16/12, 192.168/16 or 100.64/10) and never the
+ * node's underlay or public address: binding one of those would put the forwarder on the wire, and
+ * the guard deliberately permits the address the packet was sent to.
+ */
+export function isGatewayAddress(value: string): boolean {
+	const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+	if (!match) return false;
+	const octets = match.slice(1).map(Number);
+	if (octets.some((octet, index) => octet > 255 || String(octet) !== match[index + 1])) return false;
+	const [a, b] = octets as [number, number, number, number];
+	return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
 }
 
 function routeKey(route: ConsumerRoute): string {

@@ -422,7 +422,8 @@ export class GcsObjectStore implements ObjectStore, ConditionalStore {
 					};
 					return {
 						versioning: json.versioning?.enabled ?? null,
-						objectLock: json.retentionPolicy ? true : null,
+						// A readable bucket without a retention policy is measurably not immutable.
+						objectLock: json.retentionPolicy ? true : false,
 					};
 				});
 			},

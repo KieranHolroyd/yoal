@@ -706,7 +706,7 @@ export class WorkloadService {
 					.run();
 			}
 		}
-		if (waiting > 0)
+		if (waiting > 0 || (releaseSpec && (changed || running === null) && !options.holdCopies))
 			this.ctx.db
 				.update(workloads)
 				.set({ rolloutStatus: 'rolling', rolloutStartedAt: now, rolloutFromDeploymentId: running })
@@ -1041,7 +1041,18 @@ export class WorkloadService {
 			// keeps the deployment before, and a first deploy with no old copy renders nothing, so
 			// the app cannot start ahead of its migrations.
 			const awaitingRelease = this.awaitingRelease(workload, currentSpec);
-			const held = awaitingRelease ? this.copyRelease(workload.rolloutFromDeploymentId) : null;
+			// Normally the rollout records the release the copies still run. If that pointer was
+			// pruned, fall back to the deployment on the copies themselves, so a gated rollout never
+			// blanks an app that has something running.
+			const runningCopy = this.ctx.db
+				.select({ deploymentId: workloadReplicas.deploymentId })
+				.from(workloadReplicas)
+				.where(eq(workloadReplicas.workloadId, workload.id))
+				.get()?.deploymentId;
+			const held = awaitingRelease
+				? this.copyRelease(workload.rolloutFromDeploymentId) ?? this.copyRelease(runningCopy ?? null)
+				: null;
+			// Nothing to hold and nothing running: a first deploy awaits its command with no copies.
 			if (awaitingRelease && !held) return [];
 			const released = held?.deployment ?? current;
 			const releasedSpec = held?.spec ?? currentSpec;
@@ -1155,7 +1166,10 @@ export class WorkloadService {
 	 */
 	private awaitingRelease(workload: WorkloadRow, spec: WorkloadSpec): boolean {
 		if (!featureEnabled(this.ctx.config, 'RELEASE_PHASE') || !spec.release) return false;
-		return this.ctx.releaseCommands.gate(workload.deploymentId).state !== 'succeeded';
+		// Gate on the attempt, not on the mere presence of `release`: saving the command on a live
+		// app creates no run, and `none` means there is nothing to wait for (H25).
+		const state = this.ctx.releaseCommands.gate(workload.deploymentId).state;
+		return state === 'pending' || state === 'failed';
 	}
 
 	/**

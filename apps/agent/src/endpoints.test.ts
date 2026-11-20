@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createServer, connect, type Server } from 'node:net';
-import { ServiceForwarder, wantsGateway, type NodeTrustMaterial } from './endpoints.ts';
+import { ServiceForwarder, isGatewayAddress, wantsGateway, type NodeTrustMaterial } from './endpoints.ts';
 import { TestPki } from './test-pki.ts';
 
 const servers: Server[] = [];
@@ -262,15 +262,15 @@ describe('ServiceForwarder gateway address (HA-PLAN H24)', () => {
 		const logs: string[] = [];
 		const forwarder = new ServiceForwarder({ log: (_level, message) => logs.push(message) });
 		forwarders.push(forwarder);
-		// TEST-NET-3: never configured on a test host, so the bind fails like a bridge not up yet.
-		const endpoint = plainEndpoint('sep_g2', port, target, { gatewayAddress: '203.0.113.7' });
+		// A private address never configured on a test host: the bind fails like a bridge not up yet.
+		const endpoint = plainEndpoint('sep_g2', port, target, { gatewayAddress: '10.99.99.99' });
 		forwarder.converge([endpoint], [], { gatewayAllowed: true });
 		forwarder.converge([endpoint], [], { gatewayAllowed: true });
 		await Bun.sleep(100);
 		expect(forwarder.listening()[port]).toEqual(['127.0.0.1']);
 		expect(await readOnce(port, 'still')).toBe('still');
 		// Logged once per failure, not once per converge.
-		expect(logs.filter((line) => line.includes('203.0.113.7')).length).toBe(1);
+		expect(logs.filter((line) => line.includes('10.99.99.99')).length).toBe(1);
 	});
 
 	test.skipIf(process.platform !== 'linux')('listens on the gateway address too, same port, and drops it when unset', async () => {
@@ -479,5 +479,12 @@ describe('ServiceForwarder install-CA trust (HA-PLAN H24)', () => {
 		expect(result).toMatchObject({ started: 2, stopped: 0 });
 		expect(forwarder.listening()[localPort]).toEqual(['127.0.0.1']);
 		expect(await readOnce(localPort, 'unchanged')).toBe('unchanged');
+	});
+});
+
+describe('gateway address validation (W4)', () => {
+	test('only a private container-gateway address may be bound', () => {
+		for (const address of ['10.89.0.1', '172.16.4.1', '192.168.1.1', '100.64.0.1']) expect(isGatewayAddress(address)).toBe(true);
+		for (const address of ['127.0.0.1', '0.0.0.0', '203.0.113.7', '8.8.8.8', '10.89.0.1 evil', '010.0.0.1', '10.89.0']) expect(isGatewayAddress(address)).toBe(false);
 	});
 });
