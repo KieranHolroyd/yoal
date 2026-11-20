@@ -444,6 +444,27 @@ describe('ServiceForwarder install-CA trust (HA-PLAN H24)', () => {
 		await expect(readOnce(localPort, 'x')).rejects.toBeTruthy();
 	});
 
+	test.skipIf(!Bun.which('openssl'))('a provider listener moves from plain to TLS when the CA leaf arrives', async () => {
+		const ca = pki();
+		const target = await echoServer();
+		const providerPort = await freePort();
+		const localPort = await freePort();
+		const server = new ServiceForwarder();
+		const client = new ServiceForwarder();
+		forwarders.push(server, client);
+		// First converge: the CSR has not been signed yet, so the install-ca listener fails closed.
+		server.converge([], [provider(providerPort, target)], { trust: null });
+		client.converge([consumer(localPort, providerPort)], [], { trust: null });
+		await Bun.sleep(30);
+		await expect(readOnce(localPort, 'x')).rejects.toBeTruthy();
+		// The signed leaves arrive in desired state: both listeners are replaced, not left plain.
+		const transition = server.converge([], [provider(providerPort, target)], { trust: material(ca, 'nod_b').trust });
+		expect(transition).toMatchObject({ stopped: 1, started: 1 });
+		client.converge([consumer(localPort, providerPort)], [], { trust: material(ca, 'nod_a').trust });
+		await Bun.sleep(50);
+		expect(await readOnce(localPort, 'now')).toBe('now');
+	});
+
 	test('with the flag off (no trust, no gateway) the forwarder behaves as before', async () => {
 		const target = await echoServer();
 		const providerPort = await freePort();
