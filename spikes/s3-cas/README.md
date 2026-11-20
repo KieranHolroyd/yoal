@@ -54,3 +54,10 @@ bun spikes/s3-cas/run-local.ts          # MinIO, Garage, RustFS in yoal-w0-s3-* 
 # or one target you already have:
 S3_ENDPOINT=… S3_BUCKET=… S3_ACCESS_KEY_ID=… S3_SECRET_ACCESS_KEY=… [S3_REGION=auto] bun spikes/s3-cas/spike.ts
 ```
+
+## Result (2026-11-20)
+
+All three local stores fail by the criteria as written. Numbers, per-condition codes and what they change
+in the plan are in [docs/SPIKES.md § S3](../../docs/SPIKES.md). In short: Garage ignores the conditions;
+MinIO and RustFS are correct CAS stores but have MD5 ETags and miss p99 at 200 writers. `ControlLease`
+can overlap two holders when a write's answer arrives late (`client-late-confirm`).

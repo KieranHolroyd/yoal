@@ -121,3 +121,119 @@ Verdict: build the MTA in Bun (D115). KumoMTA is no longer needed.
 - Litestream → R2 replication + `yoal restore` drill (needs an R2 bucket and credentials).
 - Re-measure DuckDB, control-plane and Caddy RSS on Debian 13.
 - Real-client check: connect Claude Code / Claude.ai to a deployed instance (CIMD vs DCR, protocol era).
+
+## S3 — Conditional writes as the only arbiter: local stores (2026-11-20)
+
+Question, criteria and fallback: [`spikes/s3-cas/README.md`](../spikes/s3-cas/README.md) (CLUSTERING §15.2 S3,
+§6.3; HA-PLAN W2). Rig: `bun spikes/s3-cas/run-local.ts` (one command; starts and removes the containers).
+R2, AWS S3, Azure Blob and GCS are not in this run; the same rig takes any S3 target from `S3_*`
+variables, and Azure/GCS are one `CasTarget` adapter each (S7).
+
+**Environment.** Apple M3 Pro, macOS 27.3, Bun 1.4.5, OrbStack Docker 29.8.2, shared with other lanes
+(load average 5–7 during the runs). One single-node container per store on a random loopback port, data on an
+anonymous volume, run one store at a time. The client is the production `S3ObjectStore`; the lease is the
+unchanged `ControlLease` (`packages/core/src/ha-lease.ts`).
+
+| Store | Version | Image |
+|---|---|---|
+| MinIO | `RELEASE.2025-10-15T17-29-55Z`, commit `9e49d5e7`, go1.24.8 | Built from the archived source tag by `spikes/s3-cas/stores/minio.Dockerfile` (no public image or binary remains: quay and Docker Hub refuse the pull, dl.min.io answers 410). Reports itself as `DEVELOPMENT.2025-10-15T17-29-55Z` |
+| Garage | v2.5.0 | `dxflrs/garage@sha256:677e5b758e4425a325b811c425c026bf35a4bf42f7ddbaa773de3f4fd779a5a5`, `replication_factor = 1`, lmdb |
+| RustFS | 1.0.6 | `rustfs/rustfs@sha256:ee717072290bec9b11abfc0365f8310b00df1cd9b3639943edae47bdef05044a`, single drive |
+
+**Method.** Per store: 20 `Date` readings against the Mac clock corrected by `sntp time.apple.com`
+(±21 ms); a table of single-key conditions; 50 identical-body writes; stale and ABA (X→Y→X) `If-Match`;
+an unconditional PUT under a held `If-Match`; 200 sequential write→GET→HEAD rounds; **10,000 CAS attempts by
+200 writers in 50 lock-step rounds over 60 s** (every 200 checked as a link in one ETag chain from the first
+object, winners re-read with GET and HEAD); a further 15 s free-running flood at 200 writers; a TCP proxy that
+holds one request or one response for 5 s against a client with a 2 s deadline (four cases); then 240 s of
+`ControlLease` with three contenders (policy scaled ÷5: TTL 6 s, fence 4 s, takeover 8 s), the primary frozen
+for 12 s every 15 s, one contender behind the proxy with 22–28 random holds of 1–3.5 s, and a final targeted
+case: a renewal answered 6 s late, then the primary frozen. MinIO and RustFS contention was run twice.
+
+**Response codes.**
+
+| Condition on PUT | MinIO | Garage | RustFS |
+|---|---|---|---|
+| `If-None-Match: *`, key absent | 200 | 200 | 200 |
+| `If-None-Match: *`, key exists | 412 PreconditionFailed | **200** | 412 PreconditionFailed |
+| `If-Match` current ETag | 200 | 200 | 200 |
+| `If-Match` stale ETag (other body) | 412 | **200** | 412 |
+| `If-Match` unknown ETag | 412 | **200** | 412 |
+| `If-Match` on an absent key | 404 NoSuchKey | **200** | 404 NoSuchKey |
+| `If-Match` stale, body since restored (ABA) | **200** | **200** | **200** |
+| `If-Match: W/<current>` | 412 | 200 | 412 |
+| `If-Match: *`, key exists | 200 | 200 | 200 |
+| `If-Match` + `If-None-Match: *` | 412 | 200 | 412 |
+| `If-None-Match: <current ETag>` (not defined for S3 PUT) | 412 (implements RFC 9110) | **200, object replaced** | 501 NotImplemented |
+| `If-None-Match: <other ETag>` | 200 | 200 | 501 NotImplemented |
+| Holder's `If-Match` after an unconditional PUT | 412 | **200** | 412 |
+| Retry of an applied `If-Match` after a client timeout | 412 | **200** | 412 |
+| Under 200-writer load, besides 200/412 | 14 and 24 ECONNRESET | — | 503 (4 and 54), GET 503 (22 and 1) |
+
+**Numbers per criterion** (two contention runs shown as run 1 / run 2).
+
+| Criterion | MinIO | Garage | RustFS |
+|---|---|---|---|
+| Exactly one 200 per epoch, never two holders | **PASS** — 351 / 251 wins, 1,338 in the flood; every 200 one link of the chain; 0 ETags consumed twice | **FAIL** — 10,000 of 10,000 attempts got 200 across 146 epochs; 144 epochs with two or more 200s | **PASS** — 24 / 25 wins, 7 in the flood; chain intact |
+| 409/412, never 200, for a stale `If-Match` | **PASS** for a stale ETag; **FAIL** in the ABA form (200) | **FAIL** (200 for stale, unknown and absent) | **PASS** for a stale ETag; **FAIL** in the ABA form (200) |
+| The ETag changes on every write | **FAIL** — 50 identical-body writes, 1 ETag (content MD5) | **FAIL** — same | **FAIL** — same |
+| p99 PUT ≤ 300 ms (200 writers) | **FAIL** — p50 104 / 124 ms, p99 371 / 372 ms, max 1.1 / 3.6 s (sequential p99 16 ms) | PASS — p99 208 ms (meaningless: nothing is compared) | **FAIL** — p50 52 / 48 ms, p99 4,013 / 4,381 ms, max 5.0 s; the 60 s schedule took 89 s; flood managed 819 attempts in 15 s (sequential p99 9 ms) |
+| Store time within 5 s of true time | **PASS** — −1,004 to −24 ms | **PASS** — −912 to −33 ms | **PASS** — −886 to −10 ms |
+| 501 for an unsupported condition, never silent success | **PASS** — no silent success (MinIO evaluates `If-None-Match: <etag>`) | **FAIL** — every condition ignored with 200 | **PASS** — 501 |
+| T1 `If-None-Match: *` on existing key refused | PASS | **FAIL** | PASS |
+| T2 unconditional PUT breaks a held `If-Match` | PASS | **FAIL** | PASS |
+| T3 read-after-write (GET and HEAD, 200 sequential + every winner) | PASS — 0 stale | PASS sequentially; under contention n/a | PASS — 0 stale |
+| T4 held request/response (5 s, client deadline 2 s) | **PASS** — applied-then-timed-out retry 412; late stale write lost to the competitor; late copy lost to the retry; waited 200 after 5.0 s matched a read | **FAIL** — the retry got a second 200; the late stale write replaced the competitor's and the retry's | **PASS** — as MinIO |
+| T5 `ControlLease`, 3 contenders, 240 s | **PASS** — 15 terms, 12 freezes, 24 holds, 14 fences, 0 overlaps, epochs 1→15 | **FAIL** — 1 overlap (683 ms) with two primaries at epoch 2 | **PASS** — 14 terms, 12 freezes, 28 holds, 13 fences, 0 overlaps, epochs 1→14 |
+
+**Verdict.** By the criteria as written, **all three fail**, so none is offered as an arbiter (HA-PLAN W2
+fallback: per store, not offered; installs on a local store get no automatic promotion, CLUSTERING §15.4 S3).
+The failures are of two different kinds:
+
+- **Garage v2.5.0 has no conditional PUT and says so nowhere.** It ignores `If-Match` and `If-None-Match`
+  and answers 200, so the real `ControlLease` produced two primaries at one epoch. Hard fail.
+- **MinIO and RustFS are correct compare-and-swap stores** — one winner per ETag across 20,000+ contended
+  attempts, stale and late writes refused, no stale reads, no lease overlap under chaos — and fail on
+  (a) the ETag criterion, because their ETag is the body's MD5, and (b) p99 at 200 writers on this shared
+  laptop. RustFS also serialises badly under contention (503s, 4–5 s tails, schedule overrun).
+
+**Fallback triggered.** Per store, not offered as an arbiter (MinIO, Garage, RustFS). Not a global fail:
+R2/S3/Azure/GCS are still to run.
+
+**What this proves wrong in the plan.**
+
+1. *"The ETag changes on every write"* is not a store property of any MD5-ETag store. AWS S3 and R2 also use
+   the MD5 for single-part uploads without SSE-KMS, so they will most likely fail it too (not tested).
+   Proposal: make it a client guarantee. Every lease body carries a per-write nonce or counter, so no two
+   writes are byte-identical and the ABA case cannot arise. Then judge stores on stale/ABA refusal for
+   lease-shaped bodies. Today's `ControlLease` bodies differ in practice (`expiresAt` moves with each
+   renewal), but nothing guarantees it: two renewals in one store second, or a store clock stepping back,
+   repeat a body.
+2. *"A 501 … means the store has no conditional PUT"* (§6.3) does not catch the store that actually lacks
+   it: Garage answers 200. Enabling HA must run an active conformance probe first (create-only on an existing
+   key → 412; stale `If-Match` → 412; unconditional PUT then the holder's `If-Match` → 412), which is the
+   first half of this rig. It must refuse the store otherwise.
+3. **`ControlLease` can overlap two holders when a write's answer is late (client bug, all stores).**
+   `#lastConfirmedAt` is taken when the response *arrives*, so a renewal answered *d* late lets `holds()`
+   run until apply + *d* + fence. A standby that watched the ETag from apply takes over at apply + takeover.
+   Overlap whenever *d* > takeover − fence (20 s at the default policy). Reproduced on every store at the
+   scaled policy: 1,450 ms (MinIO), 1,211 ms (Garage), 1,696 ms (RustFS) of two contenders passing
+   `holds()`. Fix (not applied; production code untouched): record the monotonic time *before* sending the
+   write and use that as the confirmation time; also give `S3ObjectStore` a request deadline below
+   `fenceAfterMs`, since it has none today.
+4. p99 ≤ 300 ms at 200 writers measures a load about 1,000× the lease's (three writers every 5 s; sequential
+   p99 was 9–16 ms everywhere). The criterion stands as written here. Whether it should gate a lease store is
+   for the plan owner to decide.
+
+**Not tested.**
+
+- R2, AWS S3, Azure, GCS (need credentials).
+- Multi-node and erasure-coded deployments, which could change the answer. MinIO and RustFS check the
+  condition under a distributed namespace lock; behaviour under partition or lock loss is unknown. Garage
+  has no conditional write to test, and its quorum/CRDT design offers no linearizable CAS (from its design,
+  not verified here).
+- Clock drift independent of the host: the containers share the OrbStack VM clock, which follows the Mac, so
+  the clock check proves only that the `Date` header is honest.
+- Latency on dedicated hardware, without OrbStack port forwarding and other lanes' load.
+- RustFS's 503 error code (the production client drops the body).
+- The fetch-layer variant of T4 for TLS endpoints, written for R2/S3 but not exercised here.

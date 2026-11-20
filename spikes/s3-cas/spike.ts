@@ -189,6 +189,7 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 		const statuses: Record<string, number> = {};
 		let tries = 0;
 		let errors = 0;
+		const errorKinds: Record<string, number> = {};
 		const attempt = async (writer: string) => {
 			try {
 				const read = await target.readVersioned(k);
@@ -208,8 +209,10 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 					const [get, head] = await Promise.all([target.readVersioned(k), target.head(k)]);
 					win.seenAfter.push(get.etag ?? 'none', head.etag ?? 'none');
 				}
-			} catch {
+			} catch (error) {
 				errors++;
+				const kind = error instanceof Error ? `${error.name}: ${error.message}`.slice(0, 80) : String(error);
+				errorKinds[kind] = (errorKinds[kind] ?? 0) + 1;
 			}
 		};
 		const started = Date.now();
@@ -260,6 +263,7 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 			seconds: Math.round(elapsed * 10) / 10,
 			attempts: tries,
 			transportErrors: errors,
+			errorKinds,
 			wins: wins.length,
 			statuses,
 			putP50: pct(latencies, 0.5),
@@ -274,7 +278,7 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 		check(`only-200-409-412${tag}`, 'losers get 409 or 412, nothing else', Object.keys(statuses).every((s) => ['200', '409', '412'].includes(s)) && errors === 0, `${JSON.stringify(statuses)}, ${errors} transport errors`);
 		check(`read-after-win${tag}`, 'T3: after a 200, GET and HEAD show that write or a later one', staleAfterWin === 0, `${staleAfterWin} of ${wins.length} winners read an older ETag`);
 		if (mode === 'rounds') {
-			check('attempts-10000', 'method: 10,000 CAS attempts by 200 writers over 60 s', tries >= attempts && writers >= 200, `${tries} attempts, ${writers} writers, ${result.seconds} s`);
+			check('attempts-10000', 'method: 10,000 CAS attempts by 200 writers over 60 s', tries + errors >= attempts && writers >= 200, `${tries + errors} attempts issued (${tries} answered), ${writers} writers, ${result.seconds} s`);
 			check('put-p99-under-300ms', 'p99 PUT ≤ 300 ms', result.putP99 <= 300, `p50 ${result.putP50} ms, p99 ${result.putP99} ms, max ${result.putMax} ms`);
 		}
 	};
