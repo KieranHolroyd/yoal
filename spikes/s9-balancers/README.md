@@ -86,3 +86,95 @@ host ports published, no cloud resource.
 
 One command runs everything, prints the numbers and removes every container, network and image it
 created: `./run.sh`.
+
+---
+
+## Results (2026-11-20)
+
+The numbers, verdicts and environment are in [docs/SPIKES.md](../../docs/SPIKES.md), section
+"S9 — Ingress behind a load balancer: HAProxy and keepalived". This section records what the rig
+prototyped, so W8 can build it.
+
+### Design prototyped (W8 builds this)
+
+- **Health endpoint: state files plus Caddy's `file` matcher, no reload to flip.** The agent owns
+  `/run/yoal/health/` and writes `ready` (routes converged, releases on disk, certificates loaded)
+  and `drain` (lame duck). A terminal route at the front of every server answers
+  `GET /.well-known/yoal/health`: `503 draining` if `drain` exists, else `503 notready` if `ready`
+  is missing, else `200 ok`. Every body is 16 bytes (one word, space-padded, newline);
+  `Server` is deleted. The route sits on `:443`, on `:80` (ahead of the redirect) and on a dedicated
+  plain-HTTP server (`yoal_health`, rig port 8099; the port is still to be reserved). Caddy stats
+  the file per probe, so flipping state costs no reload and survives an agent crash. The rejected
+  alternative, a `static_response` the agent rewrites, costs a full `POST /load` per flip, which
+  closes every client keep-alive behind an L4 balancer (criterion 4).
+- **Lame duck:** touch `drain` → wait `drainSeconds` (20 s) → admin `POST /stop` (graceful,
+  `grace_period` 10 s on `apps.http`). While draining, a second non-terminal route sets
+  `Connection: close` on every response so keep-alive clients leave before the stop. Both variants
+  (with and without `Connection: close`) had zero failures behind HAProxy; keep `Connection: close`,
+  because it is what drains an L4 balancer's existing sessions (a DOWN server keeps its sessions).
+- **Client address:** `ingress.trustedProxies` renders the `proxy_protocol` listener wrapper with
+  `allow: trustedProxies`, `fallback_policy: ignore` (a header from anyone else is read and
+  discarded; a connection without a header is accepted, so probes and direct or VIP clients work),
+  before the `tls` wrapper on `:443`, and on `:80` and the health server; plus server
+  `trusted_proxies` (static, same list), `client_ip_headers: ["X-Forwarded-For"]`,
+  `trusted_proxies_strict: 1`. Allowlists must match `client_ip` (H19); `remote_ip` (today's
+  Kubernetes allowlist, `apps/agent/src/caddy-config.ts:230`) is right only behind PROXY protocol.
+- **`@id` must be unique across the whole config**, so the health route needs one id per server.
+  `caddy validate` does not catch a duplicate; `caddy run` and `POST /load` refuse it.
+- `render.ts` `applyIngressPrototype()` is the exact JSON; it is applied after the real
+  `compileCaddyConfig()`.
+
+### Recipe sketch: HAProxy (generated as `tmp/conf/haproxy.cfg`)
+
+```haproxy
+backend be_tls                                # L4: TLS passes through (NLB / Azure LB / Hetzner LB shape)
+  mode tcp
+  balance leastconn
+  option httpchk
+  http-check send meth GET uri /.well-known/yoal/health
+  http-check expect status 200
+  default-server send-proxy-v2               # not on-marked-down shutdown-sessions (resets drained requests)
+  server ing-a 10.0.0.21:443 check port 8099 inter 5s fall 2 rise 2   # fastinter 1s should cut removal to ~8 s (untested)
+  timeout check 2s                            # (in defaults) worst-case removal ≈ inter + 2×timeout + inter ≈ 14 s
+
+backend be_http                               # L7: HAProxy keeps client keep-alives across Caddy reloads
+  mode http
+  http-reuse safe
+  retry-on conn-failure empty-response response-timeout
+  default-server send-proxy-v2 ssl verify none sni req.hdr(host)
+  server ing-a 10.0.0.21:443 check port 8099 inter 5s fall 2 rise 2
+```
+
+Probe: plain HTTP to the dedicated port, from HAProxy's own address, without a PROXY header.
+`trustedProxies` lists the addresses that **send** PROXY headers: each HAProxy's source address.
+Probe sources need not be listed. Prefer L7 (`mode http`) when Yoal reloads often: it was the only
+path with zero dropped client connections on a config change.
+
+### Recipe sketch: keepalived (`vip` driver; generated as `tmp/conf/keepalived-a.conf`)
+
+```
+vrrp_instance yoal_ingress {
+  state MASTER | BACKUP; interface eth0; virtual_router_id 59; priority 150 | 100; advert_int 1
+  authentication { auth_type PASS; auth_pass <8 chars> }   # VRRPv2 PASS is cleartext on the segment
+  virtual_ipaddress { <vip>/24 dev eth0 }
+  track_file { yoal_ingress }                               # no vrrp_script, no notify (HA-PLAN §10)
+}
+track_file yoal_ingress { file /run/yoal/health/vrrp; weight 0; init_file 0 overwrite }
+```
+
+Debian 13's keepalived 2.3.3 is built without `track_process`, so nothing script-free notices that
+Caddy died unless the agent (through a fixed helper verb) writes a non-zero value to the track
+file. The same file is the VIP's lame duck: `drain` for a few seconds, then write `1`. Consider
+`nopreempt` (both nodes `BACKUP`): the measured fail-back reset in-flight requests (not tested).
+
+### Deviations from the brief and plan
+
+- The ingress image is Debian 13, not Alpine: Alpine's keepalived has no `track_process`. Debian's has
+  none either, so criterion 3's tightened "only Caddy dies" case was run twice: undetected (no tracking
+  exists) and with the agent's `track_file` write simulated by the rig 1 s after the kill.
+- Caddy is built as `release.yml` builds it; `GOTOOLCHAIN=auto` resolved Go 1.24 to go1.26.0 because
+  Caddy 2.11.8's `go.mod` asks for it (the release runner's `setup-go` does the same).
+- Certificates come from Caddy's internal CA, not ACME (no DNS, no money); H20/S4 own real certificates.
+- The health port (8099) is free in `PLATFORM_HOST_PORTS` but not reserved; W8 reserves one.
+- Criterion 1 measures removal for `docker kill`, which the bridge reports as host-unreachable within
+  seconds; a powered-off host is silent. DOWN times are unaffected (checks time out at 2 s either way).

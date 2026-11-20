@@ -11,9 +11,7 @@ $.throws(false);
 const RIG = import.meta.dir;
 const CONF = join(RIG, 'tmp', 'conf');
 const OUT = join(RIG, 'tmp', 'out');
-// Empty, never recreate: the client container bind-mounts this directory.
 mkdirSync(OUT, { recursive: true });
-for (const f of readdirSync(OUT)) rmSync(join(OUT, f), { force: true });
 const results: Record<string, unknown> = {};
 /** Lame-duck runs per variant (`S9_REPEAT`). */
 const REPEAT = Number(process.env.S9_REPEAT ?? 3);
@@ -52,6 +50,8 @@ async function startIngress(name: string, config = 'g0') {
 
 async function up() {
 	await down();
+	// Empty, never recreate: the client container bind-mounts this directory.
+	for (const f of readdirSync(OUT)) rmSync(join(OUT, f), { force: true });
 	say('lab up');
 	const rendered = await $`bun run ${join(RIG, 'render.ts')}`.quiet();
 	if (rendered.exitCode !== 0) throw new Error(`render failed: ${rendered.stderr}`);
@@ -392,6 +392,8 @@ try {
 	}
 } finally {
 	if (!argv.length) await down().catch(() => {});
-	writeFileSync(join(OUT, 'results.json'), JSON.stringify(results, null, 2));
-	console.log(JSON.stringify(results, null, 2));
+	if (Object.keys(results).length > 0) {
+		writeFileSync(join(OUT, 'results.json'), JSON.stringify(results, null, 2));
+		console.log(JSON.stringify(results, null, 2));
+	}
 }
