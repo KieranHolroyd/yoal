@@ -1,7 +1,9 @@
 import { and, eq, isNotNull, isNull } from 'drizzle-orm';
-import { databases, disks, nodes, projects, storageInstances, workloads } from '@yoal/db';
+import { appVolumes, databaseBackups, databaseReplicas, databases, disks, nodes, projects, storageInstances, workloadReplicas, workloads } from '@yoal/db';
 import {
+	workloadSpecSchema,
 	type BlastRadiusItem,
+	type HaLevel,
 	type BlastRadiusView,
 	type Principal,
 	type TopologyNodeView,
@@ -10,6 +12,8 @@ import {
 } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { CoreError, NotFoundError } from './errors.ts';
+import { computeHaLevel, type HaLevelInput } from './ha-level.ts';
+import { parseJson } from './util.ts';
 
 /**
  * Topology and blast radius (docs/CLUSTERING.md §3.6 and §12, phase C0).
@@ -112,6 +116,7 @@ export class TopologyService {
 		}
 		const nodeIds = new Set(affected.map((row) => row.id));
 		const items: BlastRadiusItem[] = [];
+		const levels = this.haLevels(nodeRows);
 
 		for (const item of this.liveWorkloads()) {
 			if (!item.nodeId || !nodeIds.has(item.nodeId)) continue;
@@ -121,7 +126,7 @@ export class TopologyService {
 				name: item.name,
 				nodeId: item.nodeId,
 				orgId: item.orgId,
-				haLevel: 'L0',
+				haLevel: levels.workload(item.id),
 			});
 		}
 		for (const item of this.ctx.db
@@ -130,7 +135,7 @@ export class TopologyService {
 			.where(isNull(databases.deletedAt))
 			.all()) {
 			if (!nodeIds.has(item.nodeId)) continue;
-			items.push({ kind: 'database', ...item, haLevel: 'L0' });
+			items.push({ kind: 'database', ...item, haLevel: levels.database(item.id, item.nodeId) });
 		}
 		for (const item of this.ctx.db
 			.select({ id: storageInstances.id, name: storageInstances.name, nodeId: storageInstances.nodeId, orgId: storageInstances.orgId })
@@ -138,7 +143,7 @@ export class TopologyService {
 			.where(isNull(storageInstances.deletedAt))
 			.all()) {
 			if (!nodeIds.has(item.nodeId)) continue;
-			items.push({ kind: 'storage', ...item, haLevel: 'L0' });
+			items.push({ kind: 'storage', ...item, haLevel: levels.storage(item.nodeId) });
 		}
 		for (const disk of this.ctx.db.select().from(disks).all()) {
 			if (!nodeIds.has(disk.nodeId)) continue;
@@ -162,6 +167,61 @@ export class TopologyService {
 				storageInstances: items.filter((item) => item.kind === 'storage').length,
 				disks: items.filter((item) => item.kind === 'disk').length,
 			},
+		};
+	}
+
+	/**
+	 * HA levels from current placement (HA-PLAN G24, CLUSTERING §8.1), through `computeHaLevel`. Shown
+	 * whatever `RELEASE_PHASE` says: it describes where things run and changes no behaviour. A disk
+	 * is always `L0`; a storage instance is `L0` until bucket replication counts (C9).
+	 */
+	private haLevels(nodeRows: Array<typeof nodes.$inferSelect>): {
+		workload: (id: string) => HaLevel;
+		database: (id: string, nodeId: string) => HaLevel;
+		storage: (nodeId: string) => HaLevel;
+	} {
+		const zoneOf = new Map(nodeRows.map((row) => [row.id, row.zone]));
+		const placed = (nodeIds: string[]) => ({ nodes: new Set(nodeIds).size, zones: new Set(nodeIds.map((id) => zoneOf.get(id) ?? 'default')).size });
+		const level = (input: HaLevelInput) => computeHaLevel(input).level;
+		return {
+			workload: (id) => {
+				const row = this.ctx.db.select().from(workloads).where(eq(workloads.id, id)).get();
+				if (!row?.nodeId) return 'L0';
+				const spec = workloadSpecSchema.safeParse(parseJson<unknown>(row.specJson, null)).data;
+				const copies = this.ctx.db.select({ nodeId: workloadReplicas.nodeId }).from(workloadReplicas).where(eq(workloadReplicas.workloadId, id)).all();
+				const nodeIds = copies.length > 0 ? copies.map((copy) => copy.nodeId) : [row.nodeId];
+				const volumes = this.ctx.db.select({ id: appVolumes.id }).from(appVolumes).where(and(eq(appVolumes.projectId, row.projectId), isNull(appVolumes.deletedAt))).all();
+				return level({
+					kind: 'workload',
+					copies: copies.length > 0 ? copies.length : (spec?.replicas ?? 1),
+					...placed(nodeIds),
+					verifiedBackup: false,
+					http: spec?.ingress !== 'none',
+					pinned: Boolean(spec?.data) || volumes.length > 0,
+				});
+			},
+			database: (id, nodeId) => {
+				const replicas = this.ctx.db
+					.select({ nodeId: databaseReplicas.nodeId, status: databaseReplicas.status })
+					.from(databaseReplicas)
+					.where(eq(databaseReplicas.databaseId, id))
+					.all()
+					.filter((replica) => replica.status === 'streaming' || replica.status === 'lagging');
+				const verified = this.ctx.db
+					.select({ id: databaseBackups.id })
+					.from(databaseBackups)
+					.where(and(eq(databaseBackups.databaseId, id), isNotNull(databaseBackups.verifiedAt)))
+					.get();
+				return level({
+					kind: 'database',
+					copies: 1 + replicas.length,
+					...placed([nodeId, ...replicas.map((replica) => replica.nodeId)]),
+					verifiedBackup: Boolean(verified),
+					http: false,
+					pinned: false,
+				});
+			},
+			storage: (nodeId) => level({ kind: 'storage', copies: 1, ...placed([nodeId]), verifiedBackup: false, http: false, pinned: false }),
 		};
 	}
 

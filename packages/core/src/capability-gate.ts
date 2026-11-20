@@ -127,7 +127,7 @@ export function featureFlagsForGate(config: Pick<CoreConfig, 'features'>): Capab
  * - without `ENDPOINTS_GATEWAY` and `endpoints-gateway`: `readEndpoints`, `nodeTrust`, `workloads[].addHosts`,
  *   `serviceEndpoints[].role|gatewayAddress|trust|version` (non-primary entries are dropped),
  *   `serviceProviders[].clientAuth|allowedClientNodeIds`;
- * - without `RELEASE_PHASE` and `release-phase`: `releaseCommands`, `workloads[].readinessPath|drainSeconds|
+ * - without `RELEASE_PHASE` and `release-phase`: `releaseCommands`, `imagePrePulls`, `workloads[].readinessPath|drainSeconds|
  *   stopTimeoutSeconds`, `routes[].readinessPath`.
  * Returns `state` itself when nothing was removed.
  */
@@ -151,8 +151,8 @@ export function gateDesiredState(state: DesiredState, capabilities: readonly str
 		set('serviceProviders', mapIfChanged(next.serviceProviders, stripProvider));
 	}
 	if (!release) {
-		if (next.releaseCommands !== undefined) {
-			const { releaseCommands: _commands, ...rest } = next;
+		if (next.releaseCommands !== undefined || next.imagePrePulls !== undefined) {
+			const { releaseCommands: _commands, imagePrePulls: _pulls, ...rest } = next;
 			next = rest;
 		}
 		set('routes', mapIfChanged(next.routes, stripRoute));

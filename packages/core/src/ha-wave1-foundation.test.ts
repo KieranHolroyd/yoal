@@ -13,11 +13,6 @@ import {
 	objectStoreKindAllowed,
 } from './capability-gate.ts';
 import { assertReleasePhaseSpec } from './release-phase-gate.ts';
-import { computeHaLevel } from './ha-level.ts';
-import { judgeCanary } from './canary-judge.ts';
-import { createAzureObjectStore, createGcsObjectStore, createObjectStore } from './object-store-factory.ts';
-import { ReleaseCommandScheduler } from './release-commands.ts';
-import { NodeCaService } from './node-ca.ts';
 import { S3ObjectStore, LocalObjectStore, storageKindForDb } from './object-store.ts';
 import { buildPrincipal } from './orgs.ts';
 import { createCore, type Core } from './index.ts';
@@ -239,52 +234,6 @@ describe('release phase refusals (H25)', () => {
 			expect(() => assertReleasePhaseSpec(on, { [field]: value })).not.toThrow();
 		}
 		expect(() => assertReleasePhaseSpec(off, { runtime: 'process', port: 3000 })).not.toThrow();
-	});
-});
-
-describe('stubs are in place and fail loudly', () => {
-	test('each names its owning lane', () => {
-		expect(() => computeHaLevel({ kind: 'workload', copies: 1, nodes: 1, zones: 1, verifiedBackup: false, http: true, pinned: false })).toThrow('lane C');
-		expect(() =>
-			judgeCanary({
-				rollout: { canary: 1, soakSeconds: 60, maxUnavailable: 0 },
-				elapsedSeconds: 0,
-				canary: { requests: 0, status5xx: 0, durationP95Ms: 0 },
-				baseline: null,
-			}),
-		).toThrow('lane C');
-		const azure = createAzureObjectStore(
-			{ kind: 'azure', account: 'acct1', container: 'yoal', endpoint: null, pathPrefix: '', immutability: null },
-			{ kind: 'azure', accountKey: 'k'.repeat(20) },
-		);
-		expect(azure.kind).toBe('azure');
-		const gcs = createGcsObjectStore(
-			{ kind: 'gcs', bucket: 'yoal-ha', endpoint: null, pathPrefix: '', immutability: null },
-			{ kind: 'gcs', serviceAccountJson: JSON.stringify({ client_email: 'a@b', private_key: 'k' }) },
-		);
-		expect(gcs.kind).toBe('gcs');
-		const ctx = {} as never;
-		expect(() => new ReleaseCommandScheduler(ctx).gate('dep_1')).toThrow('lane C');
-		expect(() => new NodeCaService(ctx).bundle()).toThrow('lane B');
-	});
-
-	test('the factory builds an s3 store from a target with today\'s defaults', () => {
-		const store = createObjectStore(
-			{ kind: 's3', endpoint: 'https://minio.test', region: 'auto', bucket: 'b-1', pathPrefix: 'p', pathStyle: true, immutability: null },
-			{ kind: 's3', accessKeyId: 'AKIA', secretAccessKey: 'secret-1234' },
-		);
-		expect(store).toBeInstanceOf(S3ObjectStore);
-		expect(() =>
-			createObjectStore(
-				{ kind: 's3', endpoint: null, region: 'auto', bucket: 'b-1', pathPrefix: '', pathStyle: true, immutability: null },
-				{ kind: 'azure', sasToken: 's'.repeat(20) },
-			),
-		).toThrow('credentials are for azure');
-	});
-
-	test('every remote store still maps to the r2 storage column', () => {
-		expect(storageKindForDb('local')).toBe('local');
-		for (const kind of ['s3', 'azure', 'gcs'] as const) expect(storageKindForDb(kind)).toBe('r2');
 	});
 });
 

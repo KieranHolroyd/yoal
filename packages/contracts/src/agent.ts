@@ -12,7 +12,13 @@ import {
 	serviceProviderSchema,
 } from './endpoint.ts';
 import { nodeCsrSchema, nodeTrustDesiredSchema, pemCsrSchema } from './node-ca.ts';
-import { RELEASE_PHASE_CAPABILITY, releaseCommandResultSchema, releaseCommandTaskSchema } from './release-phase.ts';
+import {
+	RELEASE_PHASE_CAPABILITY,
+	imagePrePullSchema,
+	releaseCommandResultSchema,
+	releaseCommandTaskSchema,
+	upstreamCounterSchema,
+} from './release-phase.ts';
 import { OBJECT_STORE_KINDS_CAPABILITY } from './object-store-target.ts';
 import { databaseStudioPrincipalResultSchema, databaseStudioPrincipalTaskSchema } from './database-studio-principal.ts';
 import { accessModes, deploymentStatuses, nodeStatuses, runtimes } from './model.ts';
@@ -327,6 +333,11 @@ export const desiredStateSchema = z.object({
 	 * `releaseId`. Only for an agent that declares `release-phase`.
 	 */
 	releaseCommands: z.array(releaseCommandTaskSchema).max(20).optional(),
+	/**
+	 * Container images to pull ahead of a rollout or a failover (HA-PLAN H25 "image pre-pull").
+	 * Only for an agent that declares `release-phase`.
+	 */
+	imagePrePulls: z.array(imagePrePullSchema).max(200).optional(),
 	/** Public storage endpoints this node serves (S3): byte-for-byte proxies, not sites. */
 	storageRoutes: z.array(storageRouteSchema).default([]),
 	/**
@@ -421,8 +432,8 @@ export const RUN_LEASES_CAPABILITY = 'run-leases';
  * - `endpoints-gateway` (lane A): `serviceEndpoints[].role|gatewayAddress|trust|version`,
  *   `serviceProviders[].clientAuth|allowedClientNodeIds`, `readEndpoints`, `nodeTrust`,
  *   `workloads[].addHosts`, and sends `nodeCsr`.
- * - `release-phase` (lane D): `releaseCommands`, `workloads[].readinessPath|drainSeconds|
- *   stopTimeoutSeconds`, `routes[].readinessPath`, and sends `releaseCommandResults`.
+ * - `release-phase` (lane D): `releaseCommands`, `imagePrePulls`, `workloads[].readinessPath|drainSeconds|
+ *   stopTimeoutSeconds`, `routes[].readinessPath`, and sends `releaseCommandResults` and `upstreamCounters`.
  * - `object-store-kinds` (lane E): parses PITR activations with `databasePitrAnyActivationSchema`
  *   and renders `azure`/`gcs` repositories from their top-level `store` and `storeCredentials`.
  *   This group is not in desired state: a PITR repository reaches the node only through the
@@ -511,6 +522,11 @@ export const heartbeatSchema = z.object({
 	nodeCsr: nodeCsrSchema.optional(),
 	/** Progress and outcomes of `releaseCommands` since the last heartbeat (HA-PLAN H25). */
 	releaseCommandResults: z.array(releaseCommandResultSchema).max(20).optional(),
+	/**
+	 * Per-upstream request counters since the previous heartbeat (HA-PLAN H25 "Canary"), from this
+	 * node's own Caddy. Sent by an agent that declares `release-phase`.
+	 */
+	upstreamCounters: z.array(upstreamCounterSchema).max(2_000).optional(),
 	/** What the node's storage service last applied (D48). */
 	storage: nodeStorageStatusSchema.optional(),
 	/** Mounts and block devices the node reports, from which Settings → Storage lists disk candidates (D72, D80). */

@@ -219,6 +219,8 @@ export class FailoverService {
 			this.#markOffline(now, facts);
 			try {
 				this.#replicaTick(now, config, fence, facts, report, alerts);
+				// Release-command leases first: a rollout reads their gates this tick (H25, I16).
+				this.ctx.releaseCommands.tick(now);
 				// Rollouts and autoscaling are this controller's too: one holder, so two control
 				// planes never restart or scale the same app (SCALING §4, §5).
 				alerts.push(...this.ctx.workloads.rolloutTick(now));

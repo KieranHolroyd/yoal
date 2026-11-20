@@ -801,6 +801,36 @@ export class DeploymentService {
 	}
 
 	/**
+	 * Abandon a deployment whose release command failed before any copy moved (HA-PLAN H25): put
+	 * the production and environment pointers back and restore the previous spec, but do not touch
+	 * the copies, which are already running it. `revertFailedRelease` is for a rollout that has
+	 * already reached a copy.
+	 */
+	abandonFailedRelease(project: ProjectRow, failedId: string | null, previousId: string, reason: string): void {
+		const now = this.ctx.now();
+		const production = failedId !== null && project.productionDeploymentId === failedId;
+		if (production) {
+			this.ctx.db
+				.update(projects)
+				.set({ productionDeploymentId: previousId, updatedAt: now })
+				.where(eq(projects.id, project.id))
+				.run();
+			const environment = this.ctx.environments.ensureProduction(project);
+			this.ctx.environments.setDeployment(environment, previousId);
+		}
+		this.ctx.workloads.syncDeployment(project, previousId, { auto: true, holdCopies: true });
+		this.ctx.projects.bump(project.orgId);
+		this.ctx.audit.record({
+			principal: buildSystemPrincipal('system:rollout', project.orgId),
+			action: 'deployment.auto_rollback',
+			resource: 'deployment',
+			resourceId: previousId,
+			args: { project: project.slug, from: failedId, production, reason },
+			result: 'ok',
+		});
+	}
+
+	/**
 	 * Put the release before a failed one back, on the controller's own authority (SCALING §4).
 	 * When the failed deployment was production the pointer moves back with it, so routes, the
 	 * environment and the workload agree; otherwise only the workload returns to what it ran.

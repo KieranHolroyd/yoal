@@ -1,7 +1,11 @@
 import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
-import { deployments, nodes, projects, releases, workloadReplicas, workloads } from '@yoal/db';
+import { deploymentCanaries, deployments, nodes, projects, releases, workloadReplicas, workloads } from '@yoal/db';
 import {
 	RUN_LEASES_CAPABILITY,
+	resolvedSpread,
+	type CanarySample,
+	type ImagePrePull,
+	type UpstreamCounter,
 	type ScalingMode,
 	githubRunnerSecretNames,
 	githubRunnerTarget,
@@ -44,6 +48,7 @@ import {
 } from '@yoal/contracts';
 import { featureEnabled } from './config.ts';
 import { assertReleasePhaseSpec } from './release-phase-gate.ts';
+import { judgeCanary, CANARY_MIN_REQUESTS } from './canary-judge.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import { matchingPlacementSpec, resolvePlacement, type PlacementCandidate } from './placement.ts';
@@ -87,6 +92,15 @@ export type MoveReason = 'failover' | 'drain' | 'rebalance' | 'manual';
 
 const ACTIVE_STATUSES: WorkloadStatus[] = ['pending', 'starting', 'running'];
 
+/**
+ * How long the edge's per-upstream counter windows are kept in memory for a canary judge. A soak is
+ * at most an hour (`rolloutSpecSchema`), and the judge only reads a window that begins at the
+ * canary's settle time; the control plane losing a window makes it wait for the next heartbeat.
+ */
+const UPSTREAM_COUNTER_RETENTION_MS = 2 * 60 * 60 * 1000;
+/** Most windows kept across all projects, so a large fleet cannot grow this without bound. */
+const UPSTREAM_COUNTER_LIMIT = 20_000;
+
 /** Seconds between a lease running out on a node and the fleet starting the worker elsewhere, at least. */
 export const RUN_LEASE_MARGIN_SECONDS = 30;
 
@@ -113,6 +127,14 @@ export interface ResolvedWorkload {
  * public spec fields plus secret *references*. Values are fetched at activation time.
  */
 export class WorkloadService {
+	/**
+	 * The edge's per-upstream counter windows, as heartbeat reports deliver them (HA-PLAN H25
+	 * "Canary"). Kept in memory on purpose: a window is only read by the judge at the moment it
+	 * runs, a lost window makes the judge wait for the next heartbeat, and the counters never
+	 * leave the control plane (H28: the canary does not depend on ClickHouse).
+	 */
+	private readonly upstreamCounters: Array<UpstreamCounter & { nodeId: string }> = [];
+
 	constructor(private readonly ctx: CoreContext) {}
 
 	/** Load the project's configured spec; `runtime` projects must have one. */
@@ -229,7 +251,7 @@ export class WorkloadService {
 			const planned = planReplicas({
 				count: spec.replicas,
 				memoryMb: spec.memoryMb,
-				spread: clusterConfig.spread,
+				spread: resolvedSpread(spec.placement, placementSpec, clusterConfig.spread),
 				cpuMillis: Math.round((spec.cpus ?? 1) * 1000),
 				strategy: scheduling.strategy,
 				stack: mode === 'stack',
@@ -525,7 +547,7 @@ export class WorkloadService {
 	}
 
 	/** Re-point the workload at an existing deployment (promote/rollback); placement is preserved. */
-	syncDeployment(project: ProjectRow, deploymentId: string, options: { auto?: boolean } = {}): void {
+	syncDeployment(project: ProjectRow, deploymentId: string, options: { auto?: boolean; holdCopies?: boolean } = {}): void {
 		const deployment = this.ctx.db.select().from(deployments).where(eq(deployments.id, deploymentId)).get();
 		if (!deployment || !deployment.workloadJson || !deployment.nodeId) return;
 		const parsed = workloadSpecSchema.safeParse(parseJson<unknown>(deployment.workloadJson, null));
@@ -548,7 +570,7 @@ export class WorkloadService {
 					this.attachmentsVersion(project.id, deployment.nodeId, spec.runtime, project.orgId, spec),
 				),
 			},
-			{ keepSpread: true, auto: options.auto },
+			{ keepSpread: true, auto: options.auto, holdCopies: options.holdCopies },
 		);
 	}
 
@@ -558,7 +580,7 @@ export class WorkloadService {
 		deploymentId: string,
 		resolved: ResolvedWorkload,
 		/** `auto` marks an automatic rollback: its own failure pauses instead of rolling back again. */
-		options: { keepSpread?: boolean; auto?: boolean } = {},
+		options: { keepSpread?: boolean; auto?: boolean; holdCopies?: boolean } = {},
 	): void {
 		const now = this.ctx.now();
 		const existing = this.ctx.db.select().from(workloads).where(eq(workloads.projectId, project.id)).get();
@@ -627,23 +649,32 @@ export class WorkloadService {
 		const scheduling = this.ctx.cluster.get().scheduling;
 		const changed = running !== null && running !== deploymentId;
 		const total = this.ctx.db.select({ id: workloadReplicas.id }).from(workloadReplicas).where(eq(workloadReplicas.workloadId, id)).all().length;
-		const rolling = changed && total >= 2 && kept.length > 0 && scheduling.rollingDeploys && this.copyRelease(running) !== null;
+		// A release command gates the rollout (H25, I16): every copy stays on the old release until
+		// it succeeds, whichever the scheduling settings say. No surge either: the temporary copy
+		// would be the first thing to run the new release.
+		const releaseSpec = featureEnabled(this.ctx.config, 'RELEASE_PHASE') ? resolved.spec.release : undefined;
+		const gated = Boolean(releaseSpec) && changed && running !== null && kept.length > 0 && this.copyRelease(running) !== null;
+		const rolling = !options.holdCopies && (gated || (changed && total >= 2 && kept.length > 0 && scheduling.rollingDeploys && this.copyRelease(running) !== null));
 		let waiting = 0;
-		for (const row of kept) {
-			// Mid-rollout, a copy not yet reached still runs the release before that one.
-			const runs = row.deploymentId ?? running;
-			const previous = rolling && runs && runs !== deploymentId && this.copyRelease(runs) !== null ? runs : null;
-			if (previous) waiting += 1;
-			this.ctx.db
-				.update(workloadReplicas)
-				.set({
-					deploymentId: previous,
-					appliedVersion: null,
-					...(changed && !previous && runs !== deploymentId ? { status: 'pending' as const } : {}),
-					updatedAt: now,
-				})
-				.where(eq(workloadReplicas.id, row.id))
-				.run();
+		// A release command that failed before any copy moved reverts the pointers only: its copies
+		// are already where they belong, and re-writing them would be a rollout of its own.
+		if (!options.holdCopies) {
+			for (const row of kept) {
+				// Mid-rollout, a copy not yet reached still runs the release before that one.
+				const runs = row.deploymentId ?? running;
+				const previous = rolling && runs && runs !== deploymentId && this.copyRelease(runs) !== null ? runs : null;
+				if (previous) waiting += 1;
+				this.ctx.db
+					.update(workloadReplicas)
+					.set({
+						deploymentId: previous,
+						appliedVersion: null,
+						...(changed && !previous && runs !== deploymentId ? { status: 'pending' as const } : {}),
+						updatedAt: now,
+					})
+					.where(eq(workloadReplicas.id, row.id))
+					.run();
+			}
 		}
 		if (waiting > 0)
 			this.ctx.db
@@ -651,8 +682,22 @@ export class WorkloadService {
 				.set({ rolloutStatus: 'rolling', rolloutStartedAt: now, rolloutFromDeploymentId: running })
 				.where(eq(workloads.id, id))
 				.run();
-		else if (changed && total === 0 && existing && scheduling.rollingDeploys && scheduling.surgeDeploys)
+		else if (!options.holdCopies && changed && total === 0 && existing && scheduling.rollingDeploys && scheduling.surgeDeploys && !releaseSpec)
 			this.startSurge(project, { ...existing, ...values, id }, resolved.spec, running!, existing.status === 'running', now);
+		// Queue the release command (idempotent: the I16 index is the lease). A superseded deploy's
+		// unstarted attempt is cancelled so its migrations never run after the fact. A first deploy
+		// has no previous release to hold, so its copies are withheld by desired state instead.
+		if (releaseSpec && (changed || running === null) && !options.holdCopies) {
+			this.ctx.releaseCommands.cancelSuperseded(id, deploymentId);
+			this.ctx.releaseCommands.schedule({
+				releaseId: deploymentId,
+				orgId: project.orgId,
+				projectId: project.id,
+				workloadId: id,
+				spec: releaseSpec,
+				createdBy: null,
+			});
+		}
 		this.reconcileEndpoints(project.id, nodesBefore);
 	}
 
@@ -671,7 +716,7 @@ export class WorkloadService {
 			count: 2,
 			memoryMb: spec.memoryMb,
 			cpuMillis: Math.round((spec.cpus ?? 1) * 1000),
-			spread: this.ctx.cluster.get().replicas.spread,
+			spread: resolvedSpread(spec.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread),
 			strategy: this.ctx.cluster.get().scheduling.strategy,
 			reason: 'surge',
 			existing: [{ index: 0, nodeId: workload.nodeId }],
@@ -936,6 +981,14 @@ export class WorkloadService {
 		const identityNode = this.nodeHasCapability(nodeId, WORKLOAD_IDENTITY_CAPABILITY);
 		return rows.flatMap(({ workload, project, deployment: current }) => {
 			const currentSpec = this.specOf(project, workload);
+			// A release command holds the new release back (H25, I16): until it succeeds every copy
+			// keeps the deployment before, and a first deploy with no old copy renders nothing, so
+			// the app cannot start ahead of its migrations.
+			const awaitingRelease = this.awaitingRelease(workload, currentSpec);
+			const held = awaitingRelease ? this.copyRelease(workload.rolloutFromDeploymentId) : null;
+			if (awaitingRelease && !held) return [];
+			const released = held?.deployment ?? current;
+			const releasedSpec = held?.spec ?? currentSpec;
 			const isolated = featureEnabled(this.ctx.config, 'ORG_NETWORKS');
 			const volumes = this.ctx.appVolumes.mountsForWorkload(workload.id);
 			// One copy of this workload as it should run on this node, on the given release. Every
@@ -999,15 +1052,15 @@ export class WorkloadService {
 					...(identityNode && workloadGetsIdentity(spec) ? { identity: true as const } : {}),
 				};
 			};
-			const spec = currentSpec;
-			const base = render(current, spec, workload.cpus);
+			const spec = releasedSpec;
+			const base = render(released, spec, workload.cpus);
 			// A spread workload carries only the copies assigned to this node (C4).
 			const assigned = replicaRows.filter((row) => row.workloadId === workload.id);
 			if (assigned.length > 0) {
 				return assigned.map((row) => {
 					const id = workloadReplicaId(workload.id, row.replicaIndex);
 					// Not yet reached by a rollout: this copy still runs the release before.
-					const previous = row.deploymentId && row.deploymentId !== current.id ? this.copyRelease(row.deploymentId) : null;
+					const previous = row.deploymentId && row.deploymentId !== released.id ? this.copyRelease(row.deploymentId) : null;
 					const copy = previous ? render(previous.deployment, previous.spec, Math.round(previous.spec.cpus)) : base;
 					const copySpec = previous?.spec ?? spec;
 					return {
@@ -1035,6 +1088,61 @@ export class WorkloadService {
 				};
 			});
 		});
+	}
+
+	/**
+	 * Whether a release command still holds this workload's new deployment back (HA-PLAN H25,
+	 * I16). Only a spec written while `RELEASE_PHASE` was on can carry `release`; with the flag off
+	 * the leftover is inert, exactly as the capability gate treats it.
+	 */
+	private awaitingRelease(workload: WorkloadRow, spec: WorkloadSpec): boolean {
+		if (!featureEnabled(this.ctx.config, 'RELEASE_PHASE') || !spec.release) return false;
+		return this.ctx.releaseCommands.gate(workload.deploymentId).state !== 'succeeded';
+	}
+
+	/**
+	 * Container images this node should pull now, so a rollout or a failover onto it does not wait
+	 * for the pull (HA-PLAN H25 "image pre-pull"). Only the new release's image, and only for a node
+	 * that holds a copy of the app or could take one while the app is rolling; nothing runs and no
+	 * credentials are carried here (the agent pulls under the app's own registry identity).
+	 */
+	imagePrePullsForNode(nodeId: string): ImagePrePull[] {
+		if (!featureEnabled(this.ctx.config, 'RELEASE_PHASE')) return [];
+		const pulls: ImagePrePull[] = [];
+		const rows = this.ctx.db
+			.select({ workload: workloads, project: projects })
+			.from(workloads)
+			.innerJoin(projects, eq(projects.id, workloads.projectId))
+			.innerJoin(deployments, eq(deployments.id, workloads.deploymentId))
+			.where(and(isNull(projects.deletedAt), eq(deployments.status, 'active')))
+			.all();
+		for (const { workload, project } of rows) {
+			if (pulls.length >= 200) break;
+			const spec = this.specOf(project as ProjectRow, workload);
+			if (spec.runtime !== 'container' || !spec.image) continue;
+			const image = desiredImage(spec);
+			if (!image) continue;
+			const copies = this.ctx.db
+				.select()
+				.from(workloadReplicas)
+				.where(eq(workloadReplicas.workloadId, workload.id))
+				.all()
+				.sort((a, b) => a.replicaIndex - b.replicaIndex);
+			const here = copies.find((copy) => copy.nodeId === nodeId);
+			const rolling = workload.rolloutStatus === 'rolling';
+			if (here) {
+				// Already on this image: nothing to pull.
+				const running = here.deploymentId && here.deploymentId !== workload.deploymentId ? this.copyRelease(here.deploymentId) : null;
+				if (running && desiredImage(running.spec) === image) continue;
+				pulls.push({ workloadId: workload.id, image });
+				continue;
+			}
+			if (!rolling) continue;
+			// The failover reserve: one possible destination for a copy while the app rolls.
+			const candidate = this.copyCandidates(project as ProjectRow, spec, workload.id).find((node) => node.id === nodeId);
+			if (candidate) pulls.push({ workloadId: workload.id, image });
+		}
+		return pulls;
 	}
 
 	/**
@@ -1201,7 +1309,8 @@ export class WorkloadService {
 		}
 		const workload = this.ctx.db.select().from(workloads).where(eq(workloads.id, row.workloadId)).get();
 		if (!workload) return { ok: false, message: 'The workload no longer exists.' };
-		const spec = this.specOf(this.requireProject(workload.projectId), workload);
+		const project = this.requireProject(workload.projectId);
+		const spec = this.specOf(project, workload);
 		const siblings = this.ctx.db
 			.select()
 			.from(workloadReplicas)
@@ -1210,7 +1319,7 @@ export class WorkloadService {
 			.filter((other) => other.id !== row.id);
 		const all = this.candidates({ excludeWorkloadId: workload.id });
 		const zoneOf = new Map(all.map((candidate) => [candidate.id, candidate.zone ?? 'default']));
-		const spread = this.ctx.cluster.get().replicas.spread;
+		const spread = resolvedSpread(spec.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread);
 		const keptNodes = new Set(siblings.map((other) => other.nodeId));
 		const keptZones = new Set(siblings.map((other) => zoneOf.get(other.nodeId) ?? 'default'));
 		// The siblings still hold their own shares; only this copy's room was given back above.
@@ -1426,7 +1535,6 @@ export class WorkloadService {
 			cpuCapacityMillis: candidate.cpuBudgetMillis ?? null,
 			reservedCpuMillis: candidate.reservedCpuMillis ?? 0,
 		}));
-		const spread = this.ctx.cluster.get().replicas.spread;
 		const rows = this.ctx.db
 			.select({ workload: workloads, project: projects })
 			.from(workloads)
@@ -1441,6 +1549,7 @@ export class WorkloadService {
 		for (const { workload, project } of rows) {
 			if (!workload.nodeId || !ACTIVE_STATUSES.includes(workload.status)) continue;
 			const spec = this.specOf(project as ProjectRow, workload);
+			const spread = resolvedSpread(spec.placement, placementSpecFor(project as ProjectRow), this.ctx.cluster.get().replicas.spread);
 			const allowed = candidates.filter((candidate) => this.canHost(candidate.id, spec, workload.projectId)).map((candidate) => candidate.id);
 			const allowedNodeIds = allowed.length === candidates.length ? null : allowed;
 			const copies = replicaRows.filter((row) => row.workloadId === workload.id);
@@ -1512,6 +1621,33 @@ export class WorkloadService {
 		const spec = previous?.spec ?? this.specOf(project, row);
 		const deploymentId = previous?.deployment.id ?? row.deploymentId;
 		if (!copy && replica >= spec.replicas) throw new NotFoundError('Workload replica');
+		return this.activationPayload(nodeId, row, project, spec, deploymentId, desiredId);
+	}
+
+	/**
+	 * The activation a release-command run gets (HA-PLAN H25): the new release's environment and
+	 * secrets, as a copy of that release would get them on this node. The node holds the run lease,
+	 * not necessarily a workload copy of its own, so this does not assert copy placement; the
+	 * scheduler only serves a run to the node it leased it to.
+	 */
+	releaseActivation(nodeId: string, workloadId: string, releaseId: string): WorkloadActivation {
+		const row = this.ctx.db.select().from(workloads).where(eq(workloads.id, workloadId)).get();
+		if (!row) throw new NotFoundError('Workload');
+		const release = this.copyRelease(releaseId);
+		if (!release || release.deployment.projectId !== row.projectId) throw new NotFoundError('Release');
+		const project = this.requireProject(row.projectId);
+		return this.activationPayload(nodeId, row, project, release.spec, releaseId, workloadId);
+	}
+
+	/** The env, files and registry credentials one spec gets on one node. */
+	private activationPayload(
+		nodeId: string,
+		row: WorkloadRow,
+		project: ProjectRow,
+		spec: WorkloadSpec,
+		deploymentId: string | null,
+		desiredId: string,
+	): WorkloadActivation {
 		const appErrorEnv = this.ctx.appErrors.consumerEnv(row.projectId);
 		if (appErrorEnv.SENTRY_DSN && deploymentId) {
 			appErrorEnv.SENTRY_RELEASE = deploymentId;
@@ -1712,6 +1848,21 @@ export class WorkloadService {
 	}
 
 	/**
+	 * Keep the edge's counter windows for the canary judge (HA-PLAN H25 "Canary"). Only kept while
+	 * the release phase is on; sorted by `to` so old windows leave cheaply.
+	 */
+	recordUpstreamCounters(nodeId: string, counters: readonly UpstreamCounter[]): void {
+		if (!featureEnabled(this.ctx.config, 'RELEASE_PHASE')) return;
+		for (const counter of counters) this.upstreamCounters.push({ ...counter, nodeId });
+		const horizon = this.ctx.now() - UPSTREAM_COUNTER_RETENTION_MS;
+		let drop = 0;
+		while (drop < this.upstreamCounters.length && this.upstreamCounters[drop]!.to < horizon) drop++;
+		if (drop > 0) this.upstreamCounters.splice(0, drop);
+		const excess = this.upstreamCounters.length - UPSTREAM_COUNTER_LIMIT;
+		if (excess > 0) this.upstreamCounters.splice(0, excess);
+	}
+
+	/**
 	 * Per-copy status for spread replicas (C4): the failover controller completes a move when the
 	 * copy reports `running` from its new node. Only rows placed on the reporting node change.
 	 */
@@ -1747,10 +1898,134 @@ export class WorkloadService {
 	// ------------------------------------------------------------------ rolling deploys (SCALING §4)
 
 	/**
+	 * Pause, or roll back, a rollout that never touched a copy (a failed release command) or whose
+	 * canary failed. The previous release is known to work, so it comes back by itself once, as a
+	 * failed copy does; otherwise every copy stays where it is and a person decides.
+	 */
+	private failRolloutBeforeOrDuring(
+		workload: WorkloadRow,
+		project: ProjectRow | null | undefined,
+		rows: ReplicaRow[],
+		waiting: ReplicaRow[],
+		slug: string,
+		what: string,
+		now: number,
+		alerts: Array<{ key: string; title: string; detail: string; severity: 'warning' | 'info' }>,
+		someCopiesMoved = true,
+	): void {
+		const from = workload.rolloutFromDeploymentId;
+		if (project && from && !workload.rolloutAuto && this.ctx.cluster.get().scheduling.autoRollback && this.copyRelease(from)) {
+			const serving = waiting.length > 0 ? 'The app kept serving on the previous release throughout.' : '';
+			const detail = `${what} ${slug} was rolled back to its previous release automatically. ${serving}`.trim();
+			// Nothing rolled (a failed release command): the copies are already the previous release,
+			// so only the pointers move. Otherwise the copies that did roll are brought back by tick.
+			if (someCopiesMoved) this.ctx.deployments.revertFailedRelease(project, workload.deploymentId, from, what);
+			else this.ctx.deployments.abandonFailedRelease(project, workload.deploymentId, from, what);
+			this.ctx.db.update(workloads).set({ rollbackNote: detail, rollbackAt: now }).where(eq(workloads.id, workload.id)).run();
+			alerts.push({ key: `rollout:${workload.id}`, title: `${slug}: a failed release was rolled back`, detail, severity: 'warning' });
+			return;
+		}
+		const rest =
+			waiting.length > 0
+				? `The rollout is paused: ${waiting.length} of ${rows.length} ${waiting.length === 1 ? 'copy still runs' : 'copies still run'} the previous release and ${waiting.length === 1 ? 'keeps' : 'keep'} serving.`
+				: 'Every other copy is on the new release.';
+		const detail = `${what} ${rest} Roll back, or deploy a fix.`;
+		this.ctx.db.update(workloads).set({ rolloutStatus: 'paused', rolloutMessage: detail, updatedAt: now }).where(eq(workloads.id, workload.id)).run();
+		alerts.push({ key: `rollout:${workload.id}`, title: `Rollout of ${slug} paused`, detail, severity: 'warning' });
+	}
+
+	/** A deployment's canary state, created when its rollout first reaches the canary step. */
+	private ensureCanary(
+		workload: WorkloadRow,
+		spec: WorkloadSpec,
+		waiting: ReplicaRow[],
+		rows: ReplicaRow[],
+		now: number,
+	): typeof deploymentCanaries.$inferSelect | null {
+		const count = spec.rollout?.canary ?? 0;
+		if (count <= 0) return null;
+		const existing = this.ctx.db
+			.select()
+			.from(deploymentCanaries)
+			.where(eq(deploymentCanaries.deploymentId, workload.deploymentId))
+			.get();
+		if (existing) return existing;
+		const copies = [...(waiting.length > 0 ? waiting : rows)].sort((a, b) => a.replicaIndex - b.replicaIndex).slice(0, count);
+		if (copies.length === 0) return null;
+		this.ctx.db
+			.insert(deploymentCanaries)
+			.values({
+				deploymentId: workload.deploymentId,
+				workloadId: workload.id,
+				state: 'soaking',
+				canaryCopies: copies.length,
+				soakSeconds: spec.rollout!.soakSeconds,
+				copiesJson: JSON.stringify(copies.map((copy) => copy.id)),
+				startedAt: now,
+				updatedAt: now,
+			})
+			.run();
+		return this.ctx.db
+			.select()
+			.from(deploymentCanaries)
+			.where(eq(deploymentCanaries.deploymentId, workload.deploymentId))
+			.get()!;
+	}
+
+	/**
+	 * The edge's own counters for the canary copies and the copies still on the previous release,
+	 * over the soak window (H25, H28). A window belongs to a copy's node: a remote copy is dialled
+	 * as `http://<node address>`, a local one as a socket or loopback address the reporting node
+	 * itself serves. p95 across windows is request-weighted: an approximation, chosen so a short
+	 * quiet window cannot move it and it never needs ClickHouse.
+	 */
+	private canarySample(
+		project: ProjectRow,
+		rows: ReplicaRow[],
+		canaryIds: string[],
+		from: number,
+		now: number,
+	): { canary: CanarySample; baseline: CanarySample } {
+		const canary = new Set(canaryIds);
+		const canaryNodes = new Set(rows.filter((row) => canary.has(row.id)).map((row) => row.nodeId));
+		const addressOf = new Map(
+			this.ctx.db
+				.select({ id: nodes.id, address: nodes.publicAddress })
+				.from(nodes)
+				.all()
+				.flatMap((node) => (node.address ? [[node.address, node.id] as const] : [])),
+		);
+		const nodeOf = (counter: UpstreamCounter & { nodeId: string }): string => {
+			const remote = /^http:\/\/(.+)$/.exec(counter.upstream);
+			return (remote ? addressOf.get(remote[1]!) : counter.nodeId) ?? counter.nodeId;
+		};
+		const windows = this.upstreamCounters.filter(
+			(counter) => counter.projectId === project.id && counter.to > from && counter.from < now,
+		);
+		const aggregate = (selected: typeof windows): CanarySample => {
+			let requests = 0;
+			let status5xx = 0;
+			let weighted = 0;
+			for (const window of selected) {
+				requests += window.requests;
+				status5xx += window.status5xx;
+				weighted += window.durationP95Ms * window.requests;
+			}
+			return { requests, status5xx, durationP95Ms: requests > 0 ? weighted / requests : 0 };
+		};
+		return {
+			canary: aggregate(windows.filter((counter) => canaryNodes.has(nodeOf(counter)))),
+			baseline: aggregate(windows.filter((counter) => !canaryNodes.has(nodeOf(counter)))),
+		};
+	}
+
+	/**
 	 * Advance every rollout by at most one copy. A copy is restarted on the new release only when
 	 * every copy already on it is confirmed running, so a set never loses more than one copy at a
 	 * time. A copy that fails, or does not come up in time, pauses the rollout: the copies not yet
 	 * reached keep serving the previous release, and nothing more is touched until a human acts.
+	 * A release command gates the first copy (H25, I16); with `rollout.canary` the first copies
+	 * soak and are judged on the edge's own counters before the rest follow.
 	 * Called by the controller that holds the failover lease.
 	 */
 	rolloutTick(now: number = this.ctx.now()): Array<{ key: string; title: string; detail: string; severity: 'warning' | 'info' }> {
@@ -1772,6 +2047,20 @@ export class WorkloadService {
 				.sort((a, b) => Number(a.status === 'running') - Number(b.status === 'running') || a.replicaIndex - b.replicaIndex);
 			const updated = rows.filter((row) => !waiting.includes(row));
 			const slug = project?.slug ?? workload.projectId;
+			const spec = project ? this.specOf(project, workload) : null;
+			// The release command gates the whole rollout (H25, I16): a failed or expired run fails
+			// the deployment before any copy moves; a live one keeps waiting, never starts a copy.
+			const gate = spec?.release && featureEnabled(this.ctx.config, 'RELEASE_PHASE') ? this.ctx.releaseCommands.gate(workload.deploymentId) : null;
+			if (gate && gate.state !== 'succeeded') {
+				if (gate.state === 'failed') {
+					const what =
+						gate.run.status === 'timeout'
+							? `The release command for ${slug} timed out with an unknown outcome, so it is not run again automatically.`
+							: `The release command for ${slug} failed${gate.run.exitCode !== null ? ` (exit ${gate.run.exitCode})` : ''}${gate.run.error ? `: ${gate.run.error}` : '.'}`;
+					this.failRolloutBeforeOrDuring(workload, project, rows, waiting, slug, what, now, alerts, false);
+				}
+				continue;
+			}
 			const overdue = (row: ReplicaRow) => now - (row.rolledAt ?? row.updatedAt) >= timeoutMs;
 			// Restarted and not yet confirmed by its node, or placed and not yet up.
 			const unsettled = updated.filter((row) => row.appliedVersion !== null || row.status !== 'running');
@@ -1812,7 +2101,58 @@ export class WorkloadService {
 			}
 			// One at a time: every copy on the new release is confirmed before the next is touched.
 			if (unsettled.length > 0) continue;
-			const next = waiting[0];
+			// Canary (H25): the first copies roll and soak, judged on the edge's own counters, before
+			// any other copy is touched. The soak clock only starts once every canary copy is up.
+			const canary = spec ? this.ensureCanary(workload, spec, waiting, rows, now) : null;
+			let next: ReplicaRow | undefined = waiting[0];
+			if (canary && canary.state === 'soaking') {
+				const canaryIds = parseJson<string[]>(canary.copiesJson, []);
+				const canaryIdsSet = new Set(canaryIds);
+				const canaryRows = rows.filter((row) => canaryIdsSet.has(row.id));
+				const canaryWaiting = waiting.filter((row) => canaryIdsSet.has(row.id));
+				const canaryUp = canaryRows.length > 0 && canaryRows.every((row) => !waiting.includes(row));
+				if (!canaryUp) {
+					// Until the last canary copy is serving, every tick restarts the soak clock.
+					if (canary.startedAt !== now)
+						this.ctx.db
+							.update(deploymentCanaries)
+							.set({ startedAt: now, updatedAt: now })
+							.where(eq(deploymentCanaries.deploymentId, workload.deploymentId))
+							.run();
+					next = canaryWaiting[0];
+					if (!next) continue;
+				} else if (project && spec?.rollout) {
+					const sample = this.canarySample(project, rows, canaryIds, canary.startedAt, now);
+					const verdict = judgeCanary({
+						rollout: spec.rollout,
+						elapsedSeconds: (now - canary.startedAt) / 1000,
+						canary: sample.canary,
+						baseline: sample.baseline,
+					});
+					this.ctx.db
+						.update(deploymentCanaries)
+						.set({
+							state: verdict.verdict === 'wait' ? 'soaking' : verdict.verdict === 'pass' ? 'passed' : 'failed',
+							sampleJson: JSON.stringify(sample),
+							reason: verdict.reason,
+							...(verdict.verdict === 'wait' ? {} : { judgedAt: now }),
+							updatedAt: now,
+						})
+						.where(eq(deploymentCanaries.deploymentId, workload.deploymentId))
+						.run();
+					if (verdict.verdict === 'wait') continue;
+					if (verdict.verdict === 'fail') {
+						this.ctx.projects.bump(workload.orgId);
+						// Only the canary copies are on the new release, and they are the ones the judge
+						// failed: move the pointers back. Every copy then renders the previous release at
+						// once, instead of a second tick still serving the bad canary.
+						this.failRolloutBeforeOrDuring(workload, project, rows, waiting, slug, `The canary failed: ${verdict.reason}`, now, alerts, false);
+						continue;
+					}
+					this.ctx.projects.bump(workload.orgId);
+					next = waiting[0];
+				}
+			}
 			if (!next) {
 				this.ctx.db
 					.update(workloads)
@@ -1861,6 +2201,8 @@ export class WorkloadService {
 			.set({ rolloutStatus: 'rolling', rolloutMessage: null, updatedAt: now })
 			.where(eq(workloads.id, workload.id))
 			.run();
+		// A resumed rollout judges its canary again: a person chose to try it once more.
+		this.ctx.db.delete(deploymentCanaries).where(eq(deploymentCanaries.deploymentId, workload.deploymentId)).run();
 		this.ctx.audit.record({
 			principal,
 			action: 'workload.rollout_resume',
@@ -1912,7 +2254,7 @@ export class WorkloadService {
 						count,
 						memoryMb: next.memoryMb,
 						cpuMillis: Math.round((next.cpus ?? 1) * 1000),
-						spread: this.ctx.cluster.get().replicas.spread,
+						spread: resolvedSpread(next.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread),
 						strategy: this.ctx.cluster.get().scheduling.strategy,
 						stack: mode === 'stack',
 						reason: 'scale',
@@ -1989,7 +2331,7 @@ export class WorkloadService {
 			count: limit,
 			memoryMb: spec.memoryMb,
 			cpuMillis: Math.round((spec.cpus ?? 1) * 1000),
-			spread: this.ctx.cluster.get().replicas.spread,
+			spread: resolvedSpread(spec.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread),
 			stack: mode === 'stack',
 			existing: workload ? this.copyPlacements(workload) : [],
 			candidates: this.copyCandidates(project, spec, workload?.id),
