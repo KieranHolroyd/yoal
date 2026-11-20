@@ -1916,7 +1916,10 @@ export class WorkloadService {
 			// drops its copy on the next pull.
 			const arrived = status === 'running' && row.movingFromNodeId !== null;
 			if (status === row.status && !arrived) continue;
-			if (arrived) this.ctx.projects.bump(row.orgId);
+			// A copy becoming `running` adds it to every ingress's upstream list, and one leaving
+			// removes it: either must be a new desired-state version, or the edge keeps the old list
+			// until some unrelated change (the M1 kill-node edge bug).
+			this.ctx.projects.bump(row.orgId);
 			this.ctx.db
 				.update(workloads)
 				.set({
@@ -1975,6 +1978,9 @@ export class WorkloadService {
 				.set({ status, ...(confirmed ? { appliedVersion: null } : {}), updatedAt: now })
 				.where(eq(workloadReplicas.id, row.id))
 				.run();
+			// The edge's upstream list is built from copy status; a copy becoming running (or
+			// failing) must re-render desired state now, not on the next unrelated change.
+			this.ctx.projects.bump();
 		}
 	}
 
