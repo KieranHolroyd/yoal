@@ -1,6 +1,7 @@
 import * as z from 'zod';
 import { databaseEngines } from './database.ts';
 import { databaseRestoreSchema } from './database-backup.ts';
+import { objectStoreCredentialsSchema, objectStoreTargetSchema } from './object-store-target.ts';
 
 /**
  * Point-in-time recovery for managed databases (docs/PITR.md).
@@ -58,6 +59,13 @@ export const databasePitrRepoViewSchema = z.object({
 	region: z.string().min(1).max(63),
 	pathPrefix: z.string().max(300),
 	forcePathStyle: z.boolean(),
+	/**
+	 * HA-PLAN W3: the repository as an object-store target. Absent means the S3 fields above (every
+	 * repository before W3). For an `azure` or `gcs` target the S3 fields above still carry the
+	 * nearest values (container or bucket, endpoint, prefix) so an older reader parses the view,
+	 * but a node is sent such a repository only when it declares `object-store-kinds`.
+	 */
+	store: objectStoreTargetSchema.optional(),
 });
 export type DatabasePitrRepoView = z.infer<typeof databasePitrRepoViewSchema>;
 
@@ -65,6 +73,11 @@ export type DatabasePitrRepoView = z.infer<typeof databasePitrRepoViewSchema>;
 export const databasePitrRepoConfigSchema = databasePitrRepoViewSchema.extend({
 	accessKeyId: z.string().min(3).max(128),
 	secretAccessKey: z.string().min(8).max(512),
+	/**
+	 * HA-PLAN W3: the credentials for a `store` that is not `s3` (an Azure key or SAS token, a GCS
+	 * service-account file). Absent for S3, whose keys are the two fields above.
+	 */
+	storeCredentials: objectStoreCredentialsSchema.optional(),
 });
 export type DatabasePitrRepoConfig = z.infer<typeof databasePitrRepoConfigSchema>;
 

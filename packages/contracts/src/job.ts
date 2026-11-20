@@ -66,8 +66,13 @@ export const jobTimeoutSchema = z.number().int().min(jobLimits.minTimeoutSeconds
 export const jobConcurrencyPolicies = ['forbid', 'allow', 'replace'] as const;
 export type JobConcurrency = (typeof jobConcurrencyPolicies)[number];
 
-/** `schedule` = the cron fired, `manual` = someone ran it, `retry` = a failed run's next attempt. */
-export const jobRunTriggers = ['schedule', 'manual', 'retry'] as const;
+/**
+ * `schedule` = the cron fired, `manual` = someone ran it, `retry` = a failed run's next attempt,
+ * `release` = a release command run before a rollout (HA-PLAN H25; `release-phase.ts`). The
+ * trigger is never on the node wire (`agentJobRunSchema`), and `job_runs.trigger` has no CHECK
+ * (0059), so the new value reaches no agent and needs no migration.
+ */
+export const jobRunTriggers = ['schedule', 'manual', 'retry', 'release'] as const;
 export type JobRunTrigger = (typeof jobRunTriggers)[number];
 
 export const jobRunStatuses = ['queued', 'running', 'succeeded', 'failed', 'timeout', 'cancelled', 'skipped'] as const;

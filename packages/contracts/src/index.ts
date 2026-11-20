@@ -96,3 +96,6 @@ export * from './app-errors.ts';
 export * from './sentry.ts';
 export * from './usage-analytics.ts';
 export * from './whats-new.ts';
+export * from './object-store-target.ts';
+export * from './node-ca.ts';
+export * from './release-phase.ts';

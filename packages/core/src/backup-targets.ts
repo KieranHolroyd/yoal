@@ -3,6 +3,7 @@ import { backupTargets, databaseBackups, databases } from '@yoal/db';
 import {
 	backupTargetCreateSchema,
 	backupTargetUpdateSchema,
+	objectStoreKindIssue,
 	type BackupTargetCredentials,
 	type BackupTargetResolution,
 	type BackupTargetTestResult,
@@ -134,7 +135,17 @@ export class BackupTargetService {
 
 	create(principal: Principal, raw: unknown, options: BackupTargetCreateOptions = {}): BackupTargetMutationResult {
 		this.requireMutationsEnabled();
-		const input = backupTargetCreateSchema.parse(raw);
+		const parsed = backupTargetCreateSchema.parse(raw);
+		// HA-PLAN W3: Azure and GCS are refused while their flag is off; lane E builds them.
+		if (parsed.kind === 'azure' || parsed.kind === 'gcs') {
+			const refused = objectStoreKindIssue(parsed.kind, {
+				OBJECT_STORE_AZURE: featureEnabled(this.ctx.config, 'OBJECT_STORE_AZURE'),
+				OBJECT_STORE_GCS: featureEnabled(this.ctx.config, 'OBJECT_STORE_GCS'),
+			});
+			if (refused) throw new ValidationError(refused);
+			throw new CoreError('not_implemented', `not implemented (HA Wave 1 lane E): ${parsed.kind} backup targets`, 501);
+		}
+		const input = parsed;
 		const platform = options.platform === true;
 		if (platform) this.requirePlatformAdmin(principal);
 		else this.ctx.iam.require(principal, 'database:update', { type: 'org' });
@@ -173,6 +184,8 @@ export class BackupTargetService {
 						orgId,
 						name: input.name,
 						kind: 's3' as const,
+						// 0120 (HA-PLAN W3): which object store; existing rows were backfilled the same way.
+						storeKind: 's3' as const,
 						path: null,
 						endpoint: input.endpoint ?? null,
 						bucket: input.bucket,
@@ -762,6 +775,8 @@ function countLabel(count: number, noun: string): string {
 }
 
 function snapshotOf(target: BackupTargetView): BackupLocationSnapshot {
+	if (target.kind === 'azure' || target.kind === 'gcs')
+		throw new CoreError('not_implemented', `not implemented (HA Wave 1 lane E): ${target.kind} backup locations`, 501);
 	return {
 		kind: target.kind,
 		orgId: target.orgId,

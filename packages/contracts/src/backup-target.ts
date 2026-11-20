@@ -1,6 +1,7 @@
 import * as z from 'zod';
 import { bucketNameSchema } from './object-storage.ts';
 import { SLUG_PATTERN } from './slugs.ts';
+import { azureAccountSchema, azureContainerSchema, gcsBucketSchema, objectStoreTargetSchema } from './object-store-target.ts';
 
 /**
  * Backup targets (plan 05, docs/BACKUPS.md).
@@ -16,7 +17,12 @@ import { SLUG_PATTERN } from './slugs.ts';
 
 export const BACKUP_TARGET_ID_PREFIX = 'bt_';
 
-export const backupTargetKinds = ['local', 's3'] as const;
+/**
+ * `azure` and `gcs` (HA-PLAN W3) are API kinds only. In the database they are rows with
+ * `kind = 's3'` (an object store; the 0019 CHECK allows only `local`/`s3`) and `store_kind` set
+ * (0120), so no table rebuild was needed. Each is refused while its `OBJECT_STORE_*` flag is off.
+ */
+export const backupTargetKinds = ['local', 's3', 'azure', 'gcs'] as const;
 export type BackupTargetKind = (typeof backupTargetKinds)[number];
 
 export const backupTargetStatuses = ['pending', 'ok', 'failed'] as const;
@@ -126,10 +132,50 @@ const s3TargetCreateSchema = z
 	})
 	.describe('An S3-compatible bucket.');
 
+const azureTargetCreateSchema = z
+	.strictObject({
+		name: backupTargetNameSchema,
+		kind: z.literal('azure'),
+		account: azureAccountSchema,
+		container: azureContainerSchema,
+		/** Omit for Azure; set for Azurite or a sovereign cloud. */
+		endpoint: backupTargetEndpointSchema.optional(),
+		pathPrefix: backupTargetPathPrefixSchema.default('yoal/backups'),
+		/** The storage account's shared key, or a container-scoped SAS token (exactly one). */
+		accountKey: z.string().min(16).max(512).optional(),
+		sasToken: z.string().min(16).max(2048).optional(),
+		writeOnly: z.boolean().default(false),
+		/** A container immutability policy keeps artifacts immutable for the retention period. */
+		immutable: z.boolean().default(false),
+	})
+	.refine((input) => (input.accountKey === undefined) !== (input.sasToken === undefined), {
+		message: 'Give either an account key or a SAS token.',
+		path: ['accountKey'],
+	})
+	.describe('An Azure Blob Storage container (YOAL_FEATURE_OBJECT_STORE_AZURE).');
+
+const gcsTargetCreateSchema = z
+	.strictObject({
+		name: backupTargetNameSchema,
+		kind: z.literal('gcs'),
+		bucket: gcsBucketSchema,
+		/** Omit for Google Cloud; set for an emulator. */
+		endpoint: backupTargetEndpointSchema.optional(),
+		pathPrefix: backupTargetPathPrefixSchema.default('yoal/backups'),
+		/** A service-account key file (JSON). */
+		serviceAccountJson: z.string().min(20).max(16_384),
+		writeOnly: z.boolean().default(false),
+		/** A bucket retention policy keeps artifacts immutable for the retention period. */
+		immutable: z.boolean().default(false),
+	})
+	.describe('A Google Cloud Storage bucket (YOAL_FEATURE_OBJECT_STORE_GCS).');
+
 /** Create a target. Credentials are accepted here and sealed; they never reappear in a view. */
 export const backupTargetCreateSchema = z.discriminatedUnion('kind', [
 	localTargetCreateSchema,
 	s3TargetCreateSchema,
+	azureTargetCreateSchema,
+	gcsTargetCreateSchema,
 ]);
 export type BackupTargetCreate = z.input<typeof backupTargetCreateSchema>;
 
@@ -191,6 +237,11 @@ export const backupTargetViewSchema = z
 		objectLock: z.boolean(),
 		/** Whether a sealed credential exists. Never the credential itself. */
 		hasCredentials: z.boolean(),
+		/**
+		 * HA-PLAN W3: the target as a credential-free object-store target; null for `local`. Optional
+		 * so views built before W3 still parse.
+		 */
+		store: objectStoreTargetSchema.nullable().optional(),
 		status: z.enum(backupTargetStatuses),
 		lastCheckedAt: z.string().nullable(),
 		lastError: z.string().max(2000).nullable(),

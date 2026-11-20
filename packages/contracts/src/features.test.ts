@@ -37,7 +37,11 @@ describe('feature registry', () => {
 			'UPGRADE_ROLLBACK',
 			'BLUEPRINTS',
 			'MEDIA',
-			'DB_AUTO_PROMOTE'
+			'DB_AUTO_PROMOTE',
+			'ENDPOINTS_GATEWAY',
+			'RELEASE_PHASE',
+			'OBJECT_STORE_AZURE',
+			'OBJECT_STORE_GCS'
 		]);
 		for (const name of FEATURE_FLAG_NAMES) {
 			expect(FEATURE_FLAGS[name].name).toBe(name);
@@ -54,7 +58,24 @@ describe('feature registry', () => {
 	test('automatic database promotion is opt-in (HA-PLAN F1)', () => {
 		expect(FEATURE_FLAGS.DB_AUTO_PROMOTE.default).toBe(false);
 		expect(DEFAULT_FEATURES.DB_AUTO_PROMOTE).toBe(false);
-		expect([...OPT_IN_FEATURES]).toEqual(['DB_AUTO_PROMOTE']);
+		expect(OPT_IN_FEATURES.has('DB_AUTO_PROMOTE')).toBe(true);
+	});
+
+	test('HA Wave 1 flags are opt-in and cite their H-section (HA-WAVE-1.md)', () => {
+		expect([...OPT_IN_FEATURES]).toEqual([
+			'DB_AUTO_PROMOTE',
+			'ENDPOINTS_GATEWAY',
+			'RELEASE_PHASE',
+			'OBJECT_STORE_AZURE',
+			'OBJECT_STORE_GCS'
+		]);
+		expect(FEATURE_FLAGS.ENDPOINTS_GATEWAY.description).toContain('H24');
+		expect(FEATURE_FLAGS.RELEASE_PHASE.description).toContain('H25');
+		expect(FEATURE_FLAGS.OBJECT_STORE_AZURE.description).toContain('G17');
+		expect(FEATURE_FLAGS.OBJECT_STORE_GCS.description).toContain('G17');
+		const env = parseFeatureFlags({});
+		for (const name of ['ENDPOINTS_GATEWAY', 'RELEASE_PHASE', 'OBJECT_STORE_AZURE', 'OBJECT_STORE_GCS'] as const)
+			expect(env[name]).toBe(false);
 	});
 
 	test('uses YOAL_FEATURE_<NAME> as the env key', () => {

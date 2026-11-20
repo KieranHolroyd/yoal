@@ -230,3 +230,97 @@ describe('migration aliases', () => {
 		sqlite.close();
 	});
 });
+
+describe('HA Wave 1 migrations 0118–0120 (docs/build-plan/HA-WAVE-1.md)', () => {
+	const wave1 = ['0118_node_ca.sql', '0119_release_phase.sql', '0120_object_store_kinds.sql'];
+	const tables = (sqlite: Database) =>
+		new Set(sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
+	const columns = (sqlite: Database, table: string) =>
+		sqlite.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map((row) => row.name);
+
+	test('are the reserved files, in order, right after 0117', () => {
+		const ids = migrations.map((migration) => migration.id);
+		const at = ids.indexOf('0117_kubernetes_k5_k6.sql');
+		expect(ids.slice(at + 1, at + 4)).toEqual(wave1);
+	});
+
+	test('apply on a fresh database', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		const ran = migrate(sqlite);
+		for (const id of wave1) expect(ran).toContain(id);
+		const names = tables(sqlite);
+		for (const table of ['node_ca', 'node_ca_certificates', 'release_command_runs', 'deployment_canaries']) expect(names.has(table)).toBe(true);
+		expect(columns(sqlite, 'backup_targets')).toEqual(expect.arrayContaining(['store_kind', 'store_options_json', 'immutable_retention_days']));
+		expect(migrate(sqlite)).toEqual([]);
+		sqlite.close();
+	});
+
+	test('apply on a database at 0117 and backfill existing object-store targets as s3', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		sqlite.run('CREATE TABLE yoal_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+		for (const migration of migrations) {
+			if (Number(migration.id.slice(0, 4)) > 117) continue;
+			sqlite.run(migration.sql);
+			sqlite.run('INSERT INTO yoal_migrations (id, applied_at) VALUES (?, ?)', [migration.id, 1]);
+		}
+		expect(tables(sqlite).has('node_ca')).toBe(false);
+		sqlite.run(
+			`INSERT INTO backup_targets (id, org_id, name, kind, endpoint, bucket, region, path_prefix, access_key_sealed, secret_sealed, object_lock, created_at, updated_at)
+			 VALUES ('bt_s3', NULL, 'r2-main', 's3', 'https://acc.r2.cloudflarestorage.com', 'yoal', 'auto', 'yoal/backups', 'ak', 'sk', 1, 1, 1)`,
+		);
+		sqlite.run(
+			`INSERT INTO backup_targets (id, org_id, name, kind, path, created_at, updated_at)
+			 VALUES ('bt_local', 'org_1', 'local-main', 'local', '/var/lib/yoal/backups', 1, 1)`,
+		);
+
+		expect(migrate(sqlite)).toEqual(wave1);
+
+		const rows = sqlite
+			.query<{ id: string; kind: string; store_kind: string | null; store_options_json: string; object_lock: number; immutable_retention_days: number | null; secret_sealed: string | null }, []>(
+				'SELECT id, kind, store_kind, store_options_json, object_lock, immutable_retention_days, secret_sealed FROM backup_targets ORDER BY id',
+			)
+			.all();
+		expect(rows).toEqual([
+			{ id: 'bt_local', kind: 'local', store_kind: null, store_options_json: '{}', object_lock: 0, immutable_retention_days: null, secret_sealed: null },
+			{ id: 'bt_s3', kind: 's3', store_kind: 's3', store_options_json: '{}', object_lock: 1, immutable_retention_days: null, secret_sealed: 'sk' },
+		]);
+		expect(() => sqlite.run("UPDATE backup_targets SET store_kind = 'ftp' WHERE id = 'bt_s3'")).toThrow();
+		sqlite.close();
+	});
+
+	test('release_command_runs is the I16 run lease: one live attempt and one success per release', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		migrate(sqlite);
+		const insert = (id: string, attempt: number, status: string) =>
+			sqlite.run(
+				`INSERT INTO release_command_runs (id, release_id, org_id, project_id, workload_id, attempt, status, command_json, timeout_seconds, created_at, updated_at)
+				 VALUES (?, 'dep_1', 'org_1', 'prj_1', 'wl_1', ?, ?, '["bin/migrate"]', 600, 1, 1)`,
+				[id, attempt, status],
+			);
+		insert('rc_1', 1, 'running');
+		expect(() => insert('rc_2', 2, 'queued')).toThrow();
+		sqlite.run("UPDATE release_command_runs SET status = 'failed' WHERE id = 'rc_1'");
+		insert('rc_2', 2, 'queued');
+		expect(() => insert('rc_dup', 2, 'failed')).toThrow();
+		sqlite.run("UPDATE release_command_runs SET status = 'succeeded' WHERE id = 'rc_2'");
+		insert('rc_3', 3, 'failed');
+		expect(() => sqlite.run("UPDATE release_command_runs SET status = 'succeeded' WHERE id = 'rc_3'")).toThrow();
+		expect(() => insert('rc_4', 4, 'pending')).toThrow();
+		sqlite.close();
+	});
+
+	test('node_ca allows one active CA', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		migrate(sqlite);
+		const insert = (id: string, state: string) =>
+			sqlite.run(
+				`INSERT INTO node_ca (id, state, cert_pem, key_sealed, fingerprint, subject, not_before, not_after, created_at, updated_at)
+				 VALUES (?, ?, 'pem', 'sealed', ?, 'CN=Yoal install CA', 1, 2, 1, 1)`,
+				[id, state, `fp-${id}`],
+			);
+		insert('ca_1', 'active');
+		expect(() => insert('ca_2', 'active')).toThrow();
+		insert('ca_2', 'previous');
+		sqlite.close();
+	});
+});

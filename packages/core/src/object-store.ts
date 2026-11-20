@@ -13,7 +13,11 @@ import { hmac, randomToken, safeEqual } from './util.ts';
  * Presigned URLs let large uploads go direct to the bucket and let agents download releases
  * without an extra hop through the control plane.
  */
-export type ObjectStoreKind = 'local' | 's3';
+/**
+ * `azure` and `gcs` are HA-PLAN W3 backends (`object-store-factory.ts`, Wave 1 lane E), each
+ * behind its `OBJECT_STORE_*` flag; nothing constructs them while the flags are off.
+ */
+export type ObjectStoreKind = 'local' | 's3' | 'azure' | 'gcs';
 
 /** A stream we can upload: a web `ReadableStream` or any async iterable of byte chunks. */
 export type ObjectStoreBody = ReadableStream<Uint8Array> | AsyncIterable<Uint8Array>;
@@ -114,7 +118,9 @@ export interface StoredObject {
  * constraints keep working until the schema migration ships.
  */
 export function storageKindForDb(kind: ObjectStoreKind): 'local' | 'r2' {
-	return kind === 's3' ? 'r2' : kind;
+	// Every remote store is `r2` ("remote") in that column; one platform has one store, whose kind
+	// is configuration, so the column never needs widening.
+	return kind === 'local' ? 'local' : 'r2';
 }
 
 function isReadableStream(body: ObjectStoreBody): body is ReadableStream<Uint8Array> {
