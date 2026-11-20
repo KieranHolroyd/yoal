@@ -638,3 +638,78 @@ contact address) and sent at least six orders, all refused (`b.s4.test` has no p
 the run was stopped at about 07:42 UTC. No certificate was issued and nothing identifying was sent.
 The rig now runs on an `--internal` network, gives every policy an explicit issuer, and fails a
 scenario if any container logs a public ACME endpoint.
+
+## S4 (cloud): DNS-01 on Cloudflare (2026-11-20)
+
+Question, criteria and fallback: [`spikes/s4-certificates/README.md`](../spikes/s4-certificates/README.md),
+section "Cloud half" (HA-PLAN H20 item 1, §4 W2 S4). Rig: `spikes/s4-certificates/cloud.sh` (one
+command; sweeps the zone and deletes every key on exit).
+
+**Environment.** Apple M3 Pro, macOS 27.3, OrbStack Docker 29.8.2, Bun 1.4.5. CA: **Let's Encrypt
+staging only**. Every rendered Caddy config and lego argument list was grepped for
+`acme-v02.api.letsencrypt.org` and `zerossl` before each run; both hosts resolved to 127.0.0.1 in the
+clients; no client log named either. One ACME account (`acct/374986333`, no contact) was registered
+by lego and reused by Caddy through `account_key`. Zone: a real Cloudflare zone (active, full setup).
+`<zone>` is a one-label subdomain inside it, and records were named `_acme-challenge.yoal-w0-s4-xxxx.<zone>`.
+Token: the one `CF_API_TOKEN` (owner: `Zone:DNS:Edit` on that zone). Clients:
+**(a)** lego v5.6.0 `cloudflare` provider (design B's issuer);
+**(b)** Yoal's pinned Caddy 2.11.8 built as `release.yml` does (xcaddy v0.4.7, caddy-dns/cloudflare
+v0.2.4 → libdns/cloudflare v0.2.2, certmagic v0.25.6, acmez v3.1.7; toolchain go1.26.0, see below).
+Neither client was tuned (default propagation checks and timeouts). They ran in containers with
+public resolvers. Every Cloudflare API call went through a rig CONNECT proxy that could black out
+`api.cloudflare.com` (open tunnels closed, new ones closed unanswered). Outside measurement: the
+API every 1 s, and every IPv4 address of the zone's two nameservers (6) every 250 ms.
+
+**Numbers per criterion.**
+
+| # | Criterion | (a) lego (control-plane issuer) | (b) pinned Caddy |
+|---|---|---|---|
+| 1 | Issues `*.<l>.<zone>` + `<l>.<zone>`, ≤ 300 s | **PASS**: **one order, one certificate** with exactly both SANs, issuer `(STAGING) Baloney Bulgur YE2`, **25.1 s** from start. lego solves the two authorizations one after the other | **PASS, two orders**: certmagic issues one certificate per name, so the pair is two orders, two certificates and two keys, solved in parallel. Both in **24.2 s**, about 10 s of it one DNS timeout in zone discovery; a single name took **12.1 s** |
+| 2 | Propagation: default check passes; every authorization valid first try | **PASS**: TXT on all 6 authoritative addresses **3.5–3.7 s** after creation. lego's own wait: first recursive check NXDOMAIN at +2.1 s, passed at the next 2 s poll; validated **8.5 s** after it began waiting. 3 of 3 authorizations valid first try | **PASS**: all 6 at **3.6–3.7 s**; certmagic's check passed **4.4–4.5 s** after creation (two polls 2 s apart); challenge accepted 0.2 s later. 3 of 3 valid first try |
+| 3 | The one `Zone:DNS:Edit` token is enough | **PASS**: zone lookup by name (`GET /zones?name=<apex>`), create, delete | **PASS**: same calls through libdns |
+| 4 | No `_acme-challenge` TXT left ≤ 60 s after the certificate | **PASS**: both records deleted 18.8 / 19.1 s after creation, before finalize | **PASS**: deleted 7.9 s after creation |
+| 5a | API unreachable 60 s from the first API call: fails without hanging, retries, issues, ≤ 3 orders, no TXT | **PASS in part**: the zone lookup failed (`unexpected EOF`), and lego deactivated the authorization and exited 1 **0.37 s** later (2 s in all), 1 order, no record. lego is one-shot, so the retry belongs to the issuer loop and was **not run** (order budget) | **PASS in part**: the first attempt failed **0.38 s** after it began presenting (zone lookup `unexpected EOF`), with no record created, and certmagic logged `will retry … attempt 1, retrying_in 60` (its schedule is 1, 2, 2, 5, 10 … min, up to 30 days). The successful retry was **not observed**: this run came from a rig bug and was stopped at its cap |
+| 5b | API unreachable 60 s from the moment the TXT exists: no stale TXT 120 s after | **FAIL**: issued anyway (12.3 s). Cleanup failed at once (`Cleaning up failed … unexpected EOF`, **WARN**) and was **never retried**. The record was still there **553 s** later, when the sweep deleted it | **FAIL, silently**: issued (12.1 s). **No error was logged**, and the record was still there **298 s** later (sweep). Cause: libdns/cloudflare v0.2.2 `getDNSRecords` ignores `doAPIRequest`'s error on the TXT content-match path (`client.go:92`), so `DeleteRecords` finds nothing and returns success. Any API failure at cleanup (unreachable, 5xx, 429) leaks the record without trace |
+
+Orders: **9 of 10** (lego 5, Caddy 4). Two lego orders failed before the lab DNS fix (OrbStack's
+container resolver timed out on lego's recursive check; lego waited its full 120 s per
+authorization, failed, and deleted both records). One Caddy order was the 5a attempt above. The
+final sweep found exactly the two 5b records, deleted them, and found none left. Afterwards,
+records of any type whose name contains `yoal-w0-s4`: **0**. Certificates, keys and the account
+were deleted from disk.
+
+**Verdict.** DNS-01 against a real Cloudflare zone **works for both designs** with the one
+`Zone:DNS:Edit` token: 12–25 s per issuance, with propagation (under 4 s) a small part of it. Both
+designs leak the challenge record when the API fails between present and cleanup, lego with a
+warning and Caddy silently. **O1 is unchanged: control-plane issuer (B).** DNS-01 strengthens the
+case: lego puts the wildcard and the apex in one order with one key, where Caddy needs two of each.
+The issuer must own cleanup: after each order, and on a timer, list `_acme-challenge.*` TXT records
+whose value it presented (or older than one order's lifetime) and delete them, retrying with backoff.
+Yoal's Caddy path has the same leak today and nothing that sweeps it.
+
+**Fallback triggered:** none.
+
+**Azure DNS and Route 53: not run** (no credentials).
+
+**What this proves wrong in the plan or the code.**
+
+- `release.yml` pins `GO_VERSION: '1.24'`, but Caddy 2.11.8 itself declares `go 1.26.0`. The
+  release build is go1.26.0 by toolchain auto-download, not 1.24. The local half attributed this to
+  the S3 storage module; it is Caddy.
+- CLUSTERING §7.3 and the threat model assume a failed renewal step costs only a retry. On
+  Cloudflare, a failed cleanup costs a stale TXT record that no client removes. Cloudflare caps the records
+  in a zone, so a long API incident over many renewals accumulates records toward that cap. The issuer needs a
+  sweep (above), and per-ingress Caddy (the fallback) needs one too, or a libdns fix.
+- The threat model (CLUSTERING, "DNS or Cloudflare compromise") places the token in `agent.env`.
+  The code compiles it into the Caddy JSON itself (`packages/site-config/src/compile.ts:395`,
+  `apps/agent/src/caddy-config.ts:134`: `api_token: tls.cloudflareApiToken`). It therefore lives in
+  Caddy's loaded and autosaved config. The rig used `{env.CF_API_TOKEN}`, which Caddy resolves at
+  provision time, and that worked. Seen in passing, not tested further.
+- Caddy cannot issue one certificate for a name set. "One certificate per name set" (H13) holds only
+  for an issuer outside Caddy.
+
+**Not tested.** The issuer loop's retry for lego and an observed successful Caddy retry (order
+budget); blackouts at other points (between order and present; during propagation only); API 5xx
+or 429 instead of unreachable; renewal (the staging certificates were 64-day; ARI windows reported
+but not exercised); a proxied-only zone or Origin CA; Azure DNS, Route 53; Linux hosts (containers
+on macOS).
