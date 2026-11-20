@@ -226,3 +226,10 @@ private network, `use_private_ip`), does a Yoal ingress set meet the S9 targets?
 
 Per HA-PLAN §4 W2: the Hetzner LB is documented as unsupported for the failed property (for
 criterion 4, recorded against the plan's choice already raised by the local half).
+
+### Cloud run status (2026-11-20)
+
+Stopped at the safety inventory: the supplied token's project holds the owner's servers (`plausible`,
+`edge-b`), so nothing was created and nothing spent. `cloud/hcloud.ts inventory` is the guard every
+future cloud run starts with; it needs a token for a dedicated, otherwise empty project. See
+docs/SPIKES.md, "S9 (cloud)".

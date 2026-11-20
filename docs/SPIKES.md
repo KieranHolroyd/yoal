@@ -206,3 +206,25 @@ counts are optimistic; the DOWN times hold (checks time out after 2 s either way
 `shutdown_delay` / `{http.shutting_down}` as an alternative lame duck. `fastinter`. `nopreempt`. HTTP/2 and
 HTTP/3 clients (the load generator is HTTP/1.1). IPv6. Rate limiting of the health endpoint (no module in
 the pinned build). TLS on a real ACME certificate.
+
+## S9 (cloud): Hetzner Load Balancer (2026-11-20)
+
+Question, criteria and fallback: [`spikes/s9-balancers/README.md`](../spikes/s9-balancers/README.md),
+section "Cloud: Hetzner Load Balancer". **Not run: the run stopped at the safety inventory.**
+
+**What happened.** The brief's first API call is a read-only inventory of the Hetzner project
+(`bun run spikes/s9-balancers/cloud/hcloud.ts inventory`, token from the environment of that one
+command, never printed). The project behind the supplied `HCLOUD_TOKEN` is **not a throwaway**:
+2 servers (`plausible`, `edge-b`, the owner's production worker), 0 load balancers, 0 networks,
+0 firewalls, 1 SSH key (the owner's). By the brief's absolute rule the run stopped there: **no
+resource was created, modified or deleted**, no price was fetched and nothing was spent (**€0**).
+
+**Numbers per criterion.** None. Criteria 1–4 (killed node ≤ 15 s, lame duck with zero failures,
+client address through `proxyprotocol`, reload under 1,000 keep-alives) are **untested** on the
+Hetzner LB; the local half's results (section above) stand alone. Fallback: not triggered (no result).
+
+**Not run.** Hetzner LB (wrong project, above). Azure LB and AWS NLB (no credentials).
+
+**To run it.** A dedicated Hetzner project holding nothing but `yoal-w0*` resources, and a token for
+it. The inventory guard (`cloud/hcloud.ts`) refuses any project with a server not named `yoal-w0*`
+or with edge-b's address, and allows writes only to resources labelled `yoal-w0=s9`.
