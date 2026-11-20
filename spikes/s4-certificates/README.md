@@ -59,3 +59,54 @@ show the flow; Cloudflare, Azure DNS and Route 53 are not run.
 Local only: OrbStack containers named `yoal-w0-s4-*` on one bridge network, no published host
 ports, no real DNS, no real CA, no Cloudflare. The rig keeps no data, credentials or binaries;
 pinned versions are fetched at run time. Results go in `docs/SPIKES.md` (`## S4 — …`).
+
+## Rig
+
+`./run.sh` (all scenarios, about 45 min) or `./run.sh a b-hot …`; numbers land in `results.json`
+(git-ignored). It builds three images, starts only `yoal-w0-s4-*` containers on an `--internal`
+bridge (no egress), and removes everything at the end. Results: `docs/SPIKES.md`, section S4.
+
+| File | Role |
+|---|---|
+| `images/ingress.Dockerfile` | Yoal's pinned Caddy build (2.11.8, xcaddy v0.4.7, caddy-dns/cloudflare v0.2.4) **plus one** certmagic S3 storage module: `github.com/techknowlogick/certmagic-s3@v1.5.0` (image `:lock`) or `github.com/ss098/certmagic-s3@8af482af` (image `:nolock`; its `Lock` is a no-op). The module's `go 1.26.0` directive makes `GOTOOLCHAIN=auto` build with Go 1.26.0. Bun is copied in for the agent |
+| `images/cp.Dockerfile` | Design B's issuer: lego v5.6.0 beside Bun |
+| `lab.ts` | Names, addresses, pinned images (Pebble and challtestsrv 2.10.3 by digest, HAProxy 3.4.8, MinIO's last community image by digest) |
+| `caddy.ts` | Ingress Caddy JSON: design A (shared S3 storage or local), design B (`load_files` + `POST /load`, or `get_certificate` from the agent), the HTTP-01 relay route |
+| `cp.ts` | Design B issuer loop: renew at 1/3 lifetime left, retry every 5 s, serve the pair to agents, `POST /reissue` |
+| `agent.ts` | Design B ingress agent: pull, write 0640 root:caddy by atomic rename, then `POST /load` or serve the pair to Caddy on loopback |
+| `load.ts` | Client: fingerprint probe and watch, 1,000-connection keep-alive hold |
+| `dns-exec.sh` | lego `exec` DNS provider → challtestsrv |
+| `run.ts` | Scenarios `a`, `a-nolock`, `a-local`, `b`, `b-hot`, `b-norelay`, `dns01`; asserts no container log names a public ACME endpoint |
+
+Topology: Pebble (lifetime `S4_LIFETIME`, default 240 s; no authz reuse, no nonce rejection, no VA
+sleep) resolves every name through challtestsrv to HAProxy, which round-robins plain TCP on :80 and
+:443 over three ingresses with no health checks. Pebble makes three concurrent validations per
+challenge and needs all three, so each HTTP-01 challenge reaches all three ingresses.
+
+MinIO no longer publishes images; the rig uses the last community image by digest (as S2 did). If
+it is not in the local cache, build it from source with
+`spikes/s3-cas/stores/minio.Dockerfile` on `ha/w0-spike-s3` and add `mc` to it.
+
+## Result (2026-11-20)
+
+Numbers, verdict and what could not be tested: `docs/SPIKES.md`, section S4. In short:
+- **O1:** the control-plane issuer, delivered without a config reload (`b-hot`), passed all five
+  criteria.
+- **Caddy holder (A):** failed criterion 2. certmagic's ARI logic renewed early and twice in a row.
+  A forced reissue does not reach the other ingresses.
+- **`load_files` + `POST /load` (B):** failed criterion 3, dropping 1,000 of 1,000 connections per
+  reload.
+
+### Deviations from the brief and the plan
+
+- Three ingresses rather than two; the criteria are judged on all three.
+- Compression: lifetime 240 s, renewal window 80 s, outage 40 s (half the window, against the plan's
+  1/120). Design A's outage is of the object store, since it has no control plane in the path.
+- Added design variant **B-hot** (Caddy `get_certificate` from the agent) after B failed criterion 3,
+  and the **A-nolock**, **A-local** and **a-ari** controls.
+- Go toolchain 1.26.0 for the Caddy build (the S3 storage module requires it); release.yml pins 1.24.
+- MinIO is the last community image from the local cache (no published image remains).
+- Pebble clamps its ARI window to the whole lifetime for short certificates. This exposed certmagic's
+  early renewals and is a lab property; real Let's Encrypt windows were not tested.
+- One run reached public Let's Encrypt (production and staging) by accident: six accounts, refused
+  orders, no certificate. See `docs/SPIKES.md`. The rig now has no egress and asserts on it.
