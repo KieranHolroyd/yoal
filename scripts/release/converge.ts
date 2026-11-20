@@ -206,8 +206,10 @@ export async function convergeHost(input: ConvergeInput): Promise<ConvergeReport
 		return changed;
 	});
 
-	// Every node runs the distribution's caddy.service, which has no Restart= (HA-PLAN Wave 1 F10).
-	// Upgrades get the drop-in here; a host without that unit (release-managed Caddy) is left alone.
+	// Installer-built hosts run the distribution's caddy.service, which has no Restart= (HA-PLAN
+	// Wave 1 F10). This covers control-plane hosts, the only ones that run convergence; workers update
+	// through the helper's `node/update`, and the helper writes the same drop-in on every start. A
+	// host without that unit (release-managed `yoal-caddy.service`) is left alone.
 	await step(report, 'caddy-restart-policy', () => {
 		if (runner.capture(['systemctl', 'show', '-p', 'LoadState', '--value', STOCK_CADDY_UNIT])?.trim() !== 'loaded') return false;
 		return ensureCaddyRestartPolicy({ systemdDir: paths.systemdDir, run: tolerant, log });
