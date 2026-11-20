@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import type { ObjectStore } from './object-store.ts';
 import type { DnsProvider } from './steering/dns/provider.ts';
 import type { IngressProber } from './steering/dns-failover/probe.ts';
+import type { VipControl } from './steering/vip/driver.ts';
 import { hmac } from './util.ts';
 
 export interface EmailMessage {
@@ -147,6 +148,13 @@ export interface CoreConfig {
 	dnsProvider?: DnsProvider | null;
 	/** Injected ingress prober for the steering drivers; production probes the public addresses. */
 	ingressProber?: IngressProber;
+	/**
+	 * Injected keepalived transport for the `vip` driver (HA-PLAN H18). Production uses the helper
+	 * sockets named by `YOAL_VIP_HELPER_SOCKETS`; tests supply a fake so no node is touched.
+	 */
+	vipControl?: VipControl | null;
+	/** Injected webhook transport for the `webhook` driver; production uses the global fetch. */
+	webhookFetch?: typeof fetch;
 	/**
 	 * Resolved `YOAL_FEATURE_*` flags. Optional so existing tests and embedders keep working;
 	 * services must read them through `featureEnabled`, which falls back to the registry defaults.

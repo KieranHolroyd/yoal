@@ -661,3 +661,66 @@ describe('endpoint guard verb (HA-PLAN H24)', () => {
 		expect(await response.json()).toEqual({ error: 'nftables check failed: line 6' });
 	});
 });
+
+describe('keepalived verbs (HA-PLAN H18)', () => {
+	function keepalivedHandler(overrides: Partial<{
+		install: (state: unknown) => Promise<{ changed: boolean; service: string }>;
+		configure: (state: unknown) => Promise<{ changed: boolean; service: string }>;
+	}> = {}) {
+		const calls: string[] = [];
+		const api = {
+			async install(state: unknown) {
+				calls.push(`install:${JSON.stringify(state)}`);
+				return overrides.install ? overrides.install(state) : { changed: true, service: 'keepalived.service' };
+			},
+			async configure(state: unknown) {
+				calls.push(`configure:${JSON.stringify(state)}`);
+				return overrides.configure ? overrides.configure(state) : { changed: true, service: 'keepalived.service' };
+			},
+			async start() {
+				calls.push('start');
+				return { service: 'keepalived.service' };
+			},
+			async stop() {
+				calls.push('stop');
+				return { service: 'keepalived.service' };
+			},
+			async status() {
+				calls.push('status');
+				return {
+					service: 'keepalived.service',
+					running: true,
+					interface: 'eth0',
+					virtualAddress: '192.0.2.100',
+					addressPresent: true,
+				};
+			},
+		};
+		return { handler: createHandler(new FakeRuntime(), { version: '0.1.0', keepalived: api }), calls };
+	}
+
+	test('installs and configures from structured fields only', async () => {
+		const { handler, calls } = keepalivedHandler();
+		const state = { instance: 'YOAL', virtualAddress: '192.0.2.100' };
+		expect((await handler(post('/v1/keepalived/install', state))).status).toBe(200);
+		expect((await handler(post('/v1/keepalived/configure', state))).status).toBe(200);
+		expect(calls).toEqual([`install:${JSON.stringify(state)}`, `configure:${JSON.stringify(state)}`]);
+	});
+
+	test('start, stop and status take no input beyond the fixed route', async () => {
+		const { handler, calls } = keepalivedHandler();
+		expect((await handler(new Request('http://localhost/v1/keepalived/start', { method: 'POST' }))).status).toBe(200);
+		expect((await handler(new Request('http://localhost/v1/keepalived/stop', { method: 'POST' }))).status).toBe(200);
+		expect((await handler(new Request('http://localhost/v1/keepalived/status'))).status).toBe(200);
+		expect(calls).toEqual(['start', 'stop', 'status']);
+		// A body or query on a fixed verb is refused, never forwarded.
+		expect((await handler(post('/v1/keepalived/start', { command: 'sh -c id' }))).status).toBe(400);
+		expect((await handler(new Request('http://localhost/v1/keepalived/status?argv=sh'))).status).toBe(400);
+		expect(calls).toEqual(['start', 'stop', 'status']);
+	});
+
+	test('an older helper answers 404 instead of silently succeeding', async () => {
+		const handler = createHandler(new FakeRuntime(), { version: '0.1.0' });
+		expect((await handler(post('/v1/keepalived/install', {}))).status).toBe(404);
+	});
+});

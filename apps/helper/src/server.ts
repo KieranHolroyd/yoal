@@ -49,6 +49,7 @@ import {
 } from './app-volumes.ts';
 import { assertRunId, parseJobRequest, type JobApi } from './jobs.ts';
 import { routePipelineRequest, type PipelineJobApi } from './pipeline-jobs.ts';
+import type { KeepalivedStatus } from './keepalived.ts';
 
 /**
  * The helper's entire network surface is a fixed set of verbs (slice, apply, status, remove, logs,
@@ -148,6 +149,15 @@ export interface WireguardApi {
 	status(): Promise<WireguardStatus>;
 }
 
+/** keepalived/VRRP through fixed verbs (HA-PLAN H18); absent on a helper that predates `vip`. */
+export interface KeepalivedApi {
+	install(state: unknown): Promise<{ changed: boolean; service: string }>;
+	configure(state: unknown): Promise<{ changed: boolean; service: string }>;
+	start(): Promise<{ service: string }>;
+	stop(): Promise<{ service: string }>;
+	status(): Promise<KeepalivedStatus>;
+}
+
 export interface HandlerOptions {
 	version: string;
 	maxBodyBytes?: number;
@@ -161,6 +171,8 @@ export interface HandlerOptions {
 	};
 	/** Managed overlay verbs (C1); absent on a helper that predates the overlay. */
 	wireguard?: WireguardApi;
+	/** keepalived/VRRP fixed verbs (HA-PLAN H18); absent on a helper that predates `vip`. */
+	keepalived?: KeepalivedApi;
 	/** The endpoint guard nftables table (HA-PLAN H24); absent = 404. */
 	endpointGuard?: { apply(): Promise<{ table: string }> };
 	/** Profiling of a registered disk (docs/STORAGE.md §5.1); absent = 404. */
@@ -293,6 +305,29 @@ export function createHandler(
 					return json({ ok: true, ...(await options.wireguard.status()) });
 				}
 				return json({ error: 'not_found' }, 404);
+			}
+
+			// --- keepalived/VRRP (HA-PLAN H18): fixed verbs, structured fields only ------------
+			if (path.startsWith('/v1/keepalived/')) {
+				if (!options.keepalived) return json({ error: 'keepalived is not available on this helper' }, 404);
+				const verb = path.slice('/v1/keepalived/'.length);
+				if (verb === 'status') {
+					if (method !== 'GET') return methodNotAllowed('GET');
+					assertNoVerbInput({ search: url.search, body: await readText(request, maxBodyBytes) });
+					return json({ ok: true, ...(await options.keepalived.status()) });
+				}
+				if (verb === 'start' || verb === 'stop') {
+					if (method !== 'POST') return methodNotAllowed('POST');
+					assertNoVerbInput({ search: url.search, body: await readText(request, maxBodyBytes) });
+					return json({ ok: true, ...(verb === 'start' ? await options.keepalived.start() : await options.keepalived.stop()) });
+				}
+				if (verb === 'install' || verb === 'configure') {
+					if (method !== 'POST') return methodNotAllowed('POST');
+					if (url.search) throw new ValidationError('keepalived takes no query parameters');
+					const state = assertRecord(await readJson(request, maxBodyBytes), 'state');
+					return json({ ok: true, ...(verb === 'install' ? await options.keepalived.install(state) : await options.keepalived.configure(state)) });
+				}
+				return json({ error: 'not_found', path }, 404);
 			}
 
 			// --- cluster share mounts (C3): fixed mount/unmount, no shell ---------------------
@@ -914,7 +949,7 @@ export interface RunningHelper {
 export async function startHelperServer(
 	config: HelperConfig,
 	runtime: HelperRuntime,
-	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'endpointGuard' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler' | 'extraRoutes'> = {},
+	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'keepalived' | 'endpointGuard' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler' | 'extraRoutes'> = {},
 ): Promise<RunningHelper> {
 	const directory = dirname(config.socketPath);
 	const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;

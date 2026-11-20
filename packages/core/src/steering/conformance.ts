@@ -40,6 +40,8 @@ export interface SteeringConformanceOptions {
 	create(context: SteeringDriverContext): SteeringDriver;
 	/** Set false only for `direct`, which is valid with no ingress and owns no serving set. */
 	requiresIngress?: boolean;
+	/** `withdraw` for a floating address: a stale VIP is worse than none. Default `keep` (DNS). */
+	lastHealthyAllFail?: 'keep' | 'withdraw';
 }
 
 const fleet = (statuses: Array<Partial<SteeringNode>> = [{}, {}, {}]) =>
@@ -140,11 +142,11 @@ export function describeSteeringConformance(label: string, options: SteeringConf
 			const oneLeft = (await driver.observe()) as { serving: string[] };
 			expect(oneLeft.serving).toEqual(['node-1']);
 
-			// The last one goes silent too: the intended set is kept, never emptied.
+			// The last one goes silent too. DNS keeps the last record; a floating address withdraws.
 			nodes = fleet([{ status: 'offline' }, { status: 'offline' }, { status: 'offline' }]);
 			await driver.desired();
 			const kept = (await driver.observe()) as { serving: string[] };
-			expect(kept.serving).toEqual(['node-1']);
+			expect(kept.serving).toEqual(options.lastHealthyAllFail === 'withdraw' ? [] : ['node-1']);
 		});
 	});
 }

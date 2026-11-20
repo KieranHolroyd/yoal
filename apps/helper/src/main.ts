@@ -12,6 +12,7 @@ import { JobDriver } from './jobs.ts';
 import { PipelineJobDriver, resolveBuildsRoot } from './pipeline-jobs.ts';
 import { ensureStorageTools } from './storage-tools.ts';
 import { ensureCaddyRestartDropIn } from './caddy-restart.ts';
+import { KeepalivedManager } from './keepalived.ts';
 import { dirname, join } from 'node:path';
 
 /**
@@ -108,8 +109,18 @@ export async function runHelper(options: RunHelperOptions = {}): Promise<void> {
 	});
 	// Routes a test-only entry point adds (it passes `extend`); the release entry never does.
 	const extension = await options.extend?.({ systemctlPath: config.systemctlPath, log });
+	const keepalivedRunner = spawnRunner();
 	helper = await startHelperServer(config, driver, {
 		...(extension?.routes ? { extraRoutes: extension.routes } : {}),
+		// keepalived/VRRP for the `vip` steering driver (HA-PLAN H18). No daemon is added here:
+		// the distribution's keepalived.service is the only long-running process.
+		keepalived: new KeepalivedManager({
+			paths: {
+				systemctlPath: config.systemctlPath,
+				ipPath: Bun.which('ip') ?? '/usr/sbin/ip',
+			},
+			runner: (argv) => keepalivedRunner.run(argv),
+		}),
 		nodeUpdate,
 		wireguard,
 		endpointGuard: { apply: () => firewall.applyEndpointGuard() },

@@ -48,6 +48,8 @@ import { CertificateService, IngressSetService, SteeringService } from './ingres
 import { ControlPlaneService } from './control-plane-service.ts';
 import { DatabaseMemberService } from './database-member-service.ts';
 import { createDnsFailoverDriver } from './steering/dns-failover/core.ts';
+import { createVipDriverFromCore } from './steering/vip/core.ts';
+import { createWebhookDriverFromCore } from './steering/webhook/core.ts';
 import { STEERING_DRIVER_FACTORIES } from './steering/registry.ts';
 import { WorkloadService } from './workloads.ts';
 import { DatabaseService } from './databases.ts';
@@ -507,6 +509,10 @@ export function createCore(options: CoreOptions): Core {
 	ctx.steering = new SteeringService(ctx, {
 		...STEERING_DRIVER_FACTORIES,
 		'dns-failover': () => createDnsFailoverDriver(ctx),
+		// W8 lane E: both need the core context (a sealed secret, the ingress snapshot, a helper
+		// transport), so the adapters live beside the driver and are registered here.
+		vip: () => createVipDriverFromCore(ctx),
+		webhook: () => createWebhookDriverFromCore(ctx),
 	});
 	ctx.certificates = new CertificateService(ctx);
 	ctx.controlPlane = new ControlPlaneService(ctx);

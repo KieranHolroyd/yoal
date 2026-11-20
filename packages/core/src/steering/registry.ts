@@ -1,6 +1,8 @@
 import type { SteeringDriver, SteeringDriverKind } from '@yoal/contracts';
 import { createDirectDriver } from './direct/index.ts';
 import { createExternalLbDriver } from './external-lb/index.ts';
+import { createVipDriver } from './vip/index.ts';
+import { createWebhookDriver } from './webhook/index.ts';
 import type { SteeringDriverContext, SteeringDriverFactory } from './types.ts';
 
 /**
@@ -9,12 +11,14 @@ import type { SteeringDriverContext, SteeringDriverFactory } from './types.ts';
  * controller.
  *
  * Kinds that are in the contract but not built yet are absent, so selection fails with a reason
- * instead of silently steering nothing: `dns-failover`, `vip`, `cloud-lb`, `cloudflare-tunnel` and
- * `webhook` are later lanes (W8, after M5 for the cloud balancers).
+ * instead of silently steering nothing: `dns-failover` is registered by the core adapter (it needs
+ * the database), and `cloud-lb`/`cloudflare-tunnel` are later lanes (W8, after M5).
  */
 export const STEERING_DRIVER_FACTORIES: Readonly<Partial<Record<SteeringDriverKind, SteeringDriverFactory>>> = {
 	direct: createDirectDriver,
 	'external-lb': createExternalLbDriver,
+	vip: createVipDriver,
+	webhook: createWebhookDriver,
 };
 
 export function createSteeringDriver(kind: SteeringDriverKind, context: SteeringDriverContext): SteeringDriver {

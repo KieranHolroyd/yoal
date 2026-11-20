@@ -13,6 +13,7 @@ import type { CoreContext } from './context.ts';
 import { nodeHasCapability } from './capability-gate.ts';
 import { ConflictError, ForbiddenError } from './errors.ts';
 import { ingressNodeIds, nodeRoles } from './ingress.ts';
+import { nodeAddress } from './steering/snapshot.ts';
 import {
 	STEERING_DRIVER_FACTORIES,
 	type SteeringDriverContext,
@@ -286,6 +287,11 @@ export class SteeringService {
 		}
 	}
 
+	/** The same read-only context the registry gives a driver, for adapters built in `index.ts`. */
+	driverContext(): SteeringDriverContext {
+		return this.context();
+	}
+
 	/** A read-only snapshot for the driver: no database handle, no writer, no provider client. */
 	private context(): SteeringDriverContext {
 		return {
@@ -314,6 +320,7 @@ export class SteeringService {
 					capabilities: view.capabilities,
 					ingress: ingress.has(row.id),
 					capable: nodeHasCapability(row, INGRESS_SET_CAPABILITY),
+					address: nodeAddress(row),
 					lastHeartbeatAt: row.lastHeartbeatAt,
 				};
 			});
