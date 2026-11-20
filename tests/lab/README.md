@@ -1,0 +1,159 @@
+# HA lab
+
+The four-node lab and fault harness of [HA-PLAN](../../docs/HA-PLAN.md) W1 and
+[CLUSTERING](../../docs/CLUSTERING.md) §19.3. Every HA exit criterion is measured here, never on a
+live fleet.
+
+```sh
+bun tests/lab/lab.ts up                     # ~10 min from clean, ~10 s when already up
+bun tests/lab/verify-faults.ts              # every fault verb applied, checked and auto-reverted
+bun tests/ha/scenarios/kill-node-b.ts       # the W1 exit scenario with the checker
+bun tests/lab/lab.ts down                   # removes every yoal-w0-* object
+```
+
+## What it is
+
+One definition, [`lab.config.ts`](./lab.config.ts), and two forms of it.
+
+| Node | Address | Role | Zone | What runs |
+|---|---|---|---|---|
+| `lab-a` | 172.30.147.11 | control | `cloud-a` | Full install: control plane, edge agent, Caddy, helper; overlay hub |
+| `lab-b` | 172.30.147.12 | worker | `cloud-b` | `install --join`: agent, helper, Caddy, Podman |
+| `lab-c` | 172.30.147.13 | worker | `home` | as lab-b |
+| `lab-ctl` | 172.30.147.14 | worker | `ctl` | as lab-b; reserved for later control-plane standby and injection work |
+| `s3lab` | 172.30.147.20 (MinIO behind it at .21) | — | — | S3 with fault injection: the arbiter and backup target of later waves |
+
+Every node runs the real control plane, agent and helper built from this checkout by the real
+installer (`scripts/install/main.ts`), and the four join one fleet over the managed WireGuard
+overlay (10.47.0.0/22). The helper on every node is then replaced by its fault-injection test build
+(`bun run --cwd apps/helper build:faults`) through a lab-only systemd drop-in.
+
+**The container form** (this directory; what CI runs). Each node is a Debian 13 container with
+systemd as PID 1, privileged, with a private cgroup v2 namespace, on the `yoal-w0-net` bridge. Lab
+images, containers, volumes and the network are all named `yoal-w0-*` and labelled `yoal-w0=lab`;
+`lab down` removes only those (and the MinIO image only if `lab up` pulled it).
+
+Built and verified on OrbStack (Docker 29, arm64, kernel 7.2) on macOS; `ha-integration` runs the
+same on `ubuntu-24.04`. OrbStack did not need the Lima fallback: systemd, nftables, `tc netem`,
+WireGuard, loop devices and nested Podman all work in a privileged container. Two adjustments are
+baked into [`node.Dockerfile`](./node.Dockerfile):
+
+- `/` is made `rshared` before `sysinit.target`. Docker starts containers with private mount
+  propagation, and systemd 257 mounts each unit's credentials in a child namespace; without this the
+  control plane cannot read its sealed master key (`LoadCredentialEncrypted=`).
+- The installer's own bootstrap Caddyfile is pre-written. The installer writes it only when it
+  installs Caddy itself; with Caddy preinstalled it keeps the package's stock file, whose admin API
+  is on TCP, and the agent cannot drive Caddy.
+
+**Joining.** `install --join` refuses a control URL that is not `https`, and the lab has no domain or
+ACME. `lab up` runs [`node/tls-front.ts`](./node/tls-front.ts) on lab-a for the duration of the
+joins: a lab CA, a certificate for 172.30.147.11, and a forwarder from `:8443` to the platform.
+Workers trust the CA for the join only (`NODE_EXTRA_CA_CERTS`); the agents then use the platform's
+own `http://172.30.147.11` origin.
+
+**Reaching the lab.** The host does not need to route to 172.30.147.0/24 (OrbStack does not): each
+node's `:80` is published on `127.0.0.1:47080`–`47083`, and the lab's scripts call the platform at
+`http://127.0.0.1:47080` with `Host: 172.30.147.11`. s3lab is on `127.0.0.1:47900` (S3) and
+`127.0.0.1:47901` (control). Platform-admin calls that refuse API keys go through
+[`node/bootstrap.ts`](./node/bootstrap.ts) on lab-a, which signs the lab's throwaway owner in.
+
+## Commands
+
+```sh
+bun tests/lab/lab.ts up [--upgrade] [--no-faults]
+bun tests/lab/lab.ts status [--json]
+bun tests/lab/lab.ts fault <node|all> <verb> [flags] [--observe obs.jsonl]
+bun tests/lab/lab.ts fault <node|all> list | revert <id> | clear-all
+bun tests/lab/lab.ts s3 rules | add '<rule json>' | clear | log [n]
+bun tests/lab/lab.ts kill|stop|start <node>        # kill = power off (docker kill)
+bun tests/lab/lab.ts exec <node> -- <argv…>
+bun tests/lab/lab.ts logs <node> [unit]
+bun tests/lab/lab.ts api <METHOD> <path> [json]
+bun tests/lab/lab.ts down [--keep-image]
+```
+
+`--upgrade` re-runs the installer on lab-a from the current checkout. Workers keep the agent and
+helper they joined with; rebuild them with `down` and `up`.
+
+## Fault verbs
+
+Fixed helper verbs in [`apps/helper/src/faults.ts`](../../apps/helper/src/faults.ts), reached on the
+helper's root-only socket at `/v1/faults/*`. They exist only in a helper built with
+`--define YOAL_FAULT_INJECTION=true` (`build:faults`). The release build (`build`, which the
+installer, `publish.yml` and node updates use) defines it `false`, and the bundler removes the module
+and its route; [`faults-release.test.ts`](../../apps/helper/src/faults-release.test.ts) builds the
+release helper and fails if any fault string survives.
+
+Every verb takes structured fields only (CIDRs, an interface that exists, a unit from an allowlist,
+bounded numbers), never a shell string; every verb that changes state has a required `durationS`
+(1–3600) after which it reverts itself; `clear-all` reverts everything; a helper that starts sweeps
+whatever an earlier process left (nft tables `yoal_fault_*`, qdisc handle `fa17:`, clock drop-ins,
+scratch loop disks, and the faults recorded in `/run/yoal-faults/active.json`).
+
+| Verb | `lab fault` flags | What it does | Revert |
+|---|---|---|---|
+| `partition` | `--peers lab-a,s3lab --direction in\|out\|both` | One nftables table: drop input/output/forward to and from the peers' underlay and overlay addresses | Delete the table |
+| `netem` | `--device eth0 --delay 200 --jitter 20 --loss 5 [--peers lab-a]` | `tc netem` on egress; with peers, a prio qdisc steers only their traffic through it | Delete the root qdisc `fa17:` |
+| `clock-skew` | `--unit yoal-agent.service --offset 60` | libfaketime on one unit: a runtime drop-in sets `LD_PRELOAD` and an offset file (re-read every second), then the unit restarts | Offset `+0` at once, drop-in removed, no restart |
+| `freeze` | `--unit yoal-agent.service` | `SIGSTOP` to every process of the unit | `SIGCONT` |
+| `kill-unit` | `--unit caddy.service [--signal KILL\|TERM] [--mode stop]` | `SIGKILL` to the unit (systemd's `Restart=` decides what happens), or `stop` | `stop` mode: start again |
+| `fill-disk` | `[--size 64] [--path <loop-backed dir>] [--leave-kb 0]` | A fresh loopback ext4 (≤1 GiB), filled with `fallocate`; or an existing loop-backed filesystem under the Yoal data roots | Remove the fill; unmount and detach the scratch disk |
+| `block-arbiter` | `[--action drop\|reject]` | Drop or reset TCP to s3lab | Delete the table |
+| `pause-heartbeat` | — | Drop the agent user's (`meta skuid yoal`) TCP to the control plane; Caddy, workloads and the forwarder keep serving | Delete the table |
+
+Units are `yoal-agent`, `yoal-control-plane`, `yoal-control-plane-standby`, `yoal-builder`,
+`yoal-caddy`, `caddy` and `yoal-workload-<id>`; never `yoal-helper` (a frozen helper could not
+revert anything).
+
+**Clock skew, and why libfaketime.** The lab's nodes share one kernel (the Docker VM's), so the
+system clock cannot be skewed per node, and must never be stepped: it is the host's. A time
+namespace offsets only `CLOCK_MONOTONIC` and `CLOCK_BOOTTIME`, not wall time, so it cannot fake a
+skewed clock. libfaketime intercepts `clock_gettime`/`gettimeofday` in one process (Bun included;
+`verify-faults.ts` checks the agent's own log clock against journald's), and the file-based offset
+lets a scenario step the clock during a lease without a restart. It cannot fake a skewed kernel: the
+kernel's timers, TLS validity checks in other processes and the journal keep real time. On the VM
+form, a whole-VM skew is the alternative (`chronyd` off, `date -s`).
+
+## s3lab
+
+[`s3lab/proxy.ts`](./s3lab/proxy.ts) forwards to MinIO RELEASE.2025-09-07T16-13-09Z (pinned by
+digest; MinIO no longer publishes release tags) and keeps the client's `Host`, so SigV4 still
+verifies and MinIO's own `If-Match`/`If-None-Match` CAS answers pass through. Rules inject:
+
+```sh
+bun tests/lab/lab.ts s3 add '{"match":{"method":"PUT","conditional":true},"action":{"status":412},"count":3}'
+bun tests/lab/lab.ts s3 add '{"match":{"keyPrefix":"yoal/ha/"},"action":{"delayMs":5000},"durationS":60}'
+bun tests/lab/lab.ts s3 add '{"match":{"method":"GET"},"action":{"stale":true},"probability":0.5}'
+bun tests/lab/lab.ts s3 add '{"action":{"status":501}}'       # 409, 412, 500, 501, 502, 503, 504
+bun tests/lab/lab.ts s3 clear
+```
+
+A stale read serves the object's previous version with its old ETag. "Unreachable" is the
+`block-arbiter` verb on a node, not an s3lab rule.
+
+## Scenarios and the checker
+
+[`tests/ha/scenarios/kill-node-b.ts`](../ha/scenarios/kill-node-b.ts) deploys the checker app
+(`tests/ha/checker/app`, Lane B) as a process app with a Postgres database on lab-a, scales it to two
+copies on lab-a and lab-b (it drains the other nodes while placing, then resumes them), runs
+`tests/ha/checker/cli.ts` through lab-a's public route, powers lab-b off (or `--method partition`),
+and records when lab-b goes offline, when its copy is re-placed and running, and when the new copy
+answers. Output: `report.json` (the checker's), `observations.jsonl` (the lab's, which the checker
+reads), `timings.json` and `summary.md`.
+
+## The VM form
+
+[`vm/lab-node.lima.yaml`](./vm/lab-node.lima.yaml) is the same node as a Lima VM (Debian 13, VZ,
+the same packages, `user-v2` networking so the VMs reach each other). The nightly `ha-chaos` lane
+will create `yoal-w0-vm-lab-a` … `-lab-ctl` from it, install and join exactly as `lab up` does
+(over `limactl shell` instead of `docker exec`), and run node loss as a real VM stop
+(`limactl stop -f`). It is a definition only: nothing creates these VMs yet, and the weekly cloud
+lane on the reference shape (HA-PLAN §7.1) is not built.
+
+## Limits of the container form
+
+- One kernel for all nodes: no per-node kernel clock, and a kernel panic or OOM is the host's.
+- `docker kill` is a power cut of the processes, but the page cache and disks are the host's, so
+  it is not a disk failure. A hypervisor stop is not a provider partition either (CLUSTERING §19.3).
+- Node memory and CPU are cgroup limits, not hardware; the numbers are the lab's, not production's.
+- `pause-heartbeat` on lab-a does nothing: its agent reaches the control plane on a unix socket.

@@ -25,6 +25,8 @@ export async function api<T = any>(method: string, path: string, body?: unknown,
 		method,
 		headers: {
 			host: PLATFORM_HOST,
+			// The platform refuses a state-changing request without a same-origin Origin (CSRF guard).
+			origin: `http://${PLATFORM_HOST}`,
 			authorization: `Bearer ${labToken()}`,
 			...(body === undefined ? {} : { 'content-type': 'application/json' }),
 		},

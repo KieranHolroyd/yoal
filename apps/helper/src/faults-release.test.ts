@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
+import { createHandler, type HelperRuntime } from './server.ts';
 
 /**
  * HA-PLAN §10: "a release build has no fault endpoint to call". This builds the helper exactly as
@@ -73,4 +74,32 @@ describe('fault verbs are compiled only into test builds', () => {
 		},
 		120_000,
 	);
+});
+
+describe('single-node gate: without the define the router has no fault route', () => {
+	test('a handler given a fault injector still answers 404 for /v1/faults when YOAL_FAULT_INJECTION is not defined', async () => {
+		// `bun test` runs the source unbundled, where the define is absent: the same condition as any
+		// build that does not set it to true. The injector must never be consulted.
+		expect(typeof YOAL_FAULT_INJECTION).toBe('undefined');
+		let consulted = 0;
+		const handler = createHandler({} as HelperRuntime, {
+			version: '0.0.0-test',
+			faults: {
+				async handle() {
+					consulted++;
+					return new Response('fault route reached', { status: 200 });
+				},
+			},
+		});
+		for (const [method, path] of [
+			['GET', '/v1/faults'],
+			['POST', '/v1/faults/partition'],
+			['POST', '/v1/faults/clear-all'],
+		] as const) {
+			const response = await handler(new Request(`http://helper${path}`, { method, ...(method === 'POST' ? { body: '{}' } : {}) }));
+			expect(response.status).toBe(404);
+		}
+		expect(consulted).toBe(0);
+		expect((await handler(new Request('http://helper/healthz'))).status).toBe(200);
+	});
 });

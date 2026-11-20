@@ -1,0 +1,50 @@
+# HA lab, real-VM form (tests/lab/README.md, "The VM form"): one Lima VM per lab node, Debian 13 under VZ.
+# Same nodes, addresses-by-name, roles and zones as the container form (tests/lab/lab.config.ts);
+# what changes is that a node loss is a real VM stop and the kernel (clock, WireGuard, nftables)
+# is the node's own. Not provisioned by anything yet: the nightly `ha-chaos` lane on a self-hosted
+# `yoal-lab` runner will create lab-a, lab-b, lab-c and lab-ctl from this file.
+#
+#   limactl create --name yoal-w0-vm-lab-a --set '.cpus=3 | .memory="4GiB"' tests/lab/vm/lab-node.lima.yaml
+#
+# Use only yoal-w0-vm-* names, so the lab never touches a VM it did not create.
+vmType: vz
+os: Linux
+arch: default
+cpus: 2
+memory: 3GiB
+disk: 30GiB
+images:
+  - location: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2
+    arch: aarch64
+  - location: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-amd64.qcow2
+    arch: x86_64
+# No host directories: the checkout is shipped as a tarball, exactly as in the container form.
+mounts: []
+# user-v2 gives every lab VM an address on one virtual network, reachable from the others (the
+# underlay the WireGuard overlay runs over). Faults (nftables, tc) act on that interface.
+networks:
+  - lima: user-v2
+containerd:
+  system: false
+  user: false
+provision:
+  - mode: system
+    script: |
+      #!/bin/sh
+      set -eu
+      export DEBIAN_FRONTEND=noninteractive
+      apt-get update -q
+      # The same package set as tests/lab/node.Dockerfile, so one fault build runs on both forms.
+      apt-get install -y -q --no-install-recommends ca-certificates curl unzip git gnupg \
+        iproute2 iputils-ping nftables podman uidmap passt netavark aardvark-dns \
+        fio nfs-common cifs-utils wireguard-tools faketime e2fsprogs util-linux openssl jq
+      install -d /opt/yoal/runtime/bin
+      arch=$(uname -m); case "$arch" in x86_64) a=x64 ;; aarch64) a=aarch64 ;; esac
+      curl -fsSL -o /tmp/bun.zip "https://github.com/oven-sh/bun/releases/download/bun-v1.4.4/bun-linux-$a.zip"
+      unzip -qo /tmp/bun.zip -d /tmp/bun && install -m 0755 /tmp/bun/*/bun /opt/yoal/runtime/bin/bun
+      echo 'lab node (vm)' > /etc/yoal-lab-node
+probes:
+  - mode: readiness
+    script: |
+      #!/bin/sh
+      test -x /opt/yoal/runtime/bin/bun

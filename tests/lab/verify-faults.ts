@@ -57,15 +57,16 @@ function active(): string[] {
 }
 
 /** Apply, check during, wait past the expiry, check after; the auto-revert does the cleanup. */
-async function verify(verb: string, body: Record<string, unknown>, during: () => { ok: boolean; detail: string }, after: () => { ok: boolean; detail: string }, notes: string[] = []): Promise<void> {
-	say(`${verb} on ${node.name}`);
+async function verify(label: string, body: Record<string, unknown>, during: () => { ok: boolean; detail: string } | Promise<{ ok: boolean; detail: string }>, after: () => { ok: boolean; detail: string }, notes: string[] = []): Promise<void> {
+	const verb = label.split(' ')[0]!;
+	say(`${label} on ${node.name}`);
 	const applied = apply(verb, body);
 	if (applied.status !== 200) {
-		results.push({ verb, pass: false, applied: applied.body, during: 'not applied', after: '', notes });
+		results.push({ verb: label, pass: false, applied: applied.body, during: 'not applied', after: '', notes });
 		console.log(`    FAIL apply: ${JSON.stringify(applied.body)}`);
 		return;
 	}
-	const duringCheck = during();
+	const duringCheck = await during();
 	console.log(`    during: ${duringCheck.ok ? 'ok' : 'FAIL'} — ${duringCheck.detail}`);
 	const durationS = Number(body.durationS ?? 1);
 	await Bun.sleep(durationS * 1000 + 2500);
@@ -73,7 +74,7 @@ async function verify(verb: string, body: Record<string, unknown>, during: () =>
 	const afterCheck = after();
 	console.log(`    after auto-revert: ${afterCheck.ok && !stillActive ? 'ok' : 'FAIL'} — ${afterCheck.detail}${stillActive ? ' (still listed as active)' : ''}`);
 	results.push({
-		verb,
+		verb: label,
 		pass: duringCheck.ok && afterCheck.ok && !stillActive,
 		applied: { id: applied.id, params: applied.body.fault.params, evidence: applied.body.fault.evidence },
 		during: duringCheck.detail,
@@ -123,25 +124,32 @@ await verify(
 );
 
 // 3. clock-skew: the agent restarts under libfaketime; its own log clock runs +3600 s ahead.
-const skewProbe = () => {
+const skewProbe = async (sinceS: number) => {
 	const pid = sh('systemctl show -p MainPID --value yoal-agent.service').out;
 	const environ = sh(`tr '\\0' '\\n' < /proc/${pid}/environ | grep -E '^(LD_PRELOAD|FAKETIME_TIMESTAMP_FILE)='`).out.replace(/\n/g, ' ');
 	const offset = sh('cat /run/yoal-faults/clock-yoal-agent.service 2>/dev/null').out;
-	// The agent's first log line after a start carries its own idea of the time; journald's is real.
-	const line = sh("journalctl -u yoal-agent.service -o short-unix --no-pager -n 40 | grep 'INFO Agent ' | tail -1").out;
+	// The restarted agent's first log line carries its own idea of the time; journald's is real.
+	let line = '';
+	for (let attempt = 0; attempt < 20 && !line; attempt++) {
+		line = sh(`journalctl -u yoal-agent.service -o short-unix --no-pager --since @${sinceS} | grep 'INFO Agent ' | tail -1`).out;
+		if (!line) await Bun.sleep(500);
+	}
 	const journal = Number(line.split(' ')[0]);
 	const own = Date.parse(/\[yoal-agent ([^\]]+)\]/.exec(line)?.[1] ?? '') / 1000;
 	return { pid, environ, offset, skewS: Math.round(own - journal) };
 };
+let skewAppliedAt = 0;
+skewAppliedAt = Math.floor(Date.now() / 1000) - 1;
 await verify(
 	'clock-skew',
-	{ unit: 'yoal-agent.service', offsetS: 3600, durationS: 8 },
-	() => {
-		const probe = skewProbe();
+	{ unit: 'yoal-agent.service', offsetS: 3600, durationS: 10 },
+	async () => {
+		const probe = await skewProbe(skewAppliedAt);
 		return { ok: probe.environ.includes('libfaketime') && probe.skewS >= 3590 && probe.skewS <= 3610, detail: `agent pid ${probe.pid}: ${probe.environ}; offset file ${probe.offset}; agent clock − journal clock = ${probe.skewS} s` };
 	},
 	() => {
-		const probe = skewProbe();
+		const pid = sh('systemctl show -p MainPID --value yoal-agent.service').out;
+		const probe = { pid, offset: sh('cat /run/yoal-faults/clock-yoal-agent.service 2>/dev/null').out };
 		const dropIn = sh('ls /run/systemd/system/yoal-agent.service.d/ 2>/dev/null').out;
 		return { ok: probe.offset === '+0' && !dropIn.includes('yoal-fault-clock'), detail: `offset file ${probe.offset}; drop-in ${dropIn || 'removed'} (the running agent re-reads the offset within 1 s; it is not restarted)` };
 	},
@@ -166,17 +174,21 @@ await verify(
 
 // 5. kill-unit: SIGKILL (systemd restarts it with a new PID), and stop with a timed start.
 say(`kill-unit (signal) on ${node.name}`);
-const beforeKill = sh('systemctl show -p MainPID --value caddy.service').out;
-const killed = apply('kill-unit', { unit: 'caddy.service', signal: 'KILL' });
-await Bun.sleep(4000);
-const afterKill = sh('systemctl show -p MainPID --value caddy.service; systemctl is-active caddy.service; systemctl show -p NRestarts --value caddy.service').out.replace(/\n/g, ' ');
+const beforeKill = sh('systemctl show -p MainPID --value yoal-agent.service').out;
+const killed = apply('kill-unit', { unit: 'yoal-agent.service', signal: 'KILL' });
+await Bun.sleep(5000);
+const afterKill = sh('systemctl show -p MainPID --value yoal-agent.service; systemctl is-active yoal-agent.service; systemctl show -p NRestarts --value yoal-agent.service').out.replace(/\n/g, ' ');
+const caddyRestart = sh('systemctl show -p Restart --value caddy.service').out;
 results.push({
 	verb: 'kill-unit (signal)',
 	pass: killed.status === 200 && !afterKill.startsWith(`${beforeKill} `) && afterKill.includes('active'),
 	applied: { evidence: killed.body?.fault?.evidence },
 	during: `MainPID before ${beforeKill}`,
 	after: `MainPID, state, NRestarts after: ${afterKill}`,
-	notes: ['Nothing to revert: systemd restarts the unit (Restart=).'],
+	notes: [
+		'Nothing to revert: systemd restarts the unit (yoal-agent has Restart=on-failure).',
+		`caddy.service on this node has Restart=${caddyRestart}: a Caddy killed this way stays down until something starts it.`,
+	],
 });
 console.log(`    ${results.at(-1)!.pass ? 'ok' : 'FAIL'} — before ${beforeKill}, after ${afterKill}`);
 await verify(
@@ -195,7 +207,7 @@ await verify(
 		const fault = helperCall(node.name, 'GET', '/v1/faults').body.faults.find((entry: any) => entry.verb === 'fill-disk');
 		scratch = fault?.state?.mountPoint ?? '';
 		const df = sh(`df -k --output=source,size,avail ${scratch} | tail -1`).out;
-		const write = sh(`dd if=/dev/zero of=${scratch}/probe bs=64k count=4 2>&1 | tail -1`).out;
+		const write = sh(`dd if=/dev/zero of=${scratch}/probe bs=64k count=4 2>&1 | tr '\\n' ' '`).out;
 		return { ok: /\/dev\/loop\d+\s+\d+\s+0$/.test(df.trim()) && /No space left/.test(write), detail: `df: ${df.trim()}; write: ${write}` };
 	},
 	() => {
