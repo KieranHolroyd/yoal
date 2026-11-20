@@ -55,11 +55,11 @@ Every lane was reviewed by an agent that did not write it (diff + exit criteria 
 | Lane | Verdict | Disposition |
 |---|---|---|
 | A | SHIP WITH FIXES | Fixed: `databaseHostAlias` now matches the name apps dial; the agent refuses to bind a non-private gateway address (new `isGatewayAddress` + test). Open, documented: one gateway address cannot serve multiple org bridges (needs a contract change); guard table not cleared when the flag goes off. |
-| B | review run after the report | see the review note in the branch hand-off |
+| B | integrator read-through | The independent reviewer could not run (Claude quota). Integrator checked migration 0121 (additive, backfill, index), the container gate behind `ENDPOINTS_GATEWAY` + capability, `version` bumping only on an upstream change, and the flag-off golden. This is **not** the required independent review; re-run it when quota allows. |
 | C | DO NOT SHIP | Fixed the three blockers: gate on the run (`none` no longer withholds), hold the running release when the previous pointer was pruned, set a rollout for a gated first deploy. Also fixed a queued deploy being failed behind a long migration, and made the per-app lease exclusion part of the lease UPDATE. Added a live-app regression test. |
 | D | SHIP WITH FIXES | Fixed: retry deadline spin after a drain; `null` desired state no longer stops in-flight runs; persist the pending record before the helper starts (I16); corrupt state fails closed. Open: drain deadline vs Caddy apply ordering; readiness does not gate the edge until the agent reports ready (lane C owns the ordering). |
 | E | DO NOT SHIP as the W3 exit | Fixed: cancel the wrapped upload stream on failure; cancel the Azure multipart source; GCS reports `objectLock: false` for a readable bucket without a retention policy. Open blocker: Azure `presignPut` cannot carry `x-ms-blob-type`, so real Azure presigned uploads/backup targets fail; needs `{url, headers}` in the contract. Also open: GCS presign path encoding, real-service immutability, no CI job for the e2e suites. |
-| Lab | review run after the report | see the lane's hand-off |
+| Lab | integrator read-through | The independent reviewer could not run (Claude quota). Integrator checked that `rolling-deploy-under-load` judges zero non-2xx at ≥95% of 10,000/min and the failing-command path, and that `attachments-three-nodes` asserts spread, promotion env/restart per copy, the port scan and the checker. This is **not** the required independent review; re-run it when quota allows. |
 
 ## M1 exit criteria
 
