@@ -368,10 +368,15 @@ mail node (the unit sets the paths). None of them is secret: DKIM keys and crede
     `Caddyfile.dist` and replaced with a bootstrap that puts the admin API on
     `unix//var/lib/caddy/admin.sock|0660` (never TCP); the agent pushes the real config through it.
     If the module download fails the install continues (HTTP works); HTTPS needs it later. An
-    existing Caddy binary is used as is (HTTPS installs need it built with `caddy-dns/cloudflare`),
-    but not its Caddyfile: unless the admin API is already on a unix socket, the installer backs the
-    file up (`Caddyfile.dist`, or `Caddyfile.dist.<ms>` when that exists), prints where it went,
-    writes the same bootstrap and restarts Caddy, so the admin API is never left on TCP.
+    existing Caddy binary is used as is (HTTPS installs need it built with `caddy-dns/cloudflare`).
+    Its Caddyfile is replaced too when the admin API is not already on a unix socket (a commented-out
+    `admin unix//…` line does not count) and Caddy runs as the packaged `caddy.service`: on the
+    control plane's first install, when the file is still byte-for-byte the package's own (dpkg's
+    md5), or with `--replace-caddyfile`. The old file is hard-linked to `Caddyfile.dist` (or
+    `Caddyfile.dist.<ms>` when that exists), so the backup keeps its mode and owner; the installer
+    prints where it went, then enables and restarts `caddy.service`. Any other Caddyfile on an
+    existing install is left alone with a warning, and a host whose proxy is `yoal-caddy.service`
+    (a converted Skiff host) is never given a second Caddy.
   - **Podman** (agent installs only): `podman uidmap passt netavark aardvark-dns`. Managed
     Postgres and RustFS run as rootful Quadlet containers (Podman 4.4+). Project and runner
     containers get a user namespace of their own, so the helper uses `uidmap` and adds a

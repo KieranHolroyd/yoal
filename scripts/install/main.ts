@@ -75,7 +75,7 @@ import { MAIL_UNIT, mailUnit } from '../systemd/mail.ts';
 import { IDENTITY_LITESTREAM_UNIT, IDENTITY_UNIT, identityLitestreamUnit, identityUnit } from '../systemd/identity.ts';
 import { agentUnit, CADDY_ACCESS_LOG, detectCaddyAdminSocket } from '../systemd/agent.ts';
 import { ensureCaddyRestartPolicy } from '../systemd/caddy.ts';
-import { ensureNodeCaddyfile } from './caddyfile.ts';
+import { controlPlaneCaddyfile, freshPackageCaddyfile, workerCaddyfile, type CaddyfileHost } from './caddyfile.ts';
 import { CLI_COMMANDS, ensureHostCommands, RELEASE_COMMANDS } from './commands.ts';
 import { ensureMasterKey, finishMasterKeyMigration, revertMasterKeyMigration, type EnsureMasterKeyResult } from './master-key.ts';
 import { CLICKHOUSE_UNIT, clickhouseInstalled, ensureClickHouse, removeClickHouseUnit } from '../systemd/clickhouse.ts';
@@ -159,6 +159,8 @@ interface Options {
 	skipDnsCheck: boolean;
 	/** Leave package installation (Caddy, Podman) to the operator. */
 	skipDeps: boolean;
+	/** Replace an existing install's own Caddyfile with the bootstrap one (F12 review). */
+	replaceCaddyfile: boolean;
 	githubClientId?: string;
 	githubClientSecret?: string;
 	smtp?: { host: string; port: number; user: string; password: string; from: string };
@@ -266,6 +268,7 @@ const options: Options = {
 	cloudflareTokenFile: setting('--cloudflare-token-file', ['YOAL_CLOUDFLARE_TOKEN_FILE'], '/etc/caddy/cloudflare.token'),
 	skipDnsCheck: has('--skip-dns-check'),
 	skipDeps: has('--skip-deps') || process.env.YOAL_SKIP_DEPS === '1',
+	replaceCaddyfile: has('--replace-caddyfile'),
 	githubClientId: setting('--github-client-id', ['GITHUB_CLIENT_ID']) || undefined,
 	githubClientSecret: setting('--github-client-secret', ['GITHUB_CLIENT_SECRET']) || undefined,
 	objectStore: (setting('--object-store', ['YOAL_OBJECT_STORE'], 'local') as 'local' | 'r2') || 'local',
@@ -744,7 +747,7 @@ function installCaddy(): void {
 
 	// The package's Caddyfile serves a welcome page with the admin API on TCP. Yoal wants the admin
 	// API on a unix socket only (the agent pushes the real config through it).
-	ensureNodeCaddyfile({ path: CADDYFILE, listen: ':80', run: (cmd) => void run(cmd[0]!, cmd.slice(1), { allowFailure: true }), log });
+	freshPackageCaddyfile({ path: CADDYFILE, log });
 	run('systemctl', ['enable', 'caddy'], { allowFailure: true });
 	run('systemctl', ['restart', 'caddy'], { allowFailure: true });
 
@@ -1182,18 +1185,24 @@ function buildRelease(env: Map<string, string>, scope: 'full' | 'worker' = 'full
 	return release;
 }
 
-function writeUnits(release: string): void {
-	step('systemd units');
-	// A Caddy that was installed before Yoal still runs the package's Caddyfile, admin API on TCP:
-	// replace it (with a backup) before the admin socket is read from it (HA-PLAN Wave 1 F12).
-	ensureNodeCaddyfile({
+/** The host as the Caddyfile decisions see it (scripts/install/caddyfile.ts). */
+function caddyfileHost(): CaddyfileHost {
+	return {
 		path: CADDYFILE,
-		listen: ':80',
 		run: (cmd) => void run(cmd[0]!, cmd.slice(1), { allowFailure: true }),
+		capture: (cmd) => capture(cmd[0]!, cmd.slice(1)),
 		log,
 		dryRun: options.dryRun,
-		restart: true,
-	});
+	};
+}
+
+function writeUnits(release: string, firstInstall: boolean): void {
+	step('systemd units');
+	// A Caddy that was installed before Yoal still runs the package's Caddyfile, admin API on TCP:
+	// replace it (with a backup) before the admin socket is read from it (HA-PLAN Wave 1 F12), but
+	// only under caddy.service, and on an existing install only if it is the package's own file or
+	// the operator passed --replace-caddyfile.
+	controlPlaneCaddyfile({ ...caddyfileHost(), firstInstall, force: options.replaceCaddyfile });
 	ensureCaddyAccess();
 	// Primary + standby (zero-downtime updates) + boot guard; shared with the self-updater.
 	const controlUnits = controlPlaneUnits({
@@ -1815,7 +1824,7 @@ async function install(): Promise<void> {
 		installUpdateCommand();
 		// yoal plus the operator scripts (yoal-restore, yoal-alert, …).
 		installCliCommands();
-		writeUnits(release);
+		writeUnits(release, previousRelease === null);
 		await installClickHouse();
 		startServices();
 		// The control plane served with the sealed key: the plaintext a migration kept can go.
@@ -1971,15 +1980,7 @@ async function joinWorker(join_: NonNullable<Options['join']>): Promise<void> {
 
 	step('systemd units');
 	// Nothing listens publicly until the overlay address is known.
-	ensureNodeCaddyfile({
-		path: CADDYFILE,
-		listen: 'http://127.0.0.1:8080',
-		bind: '127.0.0.1',
-		run: (cmd) => void run(cmd[0]!, cmd.slice(1), { allowFailure: true }),
-		log,
-		dryRun: options.dryRun,
-		restart: true,
-	});
+	workerCaddyfile({ ...caddyfileHost() });
 	run('systemctl', ['enable', 'caddy'], { allowFailure: true });
 	ensureCaddyAccess();
 	writeFileSync(join(SYSTEMD_DIR, 'yoal-agent.service'), agentUnit({ optDir: OPT_DIR, etcDir: ETC_DIR, varDir: VAR_DIR, runDir: RUN_DIR }));
