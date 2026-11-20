@@ -262,6 +262,23 @@ export class ControlLease {
 		this.#reason = 're-seeded; not read yet';
 	}
 
+	/**
+	 * A read that does not change this node's role. Used by the state machine to decide whether a
+	 * fenced node may rejoin as a standby: an unreachable arbiter must not be mistaken for a stable
+	 * holder. It still updates the server-clock skew estimate.
+	 */
+	async probe(): Promise<
+		| { reachable: true; absent: true; holderNodeId: null; epoch: number }
+		| { reachable: true; absent: false; holderNodeId: string; epoch: number }
+		| { reachable: false; absent: false; holderNodeId: null; epoch: number; reason: string }
+	> {
+		const read = await this.#read();
+		if (read.kind === 'error')
+			return { reachable: false, absent: false, holderNodeId: null, epoch: this.#epoch, reason: read.reason };
+		if (read.kind === 'absent') return { reachable: true, absent: true, holderNodeId: null, epoch: this.#epoch };
+		return { reachable: true, absent: false, holderNodeId: read.record.holderNodeId, epoch: read.record.epoch };
+	}
+
 	async #takeOver(record: ControlLeaseRecord, etag: string, serverDate: number | null): Promise<ControlLeaseStatus> {
 		const next: ControlLeaseRecord = {
 			epoch: record.epoch + 1,

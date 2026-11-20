@@ -109,6 +109,36 @@ export class IngressState extends DesiredStatePart {
 			: relay && tls && !selfFirst
 				? `https://${relay}`
 				: null;
+		// Control-plane HA (W9, CLUSTERING §6.4): an ordered upstream list to the control nodes.
+		// Caddy health-checks each `/readyz` with `lb_policy first`; the lease holder is first, this
+		// node's own socket next when it is a control node, then its peers. A standby may answer
+		// `/readyz` 200 for humans but is never preferred while the primary is healthy.
+		const controlNodes = featureEnabled(this.ctx.config, 'CONTROL_STANDBY')
+			? this.state.allNodes
+					.filter((candidate) => nodeRoles(candidate).includes('control'))
+					.sort((a, b) => {
+						const holder = this.ctx.controlPlane.snapshot()?.lease.holderNodeId ?? null;
+						if (a.id === holder) return -1;
+						if (b.id === holder) return 1;
+						if (a.id === node.id) return -1;
+						if (b.id === node.id) return 1;
+						return a.id.localeCompare(b.id);
+					})
+			: [];
+		const platformUpstreams = controlNodes
+			.map((candidate, index) => {
+				if (candidate.id === node.id)
+					return {
+						nodeId: candidate.id,
+						upstream: this.ctx.config.platformUpstream ?? 'unix//run/yoal/control.sock',
+						priority: index,
+					};
+				// A peer control node over the managed overlay's plain ingress listener, so the list
+				// is all plain HTTP: Caddy cannot carry a TLS transport per upstream.
+				const address = candidate.privateAddress ? `${candidate.privateAddress}:8080` : null;
+				return address ? { nodeId: candidate.id, upstream: `http://${address}`, priority: index } : null;
+			})
+			.filter((entry): entry is { nodeId: string; upstream: string; priority: number } => entry !== null);
 		return {
 			// H19 (W8 lane C): drain, PROXY protocol, trusted proxies and the health port. Rendered only
 			// inside this flag-gated block, so a single-node install gets no health listener, no lame-duck
@@ -120,6 +150,7 @@ export class IngressState extends DesiredStatePart {
 			listeners: [...(tls ? [':443'] : []), ...(node.privateAddress ? [`${node.privateAddress}:8080`] : [])],
 			tls,
 			platform: platformHost && upstream ? { host: platformHost, upstream } : null,
+			...(platformUpstreams.length > 0 ? { platformUpstreams } : {}),
 		};
 	}
 }

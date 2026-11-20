@@ -80,3 +80,18 @@ export const controlStatusSchema = z.object({
 });
 
 export type ControlStatus = z.infer<typeof controlStatusSchema>;
+
+/** `POST /api/v1/ha/control/promote`: an operator promotion, still a CAS at the ETag just read. */
+export const controlPromoteRequestSchema = z.object({
+	/** Refuse with 409 when the lease is not at this epoch (CLUSTERING §6.5). */
+	expectedEpoch: z.number().int().positive().optional(),
+});
+export type ControlPromoteRequest = z.infer<typeof controlPromoteRequestSchema>;
+
+/** `POST /api/v1/ha/control/enrol`: a standby's CSR, signed after a second factor. */
+export const controlEnrolRequestSchema = z.object({
+	nodeId: z.string().min(1).max(64),
+	csrPem: z.string().min(64).max(100_000),
+	reason: z.string().max(200).optional(),
+});
+export type ControlEnrolRequest = z.infer<typeof controlEnrolRequestSchema>;

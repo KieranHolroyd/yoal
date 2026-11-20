@@ -145,6 +145,22 @@ export interface FailoverStatusView {
 	}>;
 	/** True when an automatic database promotion path is installed (`registerDatabaseHandler`). */
 	databaseHandler: boolean;
+	/**
+	 * Control-plane standby status (HA-PLAN H21, W9), present only while `CONTROL_STANDBY` is on.
+	 * Additive: a flag-off install returns the same document as before.
+	 */
+	controlPlane?: Array<{
+		nodeId: string;
+		name: string;
+		role: string;
+		epoch: number;
+		holderNodeId: string | null;
+		leaseExpiresAt: string | null;
+		canPromote: boolean;
+		replicationLagSeconds: number | null;
+		version: string | null;
+		updatedAt: string | null;
+	}>;
 	counts: { lastMinute: number; inProgress: number; queued: number };
 	recent: FailoverEventView[];
 }

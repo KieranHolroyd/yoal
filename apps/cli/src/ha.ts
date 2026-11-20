@@ -63,6 +63,39 @@ export interface HaStatusView {
 	}>;
 	counts: { lastMinute: number; inProgress: number; queued: number };
 	recent: HaEventView[];
+	/** Control-plane standby nodes (HA-PLAN H21, W9); present only while CONTROL_STANDBY is on. */
+	controlPlane?: HaControlNodeView[];
+}
+
+export interface HaControlNodeView {
+	nodeId: string;
+	name: string;
+	role: string;
+	epoch: number;
+	holderNodeId: string | null;
+	leaseExpiresAt: string | null;
+	canPromote: boolean;
+	replicationLagSeconds: number | null;
+	version: string | null;
+	updatedAt: string | null;
+}
+
+/** `yoal ha control status`: role, epoch and replay for every control node. */
+export function formatControlStatus(nodes: readonly HaControlNodeView[]): string {
+	if (nodes.length === 0) return 'No control nodes have reported. Is CONTROL_STANDBY on?';
+	return renderTable(
+		['NODE', 'ROLE', 'EPOCH', 'HOLDER', 'CAN PROMOTE', 'REPLAY LAG', 'VERSION', 'UPDATED'],
+		nodes.map((node) => [
+			node.name,
+			node.role,
+			String(node.epoch),
+			node.holderNodeId ?? '-',
+			node.canPromote ? 'yes' : 'no',
+			node.replicationLagSeconds === null ? '-' : `${node.replicationLagSeconds}s`,
+			node.version ?? '-',
+			formatTime(node.updatedAt ?? undefined),
+		]),
+	);
 }
 
 export function formatHaStatus(view: HaStatusView, options: { events?: number } = {}): string {

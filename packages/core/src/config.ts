@@ -75,6 +75,21 @@ export interface CoreConfig {
 	cloudflareApiToken?: string;
 	/** The platform upstream an ingress on the control node dials (`unix//run/yoal/control.sock`). */
 	platformUpstream?: string;
+	/** This control node's identity in the lease; `YOAL_NODE_ID` or the host name when unset. */
+	controlNodeId?: string;
+	/** `YOAL_CONTROL_ROLE=standby` marks an enrolled warm standby; absent means primary-capable. */
+	controlRole?: 'primary' | 'standby';
+	/**
+	 * Direct control endpoints an agent may try, in order (`YOAL_CONTROL_ADDRESSES`, comma
+	 * separated). Empty falls back to the platform origin.
+	 */
+	controlAddresses?: string[];
+	/** The allowlisted config digest the primary delivered at enrolment; promotion compares it. */
+	controlConfigDigest?: string;
+	/** File the enrolment wrote with the expected key/config fingerprints (default under dataDir). */
+	controlEnrolmentPath?: string;
+	/** File the restore/enrolment writes with control replica replay status. */
+	controlReplicaStatusPath?: string;
 	/**
 	 * Loopback port of the edge's internal S3 gateway (Caddy). The control plane reaches every
 	 * managed instance through it to browse and manage objects (D82).
@@ -175,6 +190,26 @@ export function coreConfigFromEnv(
 					? readSecretFileSync(env.YOAL_CLOUDFLARE_API_TOKEN_FILE)
 					: undefined)),
 		platformUpstream: overrides.platformUpstream ?? (env.YOAL_PLATFORM_UPSTREAM?.trim() || undefined),
+		controlNodeId: overrides.controlNodeId ?? (env.YOAL_NODE_ID?.trim() || undefined),
+		controlRole:
+			overrides.controlRole ??
+			(env.YOAL_CONTROL_ROLE?.trim().toLowerCase() === 'standby'
+				? 'standby'
+				: env.YOAL_CONTROL_ROLE?.trim()
+					? 'primary'
+					: undefined),
+		controlAddresses:
+			overrides.controlAddresses ??
+			(env.YOAL_CONTROL_ADDRESSES
+				? env.YOAL_CONTROL_ADDRESSES.split(',')
+						.map((address) => address.trim())
+						.filter(Boolean)
+				: undefined),
+		controlConfigDigest: overrides.controlConfigDigest ?? (env.YOAL_CONTROL_CONFIG_DIGEST?.trim() || undefined),
+		controlEnrolmentPath:
+			overrides.controlEnrolmentPath ?? (env.YOAL_CONTROL_ENROLMENT_FILE?.trim() || undefined),
+		controlReplicaStatusPath:
+			overrides.controlReplicaStatusPath ?? (env.YOAL_CONTROL_REPLICA_STATUS?.trim() || undefined),
 		storageGatewayPort:
 			overrides.storageGatewayPort ?? positiveInteger(env.YOAL_STORAGE_GATEWAY_PORT, 8081),
 		storageGatewayUrl: overrides.storageGatewayUrl ?? (env.YOAL_STORAGE_GATEWAY_URL?.replace(/\/+$/, '') || undefined),

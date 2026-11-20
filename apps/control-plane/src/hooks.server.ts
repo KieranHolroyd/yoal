@@ -78,6 +78,15 @@ export const init: ServerInit = async () => {
 		return;
 	}
 
+	// Control-plane HA (W9). The lease loop is the only process allowed to decide the role; with
+	// `CONTROL_STANDBY` off it does nothing. An enrolled warm standby starts here too: it reads the
+	// lease and its replica, and returns 503 for agents until it is promoted.
+	if (featureEnabled(core.ctx.config, 'CONTROL_STANDBY')) {
+		void core.controlPlane.start().catch((error) => {
+			reportBackgroundError('control-standby', error);
+		});
+	}
+
 	// One maintenance loop per process (HMR can call init more than once).
 	const global = globalThis as typeof globalThis & { __yoalMaintenance?: ReturnType<typeof setInterval> };
 	if (!global.__yoalMaintenance) {
@@ -185,6 +194,18 @@ const handleRequest: Handle = async ({ event, resolve }) => {
 	// Dev server only: serve `<slug>.localhost` content hosts straight from the local object store
 	// instead of requiring the agent + Caddy. Production never reaches this branch.
 	if (isDevContentHost(event.url.hostname)) return serveDevContent(event);
+
+	// Control-plane HA (W9-SPEC §4.4): an agent request, or any write, is served only by a confirmed
+	// primary. A standby or fenced node answers 503 with `x-yoal-role`/`x-yoal-epoch` so agents keep
+	// their cached desired state (I11) and never receive authority from a node that lost it.
+	const controlGate = core.controlPlane.writeGate(event.request.method, event.url.pathname);
+	if (controlGate)
+		return withFrameProtection(
+			Response.json(
+				{ error: 'control_plane_not_primary', reason: controlGate.reason },
+				{ status: controlGate.status, headers: controlGate.headers },
+			),
+		);
 
 	// Hosted user-pool pages are the pool's own sign-in surface. They use a per-pool cookie and
 	// must keep working when the platform is signed out or fails over, so the platform session,

@@ -1,5 +1,6 @@
 import { registryMirrorDesiredSchema } from './registry.ts';
 import { INGRESS_SET_CAPABILITY, ingressDesiredSchema, ingressHealthSchema } from './ingress.ts';
+import { controlDesiredSchema, controlReportSchema } from './control-plane.ts';
 import * as z from 'zod';
 import { nodeContainerConsoleDesiredSchema } from './container-console.ts';
 import { nodeStudioDesiredSchema } from './database-studio.ts';
@@ -392,6 +393,12 @@ export const desiredStateSchema = z.object({
 	 * else, which keeps a flag-off payload byte-identical. Carries no secret.
 	 */
 	ingress: ingressDesiredSchema.optional(),
+	/**
+	 * Control-plane HA (HA-PLAN H21, W9). Present only while `CONTROL_STANDBY` is on: the control
+	 * address list in preference order and the highest epoch the primary asserts. Omitted with the
+	 * flag off, so a single-node install receives a byte-identical payload.
+	 */
+	control: controlDesiredSchema.optional(),
 });
 export type DesiredState = z.infer<typeof desiredStateSchema>;
 
@@ -543,6 +550,12 @@ export const heartbeatSchema = z.object({
 	 * the endpoint itself is served by Caddy from the agent's state file, so this is the fleet view.
 	 */
 	ingressHealth: ingressHealthSchema.optional(),
+	/**
+	 * A control node's view of the arbitrated lease (HA-PLAN H21, W9). Present only on a control
+	 * node while `CONTROL_STANDBY` is on; the control plane records it in `control_state` for
+	 * `/api/v1/ha/status`. Omitted with the flag off, so a single-node payload is unchanged.
+	 */
+	control: controlReportSchema.optional(),
 	/**
 	 * Per-upstream request counters since the previous heartbeat (HA-PLAN H25 "Canary"), from this
 	 * node's own Caddy. Sent by an agent that declares `release-phase`.

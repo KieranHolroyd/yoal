@@ -8,8 +8,16 @@ import type { RequestHandler } from './$types';
  *
  * 200 = serving; 503 = the control plane or schema is not usable, which is what the self-updater
  * uses to decide whether a just-switched release should be rolled back.
+ *
+ * With `CONTROL_STANDBY` on, the same document carries the HA fields (role, epoch, lease,
+ * replication, `canPromote`, CLUSTERING §6.1) and is 503 while `joining`, `fenced` or
+ * `unavailable`. A standby answering 200 with `canPromote: false` is honest; the platform route's
+ * `/readyz` health check uses exactly that distinction. Flag off: byte-identical report.
  */
 export const GET: RequestHandler = async () => {
 	const report = await core.upgrades.readyz();
-	return json(report, report.ok ? 200 : 503, { 'cache-control': 'no-store' });
+	const ha = core.controlPlane.readyz();
+	if (!ha) return json(report, report.ok ? 200 : 503, { 'cache-control': 'no-store' });
+	const body = { ...report, ...ha.body };
+	return json(body, report.ok && ha.status === 200 ? 200 : 503, { 'cache-control': 'no-store' });
 };
