@@ -3,6 +3,7 @@ import {
 	DEFAULT_FEATURES,
 	FEATURE_FLAGS,
 	FEATURE_FLAG_NAMES,
+	OPT_IN_FEATURES,
 	featureEnvKey,
 	parseFeatureFlagValue,
 	parseFeatureFlags,
@@ -46,8 +47,14 @@ describe('feature registry', () => {
 		}
 	});
 
-	test('every flag defaults on (each is a kill switch)', () => {
-		for (const name of FEATURE_FLAG_NAMES) expect(DEFAULT_FEATURES[name]).toBe(true);
+	test('every flag defaults on (each is a kill switch) except the listed opt-in flags', () => {
+		for (const name of FEATURE_FLAG_NAMES) expect(DEFAULT_FEATURES[name]).toBe(!OPT_IN_FEATURES.has(name));
+	});
+
+	test('automatic database promotion is opt-in (HA-PLAN F1)', () => {
+		expect(FEATURE_FLAGS.DB_AUTO_PROMOTE.default).toBe(false);
+		expect(DEFAULT_FEATURES.DB_AUTO_PROMOTE).toBe(false);
+		expect([...OPT_IN_FEATURES]).toEqual(['DB_AUTO_PROMOTE']);
 	});
 
 	test('uses YOAL_FEATURE_<NAME> as the env key', () => {

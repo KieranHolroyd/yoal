@@ -3,17 +3,23 @@ title: Docs for AI agents
 description: Give coding agents the Yoal docs. Search and read them offline with yoal docs, or over MCP, and point your repository's AGENTS.md at them.
 ---
 
-An AI coding agent working on a project that deploys to Yoal does better when it reads the docs than when it guesses. The `yoal docs` command searches and prints this documentation from the terminal, as Markdown the agent can read directly. The docs are bundled into the CLI, so it needs no network connection, no `yoal login` and no MCP setup. This page covers the commands, the output an agent should expect, and an instruction to add to your repository so agents use it.
+An AI coding agent working on a project that deploys to Yoal does better when it reads the docs than when it guesses. The `yoal docs` command searches and prints this documentation from the terminal, as Markdown the agent can read directly. The docs are bundled into the CLI, so it needs no network connection, no `yoal login` and no MCP setup. When the CLI is logged in to a control plane that runs a different version, it reads that control plane's docs instead, so what an agent reads matches what is running. This page covers the commands, the output an agent should expect, and an instruction to add to your repository so agents use it.
 
 ## Choose a route
 
 | Route | Best for | Docs version |
 | --- | --- | --- |
-| `yoal docs` | Coding agents with a shell (Claude Code, Codex, Cursor and similar), scripts, offline work | The docs bundled with the installed CLI |
+| `yoal docs` | Coding agents with a shell (Claude Code, Codex, Cursor and similar), scripts, offline work | The platform you are logged in to; otherwise the docs bundled with the installed CLI |
 | [MCP](/clients/mcp#documentation) `search_docs` and `read_docs` | Agents already connected to your control plane over MCP | The docs of the platform version you are connected to |
 | **Docs** in the dashboard | People | The running platform version |
 
-All three use the same pages, slugs and section anchors, so a reference found one way opens the other ways too. Update the CLI along with the platform (`npm install -g @yoal/cli`) so its docs match the version you run.
+All three use the same pages, slugs and section anchors, so a reference found one way opens the other ways too.
+
+### Which version `yoal docs` reads
+
+The CLI's docs come from the platform version it was built from. When you are logged in (`yoal login`, or `YOAL_URL` and `YOAL_TOKEN`), `yoal docs` asks the control plane which version it runs. If that differs from the bundled docs, it downloads that control plane's docs once, caches them in the CLI's config directory and uses them. Not logged in, offline, or with `--bundled`, it uses the bundled docs. If the control plane is newer and its docs cannot be fetched, it prints a warning to standard error first. Control planes older than this feature do not serve their docs, so the CLI uses its own. Updating the CLI along with the platform (`npm install -g @yoal/cli`) avoids the download.
+
+The same docs are available over REST to any signed-in caller: `GET /api/v1/docs` (version and contents, or `?q=` to search), `GET /api/v1/docs/<slug>?anchor=<anchor>` (a page or section) and `GET /api/v1/docs/bundle` (every page, as the CLI uses them).
 
 ## The commands
 
@@ -34,6 +40,7 @@ yoal docs context <question…>      # the full text of the best-matching sectio
 | `--max-chars <n>` | `context` | Stop after about this many characters (default 20,000). The last section is cut with a pointer to the rest. |
 | `--outline` | `read` | List the page's sections instead of printing its text. |
 | `--json` | all | Structured output. See [JSON output](#json-output). |
+| `--bundled` | all | Use the docs bundled with the CLI, never the control plane's. |
 
 ### Refs
 
@@ -77,7 +84,7 @@ Each section starts with an HTML comment carrying its ref, such as `<!-- ref: da
 
 ## JSON output
 
-With `--json`, every subcommand prints one JSON object that includes `version`, the CLI version the docs shipped with. The fields match the MCP tools, plus a `ref` on each result.
+With `--json`, every subcommand prints one JSON object that includes `version`, the CLI's version, and `docs`: `{ source, platformVersion, platform }`, where `source` is `bundled` or `platform` and `platformVersion` is the platform version the docs describe. The fields match the MCP tools, plus a `ref` on each result.
 
 | Command | Shape |
 | --- | --- |

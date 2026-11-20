@@ -4,7 +4,8 @@
  * Every flag is read once from the environment as `YOAL_FEATURE_<NAME>` and resolved here. The
  * registry is the single source of truth: a flag that is not in it cannot be switched on.
  * Every flag defaults on and acts as a kill switch: set `YOAL_FEATURE_<NAME>=0` to turn a feature
- * off. Turning one off must be reversible without a migration.
+ * off. Turning one off must be reversible without a migration. The exceptions are the opt-in flags
+ * in `OPT_IN_FEATURES`, which default off because turning them on is the risky direction.
  */
 
 export type FeatureArea =
@@ -198,16 +199,25 @@ export const FEATURE_FLAGS = {
 	DB_AUTO_PROMOTE: {
 		name: 'DB_AUTO_PROMOTE',
 		// C7/C8: lets the failover controller (with `failover.enabled`) promote a Postgres read
-		// replica when its primary's node goes silent. Off until the object-store lease self-fences
-		// a partitioned primary (CLUSTERING §9.3): without it, a primary cut off from the control
-		// plane keeps accepting writes from apps on its own node. Manual promotion needs no flag.
-		default: true,
+		// replica when its primary's node goes silent. Opt-in, not a kill switch: without database
+		// self-fencing (HA-PLAN H22, CLUSTERING §9.3) a primary cut off from the control plane keeps
+		// accepting writes from apps on its own node, so two primaries are possible. Even when set,
+		// the handler is installed only while self-fencing is active
+		// (`DatabaseReplicaService.installAutoPromotion`). Manual promotion needs no flag.
+		default: false,
 		area: 'databases',
 		description: 'Let the failover controller promote a Postgres read replica automatically (CLUSTERING C8).'
 	}
 } as const satisfies Record<string, FeatureFlagDefinition>;
 
 export type FeatureName = keyof typeof FEATURE_FLAGS;
+
+/**
+ * Flags that default off. Each needs a safety prerequisite before it may be on by default, and a
+ * new entry needs a reason here, not just `default: false`.
+ * - `DB_AUTO_PROMOTE`: automatic promotion without self-fencing can leave two primaries (HA-PLAN F1).
+ */
+export const OPT_IN_FEATURES: ReadonlySet<FeatureName> = new Set<FeatureName>(['DB_AUTO_PROMOTE']);
 
 export type FeatureFlags = {
 	readonly [Name in FeatureName]: boolean;

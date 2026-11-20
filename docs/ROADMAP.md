@@ -216,11 +216,11 @@
 - [ ] Systemd mount units for disks Yoal mounts (today the agent remounts after boot)
 
 ## Clustering & HA ([CLUSTERING.md](./CLUSTERING.md), D107)
-- [ ] C0: hardware report and derived labels, zones/roles/labels, disk tiers, constraint placement with explained refusals, CPU budget, Topology page and blast radius
-- [ ] C1: Yoal-managed overlay (plan 23) generalised to hubs + LAN mesh; `private_address`; peer health
-- [ ] C2: node CA + mTLS, loopback service endpoints (`caddy-l4` or Bun forwarder), cross-node database/storage attachments
-- [ ] C3: cluster shares (NFS/SMB) mounted on demand, `backing: share`, blast-radius inheritance
-- [ ] C4: HTTP replicas across nodes, spread, health-checked load balancing, rolling deploys, drain, opt-in failover, singletons with run leases
+- [x] C0: hardware report and derived labels, zones/roles/labels, disk tiers, constraint placement with explained refusals, CPU budget, Topology page and blast radius
+- [x] C1: Yoal-managed overlay (plan 23) generalised to hubs + LAN mesh; `private_address`; peer health (verified on two hosts 2026-11-12; MTU probe and hub loss not yet)
+- [ ] C2: node CA + mTLS, loopback service endpoints (`caddy-l4` or Bun forwarder), cross-node database/storage attachments (partly: process apps over the Bun forwarder with pinned mTLS; the per-install CA and container apps remain, HA-PLAN W4)
+- [ ] C3: cluster shares (NFS/SMB) mounted on demand, `backing: share`, blast-radius inheritance (partly: shares mount on chosen nodes and serve as `bulk` disks, D143; `backing: share` and inheritance remain)
+- [x] C4: HTTP replicas across nodes, spread, health-checked load balancing, rolling deploys, drain, opt-in failover, singletons with run leases (D218, D222–D224; the release phase and drain-before-stop are HA-PLAN W5)
 - [x] Fleet scheduling (D214): per-copy accounting, every copy's node serves it, single-copy moves with surge on drain/failover/rebalance, `spread`/`pack`, overcommit, opt-in automatic rebalance, Fleet page
 - [x] Private networks (D215) and measured links with on-demand throughput tests, an hour of history and link-down alerts (D216)
 - [x] Horizontal scaling ([SCALING.md](./SCALING.md)): scale without a deploy, sticky copies, process apps and workers across nodes, rolling deploys with a health gate, CPU/memory/request-rate autoscaling, moves with app volumes, the Scaling tab and `yoal scale`; no-gap deploys for a single copy, automatic rollback, right-sizing advice, memory-pressure-aware placement and run leases for lone workers (D222–D224)

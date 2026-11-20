@@ -421,6 +421,30 @@ export class ApiClient {
 		this.nodeTaskWaitMs = options.nodeTaskWaitMs ?? NODE_TASK_LIMITS.cliWaitMs;
 	}
 
+	/**
+	 * The platform's docs version and fingerprint (`GET /api/v1/docs`, HA-PLAN F5). Null when the
+	 * platform predates the endpoint.
+	 */
+	async docsInfo(timeoutMs?: number): Promise<{ version: string; fingerprint: string; bundleFingerprint: string | null } | null> {
+		const { response, url, text, parsed } = await this.exchange('GET', '/api/v1/docs', { timeoutMs });
+		if (response.status === 404) return null;
+		if (!response.ok) throw apiError(response, 'GET', url, text, parsed);
+		const record = asRecord(parsed) ?? {};
+		const version = stringValue(record.version);
+		const fingerprint = stringValue(record.fingerprint);
+		return version && fingerprint ? { version, fingerprint, bundleFingerprint: stringValue(record.bundleFingerprint) ?? null } : null;
+	}
+
+	/** Every docs page split into sections, as the platform shipped them (`GET /api/v1/docs/bundle`). */
+	async docsBundle(timeoutMs?: number): Promise<{ version: string; fingerprint: string; bundle: unknown }> {
+		const record = asRecord(await this.request('GET', '/api/v1/docs/bundle', { timeoutMs })) ?? {};
+		return {
+			version: stringValue(record.version) ?? '',
+			fingerprint: stringValue(record.fingerprint) ?? '',
+			bundle: record.bundle,
+		};
+	}
+
 	async whoami(): Promise<{
 		user: UserView;
 		org: OrgView | null;

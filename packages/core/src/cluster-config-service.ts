@@ -2,6 +2,8 @@ import {
 	CLUSTER_CONFIG_KEY,
 	clusterConfigSchema,
 	clusterConfigUpdateSchema,
+	PLATFORM_HOST_PORTS,
+	RESERVED_LATER_HOST_PORTS,
 	type ClusterConfig,
 	type ClusterConfigUpdate,
 	type Principal,
@@ -41,7 +43,6 @@ export class ClusterConfigService {
 			failover: {},
 			scheduling: {},
 			updates: {},
-			shares: {},
 			...(raw && typeof raw === 'object' ? raw : {}),
 		});
 		return this.#cache;
@@ -86,11 +87,19 @@ export class ClusterConfigService {
 			failover: { ...current.failover, ...sent('failover') },
 			scheduling: { ...current.scheduling, ...sent('scheduling') },
 			updates: { ...current.updates, ...sent('updates') },
-			shares: { ...current.shares, ...sent('shares') },
 		});
 		if (!merged.success) throw new ValidationError('Invalid cluster configuration.', merged.error.issues);
 		if (merged.data.endpoints.portMin >= merged.data.endpoints.portMax)
 			throw new ValidationError('The endpoint port range must have min < max.');
+		// The endpoint allocator must never hand out another platform range (HA-PLAN F2).
+		const { portMin, portMax } = merged.data.endpoints;
+		const clash = [...PLATFORM_HOST_PORTS, ...RESERVED_LATER_HOST_PORTS].find(
+			(range) => range.owner !== 'service endpoints' && range.min <= portMax && portMin <= range.max,
+		);
+		if (clash)
+			throw new ValidationError(
+				`The endpoint port range ${portMin}–${portMax} overlaps ${clash.owner} (${clash.min}–${clash.max}).`,
+			);
 		this.ctx.sqlite.run(
 			'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
 			[CLUSTER_CONFIG_KEY, JSON.stringify(merged.data), this.ctx.now()],

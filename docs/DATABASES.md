@@ -689,7 +689,7 @@ Postgres only, `async` only (sync is refused: there is no downgrade path yet), a
   `<P>_READ_URL`, `_READ_URLS`, `_READ_HOST`, `_READ_PORT` (same credentials): same-node replicas
   directly (`db-dbr<hex>:5432` for containers), remote ones through a C2 endpoint keyed by the
   replica id (process apps with `SERVICE_ENDPOINTS`). The read target is folded into the consumer
-  version, so the app restarts when it changes. The stable 22000–22999 read port of §9.2 is not built.
+  version, so the app restarts when it changes. The stable read port of CLUSTERING §9.2 (now 23000–23999, reserved; HA-PLAN F2) is not built.
 - **Remove.** Leaves desired state, the replica's node purges `db_dbr_<hex>` (`databasePurges`), the
   primary drops the slot; the row goes once both are confirmed.
 - **Promote** (`database_failovers`): fence (the primary leaves its node's desired state; confirmed
@@ -702,5 +702,7 @@ Postgres only, `async` only (sync is refused: there is no downgrade path yet), a
   → completed when the database reports running there. The old primary's data dir is purged when
   its node returns. Lag budget 64 MB / 60 s, report ≤ 2 min old and the primary's node online, else
   `acceptDataLoss`. The failover controller's database handler (`failoverHandler()`) drives the
-  same steps and is registered only with `YOAL_FEATURE_DB_AUTO_PROMOTE`.
+  same steps and is registered only with `YOAL_FEATURE_DB_AUTO_PROMOTE` **and** active database
+  self-fencing (`installAutoPromotion()`, HA-PLAN F1); self-fencing is not built, so it is never
+  registered today.
 - Moves and Postgres major upgrades are refused while replicas exist.

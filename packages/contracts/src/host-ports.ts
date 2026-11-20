@@ -2,7 +2,7 @@ import { BROKER_PORT_MAX, BROKER_PORT_MIN } from './broker.ts';
 import { CONTAINER_CONSOLE_DEFAULT_PORT } from './container-console.ts';
 import { DATABASE_POOLER_PORT_MAX, DATABASE_POOLER_PORT_MIN, DATABASE_PORT_MAX, DATABASE_PORT_MIN } from './database.ts';
 import { STUDIO_DEFAULT_PORT } from './database-studio.ts';
-import { endpointPortRange } from './endpoint.ts';
+import { endpointPortRange, readEndpointPortRange } from './endpoint.ts';
 import { FUNCTION_ANALYTICS_PORT } from './function.ts';
 import { IDENTITY_DEFAULT_PORT } from './identity.ts';
 import { KUBERNETES_API_PORT_MIN, KUBERNETES_INGRESS_PORT_MAX } from './kubernetes.ts';
@@ -56,6 +56,22 @@ export const PLATFORM_HOST_PORTS: readonly ReservedPortRange[] = [
 	{ min: KUBERNETES_API_PORT_MIN, max: KUBERNETES_INGRESS_PORT_MAX, owner: 'Kubernetes clusters' },
 	{ min: COMPOSE_HOST_PORT_MIN, max: COMPOSE_HOST_PORT_MAX, owner: 'compose service routes' },
 ];
+
+/**
+ * Ranges reserved for a platform feature that nothing allocates yet (HA-PLAN F2). Unlike
+ * `PLATFORM_HOST_PORTS`, they do not stop an app that already holds such a port from being served
+ * or redeployed on it: only a new app, or a port change, is refused. The workstream that starts
+ * allocating a range moves its apps off first, then moves the range into `PLATFORM_HOST_PORTS`.
+ */
+export const RESERVED_LATER_HOST_PORTS: readonly ReservedPortRange[] = [
+	{ min: readEndpointPortRange.min, max: readEndpointPortRange.max, owner: 'service read endpoints' },
+];
+
+/** Which reserved-for-later range holds `port`; null when none. */
+export function laterPortOwner(port: number): string | null {
+	for (const range of RESERVED_LATER_HOST_PORTS) if (port >= range.min && port <= range.max) return range.owner;
+	return null;
+}
 
 /**
  * The upstream a route gets when its node must not proxy to the app (RouteSpec `unavailable`).

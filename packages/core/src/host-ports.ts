@@ -3,6 +3,7 @@ import { projects, workloadReplicas, workloads } from '@yoal/db';
 import {
 	appHostPorts,
 	appPortProblem,
+	laterPortOwner,
 	platformPortOwner,
 	workloadSpecSchema,
 	type ReservedPortRange,
@@ -56,6 +57,23 @@ export function appSpecPortProblem(ctx: Pick<CoreContext, 'config' | 'cluster'>,
 		if (problem) return problem;
 	}
 	return null;
+}
+
+/**
+ * Refusal text when `spec` newly takes a port reserved for a later platform feature (HA-PLAN F2);
+ * null when it does not. A port the project's workload already holds is allowed, so an app that
+ * was on such a port before the reservation keeps deploying on it.
+ */
+export function laterPortProblem(ctx: Pick<CoreContext, 'db'>, projectId: string, spec: WorkloadSpec): string | null {
+	if (spec.runtime === 'compose') return null;
+	const ports = appHostPorts(spec).filter((port) => laterPortOwner(port) !== null);
+	if (ports.length === 0) return null;
+	const row = ctx.db.select({ specJson: workloads.specJson }).from(workloads).where(eq(workloads.projectId, projectId)).get();
+	const current = row ? workloadSpecSchema.safeParse(parseJson<unknown>(row.specJson, null)).data : undefined;
+	const held = new Set(current ? appHostPorts(current) : []);
+	const port = ports.find((candidate) => !held.has(candidate));
+	if (port === undefined) return null;
+	return `Port ${port} is reserved for ${laterPortOwner(port)} in a coming release. Pick another port for this app (1024 or higher, outside the platform ranges).`;
 }
 
 /**

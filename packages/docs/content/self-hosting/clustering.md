@@ -164,7 +164,7 @@ Only one control plane acts at a time. The controller holds a lease (`controlPla
 
 For **databases** with replicas, the controller decides. When the primary's node has been silent for `failover.graceSeconds` (120 seconds), it picks the replica a promotion would use (the most caught-up one within `database.maxLagBytes` and `database.maxLagSeconds`, never a pending one or one on a silent node), records it, and raises a critical alert asking you to promote by hand.
 
-With `YOAL_FEATURE_DB_AUTO_PROMOTE=1` as well, the controller promotes that replica itself, in the same steps as a [manual promotion](/data/databases#promote-a-replica): the old primary leaves its node's configuration (it stops when the node next checks in), the replica is promoted and the database moves to its node. Leave it off on a two-node fleet, and anywhere a node can be cut off from the control plane while its apps keep running: Yoal cannot stop a primary on a node it cannot reach, so apps on that node could keep writing to the old primary.
+Automatic database promotion is not available yet. `YOAL_FEATURE_DB_AUTO_PROMOTE` is off by default, and setting it has no effect in this release: the control plane logs a warning and keeps promotion manual. Automatic promotion needs a primary that stops itself when it is cut off, and Yoal does not have that yet. Without it, a primary on a node the control plane cannot reach would keep taking writes from apps on that node while a replica was promoted elsewhere.
 
 For **ingress**, with the `dns-failover` or `cloudflare-lb` driver, the controller keeps the set of ingress nodes that should be in DNS. A node is withdrawn after twice the withdraw hold-down in **Settings → High availability** (at least 2 minutes) without heartbeats, and added back after the re-add hold-down, at most once every 10 minutes. A node withdrawn twice in 30 minutes stays out for 30 minutes. Yoal does not change DNS records itself: each withdrawal or re-add is a **Failover** alert and a history entry telling you which record to change.
 
@@ -189,7 +189,7 @@ A storage replication target is a real copy: the source's node copies every buck
 
 ## Settings → Clustering
 
-**Settings → Clustering** is a JSON editor for cluster tunables. It is available to platform owners only. The JSON is validated against the schema, and unknown keys are rejected. Changes apply to the next join, placement, failover check or maintenance sweep.
+**Settings → Clustering** is a JSON editor for cluster tunables. It is available to platform owners only. The JSON is validated against the schema. An unknown section is rejected; an unknown key inside a section is ignored. Changes apply to the next join, placement, failover check or maintenance sweep.
 
 These are the keys that code reads today:
 
@@ -209,12 +209,12 @@ These are the keys that code reads today:
 | `controlPlane.leaseTtlSeconds` | `30` | How long the failover lease lasts without renewal: the longest a stopped control plane holds up the next one |
 | `controlPlane.renewSeconds` | `5` | How often the controller checks the fleet and renews its lease (at most a third of the TTL) |
 | `database.maxLagBytes`, `database.maxLagSeconds` | `67108864`, `60` | A replica further behind than either is never picked for promotion |
-| `database.maxReplicas` | `2` | Replicas allowed per database (at most 8) |
+| `database.maxReplicas` | `2` | Replicas allowed per database (0 to 5) |
 | `storage.maxTargets` | `2` | Replication targets allowed per storage instance |
 | `storage.syncIntervalMinutes` | `15` | Minutes between bucket replication passes |
 
 > [!NOTE]
-> The schema also accepts `overlay.maxHubs`, `endpoints.requireMtls`, `endpoints.forwarder`, `database.defaultMode` and `shares.mountRoot`. No code reads them yet, so changing them has no effect.
+> Earlier releases also accepted `overlay.maxHubs`, `endpoints.requireMtls`, `endpoints.forwarder`, `database.defaultMode` and `shares.mountRoot`, but nothing read them. They are no longer part of the configuration. A saved document that still has them at their old defaults saves as before, and the keys are dropped. Any other value is rejected with the reason.
 
 ## Settings → High availability
 

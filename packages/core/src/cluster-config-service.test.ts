@@ -3,9 +3,11 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDb } from '@yoal/db';
+import { clusterConfigUpdateSchema } from '@yoal/contracts';
 import { buildPrincipal } from './orgs.ts';
 import { createCore, type Core } from './index.ts';
 import { LocalObjectStore } from './object-store.ts';
+import { ValidationError } from './errors.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'yoal-cluster-config-'));
 const opened = createDb({ path: ':memory:' });
@@ -35,13 +37,12 @@ describe('cluster configuration', () => {
 	test('defaults are the documented values', () => {
 		expect(core.cluster.get()).toMatchObject({
 			overlay: { cidr: '10.47.0.0/22', listenPort: 51820 },
-			endpoints: { portMin: 21000, portMax: 21999, requireMtls: true },
+			endpoints: { portMin: 21000, portMax: 21999 },
 			replicas: { max: 20, spread: 'node' },
-			database: { maxReplicas: 2, defaultMode: 'async' },
+			database: { maxReplicas: 2 },
 			storage: { maxTargets: 2 },
 			controlPlane: { leaseTtlSeconds: 30, renewSeconds: 5 },
 			failover: { enabled: false, graceSeconds: 120 },
-			shares: { mountRoot: '/run/yoal-shares' },
 		});
 	});
 
@@ -63,6 +64,43 @@ describe('cluster configuration', () => {
 		core.cluster.update(owner, { failover: { enabled: false, graceSeconds: 120, maxPerMinute: 6 } });
 		// A single bound is checked against the stored other bound.
 		expect(() => core.cluster.update(owner, { endpoints: { portMax: 20000 } })).toThrow(/min < max/);
+	});
+
+	test('keys nothing reads are refused unless they carry the old default (HA-PLAN F6)', () => {
+		const config = core.cluster.get() as Record<string, Record<string, unknown>>;
+		expect(config.database!.defaultMode).toBeUndefined();
+		expect(config.overlay!.maxHubs).toBeUndefined();
+		expect(config.endpoints!.forwarder).toBeUndefined();
+		expect(config.endpoints!.requireMtls).toBeUndefined();
+		expect(config.shares).toBeUndefined();
+		expect(() => core.cluster.update(owner, { database: { defaultMode: 'sync' } })).toThrow(ValidationError);
+		for (const bad of [
+			{ database: { defaultMode: 'sync' } },
+			{ overlay: { maxHubs: 8 } },
+			{ endpoints: { requireMtls: false } },
+			{ endpoints: { forwarder: 'caddy-l4' } },
+			{ shares: { mountRoot: '/srv/shares' } },
+		]) {
+			const parsed = clusterConfigUpdateSchema.safeParse(bad);
+			expect(parsed.success).toBe(false);
+			expect(parsed.error!.issues[0]!.message).toContain('cannot be changed');
+		}
+		// A document saved by an earlier release carries the old defaults and still saves.
+		const old = core.cluster.update(owner, {
+			overlay: { maxHubs: 4 },
+			endpoints: { requireMtls: true, forwarder: 'auto' },
+			database: { defaultMode: 'async', maxLagSeconds: 60 },
+			shares: { mountRoot: '/run/yoal-shares' },
+		}) as unknown as Record<string, Record<string, unknown>>;
+		expect(old.database!.defaultMode).toBeUndefined();
+		expect(old.shares).toBeUndefined();
+	});
+
+	test('refuses an endpoint range that overlaps another platform range (HA-PLAN F2)', () => {
+		expect(() => core.cluster.update(owner, { endpoints: { portMin: 22500, portMax: 23500 } })).toThrow(/overlaps Kubernetes clusters/);
+		expect(() => core.cluster.update(owner, { endpoints: { portMin: 23100, portMax: 23200 } })).toThrow(/overlaps service read endpoints/);
+		expect(core.cluster.update(owner, { endpoints: { portMin: 24000, portMax: 24999 } }).endpoints.portMin).toBe(24000);
+		core.cluster.update(owner, { endpoints: { portMin: 21000, portMax: 21999 } });
 	});
 
 	test('refuses an inverted endpoint range', () => {

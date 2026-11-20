@@ -11,7 +11,8 @@
 		"./diagrams": "./src/diagrams.ts",
 		"./database": "./src/database.ts",
 		"./sections": "./src/sections.ts",
-		"./manifest": "./src/manifest.ts"
+		"./manifest": "./src/manifest.ts",
+		"./bundle": "./src/bundle.ts"
 	},
 	"scripts": {
 		"check": "tsc -p . --noEmit",

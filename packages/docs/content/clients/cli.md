@@ -158,7 +158,7 @@ Failed API calls also include `status` and `requestId`, which are useful when yo
 
 ## Docs in the terminal
 
-`yoal docs` searches and prints this documentation as Markdown, offline and without signing in, because the docs are bundled into the CLI. Run `yoal docs search <words>` to find a section and `yoal docs read <ref>` to print it. It is designed for AI coding agents as much as for people; see [docs for AI agents](/clients/agent-docs).
+`yoal docs` searches and prints this documentation as Markdown, offline and without signing in, because the docs are bundled into the CLI. When you are logged in to a control plane that runs a different version, it reads that control plane's docs instead. Run `yoal docs search <words>` to find a section and `yoal docs read <ref>` to print it. It is designed for AI coding agents as much as for people; see [docs for AI agents](/clients/agent-docs).
 
 ## Conventions
 

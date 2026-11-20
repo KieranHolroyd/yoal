@@ -205,7 +205,7 @@ the default below (on). Set `0` to turn a feature off, then restart
 | `YOAL_FEATURE_ORG_NETWORKS` | **on** | networking | Private per-org networks connecting workloads and databases. |
 | `YOAL_FEATURE_SERVICE_ENDPOINTS` | **on** | networking | Cross-node database attachments through consumer loopback endpoints (CLUSTERING.md C2). |
 | `YOAL_FEATURE_MULTI_NODE_REPLICAS` | **on** | workloads | Spread HTTP workload replicas across nodes behind a load-balanced route (CLUSTERING.md C4). |
-| `YOAL_FEATURE_DB_AUTO_PROMOTE` | off | databases | Let the failover controller (with `failover.enabled`) promote a Postgres read replica when its primary's node goes silent (CLUSTERING.md §9.3). Off until the object-store lease self-fences a partitioned primary. |
+| `YOAL_FEATURE_DB_AUTO_PROMOTE` | off | databases | Let the failover controller (with `failover.enabled`) promote a Postgres read replica when its primary's node goes silent (CLUSTERING.md §9.3). Opt-in, and ignored with a startup warning until database self-fencing (HA-PLAN H22) is active, which it is not yet: setting it today changes nothing. |
 | `YOAL_FEATURE_APP_VOLUMES` | **on** | workloads | Persistent application volumes attached to deployed workloads. |
 | `YOAL_FEATURE_JOBS` | **on** | automation | Scheduled one-off and cron jobs. |
 | `YOAL_FEATURE_PREVIEW_DATA` | **on** | automation | Clone database and bucket data into previews (can copy production data). |
@@ -219,12 +219,15 @@ the default below (on). Set `0` to turn a feature off, then restart
 the control plane logs a warning at startup; remove it from `yoal.env`. An unknown
 `YOAL_FEATURE_*` is never an error.
 
-Because every flag is on, set `YOAL_FEATURE_PREVIEW_DATA=0`, `YOAL_FEATURE_AGENT_DATA_WRITE=0`
+Because every flag except `DB_AUTO_PROMOTE` is on, set `YOAL_FEATURE_PREVIEW_DATA=0`, `YOAL_FEATURE_AGENT_DATA_WRITE=0`
 and `YOAL_FEATURE_BLUEPRINTS=0` on a host whose data you are not prepared to have copied, changed
 or pruned. `DB_TLS` and `ORG_NETWORKS` change existing databases and workloads at the next
 reconcile (TLS URLs with `sslmode=require`, per-org Podman networks). `MULTI_NODE_REPLICAS` refuses a
-deploy whose replica count exceeds the eligible nodes under `node` spread, and while
-`SERVICE_ENDPOINTS` is on, process apps are not spread across nodes.
+deploy whose replica count exceeds the eligible nodes under `node` spread. With
+`SERVICE_ENDPOINTS` on, a process app attached to a database or private storage on another node
+still spreads: each node holding a copy gets its own loopback endpoint (D218). A container app
+with such an attachment stays on the attachment's node until cross-node container attachments
+exist (HA-PLAN H24).
 
 ### 2.5.1 PITR repository
 

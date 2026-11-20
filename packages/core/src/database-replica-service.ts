@@ -53,7 +53,13 @@ import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
 import type { DatabaseRow } from './databases.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
-import type { FailoverDatabaseHandler, FailoverFence, FailoverHandlerStage, FailoverStageOutcome } from './failover-service.ts';
+import type {
+	FailoverDatabaseHandler,
+	FailoverFence,
+	FailoverHandlerStage,
+	FailoverService,
+	FailoverStageOutcome,
+} from './failover-service.ts';
 import { resolvePlacement } from './placement.ts';
 import { newId, parseJson, randomBytes, sha256Hex } from './util.ts';
 
@@ -81,6 +87,20 @@ const ACTIVE_FAILOVER = ['pending', 'promoting'] as const;
  * confirm it stopped unless the node is gone), then the replica's node runs `pg_ctl promote` and
  * renames the data directory to the database's id, and only then does the database row move.
  */
+/** Whether database primaries fence themselves (HA-PLAN H22); see `DatabaseReplicaService.selfFencing`. */
+export interface DatabaseSelfFencing {
+	active: boolean;
+	/** Why it is not active; shown when automatic promotion is refused. */
+	reason: string;
+}
+
+export interface AutoPromotionInstall {
+	installed: boolean;
+	/** Why the handler was not installed, or null. */
+	reason: string | null;
+	unregister: (() => void) | null;
+}
+
 export class DatabaseReplicaService {
 	constructor(private readonly ctx: CoreContext) {}
 
@@ -282,9 +302,39 @@ export class DatabaseReplicaService {
 	}
 
 	/**
-	 * The automatic promotion path for the failover controller (docs/CLUSTERING.md §9.3, C8):
-	 * `ctx.failover.registerDatabaseHandler(ctx.databaseReplicas.failoverHandler())`. Each stage is
-	 * idempotent and reports `waiting` until the node protocol has moved it on.
+	 * Whether a database primary stops itself when it can no longer prove it holds its lease
+	 * (HA-PLAN H22, I13; CLUSTERING §9.3). Not built: today the only fence is "leave the old node's
+	 * desired state", which a node cut off from the control plane never receives, so its apps keep
+	 * writing. W11 replaces this with a real check (member logic on every data node, a tested
+	 * arbiter). Until then automatic promotion can produce two primaries.
+	 */
+	selfFencing(): DatabaseSelfFencing {
+		return {
+			active: false,
+			reason:
+				'Database self-fencing is not built (docs/HA-PLAN.md H22): a primary cut off from the control plane would keep accepting writes, so automatic promotion stays off. Promote by hand instead.',
+		};
+	}
+
+	/**
+	 * Install the automatic promotion path on the failover controller, but only when
+	 * `YOAL_FEATURE_DB_AUTO_PROMOTE` is on **and** self-fencing is active (HA-PLAN F1). This is the
+	 * only supported way to register `failoverHandler()` outside tests. Returns why it refused.
+	 */
+	installAutoPromotion(
+		failover: Pick<FailoverService, 'registerDatabaseHandler'> = this.ctx.failover,
+		selfFencing: DatabaseSelfFencing = this.selfFencing(),
+	): AutoPromotionInstall {
+		if (!featureEnabled(this.ctx.config, 'DB_AUTO_PROMOTE'))
+			return { installed: false, reason: 'YOAL_FEATURE_DB_AUTO_PROMOTE is off.', unregister: null };
+		if (!selfFencing.active) return { installed: false, reason: selfFencing.reason, unregister: null };
+		return { installed: true, reason: null, unregister: failover.registerDatabaseHandler(this.failoverHandler()) };
+	}
+
+	/**
+	 * The automatic promotion path for the failover controller (docs/CLUSTERING.md §9.3, C8). Install
+	 * it with `installAutoPromotion()`, never by registering it directly. Each stage is idempotent
+	 * and reports `waiting` until the node protocol has moved it on.
 	 */
 	failoverHandler(): FailoverDatabaseHandler {
 		return { run: (stage, plan, fence) => this.runFailoverStage(stage, plan, fence) };

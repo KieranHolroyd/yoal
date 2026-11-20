@@ -88,6 +88,8 @@ beforeAll(async () => {
 		['console-squatter', 'container'],
 		['sock-a', 'process'],
 		['sock-b', 'process'],
+		['read-squatter', 'container'],
+		['pre-reserve', 'container'],
 	] as const)
 		await core.projects.create(owner, {
 			name: slug,
@@ -209,5 +211,32 @@ describe('route guard (D225)', () => {
 		const blocked = await route('analytics');
 		expect(blocked?.upstream).toBe(UNAVAILABLE_UPSTREAM);
 		expect(blocked?.unavailable).toContain('no running workload');
+	});
+});
+
+describe('ports reserved for later (HA-PLAN F2)', () => {
+	test('a new app may not take a port in the read-endpoint range', () => {
+		const refused = failure(() => core.workloads.setSpec(owner, core.projects.requireRow(owner, 'read-squatter'), container(23_500)));
+		expect(refused.status).toBe(422);
+		expect(refused.message).toContain('service read endpoints');
+	});
+
+	test('an app that already held such a port keeps its route and can redeploy on it, but not move to another', async () => {
+		core.workloads.setSpec(owner, core.projects.requireRow(owner, 'pre-reserve'), container(8800));
+		await deploy('pre-reserve');
+		// As if it had been on 23400 before the range was reserved.
+		const project = core.projects.requireRow(owner, 'pre-reserve');
+		const row = opened.db.select().from(workloads).where(eq(workloads.projectId, project.id)).get()!;
+		opened.db
+			.update(workloads)
+			.set({ specJson: JSON.stringify({ ...JSON.parse(row.specJson), port: 23_400 }), upstream: '127.0.0.1:23400' })
+			.where(eq(workloads.id, row.id))
+			.run();
+		expect((await route('pre-reserve'))?.upstream).toBe('127.0.0.1:23400');
+		core.workloads.setSpec(owner, core.projects.requireRow(owner, 'pre-reserve'), container(23_400));
+		await deploy('pre-reserve');
+		expect((await route('pre-reserve'))?.unavailable).toBeUndefined();
+		const refused = failure(() => core.workloads.setSpec(owner, core.projects.requireRow(owner, 'pre-reserve'), container(23_401)));
+		expect(refused.message).toContain('service read endpoints');
 	});
 });

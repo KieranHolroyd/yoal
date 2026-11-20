@@ -6,22 +6,27 @@
  * signing in, and always matches the CLI version it shipped with. Gzip keeps ~1 MB of Markdown
  * to roughly a third of that in `dist/yoal.js`.
  */
+import { readFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
+import { buildDocsBundle, docsBundleFingerprint } from '../../../packages/docs/src/bundle.ts';
 import { readContent } from '../../../packages/docs/src/disk.ts';
-import { SECTIONS } from '../../../packages/docs/src/manifest.ts';
-import { splitPage } from '../../../packages/docs/src/sections.ts';
 import type { BundledDocs } from './docs.ts';
 
 export function bundledDocs(): string {
-	const sources = readContent();
-	const docs: BundledDocs = {
-		sections: SECTIONS.map((section) => ({
-			id: section.id,
-			title: section.title,
-			pages: section.pages
-				.filter((slug) => sources[slug] !== undefined)
-				.map((slug) => ({ slug, ...splitPage(sources[slug]!) })),
-		})).filter((section) => section.pages.length > 0),
-	};
+	const docs: BundledDocs = buildDocsBundle(readContent());
 	return gzipSync(JSON.stringify(docs), { level: 9 }).toString('base64');
+}
+
+/**
+ * The platform version these docs came from (repository-root `VERSION` at build time). The CLI
+ * has its own version number, so this is what `yoal docs` compares with the platform it is
+ * logged in to (HA-PLAN F5).
+ */
+export function bundledDocsPlatformVersion(): string {
+	return readFileSync(new URL('../../../VERSION', import.meta.url), 'utf8').trim();
+}
+
+/** The bundled docs' fingerprint, as the platform computes it for its own (`bundleFingerprint`). */
+export function bundledDocsFingerprint(): string {
+	return docsBundleFingerprint(buildDocsBundle(readContent()));
 }

@@ -90,10 +90,12 @@ export const init: ServerInit = async () => {
 		// A standby returned above and never takes the lease. Errors are logged at most once a minute.
 		let lastFailoverError = 0;
 		// Read-replica promotion (C7) as the controller's automatic database path. Opt-in on top of
-		// `failover.enabled`: without the object-store lease a partitioned primary is not self-fenced
-		// (docs/CLUSTERING.md §9.3). Without it a lost primary is a manual event and an alert.
-		if (featureEnabled(core.ctx.config, 'DB_AUTO_PROMOTE'))
-			core.failover.registerDatabaseHandler(core.databaseReplicas.failoverHandler());
+		// `failover.enabled`, and refused while database self-fencing is not active (HA-PLAN F1):
+		// without it a partitioned primary keeps taking writes. Otherwise a lost primary is a
+		// manual event and an alert.
+		const autoPromotion = core.databaseReplicas.installAutoPromotion();
+		if (!autoPromotion.installed && featureEnabled(core.ctx.config, 'DB_AUTO_PROMOTE'))
+			console.warn(`[failover] YOAL_FEATURE_DB_AUTO_PROMOTE is set but ignored: ${autoPromotion.reason}`);
 		startFailoverLoop(core.failover, {
 			onError: (error) => {
 				if (Date.now() - lastFailoverError < 60_000) return;
