@@ -814,7 +814,10 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 				},
 			],
 		}));
-		server.routes = [...relayRoutes, ...server.routes];
+		// ACME HTTP-01 always arrives on :80; the content server listens on :443 and cannot answer it.
+		const servers = apps.http.servers as Record<string, { listen?: string[]; routes?: unknown[] }>;
+		const plain = (servers.http_redirect ??= { listen: [':80'], routes: [] });
+		plain.routes = [...relayRoutes, ...(plain.routes ?? [])];
 	}
 
 	if (options.accessLog) {

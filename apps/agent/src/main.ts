@@ -184,6 +184,8 @@ class AgentRuntime {
 	/** Whether this process has pulled a full desired state yet; see `desiredStateRequest`. */
 	private desiredPulledThisRun = false;
 	private convergedVersion: number | null = null;
+	/** The last config body applied, so a certificate delivery does not trigger a needless reload. */
+	private appliedCaddyJson: string | null = null;
 	private actualStateVersion = 0;
 	private projectByHost = new Map<string, string>();
 	private readonly usedTokens = new UsedTokenCache();
@@ -981,7 +983,11 @@ class AgentRuntime {
 					}
 				: {}),
 		});
-		await this.caddy.applyFullConfig(caddyConfig, this.shutdownController.signal);
+		const caddyJson = JSON.stringify(caddyConfig);
+		if (caddyJson !== this.appliedCaddyJson) {
+			await this.caddy.applyFullConfig(caddyConfig, this.shutdownController.signal);
+			this.appliedCaddyJson = caddyJson;
+		}
 
 		this.caddyOk = true;
 		this.projectByHost = new Map(

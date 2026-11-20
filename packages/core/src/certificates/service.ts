@@ -1,4 +1,4 @@
-import { and, eq, isNull, lte } from 'drizzle-orm';
+import { and, eq, inArray, isNull, lte } from 'drizzle-orm';
 import { acmeLeases, domains, ingressCertificates, nodes } from '@yoal/db';
 import {
 	ACME_LEASE_TTL_MS,
@@ -398,6 +398,7 @@ export class CertificateService {
 		const custom = this.ctx.db
 			.select({ host: domains.hostname })
 			.from(domains)
+			.where(inArray(domains.status, ['verified', 'active']))
 			.all()
 			.map((row) => normalizeCertificateHost(row.host));
 		for (const host of custom) wanted.add(host);
@@ -411,11 +412,12 @@ export class CertificateService {
 	 */
 	bootstrap(): string[] {
 		if (!this.enabled()) return [];
+		// Any row for the host is the decision, including a revoked one: an operator's removal must
+		// not be undone by the next bootstrap pass.
 		const existing = new Set(
 			this.ctx.db
 				.select({ host: ingressCertificates.host })
 				.from(ingressCertificates)
-				.where(isNull(ingressCertificates.revokedAt))
 				.all()
 				.map((row) => normalizeCertificateHost(row.host)),
 		);
@@ -620,12 +622,9 @@ export class CertificateService {
 			.where(eq(nodes.id, nodeId))
 			.get();
 		if (!row) return false;
-		const all = this.ctx.db.select({ id: nodes.id, mode: nodes.mode, rolesJson: nodes.rolesJson }).from(nodes).all();
-		const inSet =
-			ingressNodeIds(all, this.ctx.config.edgeNodeId ?? null).includes(nodeId) ||
-			nodeRoles(row).includes('ingress') ||
-			nodeRoles(row).includes('control');
-		return inSet && this.ctx.ingressSet.capable(nodeId);
+		// Delivery is only to a member of the ingress set: a control-only node is not an ingress,
+		// whatever capability it advertises.
+		return this.ctx.ingressSet.isIngress(nodeId) && this.ctx.ingressSet.capable(nodeId);
 	}
 
 	private pickHolder(): string | null {

@@ -227,7 +227,10 @@ describe('buildCaddyConfig', () => {
 		});
 		expect(policies[1]!.get_certificate).toBeUndefined();
 
-		const relay = routes(withShared)[0]!;
+		// HTTP-01 always arrives on :80, so the relay belongs to the plain server, not content :443.
+		const servers = (((withShared.apps as Json).http as Json).servers as Json);
+		const relay = ((servers.http_redirect as Json).routes as Json[])[0]!;
+		expect(routes(withShared).some((route) => String(route['@id']).startsWith('acme-relay:'))).toBe(false);
 		expect(relay['@id']).toBe('acme-relay:public.example.com');
 		expect(relay.terminal).toBe(true);
 		expect(relay.match).toEqual([{ host: ['public.example.com'], path: ['/.well-known/acme-challenge/*'] }]);

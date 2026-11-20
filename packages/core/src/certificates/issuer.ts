@@ -52,7 +52,12 @@ export class LegoAcmeIssuer implements CertificateIssuer {
 		this.run =
 			options.exec ??
 			(async (cmd, env) => {
-				const child = Bun.spawn(cmd, { env: { ...process.env, ...env }, stdout: 'pipe', stderr: 'pipe' });
+				// Only what the binary needs: never inherit YOAL_MASTER_KEY or node tokens.
+				const child = Bun.spawn(cmd, {
+					env: { PATH: process.env.PATH ?? '/usr/local/bin:/usr/bin:/bin', HOME: process.env.HOME ?? '/tmp', ...env },
+					stdout: 'pipe',
+					stderr: 'pipe',
+				});
 				const [stdout, stderr] = await Promise.all([
 					new Response(child.stdout).text(),
 					new Response(child.stderr).text(),
