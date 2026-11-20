@@ -117,3 +117,30 @@ the no-failed-request deploy misses by 3 requests. W3's Azure half also has a kn
 5. **Operator retry** (C): no REST/CLI surface for "retry a failed release command" yet.
 6. **Lab evidence**: the four-node run is recorded above; the three failures are tracked as the
    platform bugs above and are Wave 2/M2 fix candidates (the edge upstream bump is the first).
+
+## S10 outcome (forwarder decision)
+
+S10 chose the **Bun forwarder with the restart fix** over caddy-l4: caddy-l4 fails all listeners when
+one gateway address cannot bind, couples every endpoint edit to a sites reload, and needs a new Caddy
+module; the Bun forwarder already has pinned mTLS. Numbers are in `docs/SPIKES.md` (S10).
+
+Already covered by the merged Wave 1 code:
+- the reload bug S10 found (stored vs compared signature mismatch) is gone — the forwarder now
+  updates in place and does not restart unchanged listeners;
+- a failed gateway bind is retried with backoff instead of logged once;
+- the endpoint guard drops other orgs and the underlay, and the gateway binds only after it is applied.
+
+Still open, and now recorded here:
+- **Pin the org network subnet.** Podman allocates `10.89.N.0/24` in creation order; recreating a
+  network can move it (S10 measured 10.89.1.0 → 10.89.3.0), which breaks `AddHost` and any
+  hard-coded gateway address. The network unit should render `Subnet=`, or the control plane should
+  allocate it.
+- **One gateway address cannot serve several org bridges.** This is the same gap the lane A review
+  found: the contract carries one `gatewayAddress` per endpoint. A node with two org networks needs a
+  per-network gateway (list) or a shared endpoint network with a pinned subnet.
+- **`nf_conntrack_max`.** Each endpoint connection leaves two entries for 120 s; the default 65,536
+  filled at 100k connections and dropped SYNs. Nodes need it raised.
+- **`net.ipv4.ip_nonlocal_bind=1`.** A forwarder started before its bridge exists cannot bind until
+  the retry; the sysctl removes the race.
+- **RSS budget.** About 20–45 MB more for the agent at 200 routes (35 MB idle, 57 MB under load).
+- The 24 h soak and a real WireGuard hop are still owed to the lab/weekly job.
