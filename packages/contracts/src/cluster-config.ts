@@ -1,5 +1,5 @@
 import * as z from 'zod';
-import { ingressSettingsSchema } from './ingress.ts';
+import { ingressSettingsSchema, steeringDriverKinds } from './ingress.ts';
 import { nodeRolloutOptionsSchema } from './node-rollout.ts';
 import { replicaSpreads } from './replica.ts';
 
@@ -133,6 +133,17 @@ const updates = nodeRolloutOptionsSchema.extend({
 	autoRollout: z.boolean().default(false),
 });
 
+/**
+ * Traffic steering (HA-PLAN H18, W8). `direct` is today: Yoal writes nothing and a person moves the
+ * record. Any other driver only acts while the `STEERING` flag is on, so setting one here is inert
+ * until the operator enables it. `stacked` is for the R1 shape (for example `external-lb` inside a
+ * region and `dns-failover` between regions, HA-PLAN H18/W13).
+ */
+const steering = z.object({
+	driver: z.enum(steeringDriverKinds).default('direct'),
+	stacked: z.array(z.enum(steeringDriverKinds)).max(4).default([]),
+});
+
 export const clusterConfigSchema = z.object({
 	overlay,
 	endpoints,
@@ -144,6 +155,7 @@ export const clusterConfigSchema = z.object({
 	scheduling,
 	updates,
 	ingress: ingressSettingsSchema,
+	steering,
 });
 export type ClusterConfig = z.infer<typeof clusterConfigSchema>;
 
@@ -183,6 +195,7 @@ const sectionUpdates = {
 	scheduling: scheduling.partial().optional(),
 	updates: updates.partial().optional(),
 	ingress: ingressSettingsSchema.partial().optional(),
+	steering: steering.partial().optional(),
 	/** Only ever held `mountRoot`; kept so an older saved document still parses. */
 	shares: z.object(unwired('shares')).optional(),
 };

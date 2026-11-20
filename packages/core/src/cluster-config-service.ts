@@ -44,6 +44,7 @@ export class ClusterConfigService {
 			scheduling: {},
 			updates: {},
 			ingress: {},
+			steering: {},
 			...(raw && typeof raw === 'object' ? raw : {}),
 		});
 		return this.#cache;
@@ -88,10 +89,16 @@ export class ClusterConfigService {
 			failover: { ...current.failover, ...sent('failover') },
 			scheduling: { ...current.scheduling, ...sent('scheduling') },
 			updates: { ...current.updates, ...sent('updates') },
+			ingress: { ...current.ingress, ...sent('ingress') },
+			steering: { ...current.steering, ...sent('steering') },
 		});
 		if (!merged.success) throw new ValidationError('Invalid cluster configuration.', merged.error.issues);
 		if (merged.data.endpoints.portMin >= merged.data.endpoints.portMax)
 			throw new ValidationError('The endpoint port range must have min < max.');
+		const { driver, stacked } = merged.data.steering;
+		if (stacked.includes('direct')) throw new ValidationError('direct cannot be stacked: it means no steering.');
+		if (new Set(stacked).size !== stacked.length) throw new ValidationError('A stacked steering driver can appear only once.');
+		if (stacked.includes(driver)) throw new ValidationError(`The steering driver ${driver} cannot also be stacked.`);
 		// The endpoint allocator must never hand out another platform range (HA-PLAN F2).
 		const { portMin, portMax } = merged.data.endpoints;
 		const clash = [...PLATFORM_HOST_PORTS, ...RESERVED_LATER_HOST_PORTS].find(

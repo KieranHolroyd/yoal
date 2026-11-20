@@ -43,7 +43,23 @@ describe('cluster configuration', () => {
 			storage: { maxTargets: 2 },
 			controlPlane: { leaseTtlSeconds: 30, renewSeconds: 5 },
 			failover: { enabled: false, graceSeconds: 120 },
+			steering: { driver: 'direct', stacked: [] },
 		});
+	});
+
+	test('merges ingress and steering patches without resetting their neighbours', () => {
+		const updated = core.cluster.update(owner, {
+			ingress: { proxyProtocol: 'v2', trustedProxies: ['10.0.0.10/32'] },
+			steering: { driver: 'external-lb' },
+		});
+		expect(updated.ingress).toMatchObject({ proxyProtocol: 'v2', trustedProxies: ['10.0.0.10/32'], drainSeconds: 20, healthPort: null });
+		expect(updated.steering).toEqual({ driver: 'external-lb', stacked: [] });
+		// A later patch that names one key keeps the other values.
+		expect(core.cluster.update(owner, { ingress: { drainSeconds: 30 } }).ingress).toMatchObject({
+			proxyProtocol: 'v2',
+			drainSeconds: 30,
+		});
+		core.cluster.update(owner, { ingress: { proxyProtocol: 'off', trustedProxies: [], drainSeconds: 20 }, steering: { driver: 'direct' } });
 	});
 
 	test('merges a section patch and persists it', () => {

@@ -3,6 +3,7 @@ import { nodes } from '@yoal/db';
 import {
 	INGRESS_SET_CAPABILITY,
 	type IngressSetView,
+	type IngressSettings,
 	type SteeringDriver,
 	type SteeringDriverKind,
 } from '@yoal/contracts';
@@ -10,6 +11,15 @@ import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
 import { nodeHasCapability } from './capability-gate.ts';
 import { ingressNodeIds, nodeRoles } from './ingress.ts';
+import {
+	STEERING_DRIVER_FACTORIES,
+	type SteeringDriverContext,
+	type SteeringDriverFactory,
+	type SteeringFinding,
+	type SteeringFence,
+	type SteeringNode,
+	type SteeringTickResult,
+} from './steering/registry.ts';
 
 /**
  * The ingress set (HA-PLAN H17, Wave 2 opening). One service answers membership for the desired
@@ -45,7 +55,7 @@ export class IngressSetService {
 		return node ? nodeHasCapability(node, INGRESS_SET_CAPABILITY) : false;
 	}
 
-	/** What the dashboard and `yoal ha status` show; the lanes add the settings and driver. */
+	/** What the dashboard and `yoal ha status` show. */
 	view(): IngressSetView {
 		const settings = this.ctx.cluster.get().ingress;
 		const ids = new Set(this.nodes());
@@ -63,7 +73,7 @@ export class IngressSetService {
 					certificateFingerprint: null,
 				})),
 			settings,
-			steering: { kind: 'direct', stacked: [] },
+			steering: this.ctx.steering.selection(),
 		};
 	}
 
@@ -73,23 +83,139 @@ export class IngressSetService {
 	}
 }
 
+export interface SteeringSelection {
+	kind: SteeringDriverKind;
+	stacked: SteeringDriverKind[];
+}
+
 /**
- * Steering (HA-PLAN H18, Wave 2). The contract is in `@yoal/contracts`; the drivers are lane D/E.
- * `direct` is the only one that exists today: it does nothing, which is exactly today's behaviour.
+ * Steering (HA-PLAN H18, Wave 2). The contract is in `@yoal/contracts`; the drivers live under
+ * `./steering/<kind>/` and each passes the shared conformance suite.
+ *
+ * `direct` is what every install has today: it does nothing, probes nothing and writes nothing.
+ * A configured non-`direct` driver only acts while the `STEERING` flag is on, so saving the setting
+ * is inert. The controller calls `reconcile()` once per tick from the failover loop; a driver that
+ * writes provider state is only called while the controller holds its lease.
  */
 export class SteeringService {
-	constructor(private readonly ctx: CoreContext) {}
+	readonly #drivers = new Map<SteeringDriverKind, SteeringDriver>();
 
+	constructor(
+		private readonly ctx: CoreContext,
+		private readonly factories: Readonly<Partial<Record<SteeringDriverKind, SteeringDriverFactory>>> = STEERING_DRIVER_FACTORIES,
+	) {}
+
+	/** The configured selection: `direct` while the flag is off, whatever the saved setting says. */
+	selection(): SteeringSelection {
+		if (!featureEnabled(this.ctx.config, 'STEERING')) return { kind: 'direct', stacked: [] };
+		const { steering } = this.ctx.cluster.get();
+		return { kind: steering.driver, stacked: [...steering.stacked] };
+	}
+
+	/** True when a non-`direct`, implemented driver is selected and the flag is on. */
+	active(): boolean {
+		const { kind } = this.selection();
+		return kind !== 'direct' && this.factories[kind] !== undefined;
+	}
+
+	/** The driver for `kind`, cached for this process so its intended set survives between ticks. */
 	driver(kind: SteeringDriverKind): SteeringDriver {
-		if (kind === 'direct')
+		const cached = this.#drivers.get(kind);
+		if (cached) return cached;
+		const factory = this.factories[kind];
+		if (!factory) throw new Error(`not implemented (HA Wave 2): steering driver ${kind}`);
+		const driver = factory(this.context());
+		this.#drivers.set(kind, driver);
+		return driver;
+	}
+
+	/** Validate the selection; empty when it is usable. */
+	preflight(): { kind: SteeringDriverKind; findings: SteeringFinding[] } {
+		const { kind } = this.selection();
+		if (kind === 'direct') return { kind, findings: [] };
+		try {
+			return { kind, findings: this.driver(kind).preflight() };
+		} catch (error) {
+			return { kind, findings: [{ nodeId: null, reason: (error as Error).message }] };
+		}
+	}
+
+	/**
+	 * One controller tick. Read-only drivers (including `external-lb`) run every tick; a driver that
+	 * writes runs only while the controller still holds the lease, checked immediately before the
+	 * write (`fence.holds()`), never at the start of the tick.
+	 */
+	async reconcile(fence: SteeringFence | null = null): Promise<SteeringTickResult> {
+		const { kind } = this.selection();
+		const idle: SteeringTickResult = {
+			kind,
+			active: false,
+			applied: false,
+			writes: false,
+			waitingForLease: false,
+			observed: null,
+			findings: [],
+			error: null,
+		};
+		if (kind === 'direct') return idle;
+
+		let driver: SteeringDriver;
+		try {
+			driver = this.driver(kind);
+		} catch (error) {
+			return { ...idle, active: true, error: (error as Error).message };
+		}
+		const findings = driver.preflight();
+		if (findings.length > 0) return { ...idle, active: true, writes: driver.capabilities.writes, findings };
+
+		const writes = driver.capabilities.writes;
+		if (writes && !(fence?.holds() ?? false)) {
 			return {
-				kind: 'direct',
-				capabilities: { probes: 'none', writes: false, preservesClientIp: 'native' },
-				preflight: () => [],
-				desired: async () => undefined,
-				observe: async () => ({}),
+				...idle,
+				active: true,
+				writes: true,
+				waitingForLease: true,
+				observed: await driver.observe().catch(() => null),
 			};
-		throw new Error(`not implemented (HA Wave 2): steering driver ${kind}`);
+		}
+		try {
+			await driver.desired();
+			const observed = await driver.observe();
+			return { ...idle, active: true, applied: true, writes, observed };
+		} catch (error) {
+			return { ...idle, active: true, applied: false, writes, error: (error as Error).message };
+		}
+	}
+
+	/** A read-only snapshot for the driver: no database handle, no writer, no provider client. */
+	private context(): SteeringDriverContext {
+		return {
+			now: () => this.ctx.now(),
+			nodes: () => this.snapshot(),
+			settings: (): IngressSettings => this.ctx.cluster.get().ingress,
+		};
+	}
+
+	private snapshot(): SteeringNode[] {
+		const ingress = new Set(this.ctx.ingressSet.nodes());
+		return this.ctx.db
+			.select()
+			.from(nodes)
+			.all()
+			.map((row) => {
+				const view = this.ctx.nodes.view(row);
+				return {
+					id: row.id,
+					name: row.name,
+					zone: row.zone,
+					status: row.status,
+					roles: view.roles,
+					capabilities: view.capabilities,
+					ingress: ingress.has(row.id),
+					capable: nodeHasCapability(row, INGRESS_SET_CAPABILITY),
+					lastHeartbeatAt: row.lastHeartbeatAt,
+				};
+			});
 	}
 }
 
