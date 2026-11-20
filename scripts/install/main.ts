@@ -1081,6 +1081,8 @@ function writeSecrets(): Map<string, string> {
 	env.set('YOAL_EDGE_NODE_ID', existing.get('YOAL_EDGE_NODE_ID') ?? '');
 	env.set('BETTER_AUTH_SECRET', existing.get('BETTER_AUTH_SECRET') ?? base64(48));
 	env.set('YOAL_SITE_COOKIE_SECRET', existing.get('YOAL_SITE_COOKIE_SECRET') ?? base64(32));
+	// Shared by every ingress through activation (HA-PLAN H20/G8); same value on all nodes.
+	env.set('YOAL_ACCESS_JWT_SECRET', existing.get('YOAL_ACCESS_JWT_SECRET') ?? base64(48));
 	env.set('YOAL_OBJECT_STORE_SECRET', existing.get('YOAL_OBJECT_STORE_SECRET') ?? base64(32));
 	// Web Push alerts (D108): kept across re-runs, since a new pair orphans every subscribed device.
 	if (ensureVapidKeys(env)) log('generated the Web Push (VAPID) key pair');

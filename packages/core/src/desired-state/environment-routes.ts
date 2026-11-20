@@ -16,7 +16,7 @@ export interface EnvironmentRoutes {
 export class EnvironmentRouteState extends DesiredStatePart {
 	/** Appends every environment route to `deployment.routes`. */
 	environmentRoutes(deployment: DeploymentRoutes): EnvironmentRoutes {
-		const { node, nodeById, targetOf, projectRows } = this.state;
+		const { node, targetOf, projectRows } = this.state;
 		const { routes, baseByDeployment, composeByDeployment, accessEdge } = deployment;
 
 		// Every environment with a pointer gets its own production route at the environment host
@@ -94,7 +94,7 @@ export class EnvironmentRouteState extends DesiredStatePart {
 				if (compose) {
 					const target = targetOf(project) ?? node.id;
 					const local = target === node.id;
-					const nodeUpstream = `http://${nodeById.get(target)?.publicAddress ?? '127.0.0.1:1'}`;
+					const nodeUpstream = `http://${this.state.proxyAddress(target) ?? '127.0.0.1:1'}`;
 					const primary = compose.routes.find((route) => route.primary) ?? compose.routes[0];
 					const projectHost = this.ctx.environments.hostFor(project, environment);
 					for (const route of compose.routes) {

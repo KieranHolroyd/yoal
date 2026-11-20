@@ -28,6 +28,7 @@ import { IDENTITY_CAPABILITY, identityDesiredSchema, identityUnitStatusSchema } 
 import { workloadDesiredSchema, workloadStatuses } from './workload.ts';
 import { STORAGE_STS_CAPABILITY } from './object-storage.ts';
 import { databaseMetricBucketSchema, databaseSnapshotSchema } from './database.ts';
+import { INGRESS_SET_CAPABILITY, ingressDesiredSchema } from './ingress.ts';
 import { brokerMetricBucketSchema, brokerQueueSnapshotSchema } from './broker.ts';
 import {
 	kubernetesBackupResultSchema,
@@ -385,6 +386,12 @@ export const desiredStateSchema = z.object({
 		/** When set, this host 301s to the sibling (apex↔www). */
 		redirectTo: z.string().nullable().default(null),
 	})).default([]),
+	/**
+	 * Ingress-set payload (HA-PLAN H17/G5). Present only for a node in the ingress set while
+	 * `INGRESS_SET` is on, and only to an agent that declares `ingress-set`; omitted everywhere
+	 * else, which keeps a flag-off payload byte-identical. Carries no secret.
+	 */
+	ingress: ingressDesiredSchema.optional(),
 });
 export type DesiredState = z.infer<typeof desiredStateSchema>;
 
@@ -466,6 +473,8 @@ export const nodeCapabilities = [
 	STORAGE_STS_CAPABILITY,
 	LINK_TESTS_CAPABILITY,
 	RUN_LEASES_CAPABILITY,
+	// Parses the ingress-set desired payload, renders public listeners/TLS and fetches activation.
+	INGRESS_SET_CAPABILITY,
 	// The helper accepts /24 Kubernetes machine subnets in WireGuard peers (docs/KUBERNETES.md §10).
 	'wg-subnets',
 ] as const;

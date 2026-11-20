@@ -1,5 +1,6 @@
 import type { DatabasePitrRepoConfig, DatabasePitrRepository, FeatureFlags, FeatureName } from '@yoal/contracts';
 import { CONTAINER_CONSOLE_DEFAULT_PORT, FEATURE_FLAGS, parseFeatureFlags, STUDIO_DEFAULT_PORT } from '@yoal/contracts';
+import { readFileSync } from 'node:fs';
 import type { ObjectStore } from './object-store.ts';
 import { hmac } from './util.ts';
 
@@ -62,6 +63,16 @@ export interface CoreConfig {
 	now?: () => number;
 	/** The node that terminates ingress; the first registered node if unset. */
 	edgeNodeId?: string;
+	/** Shared HMAC secret for `Yoal-Access-Jwt`; delivered to ingresses by activation, never desired state. */
+	accessJwtSecret?: string;
+	/** ACME account email, for the TLS settings an ingress renders from desired state. */
+	acmeEmail?: string;
+	/** ACME directory override (e.g. Let's Encrypt staging), public. */
+	acmeCa?: string;
+	/** The Cloudflare DNS-01 token; delivered to ingresses by activation, never desired state. */
+	cloudflareApiToken?: string;
+	/** The platform upstream an ingress on the control node dials (`unix//run/yoal/control.sock`). */
+	platformUpstream?: string;
 	/**
 	 * Loopback port of the edge's internal S3 gateway (Caddy). The control plane reaches every
 	 * managed instance through it to browse and manage objects (D82).
@@ -137,6 +148,18 @@ export function coreConfigFromEnv(
 		releaseRepo: overrides.releaseRepo ?? env.YOAL_REPO ?? 'KieranHolroyd/yoal',
 		// The installer writes `YOAL_EDGE_NODE_ID=` before enrolment; empty means unset.
 		edgeNodeId: overrides.edgeNodeId ?? (env.YOAL_EDGE_NODE_ID || undefined),
+		// Ingress-set settings (HA-PLAN H17/G5/G8). The ACME email and CA are public; the access and
+		// Cloudflare secrets reach an ingress only through the node-authenticated activation endpoint.
+		accessJwtSecret: overrides.accessJwtSecret ?? (env.YOAL_ACCESS_JWT_SECRET?.trim() || undefined),
+		acmeEmail: overrides.acmeEmail ?? (env.YOAL_ACME_EMAIL?.trim() || undefined),
+		acmeCa: overrides.acmeCa ?? (env.YOAL_ACME_CA?.trim() || undefined),
+		cloudflareApiToken:
+			overrides.cloudflareApiToken ??
+			(env.YOAL_CLOUDFLARE_API_TOKEN?.trim() ||
+				(env.YOAL_CLOUDFLARE_API_TOKEN_FILE
+					? readSecretFileSync(env.YOAL_CLOUDFLARE_API_TOKEN_FILE)
+					: undefined)),
+		platformUpstream: overrides.platformUpstream ?? (env.YOAL_PLATFORM_UPSTREAM?.trim() || undefined),
 		storageGatewayPort:
 			overrides.storageGatewayPort ?? positiveInteger(env.YOAL_STORAGE_GATEWAY_PORT, 8081),
 		storageGatewayUrl: overrides.storageGatewayUrl ?? (env.YOAL_STORAGE_GATEWAY_URL?.replace(/\/+$/, '') || undefined),
@@ -185,6 +208,16 @@ export function featureEnabled(config: Pick<CoreConfig, 'features'>, name: Featu
 function positiveInteger(value: string | undefined, fallback: number): number {
 	const parsed = Number(value);
 	return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+/** Trimmed file contents, or undefined when unset/unreadable; for `*_FILE` secret settings. */
+function readSecretFileSync(path: string): string | undefined {
+	try {
+		const value = readFileSync(path, 'utf8').trim();
+		return value || undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 /**

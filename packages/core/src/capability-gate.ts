@@ -1,5 +1,6 @@
 import {
 	ENDPOINTS_GATEWAY_CAPABILITY,
+	INGRESS_SET_CAPABILITY,
 	OBJECT_STORE_KINDS_CAPABILITY,
 	RELEASE_PHASE_CAPABILITY,
 	type DesiredState,
@@ -111,12 +112,16 @@ function mapIfChanged<T>(items: T[], fn: (item: T) => T): T[] {
 }
 
 /** The flags `gateDesiredState` reads; `featureFlagsForGate(config)` builds it from a core config. */
-export type CapabilityGateFlags = Pick<FeatureFlags, 'ENDPOINTS_GATEWAY' | 'RELEASE_PHASE'>;
+export type CapabilityGateFlags = Pick<FeatureFlags, 'ENDPOINTS_GATEWAY' | 'RELEASE_PHASE'> & {
+	/** Optional so Wave 1 tests written before W6 keep their literal shape; absent means off. */
+	INGRESS_SET?: boolean;
+};
 
 export function featureFlagsForGate(config: Pick<CoreConfig, 'features'>): CapabilityGateFlags {
 	return {
 		ENDPOINTS_GATEWAY: featureEnabled(config, 'ENDPOINTS_GATEWAY'),
 		RELEASE_PHASE: featureEnabled(config, 'RELEASE_PHASE'),
+		INGRESS_SET: featureEnabled(config, 'INGRESS_SET'),
 	};
 }
 
@@ -128,17 +133,23 @@ export function featureFlagsForGate(config: Pick<CoreConfig, 'features'>): Capab
  *   `serviceEndpoints[].role|gatewayAddress|trust|version` (non-primary entries are dropped),
  *   `serviceProviders[].clientAuth|allowedClientNodeIds`;
  * - without `RELEASE_PHASE` and `release-phase`: `releaseCommands`, `imagePrePulls`, `workloads[].readinessPath|drainSeconds|
- *   stopTimeoutSeconds`, `routes[].readinessPath`.
+ *   stopTimeoutSeconds`, `routes[].readinessPath`;
+ * - without `INGRESS_SET` and `ingress-set`: `ingress` (listeners, TLS, platform route).
  * Returns `state` itself when nothing was removed.
  */
 export function gateDesiredState(state: DesiredState, capabilities: readonly string[], flags: CapabilityGateFlags): DesiredState {
 	const gateway = flags.ENDPOINTS_GATEWAY && capabilities.includes(ENDPOINTS_GATEWAY_CAPABILITY);
 	const release = flags.RELEASE_PHASE && capabilities.includes(RELEASE_PHASE_CAPABILITY);
-	if (gateway && release) return state;
+	const ingress = Boolean(flags.INGRESS_SET) && capabilities.includes(INGRESS_SET_CAPABILITY);
+	if (gateway && release && ingress) return state;
 	let next: DesiredState = state;
 	const set = <K extends keyof DesiredState>(key: K, value: DesiredState[K]) => {
 		if (value !== next[key]) next = { ...next, [key]: value };
 	};
+	if (!ingress && next.ingress !== undefined) {
+		const { ingress: _ingress, ...rest } = next;
+		next = rest;
+	}
 	if (!gateway) {
 		if (next.readEndpoints !== undefined || next.nodeTrust !== undefined) {
 			const { readEndpoints: _read, nodeTrust: _trust, ...rest } = next;

@@ -1,4 +1,6 @@
 import { createHmac, timingSafeEqual } from 'node:crypto';
+import { chmodSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs';
+import { dirname } from 'node:path';
 import type { DesiredState, RouteSpec } from '@yoal/contracts';
 import {
 	handleYoalAccessRequest,
@@ -25,13 +27,29 @@ export const MAX_CALLBACK_TOKEN_SECONDS = 120;
  * Remembers redeemed callback-token ids until they expire, so a leaked
  * `/_yoal/callback?token=…` URL cannot be replayed (DESIGN §6.4). Memory is bounded by the
  * token lifetime: entries are dropped as soon as the token could no longer verify anyway.
+ *
+ * With the ingress set there are several ingresses, and a callback can land on any of them. The
+ * id set is therefore persisted under the agent data directory (0600, atomic rename), so a
+ * restart or a redeploy of one ingress does not reopen a one-time token (HA-PLAN H17, G8).
+ * Persistence is best effort: a failed write keeps the in-memory cache correct rather than
+ * failing the login.
  */
+export interface UsedTokenCacheOptions {
+	maxEntries?: number;
+	/** Absolute path to persist redeemed ids; absent keeps the cache memory-only. */
+	file?: string | null;
+}
+
 export class UsedTokenCache {
 	private readonly used = new Map<string, number>();
 	private readonly maxEntries: number;
+	private readonly file: string | null;
 
-	constructor(maxEntries = 100_000) {
-		this.maxEntries = maxEntries;
+	constructor(options: number | UsedTokenCacheOptions = {}) {
+		const resolved = typeof options === 'number' ? { maxEntries: options } : options;
+		this.maxEntries = resolved.maxEntries ?? 100_000;
+		this.file = resolved.file ?? null;
+		if (this.file) this.load();
 	}
 
 	/** Record `jti`; false when it was already redeemed (or the cache is saturated). */
@@ -41,6 +59,7 @@ export class UsedTokenCache {
 		// Fail closed under a flood rather than forgetting ids that are still valid.
 		if (this.used.size >= this.maxEntries) return false;
 		this.used.set(jti, exp);
+		this.persist();
 		return true;
 	}
 
@@ -50,6 +69,40 @@ export class UsedTokenCache {
 
 	private prune(now: number): void {
 		for (const [jti, exp] of this.used) if (exp <= now) this.used.delete(jti);
+	}
+
+	private load(): void {
+		let text: string;
+		try {
+			text = readFileSync(this.file!, 'utf8');
+		} catch {
+			return;
+		}
+		try {
+			const parsed = JSON.parse(text) as Record<string, unknown>;
+			if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+			for (const [jti, exp] of Object.entries(parsed)) {
+				if (typeof exp !== 'number' || !Number.isSafeInteger(exp)) continue;
+				if (this.used.size >= this.maxEntries) break;
+				this.used.set(jti, exp);
+			}
+		} catch {
+			// A truncated or hand-edited file starts empty; the 60 s token lifetime bounds the cost.
+		}
+	}
+
+	private persist(): void {
+		if (!this.file) return;
+		const tmp = `${this.file}.tmp-${process.pid}`;
+		try {
+			mkdirSync(dirname(this.file), { recursive: true, mode: 0o755 });
+			const entries = Object.fromEntries(this.used);
+			writeFileSync(tmp, `${JSON.stringify(entries)}\n`, { mode: 0o600 });
+			renameSync(tmp, this.file);
+			chmodSync(this.file, 0o600);
+		} catch {
+			rmSync(tmp, { force: true });
+		}
 	}
 }
 

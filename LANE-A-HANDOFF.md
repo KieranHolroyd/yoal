@@ -1,142 +1,130 @@
-# Lane A hand-off — W4 agent and helper (forwarder on the gateway, `AddHost`, node CA)
+# Lane A hand-off — W6 ingress payload (full edge on every ingress)
 
-Branch `ha/w1-a-attach-agent`, merged with `ha/integration` at `1cd872e9` (merge commit
-`b593ba02`; the merge was clean — no conflicts). Everything below was run in this worktree.
+Branch `ha/w2-a-ingress-payload`, based on `ha/integration` `416996dd`. Worked only in
+`/Users/kieranholroyd/.t3/worktrees/private-cloud-deploys/t3-w2-a-ingress-payload`; no other
+worktree was touched, nothing was merged or pushed, and `VERSION` was not bumped.
 
-Final commit: `d51b2911` (code, tests and this hand-off). If the branch tip is one commit later, it only corrects this line; `git log -1` is authoritative.
+Code/tests commit: `229ddac9` (`feat(ha): W6 ingress payload — full edge on every ingress, worker
+listeners, activation secrets, drift`). The hand-off commit is the tip; `git log -1` is
+authoritative.
 
 ## 1. What was verified
 
-### Static checks and the full suite
+### Static checks, migrations and the full suite
 
 | Command | Result |
 |---|---|
-| `bun run check` | 0 errors; 1 pre-existing Svelte warning in `apps/control-plane/.../settings/registry/+page.svelte`; `iam lint` baseline 0 |
-| `bun test` | **6252 tests across 559 files: 6178 pass, 74 skip, 0 fail** (207 s) |
-| `bun test` on the ten changed test files | 244 tests: 243 pass, 1 skip, 0 fail |
-| `bun run --cwd apps/agent check`, `bun run --cwd apps/helper check` | clean |
+| `bun run check` | 0 errors; the one pre-existing Svelte warning in `settings/registry/+page.svelte`; `iam lint` baseline 0 |
+| `bun test` | **6356 tests across 571 files: 6282 pass, 74 skip, 0 fail** (240 s) |
+| `bun scripts/check-migrations.ts` | `ok`, 123 migrations, 0123 appended with no edits to history |
+| focused suite | `bun test packages/core/src/ingress-set.test.ts apps/agent/src/ingress.test.ts apps/agent/src/verify.test.ts apps/agent/src/caddy-config.test.ts packages/core/src/desired-state/golden.test.ts` — 80 pass, 0 fail |
 
-The one skip is the positive gateway-bind test (`127.0.0.2`), gated on Linux; it runs in CI.
+The desired-state golden test (`packages/core/src/desired-state/golden.test.ts`) passes unchanged
+with `INGRESS_SET` off: the snapshot file was not regenerated, so the flag-off, single-node payload
+is byte-identical. `apps/agent/src/capabilities.test.ts` and the contract suite also pass with
+`nodeCapabilities` now including `ingress-set`.
 
-New/expanded tests cover every behaviour added here, including the flag-off no-op path:
+### What the new tests prove
 
-- `apps/agent/src/endpoints.test.ts`: gateway bind only when the guard allowed it; a missing
-  gateway address is retried while loopback keeps serving; read endpoints balance over replicas with
-  the primary as fallback; re-point swaps upstreams without rebinding and keeps open sessions;
-  a version-bumped move cuts sessions (failover); 100 reloads with sessions open lose no request;
-  install-CA forwarding between two nodes, a revoked provider leaf, a leaf naming another node, a
-  bundle from another CA, no leaf on either side (fail closed), provider `allowedClientNodeIds`, a
-  plain→TLS provider transition when the leaf arrives, and `wantsGateway` false with the flag off.
-- `apps/agent/src/node-ca.test.ts`: no feature/no openssl/non-conforming node id → no key and no
-  CSR; enrolment CSR with a 0600 key; a signed leaf is stored and stops the CSR; renewal inside the
-  30-day window while still using the leaf; refuses a leaf for another key, another node, another
-  CA or an expired date; a revoked serial means no material and a `rekey` CSR; a new key discards
-  the old leaf.
-- `apps/helper/src/validate.test.ts`: `addHosts` accepted for container and compose, rejected for
-  process and managed services, injection/uppercase/public address/duplicate/65-entry refusals, and
-  the empty list is indistinguishable from absent.
-- `apps/helper/src/units.test.ts`, `systemd.test.ts`, `jobs.test.ts`: `AddHost=` in the Quadlet
-  `[Container]` section; every compose service inherits the stack's entries; container job argv
-  takes `--add-host=`; no line or flag when the field is absent.
-- `apps/helper/src/network.test.ts`: guard rendering (both ranges, loopback accept, the fib drop,
-  one chain), file written and checked before load, its own file even for a non-`yoal.nft` config,
-  and a failed `nft -c` applies nothing.
-- `apps/helper/src/server.test.ts`, `apps/agent/src/helper-client.test.ts`: the fixed verb applies,
-  takes no query/body, is POST-only, 404 on an older helper, 500 on nft failure; the agent's client
-  sends no body and surfaces the 404.
-
-### Lab (this lane's build, kernel and helper verbs)
-
-`bun tests/lab/lab.ts up` (86 s) built the image from this branch and installed the real installer,
-control plane, agent and helper on `lab-a`–`lab-ctl`. All four nodes online, all four overlay
-tunnels handshook, no endpoint or node-CA warnings in any agent log; desired state v15 converged
-with the flags off. `bun tests/lab/lab.ts down` removed every lab object and found no leftover loop
-devices.
-
-On the live `lab-b`, through the real helper socket:
-
-- `POST /v1/endpoints/guard` → `200 {"ok":true,"table":"inet yoal-endpoints"}`; a second apply is a
-  success with exactly one `input` chain; `nft list table inet yoal-endpoints` shows
-  `21000-21999, 23000-23999`, `fib daddr . iif type != local drop` and `iifname "lo" accept`; the
-  rendered file is at `/etc/yoal/network/yoal-endpoints.nft`.
-- A query string → 400, a JSON body → 400, `GET` → 405 (the verb never forwards input).
-- With the flags off no `/var/lib/yoal/agent/tls/node-ca.key` exists (only the C2 `node.key` /
-  `node.crt`); `yoal-agent.service` and `yoal-helper.service` are active. The guard table was then
-  deleted and the lab returned to its installed state.
-
-`tests/ha/scenarios/endpoint-guard-nft.sh` (new, manual; privileged Alpine with nftables 1.0.9 and
-three network namespaces) installs the exact rendered table and proves: a container on the
-address's own bridge reaches the listener; a container on **another bridge** routed at the gateway
-address is dropped; a host on the underlay that routes the gateway subnet is dropped; loopback is
-unaffected. All four cases passed.
+- `packages/core/src/ingress-set.test.ts`
+  - the set is the compatibility first ingress plus every **capable** node with the `ingress` role;
+    `setEdge` still hands the role over;
+  - two ingresses render the same hosts, release hashes, production/preview routes, custom domains
+    (cloned with the same site key) and placeholders; static production routes have `upstream:
+    null` on both and both download the release; the platform route is present on both;
+  - an app copy on the first ingress is named identically by the second (`http://…` proxy);
+  - a worker that gains the role gets `ingress.listeners`, `ingress.tls` and `ingress.platform`
+    from desired state, and a node outside the set gets no `ingress` field;
+  - the activation returns `YOAL_ACCESS_JWT_SECRET`, the site-cookie secret and the optional
+    Cloudflare token, refuses a non-ingress, and none of them appears in the desired-state JSON;
+  - drift: `actualStateVersion` below desired is not drifted inside the 120 s window and is
+    drifted after it; the report and `view()` both expose it; a fresh heartbeat clears it;
+  - `gateDesiredState` strips `ingress` without the flag or without the `ingress-set` capability.
+- `apps/agent/src/ingress.test.ts`
+  - listeners: a worker keeps its private `<overlay>:8080` and adds `:443`; an existing edge drops
+    the redirect port; no desired listeners keeps the old `[':443']` / env behaviour;
+  - secrets cache: 0600, survives a new store instance, missing/corrupt cache is `null`;
+  - redeemed-token cache: a claimed id is refused by a new instance from the same file, and the
+    memory-only constructor is unchanged.
+- `apps/agent/src/caddy-config.test.ts`: an `https://` platform upstream becomes `dial host:443`
+  with `tls.server_name` set to the platform host; a `unix//` upstream stays a plain hop.
+- `apps/agent/src/verify.test.ts`: the existing one-time-token tests still pass.
 
 ## 2. What was not verified, and why
 
-- **The W4 exit itself.** "Three copies on three nodes against one Postgres on a fourth; a manual
-  promotion changes no environment and restarts nothing; a port scan from outside the overlay finds
-  nothing" needs lane B's core placement/CA issuance (`packages/core/src/{databases,endpoints,
-  service-endpoints,workloads}.ts`, desired state) and the lab lane. This branch contains no core
-  changes, so turning `ENDPOINTS_GATEWAY` on renders no `gatewayAddress`, `readEndpoints`, `nodeTrust`
-  or `addHosts` yet; there is nothing for the agent to act on. The forwarder/helper halves are
-  unit- and kernel-tested; the end-to-end M1 scenario belongs to `ha/w1-lab`.
-- **Flag-on end-to-end CA flow** (heartbeat CSR → control-plane-signed leaf → `install-ca`
-  connections). The agent-side state machine is tested with a real openssl PKI
-  (`apps/agent/src/test-pki.ts`), but the signing service is lane B's and was not in this tree.
-  Enabling the flag in the lab without lane B would prove only that the capability is advertised.
-- **macOS-only gap:** the positive gateway bind (`127.0.0.2`) test is `skipIf` Linux, as existing
-  socket tests are; the guard's kernel semantics were instead proved in privileged Linux containers
-  (above).
-- **A host trust-store install** was not implemented (see deviations): no contract field or plan
-  text asks for it; the forwarder verifies peers against `nodeTrust.caBundlePem` directly.
+- **The authoritative two-node lab run.** Launching two real ingress nodes, killing one and
+  checking byte-for-byte responses for every route type is the lab lane's scenario; this worktree
+  ran only unit/contract tests and no cloud credentials or real DNS.
+- **Real Caddy/ACME.** The listener merge and desired TLS settings are unit-tested; forcing a
+  certificate issue on a worker that gained the role needs a real DNS-01 token or reachable
+  HTTP-01, which is lane B's certificate custody and the lab's job.
+- **The HTTP activation route end to end.** `GET /api/agent/ingress/activation` is a thin dispatch
+  over `IngressSetService.activation()`; the service is tested, the SvelteKit route only compiles
+  (`bun run check`), no browser/agent round trip ran here.
+- **Platform route after `setEdge`.** The relay target is the compatibility first ingress. Today
+  `setEdge` moves the ingress role but not the control-plane host (D98); until W9 renders the
+  control-node upstream list, a promotion that moves the control host is not handled by this
+  relay. The normal two-ingress case (control host is the edge, second node relays to it) is what
+  the tests cover.
+- **An external first ingress with no overlay address.** Cross-ingress proxies use
+  `<privateAddress>:8080` when present and the recorded public address otherwise. An external node
+  with no private address only works when its public address is a plain listener; that is the
+  pre-existing cross-node assumption, not a new one.
+- One earlier full-suite run showed the known flaky helper app-volume test; it passed alone and in
+  the final two full runs.
 
-## 3. Deviations from the contract/plan
+## 3. Deviations and choices
 
-1. **Compose workloads may carry `addHosts`.** The contract describes `workloads[].addHosts` as
-   "container units only". Compose services are containers and `systemd.ts` already gives every
-   service the stack's attachments; the helper now accepts `runtime: 'compose'` as well as
-   `container` (still refuses process/function/managed workloads). Without this, lane B could not
-   attach a compose stack.
-2. **The helper validates more strictly than the contract.** `host` must be a managed alias
-   (`db-…` or `s3-…`, lowercase DNS label) and `address` must be private IPv4 (10/8, 172.16/12,
-   192.168/16, 100.64/10), not any `z.ipv4()`. Structured fields only; newlines, arbitrary names and
-   public addresses are refused by name. This is deliberate defence in depth, but it is stricter
-   than `containerAddHostSchema`.
-3. **Install-CA provider listeners no longer require the C2 self-signed identity.**
-   `listenProvider` now chooses TLS when either CA material or the C2 certificate exists, and a
-   converge that flips a listener between plain and TLS recreates it (`providerTls`). Previously an
-   `install-ca` listener without the C2 certificate was created plain and refused every connection;
-   now a node with a signed CA leaf serves correctly, and a node with neither fails closed.
-4. **The node CA verifies its leaf before presenting it.** `material()` requires the public key to
-   match, the chain to verify against `caBundlePem`, the URI SAN to name this node, the certificate
-   to be inside its validity window, and the serial not to be revoked; otherwise it returns null and
-   the heartbeat asks for `rekey`. The WIP only checked the key and expiry.
-5. **The CSR is sent in the heartbeat, not at join.** `nodeJoinSchema.csrPem` is unused: before the
-   join the node does not know its id, and the control plane signs only a CSR whose subject is the
-   authenticated node's own id. `nodeTrust` in desired state is what starts enrolment; with no
-   `nodeTrust` the node sends and stores nothing new (flag-off no-op).
-6. **`endpointGuardPath()` uses `dirname`/`join`,** not the regex replace it inherited: a config
-   path not ending in `yoal.nft` would have overwritten the overlay rules file with the guard.
-   `applyMachineNat` has the same pre-existing pattern and was left untouched (not this lane).
-7. **A new file outside `apps/*`:** `tests/ha/scenarios/endpoint-guard-nft.sh` (manual, privileged
-   Docker; not part of `bun test`). It is the only lab artefact added; the harness and scenarios are
-   the lab lane's.
-8. **No migration was used.** The node CA schema is foundation's `0118`; the `0121` spare is
-   untouched.
-9. **Capability advertisement:** `endpoints-gateway` is advertised when openssl exists and the node
-   id can become a CSR subject (`nodeCa.available()`). The helper's build is not probed: agent and
-   helper ship together, and an older helper answers 404, after which `endpointGuardReady` stays
-   false and gateway listeners are never bound (fail closed, visible in the log).
-10. **No host trust-store mutation and no new daemon.** CA verification lives in the forwarder's TLS
-    contexts; the guard is one nftables table applied by the existing helper on request.
+1. **Migration 0123 is used — it was truly needed.** Drift must survive a control-plane restart, so
+   `nodes` gained `actual_state_version` (the agent's reported applied version) and
+   `actual_state_at` (when that value last changed, not every heartbeat). The migration is
+   additive only; no table was added. The Wave 2 reservation table listed 0124 for this lane, but
+   the brief allowed 0123 if needed; the integrator should renumber at merge as usual.
+2. **`IngressSetService.nodes()`** widens to every node with the raw `ingress` role **and** the
+   `ingress-set` capability, unioned with the compatibility `mode: 'edge'` / `YOAL_EDGE_NODE_ID`
+   nodes. The compatibility first ingress stays first and `setEdge` keeps working; a demoted edge
+   with no stored `ingress` role leaves the set (D98 semantics).
+3. **The desired-state payload is a new optional `ingress` field**, rendered only for a set member
+   while `INGRESS_SET` is on and stripped by the capability gate for any agent without
+   `ingress-set`. It carries `listeners` (`:443`, plus `<privateAddress>:8080` when the node has an
+   overlay address), `tls` (`email`, optional `ca`; public data) and `platform` (`host`, upstream).
+   No secret is in it. `nodeCapabilities` now advertises `ingress-set`, which is what makes the
+   field reachable.
+4. **Platform route:** a node that is the edge/control node dials its own
+   `YOAL_PLATFORM_UPSTREAM` (default `unix//run/yoal/control.sock`). Any other ingress relays to
+   the first ingress over HTTPS, with the platform host as SNI; the agent's Caddy config adds the
+   TLS transport to the compiled platform route (the compiler in `packages/site-config` was not
+   edited). The control-node upstream list of CLUSTERING §6.4/H17 is W9; this relay is the W6
+   bridge.
+5. **Shared secrets through activation:** new `GET /api/agent/ingress/activation` (node token),
+   returning `accessJwtSecret`, `siteCookieSecret` and the optional `cloudflareApiToken`. The agent
+   caches it 0600 as `<dataDir>/ingress-secrets.json`, loads it at start, refreshes every six hours
+   and retries a failed first fetch after a minute; the access-secret and token override the env
+   values. The **control plane** must have `YOAL_ACCESS_JWT_SECRET`, `YOAL_ACME_EMAIL` and
+   optionally `YOAL_CLOUDFLARE_API_TOKEN`/`_FILE` in its own environment (previously those were
+   documented as agent-only). The site-cookie secret is delivered and cached as H20 asks, but the
+   agent does not otherwise read it: route site keys already arrive in `routes[].access.siteKey`.
+6. **Redeemed-token cache:** `UsedTokenCache` gained an optional file, written atomically with 0600
+   and reloaded on start. Persistence is best effort (a failed write keeps the in-memory cache
+   correct); the token lifetime still bounds the file.
+7. **Worker listeners:** the agent merges `config.caddyListen` with the desired listeners instead
+   of replacing it with `:443`. A worker that gained the role keeps `<overlay>:8080` (other
+   ingresses proxy its app copies there) and adds `:443`. With no desired listeners the old
+   `[':443']`/env behaviour is unchanged.
+8. **Cross-node proxy address:** while `INGRESS_SET` is on, the route/gateway/storage/registry
+   helpers prefer `<privateAddress>:8080` over the recorded public address, so a second ingress
+   reaches an edge's Caddy over the overlay rather than its public :80 redirect. Flag off keeps
+   `publicAddress`, which is why the golden is unchanged.
+9. **Drift is reported, not acted on.** `IngressSetService.drift()`, `drifted()` and the
+   `IngressNodeView` fields expose `actualStateVersion`/`drifted`; withdrawing a drifted node from
+   rotation is the steering drivers' write (lanes D/E), which this lane deliberately did not touch.
+10. Files not touched: `packages/site-config/src/compile.ts` (lane C), certificate custody
+    (lane B), steering drivers (lanes D/E), migration 0122, and `VERSION`. No new daemon, no
+    helper shell verb, no secret in desired state or audit.
 
-Files touched: `apps/agent/src/{endpoints,endpoints.test,node-ca,node-ca.test,test-pki,helper-client,
-helper-client.test,main,capabilities.test}.ts` and `apps/helper/src/{main,network,network.test,server,
-server.test,systemd,systemd.test,units,units.test,validate,validate.test,jobs,jobs.test}.ts`. No file
-belonging to lane B, C or D, `packages/contracts`, `packages/site-config/src/compile.ts` or
-`scripts/install` was edited. `VERSION` was not bumped; every commit used `--no-verify`.
+## 4. Final commit
 
-## 4. Branch and commits
+Branch: `ha/w2-a-ingress-payload` (not merged to `ha/integration`, not pushed).
 
-Branch: `ha/w1-a-attach-agent` (not merged to `ha/integration`, not pushed).
-
-Final commit: `d51b2911` (code, tests and this hand-off). If the branch tip is one commit later, it only corrects this line; `git log -1` is authoritative.
+- Code and tests: `229ddac9e83b9f57a2244f24459e0bb065b1d1ff`
+- Final (this hand-off): the tip of the branch; print it with `git log -1 --format=%H`.

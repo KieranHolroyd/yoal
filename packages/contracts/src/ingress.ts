@@ -60,7 +60,59 @@ export interface IngressNodeView {
 	first: boolean;
 	capable: boolean;
 	certificateFingerprint: string | null;
+	/** The desired-state version this node last reported applying (`actualStateVersion`). */
+	actualStateVersion: number | null;
+	/** Behind the fleet's version for the drift window (CLUSTERING §7.1). */
+	drifted: boolean;
 }
+
+/**
+ * The public listener and TLS settings every ingress renders (HA-PLAN H17/G5). Rendered only for a
+ * node in the ingress set, so a worker that gains the `ingress` role converges from desired state
+ * instead of a hand-edited env file. Non-secret: the ACME email is public, the token is not.
+ */
+export const ingressDesiredSchema = z
+	.object({
+		/** Extra Caddy listeners for public traffic. The node's existing listen addresses stay. */
+		listeners: z.array(z.string().min(1).max(128)).max(8).default([]),
+		/** Terminate TLS with ACME. Null keeps today's env-driven behaviour. */
+		tls: z
+			.object({
+				email: z.string().min(3).max(320),
+				ca: z.string().url().max(512).optional(),
+			})
+			.nullable()
+			.default(null),
+		/**
+		 * The platform dashboard/API route (`control.<domain>`). Until W9's upstream list, a control
+		 * node dials its own socket and any other ingress relays to the first ingress over HTTPS.
+		 */
+		platform: z
+			.object({
+				host: z.string().min(1).max(253),
+				upstream: z.string().min(1).max(512),
+			})
+			.nullable()
+			.default(null),
+	})
+	.strict();
+
+export type IngressDesired = z.infer<typeof ingressDesiredSchema>;
+
+/**
+ * Secrets an ingress fetches from the node-authenticated activation endpoint (HA-PLAN H20, G8).
+ * Never part of desired state, a log line or an audit argument; the agent caches them 0600 under
+ * its data directory so a restart does not need a control-plane round trip before serving.
+ */
+export const ingressActivationSchema = z.object({
+	/** Null until the control plane has YOAL_ACCESS_JWT_SECRET (the installer writes it). */
+	accessJwtSecret: z.string().min(1).max(512).nullable(),
+	siteCookieSecret: z.string().min(1).max(512),
+	/** The ACME DNS-01 token, when the install uses DNS-01. Null for HTTP-01 or no TLS. */
+	cloudflareApiToken: z.string().min(1).max(512).nullable(),
+});
+
+export type IngressActivation = z.infer<typeof ingressActivationSchema>;
 
 /**
  * Steering driver kinds (HA-PLAN H18). `ingressDrivers` above is the C5 subset already shipped

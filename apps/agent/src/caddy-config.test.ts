@@ -880,3 +880,35 @@ describe('unavailable routes (D225)', () => {
 		expect(compiled.some((route) => String(route['@id']).startsWith('site:prj_secret:'))).toBe(true);
 	});
 });
+
+describe('ingress platform relay (W6)', () => {
+	test('an HTTPS platform upstream dials :443 with the platform host as SNI', () => {
+		const compiled = buildCaddyConfig({
+			state: state(),
+			listen: [':443', '10.47.1.3:8080'],
+			dataDir: '/data',
+			agentSocket: '/run/yoal-agent/agent.sock',
+			caddyAdminSocket: '/var/lib/caddy/admin.sock',
+			platform: { host: 'control.example.com', upstream: 'https://10.47.1.2' },
+		});
+		const platform = routes(compiled).find((route) => route['@id'] === 'platform')!;
+		const proxy = collectHandlers(platform).find((handler) => handler.handler === 'reverse_proxy')!;
+		expect(proxy.upstreams).toEqual([{ dial: '10.47.1.2:443' }]);
+		expect(proxy.transport).toEqual({ protocol: 'http', tls: { server_name: 'control.example.com' } });
+	});
+
+	test('a local socket upstream keeps the plain hop', () => {
+		const compiled = buildCaddyConfig({
+			state: state(),
+			listen: [':443'],
+			dataDir: '/data',
+			agentSocket: '/run/yoal-agent/agent.sock',
+			caddyAdminSocket: '/var/lib/caddy/admin.sock',
+			platform: { host: 'control.example.com', upstream: 'unix//run/yoal/control.sock' },
+		});
+		const platform = routes(compiled).find((route) => route['@id'] === 'platform')!;
+		const proxy = collectHandlers(platform).find((handler) => handler.handler === 'reverse_proxy')!;
+		expect(proxy.upstreams).toEqual([{ dial: 'unix//run/yoal/control.sock' }]);
+		expect(proxy.transport).toBeUndefined();
+	});
+});

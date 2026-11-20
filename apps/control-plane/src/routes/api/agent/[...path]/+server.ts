@@ -86,6 +86,14 @@ const handler: RequestHandler = async (event) => {
 			return core.workloads.activationFor(node.id, activation[1]!);
 		}
 
+		// The shared secrets an ingress needs (HA-PLAN H20, G8): node authenticated, never in desired
+		// state, and refused for a node outside the set. The agent caches them 0600 under its data dir.
+		if (action === 'ingress/activation') {
+			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+			const node = core.nodes.authenticate(token);
+			return json(core.ingressSet.activation(node.id), 200, { 'cache-control': 'no-store' });
+		}
+
 		// Kubernetes manifests (docs/KUBERNETES.md K9, K12, K19): RBAC, access-key bindings and
 		// attachment Secrets for a server machine on this node. Fetched like an activation, never
 		// put in desired state, because attachment Secrets carry passwords.

@@ -11,8 +11,10 @@ import {
 	WORKERD_INSTALL_DIR,
 	WORKERD_PINNED_VERSION,
 	workloadActivationSchema,
+	ingressActivationSchema,
 	type DesiredState,
 	type Heartbeat,
+	type IngressActivation,
 	type NodeStudioDesired,
 	type NodeContainerConsoleDesired,
 	type NodeStatus,
@@ -69,12 +71,16 @@ import { KubernetesSync, kubernetesCapabilities, readKubernetesComponent } from 
 import { DesiredStateStore, desiredStateEtag, desiredStateRequest } from './state.ts';
 import { postTelemetryBatch, TelemetryClient } from './telemetry.ts';
 import { handleSiteRequest, normalizeHost, UsedTokenCache } from './verify.ts';
+import { IngressSecretsStore, ingressListeners } from './ingress.ts';
 import { AccessDecisionCache } from './yoal-access.ts';
 import type { StudioFront } from './studio/front.ts';
 import { ConsoleFront, controlPlaneConsoleActivationFetcher } from './console-front.ts';
 import { WorkloadIdentityBroker, parseIdentityResponse } from './workload-identity.ts';
 
 const HEARTBEAT_INTERVAL_MS = 10_000;
+/** Refresh the ingress activation every six hours; retry a failed first fetch after a minute. */
+const INGRESS_SECRETS_REFRESH_MS = 6 * 60 * 60 * 1000;
+const INGRESS_SECRETS_RETRY_MS = 60_000;
 // Bun's default idle timeout on the control plane is 10 s (adapter-bun CONNECTION_IDLE_TIMEOUT),
 // so hold well under it. The server caps `wait` at 25 s for installs that raise the timeout.
 const LONG_POLL_SECONDS = 8;
@@ -183,7 +189,12 @@ class AgentRuntime {
 	private convergedVersion: number | null = null;
 	private actualStateVersion = 0;
 	private projectByHost = new Map<string, string>();
-	private readonly usedTokens = new UsedTokenCache();
+	private readonly usedTokens: UsedTokenCache;
+	/** Shared ingress secrets fetched through the node-authenticated activation endpoint (G8). */
+	private readonly ingressSecretsStore: IngressSecretsStore;
+	private ingressSecrets: IngressActivation | null = null;
+	private ingressSecretsAt = 0;
+	private ingressSecretsWarned = false;
 	/** Brief cache of verified Yoal Access decisions (IAM.md §11.1, S6). */
 	private readonly accessCache: AccessDecisionCache;
 
@@ -227,6 +238,10 @@ class AgentRuntime {
 	constructor(config: AgentConfig) {
 		this.config = config;
 		this.accessCache = new AccessDecisionCache(config.accessCacheMs);
+		// Redeemed callback ids survive a restart, so a one-time token cannot be replayed on the
+		// same ingress after an update (HA-PLAN H17).
+		this.usedTokens = new UsedTokenCache({ file: join(config.dataDir, 'redeemed-tokens.json') });
+		this.ingressSecretsStore = new IngressSecretsStore(config.dataDir);
 		this.store = new DesiredStateStore(config.dataDir);
 		this.releases = new ReleaseManager(config.dataDir);
 		this.caddy = new CaddyAdmin(config.caddyAdminSocket);
@@ -457,6 +472,7 @@ class AgentRuntime {
 	private async start(): Promise<void> {
 		await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o755 });
 		await this.releases.init();
+		this.ingressSecrets = this.ingressSecretsStore.load();
 
 		const cached = await this.store.readCached();
 		if (cached) {
@@ -621,7 +637,7 @@ class AgentRuntime {
 			insecureHttp: this.config.insecureHttp,
 			usedTokens: this.usedTokens,
 			accessCookieName: this.config.accessCookieName,
-			accessJwtSecret: this.config.accessJwtSecret,
+			accessJwtSecret: this.ingressSecrets?.accessJwtSecret ?? this.config.accessJwtSecret,
 			accessCache: this.accessCache,
 		});
 	}
@@ -662,6 +678,10 @@ class AgentRuntime {
 					// A control plane that supports long-poll holds the request. If it answered instantly
 					// (304 without holding), fall back to the documented 10 s poll interval.
 					const elapsed = Date.now() - started;
+					// The activation is refreshed on a timer even when desired state does not change
+					// (H20: on start, on a generation change and every six hours); the guard inside
+					// makes this a no-op until the interval elapses.
+					if (this.desired?.ingress) await this.syncIngressSecrets(this.desired);
 					await sleep(elapsed < 2_000 ? 10_000 : 250, this.shutdownController.signal);
 				}
 			} catch (error) {
@@ -729,6 +749,7 @@ class AgentRuntime {
 		this.applyConsole(state.containerConsole);
 		this.mail.apply(state.mail);
 		this.poolIdentity.apply(state.identity);
+		await this.syncIngressSecrets(state);
 		try {
 			await this.store.write(state, etagHeader);
 		} catch (error) {
@@ -808,6 +829,44 @@ class AgentRuntime {
 		if (!parsed.success)
 			throw new Error(`workload activation failed validation: ${parsed.error.message}`);
 		return parsed.data;
+	}
+
+	/**
+	 * Fetch the ingress activation when this node has the public payload and the cached copy is
+	 * old or missing (HA-PLAN H20, G8). A failure keeps the cached or env value and retries in a
+	 * minute; it must never stop a site serving. The secrets never enter desired state or logs.
+	 */
+	private async syncIngressSecrets(state: DesiredState): Promise<void> {
+		if (!state.ingress) return;
+		const now = Date.now();
+		const refresh = now - this.ingressSecretsAt;
+		if (this.ingressSecrets && refresh < INGRESS_SECRETS_REFRESH_MS) return;
+		if (!this.ingressSecrets && refresh < INGRESS_SECRETS_RETRY_MS && this.ingressSecretsAt > 0) return;
+		try {
+			const response = await fetch(`${this.config.controlUrl}/api/agent/ingress/activation`, {
+				headers: {
+					authorization: `Bearer ${this.config.nodeToken}`,
+					accept: 'application/json',
+				},
+				signal: AbortSignal.timeout(10_000),
+			});
+			if (!response.ok) {
+				const text = await response.text().catch(() => '');
+				throw new Error(`ingress activation -> ${response.status}${text ? `: ${text}` : ''}`);
+			}
+			this.ingressSecrets = ingressActivationSchema.parse(await response.json());
+			this.ingressSecretsAt = now;
+			try {
+				this.ingressSecretsStore.save(this.ingressSecrets);
+			} catch (error) {
+				log('warn', `Could not cache ingress secrets: ${errorText(error)}`);
+			}
+			this.ingressSecretsWarned = false;
+		} catch (error) {
+			this.ingressSecretsAt = now;
+			if (!this.ingressSecretsWarned) log('warn', `Ingress activation failed: ${errorText(error)}`);
+			this.ingressSecretsWarned = true;
+		}
 	}
 
 	/** A fresh workload token from the control plane, for the file or the metadata endpoint. */
@@ -923,7 +982,7 @@ class AgentRuntime {
 			log('error', `Workload converge failed: ${errorText(error)}`);
 		}
 
-		const tls = this.config.tls ? this.tlsOptions(state) : undefined;
+		const tls = this.config.tls || state.ingress?.tls ? this.tlsOptions(state) : undefined;
 		const caddyConfig = buildCaddyConfig({
 			// An unhealthy identity unit falls back to the control plane's hosted/OIDC routes, so a
 			// restart loop cannot take every assigned pool offline (§11.2).
@@ -931,17 +990,19 @@ class AgentRuntime {
 				state.identity && !this.poolIdentity.isHealthy
 					? { ...state, identity: null }
 					: state,
-			// With TLS enabled Caddy owns :443 and site-config adds the :80 redirect server.
-			listen: tls ? [':443'] : this.config.caddyListen,
+			// With TLS enabled Caddy owns :443 and site-config adds the :80 redirect server. An
+			// ingress-set node keeps its private listener (a worker's overlay address) and adds the
+			// public one, so the routes other ingresses proxy to it still answer (HA-PLAN G5).
+			listen: ingressListeners(this.config.caddyListen, state.ingress?.listeners, Boolean(tls)),
 			dataDir: this.config.dataDir,
 			agentSocket: this.config.agentSocket,
 			caddyAdminSocket: this.config.caddyAdminSocket,
 			accessLog: this.config.caddyAccessLog,
 			...(tls ? { tls } : {}),
-			...(this.config.platformHost
+			...(state.ingress?.platform ?? this.config.platformHost
 				? {
-						platform: {
-							host: this.config.platformHost,
+						platform: state.ingress?.platform ?? {
+							host: this.config.platformHost!,
 							upstream: this.config.platformUpstream,
 						},
 					}
@@ -1034,17 +1095,20 @@ class AgentRuntime {
 	private tlsOptions(state: DesiredState): TlsOptions {
 		const domain =
 			this.config.contentDomain ?? (state.contentDomain || deriveContentDomain(state));
+		// Desired state wins when the ingress set renders it: a worker that gained the role did not
+		// get an ACME email in its env file (HA-PLAN G5). The token is a secret and comes from the
+		// activation cache, never from here.
+		const desired = state.ingress?.tls;
+		const email = desired?.email ?? this.config.acmeEmail ?? '';
+		const ca = desired?.ca ?? this.config.acmeCa;
+		const cloudflareApiToken = this.ingressSecrets?.cloudflareApiToken ?? this.config.cloudflareApiToken;
+		const platformHost = state.ingress?.platform?.host ?? this.config.platformHost;
 		return {
-			email: this.config.acmeEmail ?? '',
-			subjects: tlsSubjects(
-				domain,
-				this.config.platformHost ? [this.config.platformHost] : [],
-			),
+			email,
+			subjects: tlsSubjects(domain, platformHost ? [platformHost] : []),
 			httpRedirect: true,
-			...(this.config.acmeCa ? { ca: this.config.acmeCa } : {}),
-			...(this.config.cloudflareApiToken
-				? { cloudflareApiToken: this.config.cloudflareApiToken }
-				: {}),
+			...(ca ? { ca } : {}),
+			...(cloudflareApiToken ? { cloudflareApiToken } : {}),
 		};
 	}
 
