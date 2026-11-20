@@ -122,21 +122,41 @@ function withWave1(state: DesiredState): DesiredState {
 	};
 }
 
+const flagsOn = { ENDPOINTS_GATEWAY: true, RELEASE_PHASE: true };
+const flagsOff = { ENDPOINTS_GATEWAY: false, RELEASE_PHASE: false };
+const both = ['endpoints-gateway', 'release-phase'];
+
+describe('capability gate: flags (reviewer item 4)', () => {
+	test('flags off: a capable node gets none of the new fields (stale or leftover values)', () => {
+		const gated = gateDesiredState(withWave1(plain), both, flagsOff);
+		expect(JSON.stringify(gated)).toBe(JSON.stringify(plain));
+	});
+
+	test('each flag gates its own group even on a capable node', () => {
+		const gatewayOnly = gateDesiredState(withWave1(plain), both, { ENDPOINTS_GATEWAY: true, RELEASE_PHASE: false });
+		expect(gatewayOnly.nodeTrust).toBeDefined();
+		expect('releaseCommands' in gatewayOnly).toBe(false);
+		const releaseOnly = gateDesiredState(withWave1(plain), both, { ENDPOINTS_GATEWAY: false, RELEASE_PHASE: true });
+		expect(releaseOnly.releaseCommands).toHaveLength(1);
+		expect('nodeTrust' in releaseOnly).toBe(false);
+	});
+});
+
 describe('capability gate (HA-PLAN §9 "Mixed versions")', () => {
 	test('a state with no Wave 1 fields comes back as the same object, for any node', () => {
 		for (const capabilities of [[], ['endpoints-gateway'], ['release-phase'], ['endpoints-gateway', 'release-phase']])
-			expect(gateDesiredState(plain, capabilities)).toBe(plain);
+			for (const flags of [flagsOn, flagsOff]) expect(gateDesiredState(plain, capabilities, flags)).toBe(plain);
 	});
 
 	test('an agent without either capability gets today\'s document, byte for byte', () => {
-		const gated = gateDesiredState(withWave1(plain), ['studio-principal', 'node-update']);
+		const gated = gateDesiredState(withWave1(plain), ['studio-principal', 'node-update'], flagsOn);
 		expect(JSON.stringify(gated)).toBe(JSON.stringify(plain));
 		// And what it receives still parses with today's schema.
 		expect(desiredStateSchema.parse(gated)).toEqual(plain);
 	});
 
 	test('endpoints-gateway alone keeps the H24 fields and strips the H25 ones', () => {
-		const gated = gateDesiredState(withWave1(plain), ['endpoints-gateway']);
+		const gated = gateDesiredState(withWave1(plain), ['endpoints-gateway'], flagsOn);
 		expect(gated.readEndpoints).toHaveLength(1);
 		expect(gated.nodeTrust?.generation).toBe(1);
 		expect(gated.serviceEndpoints[0]).toMatchObject({ role: 'pool', gatewayAddress: '10.89.0.1', trust: 'install-ca', version: 2 });
@@ -148,7 +168,7 @@ describe('capability gate (HA-PLAN §9 "Mixed versions")', () => {
 	});
 
 	test('release-phase alone keeps the H25 fields and strips the H24 ones', () => {
-		const gated = gateDesiredState(withWave1(plain), ['release-phase']);
+		const gated = gateDesiredState(withWave1(plain), ['release-phase'], flagsOn);
 		expect(gated.releaseCommands).toHaveLength(1);
 		expect(gated.routes[0]!.readinessPath).toBe('/ready');
 		expect(gated.workloads[0]).toMatchObject({ readinessPath: '/ready', drainSeconds: 10, stopTimeoutSeconds: 45 });
@@ -161,7 +181,7 @@ describe('capability gate (HA-PLAN §9 "Mixed versions")', () => {
 
 	test('both capabilities: nothing is removed', () => {
 		const full = withWave1(plain);
-		expect(gateDesiredState(full, ['release-phase', 'endpoints-gateway'])).toBe(full);
+		expect(gateDesiredState(full, ['release-phase', 'endpoints-gateway'], flagsOn)).toBe(full);
 	});
 
 	test('reads stored capabilities and names the nodes that lack one', () => {

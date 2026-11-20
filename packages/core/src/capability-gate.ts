@@ -3,8 +3,10 @@ import {
 	OBJECT_STORE_KINDS_CAPABILITY,
 	RELEASE_PHASE_CAPABILITY,
 	type DesiredState,
+	type FeatureFlags,
 	type ObjectStoreTargetKind,
 } from '@yoal/contracts';
+import { featureEnabled, type CoreConfig } from './config.ts';
 import { parseJson } from './util.ts';
 
 /**
@@ -16,7 +18,8 @@ import { parseJson } from './util.ts';
  * ignores `gatewayAddress` leaves a container with nothing to dial. Stripping here makes "the node
  * cannot do this" visible to the planner instead of hoping.
  *
- * Every desired-state builder calls `gateDesiredState` last, with the node's stored capabilities.
+ * Every desired-state builder calls `gateDesiredState` last, with the node's stored capabilities
+ * and `featureFlagsForGate(ctx.config)`.
  * A state with none of the gated fields comes back as the same object, so single-node and
  * flags-off installs render byte-for-byte what they did. Placement and enablement call
  * `nodesMissingCapability` first and refuse with the node's name (§13.7 rules 2 and 3); this
@@ -107,18 +110,30 @@ function mapIfChanged<T>(items: T[], fn: (item: T) => T): T[] {
 	return changed ? next : items;
 }
 
+/** The flags `gateDesiredState` reads; `featureFlagsForGate(config)` builds it from a core config. */
+export type CapabilityGateFlags = Pick<FeatureFlags, 'ENDPOINTS_GATEWAY' | 'RELEASE_PHASE'>;
+
+export function featureFlagsForGate(config: Pick<CoreConfig, 'features'>): CapabilityGateFlags {
+	return {
+		ENDPOINTS_GATEWAY: featureEnabled(config, 'ENDPOINTS_GATEWAY'),
+		RELEASE_PHASE: featureEnabled(config, 'RELEASE_PHASE'),
+	};
+}
+
 /**
- * Remove every HA Wave 1 field the node cannot act on:
- * - without `endpoints-gateway`: `readEndpoints`, `nodeTrust`, `workloads[].addHosts`,
+ * Remove every HA Wave 1 field the node may not act on. A group is kept only when its flag is on
+ * AND the node declares its capability; with the flag off it is stripped for every node, so a
+ * value stored while the flag was on, or a builder that forgot a check, never reaches an agent:
+ * - without `ENDPOINTS_GATEWAY` and `endpoints-gateway`: `readEndpoints`, `nodeTrust`, `workloads[].addHosts`,
  *   `serviceEndpoints[].role|gatewayAddress|trust|version`,
  *   `serviceProviders[].clientAuth|allowedClientNodeIds`;
- * - without `release-phase`: `releaseCommands`, `workloads[].readinessPath|drainSeconds|
+ * - without `RELEASE_PHASE` and `release-phase`: `releaseCommands`, `workloads[].readinessPath|drainSeconds|
  *   stopTimeoutSeconds`, `routes[].readinessPath`.
  * Returns `state` itself when nothing was removed.
  */
-export function gateDesiredState(state: DesiredState, capabilities: readonly string[]): DesiredState {
-	const gateway = capabilities.includes(ENDPOINTS_GATEWAY_CAPABILITY);
-	const release = capabilities.includes(RELEASE_PHASE_CAPABILITY);
+export function gateDesiredState(state: DesiredState, capabilities: readonly string[], flags: CapabilityGateFlags): DesiredState {
+	const gateway = flags.ENDPOINTS_GATEWAY && capabilities.includes(ENDPOINTS_GATEWAY_CAPABILITY);
+	const release = flags.RELEASE_PHASE && capabilities.includes(RELEASE_PHASE_CAPABILITY);
 	if (gateway && release) return state;
 	let next: DesiredState = state;
 	const set = <K extends keyof DesiredState>(key: K, value: DesiredState[K]) => {
