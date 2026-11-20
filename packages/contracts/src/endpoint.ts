@@ -12,6 +12,12 @@ export const serviceKinds = ['database', 'storage'] as const;
 export type ServiceKind = (typeof serviceKinds)[number];
 
 export const endpointPortRange = { min: 21_000, max: 21_999 } as const;
+/**
+ * Consumer-side loopback ports for stable read URLs (`<P>_READ_URL`, CLUSTERING §9.2) and other
+ * read endpoints (HA-PLAN H24). Reserved now, allocated by nothing yet. CLUSTERING first gave
+ * reads 22000–22999, which D226 handed to Kubernetes clusters (HA-PLAN F2).
+ */
+export const readEndpointPortRange = { min: 23_000, max: 23_999 } as const;
 
 export const serviceEndpointSchema = z.object({
 	id: z.string().min(1).max(100),

@@ -26,7 +26,7 @@ Related: [DESIGN.md](./DESIGN.md) §3 and §9, [VOLUMES.md](./VOLUMES.md),
 | C4 | Replica table/planner, deploy population, per-node state, route fan-out to every copy's node, per-copy accounting, health checks (configurable interval), drain and Rebalance for spread and single copies, surge for unattached single HTTP apps (§3.10) | Rolling deploys across a set, singletons and run leases, UPS drain deadline |
 | C5 | Driver/policy contracts, `IngressHealth`, status API, Settings page | Probing, Cloudflare writes, full route tables, certificate distribution |
 | C6 | Lease decision logic and CAS interface | Standby, Litestream follow, epoch propagation, promotion |
-| C7 | Postgres async streaming replicas: `pg_basebackup` + streaming over the agent link, slots/WAL retention, 30 s lag sampling, `<P>_READ_*` URLs, two-sided removal, fenced manual promotion (dashboard/CLI/REST, `If-Match`), rebuild of the other replicas; overlay firewall opens the provider ranges | `sync` mode and its downgrade, `db_replica_metrics_1m` and lag alerts, the stable 22000–22999 read port, `_READ_POOL_URL`, `pg_rewind` healing (the old primary is purged instead), PITR databases, switchover, live multi-node verification |
+| C7 | Postgres async streaming replicas: `pg_basebackup` + streaming over the agent link, slots/WAL retention, 30 s lag sampling, `<P>_READ_*` URLs, two-sided removal, fenced manual promotion (dashboard/CLI/REST, `If-Match`), rebuild of the other replicas; overlay firewall opens the provider ranges | `sync` mode and its downgrade, `db_replica_metrics_1m` and lag alerts, the stable 23000–23999 read port (HA-PLAN F2), `_READ_POOL_URL`, `pg_rewind` healing (the old primary is purged instead), PITR databases, switchover, live multi-node verification |
 | C8 | Stage machine; failover controller (SQLite lease + fenced writes, replica re-placement with rate limits/flap protection/expiry, ingress record-set tracking as manual events, database decide + `registerDatabaseHandler`); `failover_events`; `/ha/status`, `get_ha_status`, `yoal ha status`, Settings panels | Three-signal detection, object-store lease across hosts, DNS driver writes, self-fencing of the old primary (so the C7 promotion handler is never registered: `YOAL_FEATURE_DB_AUTO_PROMOTE` defaults off and is refused until self-fencing is active, HA-PLAN F1), drills and the chaos harness |
 | C9 | Replication registry/API/UI, migration | RustFS rule execution, IAM/config recreation, promotion |
 | C10 | Engine replication capability values | Per-engine replica topology and member networking |
@@ -676,7 +676,8 @@ reporting online, and ports never change. A node holds at most 1,000 endpoints.
 | `18123` | ClickHouse HTTP | `scripts/systemd/clickhouse.ts` |
 | `19000–19999` | storage instance ports | used today |
 | `21000–21999` | consumer endpoint ports | C2 |
-| `22000–22999` | read-URL ports on the consumer node | C7 |
+| `22000–22999` | Kubernetes cluster API and ingress ports (D226) | `KubernetesService` |
+| `23000–23999` | read-URL ports on the consumer node (moved from 22000–22999 by HA-PLAN F2; reserved, not yet allocated) | C7 |
 
 The ranges are disjoint and each has one allocator; a new range is added here before anything uses
 it. `18123` lies between the database and storage ranges and belongs to ClickHouse alone, so no
@@ -1822,7 +1823,7 @@ replay_lsn`), `lag_seconds` and `replayed_lsn`. Alerts: lag above 30 s or 256 MB
 **Read URLs and the pooler.** An attachment gains `<P>_READ_URL`, `<P>_READ_POOL_URL` and `<P>_READ_URLS`
 (comma-separated), all optional: an app that ignores them keeps working against the primary. The read URL
 is a **loopback port that does not change when the read target moves** — one extra port per attachment on
-the consumer node from `22000–22999` (§4.3), mapped in `service_endpoints` to whichever replica
+the consumer node from `23000–23999` (§4.3; originally 22000–22999, now Kubernetes, HA-PLAN F2), mapped in `service_endpoints` to whichever replica
 serves reads. `_READ_URL` targets the replica with the lowest node id and `_READ_URLS` lists all;
 reads can trail by `lag_seconds`, and read-your-writes uses the direct URL.
 
@@ -1946,7 +1947,7 @@ hard-codes `pool_mode = transaction` and there is no such field. Session mode is
 `LISTEN`/`NOTIFY`, advisory locks held across statements, cursors and session `SET`. Changing it restarts
 the pooler only (D87), so Postgres keeps its connections.
 
-**The loopback endpoint.** Allocation is per consumer, not per provider: `22000–22999` on the consumer node,
+**The loopback endpoint.** Allocation is per consumer, not per provider: `21000–21999` (primary) and `23000–23999` (read) on the consumer node,
 recorded in `service_endpoints.local_port`, lowest free, released with the attachment. Provider ranges are
 per node, so two provider nodes can both own `15432`; the consumer range must be independent or an app
 attached to two databases collides.
@@ -2542,7 +2543,7 @@ second opinion.
 ```ts
 interface ServiceEndpoint {
   id: string; consumerNodeId: string; serviceKind: 'database' | 'database-read' | 'storage' | 'studio';
-  serviceId: string; localPort: number;                // 21000–21999 attachments; 22000–22999 reads
+  serviceId: string; localPort: number;                // 21000–21999 attachments; 23000–23999 reads
   upstreamNodeId: string; upstreamPort: number; protocol: 'tcp';
   state: 'pending' | 'ready' | 'degraded'; version: number;   // version bumps on every re-point
 }
