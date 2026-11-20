@@ -1,0 +1,3372 @@
+{
+	"single-node": {
+		"solo": {
+			"version": 62,
+			"nodeId": "nod_588672b7687746748b108a01fa51bb17",
+			"agentVersion": "0.1.0",
+			"nodeUpdate": null,
+			"generatedAt": "2026-11-20T12:00:34.000Z",
+			"contentDomain": "sites.test",
+			"platformOrigin": "https://control.test",
+			"sliceMemoryMb": 8192,
+			"sliceCpuWeight": 200,
+			"storage": {
+				"dataDir": null,
+				"buildDir": null
+			},
+			"releases": [
+				{
+					"sha256": "930102b771b0dbf841bc465fe33ba3b68e3faa81170555d9e22c1b799239e071",
+					"sizeBytes": 93,
+					"fileCount": 4,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/930102b771b0dbf841bc465fe33ba3b68e3faa81170555d9e22c1b799239e071.zip?exp=1795179634&sig=gRIPQ7IAdb0GyM6oG8-E5QQQFYY11cGc1dk4RLuL1ac"
+				},
+				{
+					"sha256": "25d859fd7f740d13b1a658c8a71504b2d5b9b9bb617515591ffff6ff95908987",
+					"sizeBytes": 100,
+					"fileCount": 4,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/25d859fd7f740d13b1a658c8a71504b2d5b9b9bb617515591ffff6ff95908987.zip?exp=1795179634&sig=tIiGa6GB7-1odkKgeYMIjkX-aFNVo6q8ePnkeFwBB58"
+				},
+				{
+					"sha256": "8d03d1a6543b321fcdbcee98cd60f985fe1fbec2b04db80e7d7bef4259400fad",
+					"sizeBytes": 95,
+					"fileCount": 4,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/8d03d1a6543b321fcdbcee98cd60f985fe1fbec2b04db80e7d7bef4259400fad.zip?exp=1795179634&sig=UgNW6nbSkz-jaY29Hc5e32QgDEDo1_RwQqw7CPJ_0Y8"
+				},
+				{
+					"sha256": "c0ec1d61a33f8524be8a60c07222a20f8901215bc563bca15407c258571abcc8",
+					"sizeBytes": 14,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/c0ec1d61a33f8524be8a60c07222a20f8901215bc563bca15407c258571abcc8.zip?exp=1795179634&sig=i60OaAGcM_mFIfvWCVCqD3vIMwSdq4feG_XenNX4FR4"
+				},
+				{
+					"sha256": "74d546e08f74fb96dc87fdffae4746ca856143c3eba958b1fd5d35d4014ed8cc",
+					"sizeBytes": 20,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/74d546e08f74fb96dc87fdffae4746ca856143c3eba958b1fd5d35d4014ed8cc.zip?exp=1795179634&sig=xNyKYzyrI4HIdwPN9yhuBvslR8zY9Ej8UMnvdUddIfM"
+				},
+				{
+					"sha256": "b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901",
+					"sizeBytes": 37,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901.zip?exp=1795179634&sig=GvRerz1vvJwU2OczJdZprPyB9DPiYZamXPEEbeeK_Zw"
+				},
+				{
+					"sha256": "24f219c3636456ba277834b45d2ba068ee22623d1cc4167a0d914740c08d23a9",
+					"sizeBytes": 1304,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/24f219c3636456ba277834b45d2ba068ee22623d1cc4167a0d914740c08d23a9.zip?exp=1795179634&sig=FBiVoABh_w-IoJ25PXIR92_fqRyZEn1-1x5qOqXJaNc"
+				},
+				{
+					"sha256": "520e3062fb3ce39a52de79fc76544eed02ae7dc38123f05a933d6369967ff20a",
+					"sizeBytes": 436,
+					"fileCount": 3,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/520e3062fb3ce39a52de79fc76544eed02ae7dc38123f05a933d6369967ff20a.zip?exp=1795179634&sig=PHqvlGmzDLoZDk-HEITmcMWT1K4wahW5TwX7-da-w_M"
+				},
+				{
+					"sha256": "81cf99c140b6fc48102d92122da05b4640caabba345ab428174467dc3309fd06",
+					"sizeBytes": 94,
+					"fileCount": 4,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/81cf99c140b6fc48102d92122da05b4640caabba345ab428174467dc3309fd06.zip?exp=1795179634&sig=3elvyqGAw9PT9NamdjrksCWgfLOkayzo1wnwEwC8sws"
+				}
+			],
+			"routes": [
+				{
+					"projectId": "prj_f450124ee5cf4aad83d6778824b5773b",
+					"slug": "journal",
+					"deploymentId": "dep_9cc74bd874f04873b5ef52edc89f5d14",
+					"release": "25d859fd7f740d13b1a658c8a71504b2d5b9b9bb617515591ffff6ff95908987",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "blog--jtt60p0egf.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "l1JNrRghC6bXDqyBj38IyZUckmBu6kthKQ0xirep19A",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f450124ee5cf4aad83d6778824b5773b",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_f450124ee5cf4aad83d6778824b5773b",
+					"slug": "journal",
+					"deploymentId": "dep_2be86d1eb8da403183e842ea4120acb1",
+					"release": "8d03d1a6543b321fcdbcee98cd60f985fe1fbec2b04db80e7d7bef4259400fad",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "blog--h8gs3he81g.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "l1JNrRghC6bXDqyBj38IyZUckmBu6kthKQ0xirep19A",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f450124ee5cf4aad83d6778824b5773b",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_f450124ee5cf4aad83d6778824b5773b",
+					"slug": "journal",
+					"deploymentId": "dep_ab14657083304faa835a585fe70f7194",
+					"release": "930102b771b0dbf841bc465fe33ba3b68e3faa81170555d9e22c1b799239e071",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "blog--m3w03jgc30.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "l1JNrRghC6bXDqyBj38IyZUckmBu6kthKQ0xirep19A",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f450124ee5cf4aad83d6778824b5773b",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_c2ae8f01f6f54d8e9410e13791d608f6",
+					"slug": "backend",
+					"deploymentId": "dep_aeeab793bc05468686f13b5e67d90330",
+					"release": "c0ec1d61a33f8524be8a60c07222a20f8901215bc563bca15407c258571abcc8",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_c2ae8f01f6f54d8e9410e13791d608f6.sock",
+					"host": "backend--hwjb8thnm3.sites.test",
+					"production": false,
+					"accessMode": "access",
+					"access": {
+						"mode": "access",
+						"siteKey": "Mb4EmZgWWSfFtGI_uZyB5-Y90fHHAVehwATpYSvklB0",
+						"loginUrl": "https://control.test/api/v1/access/authorize?project=prj_c2ae8f01f6f54d8e9410e13791d608f6",
+						"policyId": "apol_c60bc99807e84bec9c0be412fd55fe41",
+						"policyEnabled": true,
+						"serviceTokens": [
+							{
+								"header": "x-deploy-token",
+								"tokenHash": "91cc3248ea93686bf3417d0be85c7dfe1ad9dd646b1dcf5bfe37d93c9c7126f1",
+								"action": "allow"
+							}
+						],
+						"hasPersonRules": true
+					}
+				},
+				{
+					"projectId": "prj_b5696cc7de894a53adf90155f47780dc",
+					"slug": "shop",
+					"deploymentId": "dep_80ae0864be094a84808c0bc2e2093112",
+					"release": "b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:3000",
+					"host": "shop--ja30xb37pt.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "_hIZwLTUiW0vzk5_LMEXWOG-UdSie0SEJZoaWXVm9TU",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_b5696cc7de894a53adf90155f47780dc",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_dac356640621489fa59ecbfe4ab5a2bb",
+					"slug": "stack",
+					"deploymentId": "dep_6aad24b0519d44b68a28a1a0a0472009",
+					"release": "24f219c3636456ba277834b45d2ba068ee22623d1cc4167a0d914740c08d23a9",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:30000",
+					"host": "stack--2rj1kb5xb1.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "xqj_EG_shJ3wsEv4YS5998mF58_LT_BomUyckkhv_7M",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_dac356640621489fa59ecbfe4ab5a2bb",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_19806d06d7034f358a9b59a4327e6672",
+					"slug": "edge-fn",
+					"deploymentId": "dep_5a7edee6e0bd4c5e82831fd8eabfc7b3",
+					"release": "520e3062fb3ce39a52de79fc76544eed02ae7dc38123f05a933d6369967ff20a",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/wld_7e178e1069984845b385a94d1e0d6f65.sock",
+					"function": {
+						"assetsDirectory": "public",
+						"runWorkerFirst": [
+							"/api/*"
+						]
+					},
+					"host": "edge-fn--9r1gx6a7t1.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "cU7FYyxNrb-0yXaItB_dI7TmatoTpv0CY6wwrFjEaRU",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_19806d06d7034f358a9b59a4327e6672",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_19806d06d7034f358a9b59a4327e6672",
+					"slug": "edge-fn",
+					"deploymentId": "dep_5fab69fa989d4637a8a06e14fc0321f0",
+					"release": "520e3062fb3ce39a52de79fc76544eed02ae7dc38123f05a933d6369967ff20a",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/wld_7e178e1069984845b385a94d1e0d6f65.sock",
+					"function": {
+						"assetsDirectory": "public",
+						"runWorkerFirst": [
+							"/api/*"
+						],
+						"upstreams": [
+							"unix//run/yoal-workloads/wld_7e178e1069984845b385a94d1e0d6f65.sock",
+							"unix//run/yoal-workloads/wld_7e178e1069984845b385a94d1e0d6f65-r1.sock"
+						]
+					},
+					"host": "edge-fn--4a2a0n07y6.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "cU7FYyxNrb-0yXaItB_dI7TmatoTpv0CY6wwrFjEaRU",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_19806d06d7034f358a9b59a4327e6672",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_a30fb96fb3ef4171b9474329e068e632",
+					"slug": "shop-clash",
+					"deploymentId": "dep_a0eec68fba9f40ad91957e445175dbea",
+					"release": "b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal/route-unavailable.sock",
+					"unavailable": "Port 3000 on this node belongs to another app.",
+					"host": "shop-clash--py3detx048.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "Xyfy-EyBZzyQdqDwpdLQELD75rPav4QleXY1bDDigbM",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_a30fb96fb3ef4171b9474329e068e632",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_8183cdae5c53481498d0f4560a1d33db",
+					"slug": "legacy",
+					"deploymentId": "dep_59b75f48a87f4526a31f2c4086ca763b",
+					"release": "81cf99c140b6fc48102d92122da05b4640caabba345ab428174467dc3309fd06",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "legacy--1mh60a6mf5.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "loYOkggipJSLL2mq7AwX4hAII7wjco-fBxiOcR-32WU",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8183cdae5c53481498d0f4560a1d33db",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_f450124ee5cf4aad83d6778824b5773b",
+					"slug": "journal",
+					"deploymentId": "dep_ab14657083304faa835a585fe70f7194",
+					"release": "930102b771b0dbf841bc465fe33ba3b68e3faa81170555d9e22c1b799239e071",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "journal.sites.test",
+					"production": true,
+					"accessMode": "access",
+					"access": {
+						"mode": "access",
+						"siteKey": "l1JNrRghC6bXDqyBj38IyZUckmBu6kthKQ0xirep19A",
+						"loginUrl": "https://control.test/api/v1/access/authorize?project=prj_f450124ee5cf4aad83d6778824b5773b",
+						"policyId": "apol_c60bc99807e84bec9c0be412fd55fe41",
+						"policyEnabled": true,
+						"serviceTokens": [
+							{
+								"header": "x-deploy-token",
+								"tokenHash": "91cc3248ea93686bf3417d0be85c7dfe1ad9dd646b1dcf5bfe37d93c9c7126f1",
+								"action": "allow"
+							}
+						],
+						"hasPersonRules": true
+					}
+				},
+				{
+					"projectId": "prj_f450124ee5cf4aad83d6778824b5773b",
+					"slug": "journal",
+					"deploymentId": "dep_2be86d1eb8da403183e842ea4120acb1",
+					"release": "8d03d1a6543b321fcdbcee98cd60f985fe1fbec2b04db80e7d7bef4259400fad",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "journal--staging.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "l1JNrRghC6bXDqyBj38IyZUckmBu6kthKQ0xirep19A",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f450124ee5cf4aad83d6778824b5773b",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_c2ae8f01f6f54d8e9410e13791d608f6",
+					"slug": "backend",
+					"deploymentId": "dep_aeeab793bc05468686f13b5e67d90330",
+					"release": "c0ec1d61a33f8524be8a60c07222a20f8901215bc563bca15407c258571abcc8",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_c2ae8f01f6f54d8e9410e13791d608f6.sock",
+					"host": "backend.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "Mb4EmZgWWSfFtGI_uZyB5-Y90fHHAVehwATpYSvklB0",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_c2ae8f01f6f54d8e9410e13791d608f6",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_b5696cc7de894a53adf90155f47780dc",
+					"slug": "shop",
+					"deploymentId": "dep_80ae0864be094a84808c0bc2e2093112",
+					"release": "b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:3000",
+					"host": "shop.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "_hIZwLTUiW0vzk5_LMEXWOG-UdSie0SEJZoaWXVm9TU",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_b5696cc7de894a53adf90155f47780dc",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_dac356640621489fa59ecbfe4ab5a2bb",
+					"slug": "stack",
+					"deploymentId": "dep_6aad24b0519d44b68a28a1a0a0472009",
+					"release": "24f219c3636456ba277834b45d2ba068ee22623d1cc4167a0d914740c08d23a9",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:30000",
+					"host": "stack.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "xqj_EG_shJ3wsEv4YS5998mF58_LT_BomUyckkhv_7M",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_dac356640621489fa59ecbfe4ab5a2bb",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_dac356640621489fa59ecbfe4ab5a2bb",
+					"slug": "stack",
+					"deploymentId": "dep_6aad24b0519d44b68a28a1a0a0472009",
+					"release": "24f219c3636456ba277834b45d2ba068ee22623d1cc4167a0d914740c08d23a9",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:30001",
+					"host": "shop-api.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"healthPath": "/",
+					"access": {
+						"mode": "public",
+						"siteKey": "xqj_EG_shJ3wsEv4YS5998mF58_LT_BomUyckkhv_7M",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_dac356640621489fa59ecbfe4ab5a2bb",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_dac356640621489fa59ecbfe4ab5a2bb",
+					"slug": "stack",
+					"deploymentId": "dep_6aad24b0519d44b68a28a1a0a0472009",
+					"release": "24f219c3636456ba277834b45d2ba068ee22623d1cc4167a0d914740c08d23a9",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:30002",
+					"host": "stack--admin.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"healthPath": "/",
+					"access": {
+						"mode": "public",
+						"siteKey": "xqj_EG_shJ3wsEv4YS5998mF58_LT_BomUyckkhv_7M",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_dac356640621489fa59ecbfe4ab5a2bb",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_19806d06d7034f358a9b59a4327e6672",
+					"slug": "edge-fn",
+					"deploymentId": "dep_5fab69fa989d4637a8a06e14fc0321f0",
+					"release": "520e3062fb3ce39a52de79fc76544eed02ae7dc38123f05a933d6369967ff20a",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/wld_7e178e1069984845b385a94d1e0d6f65.sock",
+					"function": {
+						"assetsDirectory": "public",
+						"runWorkerFirst": [
+							"/api/*"
+						],
+						"upstreams": [
+							"unix//run/yoal-workloads/wld_7e178e1069984845b385a94d1e0d6f65.sock",
+							"unix//run/yoal-workloads/wld_7e178e1069984845b385a94d1e0d6f65-r1.sock"
+						]
+					},
+					"host": "edge-fn.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "cU7FYyxNrb-0yXaItB_dI7TmatoTpv0CY6wwrFjEaRU",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_19806d06d7034f358a9b59a4327e6672",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_a30fb96fb3ef4171b9474329e068e632",
+					"slug": "shop-clash",
+					"deploymentId": "dep_a0eec68fba9f40ad91957e445175dbea",
+					"release": "b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal/route-unavailable.sock",
+					"unavailable": "Port 3000 on this node belongs to another app.",
+					"host": "shop-clash.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "Xyfy-EyBZzyQdqDwpdLQELD75rPav4QleXY1bDDigbM",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_a30fb96fb3ef4171b9474329e068e632",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_8183cdae5c53481498d0f4560a1d33db",
+					"slug": "legacy",
+					"deploymentId": "dep_59b75f48a87f4526a31f2c4086ca763b",
+					"release": "81cf99c140b6fc48102d92122da05b4640caabba345ab428174467dc3309fd06",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "legacy.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "loYOkggipJSLL2mq7AwX4hAII7wjco-fBxiOcR-32WU",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8183cdae5c53481498d0f4560a1d33db",
+						"policyId": null
+					}
+				}
+			],
+			"revocations": [
+				{
+					"id": "shr_0c5723a0f4a34aaa8055c97a05cf93de",
+					"kind": "shareLink",
+					"revokedAt": "2026-11-20T12:00:08.000Z"
+				}
+			],
+			"hostRedirects": [
+				{
+					"host": "blog.sites.test",
+					"to": "https://journal.sites.test"
+				}
+			],
+			"placeholders": [
+				{
+					"host": "fresh.sites.test",
+					"projectId": "prj_dd03f7a781b349d0ba06d8443e0f0fd5",
+					"dashboardUrl": "https://control.test/projects/fresh"
+				}
+			],
+			"workloads": [
+				{
+					"id": "wld_46e2672948f94224bee7db883f804572",
+					"projectId": "prj_c2ae8f01f6f54d8e9410e13791d608f6",
+					"projectSlug": "backend",
+					"deploymentId": "dep_aeeab793bc05468686f13b5e67d90330",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "process",
+					"status": "running",
+					"release": "c0ec1d61a33f8524be8a60c07222a20f8901215bc563bca15407c258571abcc8",
+					"command": [
+						"bun",
+						"run",
+						"start"
+					],
+					"upstream": "unix//run/yoal-workloads/prj_c2ae8f01f6f54d8e9410e13791d608f6.sock",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/healthz",
+					"socketActivation": true,
+					"activationVersion": "a57b5ba8cdac5a6645ed0bfa8944899a2672b74ea9ed5a76774b271e06143699",
+					"env": {
+						"NODE_ENV": "production"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true
+				},
+				{
+					"id": "wld_3e4fd098068e4ba6b94964a6396b40b7",
+					"projectId": "prj_9819b54deccf4aa0a30bea7bae1ba80a",
+					"projectSlug": "queue",
+					"deploymentId": "dep_f6388f8708204820b40875b86042baea",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "process",
+					"status": "running",
+					"release": "74d546e08f74fb96dc87fdffae4746ca856143c3eba958b1fd5d35d4014ed8cc",
+					"command": [
+						"bun",
+						"run",
+						"start"
+					],
+					"upstream": "none",
+					"memoryMb": 128,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/healthz",
+					"socketActivation": false,
+					"activationVersion": "968f079ff5e5e01cb9dd823f37e24369e5f52ce5e9137c8baf51cb244908ab54",
+					"env": {
+						"NODE_ENV": "production"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"ingress": "none",
+					"identity": true
+				},
+				{
+					"id": "wld_c1af239c0c8a4dd39c36886b0b3648cf",
+					"projectId": "prj_b5696cc7de894a53adf90155f47780dc",
+					"projectSlug": "shop",
+					"deploymentId": "dep_80ae0864be094a84808c0bc2e2093112",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": "b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901",
+					"image": "ghcr.io/acme/shop:1",
+					"upstream": "127.0.0.1:3000",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/",
+					"socketActivation": true,
+					"activationVersion": "baa295598a6ad0fc969364152347111b9f2da5d5a08cdaaa324bcf3a1c43302e",
+					"env": {},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true
+				},
+				{
+					"id": "wld_a786597e45f34dd39cca70a1c16258d4",
+					"projectId": "prj_dac356640621489fa59ecbfe4ab5a2bb",
+					"projectSlug": "stack",
+					"deploymentId": "dep_6aad24b0519d44b68a28a1a0a0472009",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "compose",
+					"status": "running",
+					"release": "24f219c3636456ba277834b45d2ba068ee22623d1cc4167a0d914740c08d23a9",
+					"upstream": "127.0.0.1:30000",
+					"memoryMb": 1024,
+					"cpus": 3,
+					"port": 30000,
+					"healthPath": "/",
+					"socketActivation": false,
+					"activationVersion": "20b14cbb39c35398d205a8b6e653c05d0704d7470cf3752e40a8ebd55eac885d",
+					"env": {},
+					"secrets": [],
+					"dataSizeMb": null,
+					"compose": {
+						"volumes": [],
+						"services": [
+							{
+								"name": "web",
+								"image": "nginx:1.27",
+								"env": {},
+								"secrets": [],
+								"ports": [
+									3000
+								],
+								"dependsOn": [
+									"api"
+								],
+								"volumes": [],
+								"memoryMb": 256,
+								"cpus": 1
+							},
+							{
+								"name": "api",
+								"image": "node:22-alpine",
+								"env": {},
+								"secrets": [],
+								"ports": [
+									8080
+								],
+								"dependsOn": [],
+								"volumes": [],
+								"memoryMb": 512,
+								"cpus": 0.5
+							},
+							{
+								"name": "admin",
+								"image": "node:22-alpine",
+								"env": {},
+								"secrets": [],
+								"ports": [
+									9000
+								],
+								"dependsOn": [],
+								"volumes": [],
+								"memoryMb": 256,
+								"cpus": 1
+							}
+						],
+						"routes": [
+							{
+								"service": "web",
+								"port": 3000,
+								"healthPath": "/",
+								"primary": true,
+								"hostPort": 30000
+							},
+							{
+								"service": "api",
+								"port": 8080,
+								"host": "shop-api.sites.test",
+								"healthPath": "/",
+								"primary": false,
+								"hostPort": 30001
+							},
+							{
+								"service": "admin",
+								"port": 9000,
+								"host": "stack-admin.sites.test",
+								"healthPath": "/",
+								"primary": false,
+								"hostPort": 30002
+							}
+						]
+					}
+				},
+				{
+					"id": "wld_7e178e1069984845b385a94d1e0d6f65",
+					"projectId": "prj_19806d06d7034f358a9b59a4327e6672",
+					"projectSlug": "edge-fn",
+					"deploymentId": "dep_5fab69fa989d4637a8a06e14fc0321f0",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "function",
+					"status": "running",
+					"release": "520e3062fb3ce39a52de79fc76544eed02ae7dc38123f05a933d6369967ff20a",
+					"upstream": "unix//run/yoal-workloads/wld_7e178e1069984845b385a94d1e0d6f65.sock",
+					"memoryMb": 128,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/__yoal/health",
+					"socketActivation": true,
+					"activationVersion": "e92b57afbde94e917192bcc39cbb27807de91d5e2472b56eee0bb93cb660377d",
+					"env": {},
+					"secrets": [],
+					"dataSizeMb": null,
+					"function": {
+						"main": "index.js",
+						"modules": [
+							{
+								"name": "index.js",
+								"type": "esm",
+								"sha256": "9446721af283345388f87d42e9e3a164e0e7b074893c17141205deb6b8c504c4"
+							}
+						],
+						"compatibilityDate": "2026-10-01",
+						"compatibilityFlags": [
+							"nodejs_compat"
+						],
+						"bindings": [],
+						"triggers": {
+							"crons": [],
+							"queues": []
+						},
+						"assets": {
+							"directory": "public",
+							"runWorkerFirst": [
+								"/api/*"
+							]
+						},
+						"idleStopSeconds": 300,
+						"workerdVersion": "1.20261106.1"
+					},
+					"replica": {
+						"index": 0
+					}
+				},
+				{
+					"id": "wld_7e178e1069984845b385a94d1e0d6f65-r1",
+					"projectId": "prj_19806d06d7034f358a9b59a4327e6672",
+					"projectSlug": "edge-fn",
+					"deploymentId": "dep_5fab69fa989d4637a8a06e14fc0321f0",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "function",
+					"status": "running",
+					"release": "520e3062fb3ce39a52de79fc76544eed02ae7dc38123f05a933d6369967ff20a",
+					"upstream": "unix//run/yoal-workloads/wld_7e178e1069984845b385a94d1e0d6f65-r1.sock",
+					"memoryMb": 128,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/__yoal/health",
+					"socketActivation": true,
+					"activationVersion": "e92b57afbde94e917192bcc39cbb27807de91d5e2472b56eee0bb93cb660377d",
+					"env": {},
+					"secrets": [],
+					"dataSizeMb": null,
+					"function": {
+						"main": "index.js",
+						"modules": [
+							{
+								"name": "index.js",
+								"type": "esm",
+								"sha256": "9446721af283345388f87d42e9e3a164e0e7b074893c17141205deb6b8c504c4"
+							}
+						],
+						"compatibilityDate": "2026-10-01",
+						"compatibilityFlags": [
+							"nodejs_compat"
+						],
+						"bindings": [],
+						"triggers": {
+							"crons": [],
+							"queues": []
+						},
+						"assets": {
+							"directory": "public",
+							"runWorkerFirst": [
+								"/api/*"
+							]
+						},
+						"idleStopSeconds": 300,
+						"workerdVersion": "1.20261106.1"
+					},
+					"replica": {
+						"index": 1
+					}
+				},
+				{
+					"id": "wld_afb9f7a0c6a2492cacba5de84e8c277f",
+					"projectId": "prj_a30fb96fb3ef4171b9474329e068e632",
+					"projectSlug": "shop-clash",
+					"deploymentId": "dep_a0eec68fba9f40ad91957e445175dbea",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": "b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901",
+					"image": "ghcr.io/acme/shop:1",
+					"upstream": "127.0.0.1:3000",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3001,
+					"healthPath": "/",
+					"socketActivation": true,
+					"activationVersion": "af8a541434d76d3912113e085b8574aea2c072acd661af6a52f0cf95ee7a3011",
+					"env": {},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true
+				},
+				{
+					"id": "db_9fec8d680c024a6b9a5371ff766cd2a2",
+					"projectId": "db_9fec8d680c024a6b9a5371ff766cd2a2",
+					"projectSlug": "main",
+					"deploymentId": "db_9fec8d680c024a6b9a5371ff766cd2a2",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": null,
+					"image": "docker.io/library/postgres:17-alpine",
+					"upstream": "127.0.0.1:15432",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 15432,
+					"healthPath": "/",
+					"socketActivation": false,
+					"activationVersion": "d6aeae20e1d62bece02cd789d35ddcbf2668c9ab326334ee31b538798402dc56",
+					"env": {
+						"POSTGRES_USER": "main",
+						"POSTGRES_DB": "main",
+						"PGDATA": "/data/pgdata"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"database": {
+						"engine": "postgres",
+						"version": "17",
+						"tls": true
+					},
+					"pooler": {
+						"port": 16432
+					}
+				},
+				{
+					"id": "st_5f809612b9da4e2ba8b2002b15e91d7a",
+					"projectId": "st_5f809612b9da4e2ba8b2002b15e91d7a",
+					"projectSlug": "media",
+					"deploymentId": "st_5f809612b9da4e2ba8b2002b15e91d7a",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": null,
+					"image": "docker.io/rustfs/rustfs:1.0.4",
+					"upstream": "127.0.0.1:19000",
+					"memoryMb": 512,
+					"cpus": 1,
+					"port": 19000,
+					"healthPath": "/health",
+					"socketActivation": false,
+					"activationVersion": "02a90806048ae662fe596872564290fe8b2c7afeff11603710b03ce2b148a8ee",
+					"env": {
+						"RUSTFS_VOLUMES": "/data",
+						"RUSTFS_ADDRESS": ":9000",
+						"RUSTFS_CONSOLE_ENABLE": "false",
+						"RUSTFS_OBS_LOG_DIRECTORY": "",
+						"RUSTFS_IDENTITY_OPENID_ENABLE": "on",
+						"RUSTFS_IDENTITY_OPENID_CONFIG_URL": "https://control.test/.well-known/openid-configuration",
+						"RUSTFS_IDENTITY_OPENID_ISSUER": "https://control.test",
+						"RUSTFS_IDENTITY_OPENID_CLIENT_ID": "yoal",
+						"RUSTFS_IDENTITY_OPENID_CLAIM_NAME": "groups",
+						"RUSTFS_IDENTITY_OPENID_GROUPS_CLAIM": "groups"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"objectStorage": {
+						"engine": "rustfs",
+						"version": "1.0.4",
+						"buckets": [
+							{
+								"name": "uploads",
+								"access": "private",
+								"versioning": false,
+								"lifecycle": [],
+								"cors": [],
+								"quotaBytes": null,
+								"objectLock": null,
+								"configVersion": 1,
+								"notifications": false
+							}
+						],
+						"users": [],
+						"deleteBuckets": [],
+						"keysVersion": "828ac5ca4eb00302326039dbba0a2c871895728f1f165119289a0ad5c4f5f6b7",
+						"replication": []
+					}
+				}
+			],
+			"volumes": [],
+			"shareMounts": [],
+			"shareUnmounts": [],
+			"diskMounts": [],
+			"diskUnmounts": [],
+			"volumeProfileTasks": [],
+			"linkProbes": [],
+			"linkTests": [],
+			"appVolumes": [],
+			"appVolumePurges": [],
+			"appVolumeTasks": [],
+			"databasePurges": [
+				"db_4870a86a5bc54dcca059c074663c9044",
+				"db_d9e1a6084d8140a08a23a1b0b51e124c",
+				"db_de5a9c170c9b4918b51cdd755cd23632",
+				"db_dfb8223631484d2382e157c70d4ee0da"
+			],
+			"databaseBackupTasks": [],
+			"databasePitrTasks": [],
+			"databaseRotations": [],
+			"databaseCredentialTasks": [],
+			"databaseStudioPrincipals": [
+				{
+					"databaseId": "db_9fec8d680c024a6b9a5371ff766cd2a2",
+					"generation": 1
+				}
+			],
+			"databasePoolerRestarts": [],
+			"databaseReplication": [],
+			"databaseReplicaLinks": [],
+			"databaseReplicaPromotions": [],
+			"storageGateway": {
+				"listen": "127.0.0.1:8081",
+				"routes": [
+					{
+						"host": "s3-5f809612b9da4e2ba8b2002b15e91d7a.storage.internal",
+						"upstream": "127.0.0.1:19000"
+					}
+				]
+			},
+			"studio": {
+				"port": 8083,
+				"sessions": [
+					"dss_NAxeFLodrdWEalLA1BjMCLpy"
+				]
+			},
+			"databaseGateway": {
+				"listen": "127.0.0.1:8082",
+				"routes": [
+					{
+						"host": "n-nod588672b7687746748b108a01fa51bb17.studio.internal",
+						"upstream": "127.0.0.1:8083"
+					},
+					{
+						"host": "n-nod588672b7687746748b108a01fa51bb17.console.internal",
+						"upstream": "127.0.0.1:8084"
+					}
+				]
+			},
+			"containerConsole": {
+				"port": 8084
+			},
+			"storageRoutes": [],
+			"registryMirror": null,
+			"storagePurges": [],
+			"brokerPurges": [],
+			"kubernetesPurges": [],
+			"kubernetesRoutes": [],
+			"kubernetesManifests": [],
+			"kubernetesComponentRequest": null,
+			"kubernetesBackupTasks": [],
+			"mail": null,
+			"identity": {
+				"generation": 721771228,
+				"host": "auth.sites.test",
+				"upstream": "127.0.0.1:8788",
+				"pools": []
+			},
+			"domains": [
+				{
+					"host": "blog.example.com",
+					"projectId": "prj_f450124ee5cf4aad83d6778824b5773b",
+					"kind": "apex",
+					"redirectTo": null
+				},
+				{
+					"host": "www.blog.example.com",
+					"projectId": "prj_f450124ee5cf4aad83d6778824b5773b",
+					"kind": "apex",
+					"redirectTo": "blog.example.com"
+				}
+			],
+			"serviceEndpoints": [],
+			"serviceProviders": []
+		}
+	},
+	"edge-and-two-workers": {
+		"edge": {
+			"version": 36,
+			"nodeId": "nod_19eac9a57d014d7a8b4dc8294b8432d6",
+			"agentVersion": "0.1.0",
+			"nodeUpdate": null,
+			"generatedAt": "2026-11-20T12:00:55.000Z",
+			"contentDomain": "sites.test",
+			"platformOrigin": "https://control.test",
+			"sliceMemoryMb": 8192,
+			"sliceCpuWeight": 200,
+			"storage": {
+				"dataDir": null,
+				"buildDir": null
+			},
+			"releases": [
+				{
+					"sha256": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"sizeBytes": 18,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99.zip?exp=1795179655&sig=z3ks9WUZz8gpp4wMe6tfD6LVV2gmxmkDrMWHELeJ6co"
+				},
+				{
+					"sha256": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
+					"sizeBytes": 26,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f.zip?exp=1795179655&sig=zT8uPxkoBQrjq_0_fITB9G8ItehvvoAvrlo193wIjvk"
+				},
+				{
+					"sha256": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"sizeBytes": 37,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf.zip?exp=1795179655&sig=WrNS4jMHO-y6ASbuIRoZ54ePV1qb--CS3eSTB_9qEbI"
+				}
+			],
+			"routes": [
+				{
+					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
+					"slug": "docs",
+					"deploymentId": "dep_7100a171905046cd9a4b6c8fd2e484e0",
+					"release": "1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": "http://worker-a.internal:8080",
+					"host": "docs--2qm0tb5xzj.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "JaOHGbObI2S1mG3jbi63knnmte5E_IOE8Pb6CTi9MWE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_7037b9d7d1ac41fdabc25d78070033ba",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"slug": "web",
+					"deploymentId": "dep_59891ae3caff43248a6d1da86e58c901",
+					"release": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"upstreams": [
+						"http://worker-a.internal:8080",
+						"unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock"
+					],
+					"healthPath": "/healthz",
+					"healthIntervalSeconds": 5,
+					"host": "web--5yjzw7c376.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"slug": "web",
+					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"upstreams": [
+						"http://worker-a.internal:8080",
+						"unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock"
+					],
+					"healthPath": "/healthz",
+					"healthIntervalSeconds": 5,
+					"host": "web--cqrckke1az.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"slug": "shop",
+					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:3000",
+					"upstreams": [
+						"http://worker-a.internal:8080",
+						"http://worker-b.internal:8080"
+					],
+					"healthPath": "/",
+					"healthIntervalSeconds": 5,
+					"host": "shop--w009xg1ewy.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"slug": "fresh-copies",
+					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "http://worker-a.internal:8080",
+					"upstreams": [
+						"http://worker-a.internal:8080",
+						"http://worker-b.internal:8080"
+					],
+					"healthPath": "/ready",
+					"healthIntervalSeconds": 5,
+					"host": "fresh-copies--06mdpw5hg4.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"slug": "mover",
+					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "http://worker-a.internal:8080",
+					"host": "mover--m24ytq2qvx.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
+					"slug": "docs",
+					"deploymentId": "dep_7100a171905046cd9a4b6c8fd2e484e0",
+					"release": "1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": "http://worker-a.internal:8080",
+					"host": "docs.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "JaOHGbObI2S1mG3jbi63knnmte5E_IOE8Pb6CTi9MWE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_7037b9d7d1ac41fdabc25d78070033ba",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"slug": "web",
+					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"upstreams": [
+						"http://worker-a.internal:8080",
+						"unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock"
+					],
+					"healthPath": "/healthz",
+					"healthIntervalSeconds": 5,
+					"host": "web.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"slug": "shop",
+					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:3000",
+					"upstreams": [
+						"http://worker-a.internal:8080",
+						"http://worker-b.internal:8080"
+					],
+					"healthPath": "/",
+					"healthIntervalSeconds": 5,
+					"host": "shop.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"slug": "fresh-copies",
+					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "http://worker-a.internal:8080",
+					"upstreams": [
+						"http://worker-a.internal:8080",
+						"http://worker-b.internal:8080"
+					],
+					"healthPath": "/ready",
+					"healthIntervalSeconds": 5,
+					"host": "fresh-copies.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"slug": "mover",
+					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "http://worker-a.internal:8080",
+					"host": "mover.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"policyId": null
+					}
+				}
+			],
+			"revocations": [],
+			"hostRedirects": [],
+			"placeholders": [
+				{
+					"host": "draft.sites.test",
+					"projectId": "prj_e7f83ee3afb3428e95f92ea90dad1eeb",
+					"dashboardUrl": "https://control.test/projects/draft"
+				}
+			],
+			"workloads": [
+				{
+					"id": "wld_9505b4a218fa4004ae226fac2912aad6-r2",
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectSlug": "web",
+					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "process",
+					"status": "running",
+					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"command": [
+						"bun",
+						"run",
+						"start"
+					],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/healthz",
+					"socketActivation": true,
+					"activationVersion": "9aebf3af090a483c463fc11a881a485938676c8849298d6c6b2a4725a80c937d",
+					"env": {
+						"NODE_ENV": "production"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true,
+					"replica": {
+						"index": 2
+					}
+				},
+				{
+					"id": "wld_dd34deed2e8e4004945b10e9cf5c035d-r2",
+					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"projectSlug": "shop",
+					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"image": "ghcr.io/acme/shop:2",
+					"upstream": "127.0.0.1:3000",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/",
+					"socketActivation": true,
+					"activationVersion": "2fde287d1242733cfa41e6f20e378c92090c20f696493c2f56336be5f2263266",
+					"env": {},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true,
+					"replica": {
+						"index": 2
+					}
+				}
+			],
+			"volumes": [],
+			"shareMounts": [],
+			"shareUnmounts": [],
+			"diskMounts": [],
+			"diskUnmounts": [],
+			"volumeProfileTasks": [],
+			"linkProbes": [
+				{
+					"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+					"address": "10.47.1.3",
+					"port": 8080
+				},
+				{
+					"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+					"address": "10.47.1.4",
+					"port": 8080
+				}
+			],
+			"linkTests": [],
+			"appVolumes": [],
+			"appVolumePurges": [],
+			"appVolumeTasks": [],
+			"databasePurges": [],
+			"databaseBackupTasks": [],
+			"databasePitrTasks": [],
+			"databaseRotations": [],
+			"databaseCredentialTasks": [],
+			"databaseStudioPrincipals": [],
+			"databasePoolerRestarts": [],
+			"databaseReplication": [],
+			"databaseReplicaLinks": [],
+			"databaseReplicaPromotions": [],
+			"storageGateway": {
+				"listen": "127.0.0.1:8081",
+				"routes": [
+					{
+						"host": "s3-453d33cb3c3c494381087b156cfe43bc.storage.internal",
+						"upstream": "http://worker-b.internal:8080"
+					}
+				]
+			},
+			"studio": {
+				"port": 8083,
+				"sessions": []
+			},
+			"databaseGateway": {
+				"listen": "127.0.0.1:8082",
+				"routes": [
+					{
+						"host": "n-node4d8b08da94341c68d4ac12b1d6d8b91.studio.internal",
+						"upstream": "http://worker-b.internal:8080"
+					},
+					{
+						"host": "n-nod19eac9a57d014d7a8b4dc8294b8432d6.console.internal",
+						"upstream": "127.0.0.1:8084"
+					},
+					{
+						"host": "n-nod8ee75bcf0c014a07b0983a30d0c8e7e3.console.internal",
+						"upstream": "http://worker-a.internal:8080"
+					},
+					{
+						"host": "n-node4d8b08da94341c68d4ac12b1d6d8b91.console.internal",
+						"upstream": "http://worker-b.internal:8080"
+					}
+				]
+			},
+			"containerConsole": {
+				"port": 8084
+			},
+			"storageRoutes": [],
+			"registryMirror": null,
+			"storagePurges": [],
+			"brokerPurges": [],
+			"kubernetesPurges": [],
+			"kubernetesRoutes": [],
+			"kubernetesManifests": [],
+			"kubernetesComponentRequest": null,
+			"kubernetesBackupTasks": [],
+			"mail": null,
+			"identity": {
+				"generation": 2050462547,
+				"host": "auth.sites.test",
+				"upstream": "127.0.0.1:8788",
+				"pools": []
+			},
+			"domains": [
+				{
+					"host": "docs.example.com",
+					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
+					"kind": "custom",
+					"redirectTo": null
+				}
+			],
+			"serviceEndpoints": [
+				{
+					"id": "sep_nod_19eac9a57d014d7a8b4dc8294b8432d6_database_db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"kind": "database",
+					"serviceId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"localPort": 21000,
+					"upstream": {
+						"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+						"address": "10.47.1.4",
+						"port": 15432
+					},
+					"tlsFingerprint": "6e0be922932c63eb40f2d80c99d03fe5895c150a6383fda5cda8c080aee56ff8"
+				},
+				{
+					"id": "sep_nod_19eac9a57d014d7a8b4dc8294b8432d6_database_dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"kind": "database",
+					"serviceId": "dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"localPort": 21001,
+					"upstream": {
+						"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+						"address": "10.47.1.3",
+						"port": 15432
+					},
+					"tlsFingerprint": "971142cf8e3654f7759d6337773cbbbbadaad0f0ec31b7bb0b96eee29e29973d"
+				}
+			],
+			"serviceProviders": [],
+			"wireguard": {
+				"mode": "yoal",
+				"address": "10.47.1.2",
+				"cidr": "10.47.0.0/22",
+				"mtu": 1420,
+				"listenPort": 51820,
+				"peers": [
+					{
+						"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+						"publicKey": "gU58sadpj1MvXazt0oePiiT1Ms7Mw51vs7iRjgWBhI4=",
+						"endpoint": "worker-a.internal:51820",
+						"allowedIps": [
+							"10.47.1.3/32"
+						],
+						"persistentKeepalive": 0
+					},
+					{
+						"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+						"publicKey": "4khK9MUvIDPxNGOP2xO7H8Boot2SjP3AJMePg56lEq4=",
+						"endpoint": "worker-b.internal:51820",
+						"allowedIps": [
+							"10.47.1.4/32"
+						],
+						"persistentKeepalive": 0
+					}
+				],
+				"routes": [],
+				"machineSubnet": null
+			}
+		},
+		"worker-a": {
+			"version": 36,
+			"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+			"agentVersion": "0.1.0",
+			"nodeUpdate": null,
+			"generatedAt": "2026-11-20T12:00:55.000Z",
+			"contentDomain": "sites.test",
+			"platformOrigin": "https://control.test",
+			"sliceMemoryMb": 8192,
+			"sliceCpuWeight": 200,
+			"storage": {
+				"dataDir": null,
+				"buildDir": null
+			},
+			"releases": [
+				{
+					"sha256": "1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491",
+					"sizeBytes": 92,
+					"fileCount": 4,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491.zip?exp=1795179655&sig=uepOWf50n-n7PUGoLBmPsxAUkwFU7IIRzobWFXoH6q8"
+				},
+				{
+					"sha256": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"sizeBytes": 18,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99.zip?exp=1795179655&sig=z3ks9WUZz8gpp4wMe6tfD6LVV2gmxmkDrMWHELeJ6co"
+				},
+				{
+					"sha256": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
+					"sizeBytes": 26,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f.zip?exp=1795179655&sig=zT8uPxkoBQrjq_0_fITB9G8ItehvvoAvrlo193wIjvk"
+				},
+				{
+					"sha256": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"sizeBytes": 37,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf.zip?exp=1795179655&sig=WrNS4jMHO-y6ASbuIRoZ54ePV1qb--CS3eSTB_9qEbI"
+				},
+				{
+					"sha256": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
+					"sizeBytes": 20,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7.zip?exp=1795179655&sig=d4kr04roRhbxY3h5l7n40kqvFSf6jHGHFpmFd6zaQcA"
+				},
+				{
+					"sha256": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
+					"sizeBytes": 20,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a.zip?exp=1795179655&sig=Eaz__fCVMadxoArHZh-NA1kGzUcjWZtjrdAsojh5v0k"
+				}
+			],
+			"routes": [
+				{
+					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
+					"slug": "docs",
+					"deploymentId": "dep_7100a171905046cd9a4b6c8fd2e484e0",
+					"release": "1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "docs--2qm0tb5xzj.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "JaOHGbObI2S1mG3jbi63knnmte5E_IOE8Pb6CTi9MWE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_7037b9d7d1ac41fdabc25d78070033ba",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"slug": "web",
+					"deploymentId": "dep_59891ae3caff43248a6d1da86e58c901",
+					"release": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"host": "web--5yjzw7c376.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"slug": "web",
+					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"host": "web--cqrckke1az.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"slug": "shop",
+					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:3000",
+					"host": "shop--w009xg1ewy.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"slug": "fresh-copies",
+					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"host": "fresh-copies--06mdpw5hg4.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"slug": "mover",
+					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_1899462c7d064f74becb512f2c38459d.sock",
+					"host": "mover--m24ytq2qvx.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
+					"slug": "docs",
+					"deploymentId": "dep_7100a171905046cd9a4b6c8fd2e484e0",
+					"release": "1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "docs.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "JaOHGbObI2S1mG3jbi63knnmte5E_IOE8Pb6CTi9MWE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_7037b9d7d1ac41fdabc25d78070033ba",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"slug": "web",
+					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"host": "web.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"slug": "shop",
+					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:3000",
+					"host": "shop.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"slug": "fresh-copies",
+					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"host": "fresh-copies.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"slug": "mover",
+					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_1899462c7d064f74becb512f2c38459d.sock",
+					"host": "mover.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"policyId": null
+					}
+				}
+			],
+			"revocations": [],
+			"hostRedirects": [],
+			"placeholders": [],
+			"workloads": [
+				{
+					"id": "wld_9505b4a218fa4004ae226fac2912aad6",
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectSlug": "web",
+					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "process",
+					"status": "running",
+					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"command": [
+						"bun",
+						"run",
+						"start"
+					],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/healthz",
+					"socketActivation": true,
+					"activationVersion": "9aebf3af090a483c463fc11a881a485938676c8849298d6c6b2a4725a80c937d",
+					"env": {
+						"NODE_ENV": "production"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true,
+					"replica": {
+						"index": 0
+					}
+				},
+				{
+					"id": "wld_dd34deed2e8e4004945b10e9cf5c035d",
+					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"projectSlug": "shop",
+					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"image": "ghcr.io/acme/shop:2",
+					"upstream": "127.0.0.1:3000",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/",
+					"socketActivation": true,
+					"activationVersion": "2fde287d1242733cfa41e6f20e378c92090c20f696493c2f56336be5f2263266",
+					"env": {},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true,
+					"replica": {
+						"index": 0
+					}
+				},
+				{
+					"id": "wld_80feb8764281462ab55242b3e60eedef",
+					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"projectSlug": "fresh-copies",
+					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "process",
+					"status": "running",
+					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
+					"command": [
+						"bun",
+						"run",
+						"start"
+					],
+					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"memoryMb": 128,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/ready",
+					"socketActivation": true,
+					"activationVersion": "98cb051158d10758396a3fd41bc1bfabb939e2ae23cb0bc2b4b4232b4219725c",
+					"env": {
+						"NODE_ENV": "production"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true,
+					"replica": {
+						"index": 0
+					}
+				},
+				{
+					"id": "wld_053073115d8645d2860e6bef2973517a",
+					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"projectSlug": "mover",
+					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "process",
+					"status": "running",
+					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
+					"command": [
+						"bun",
+						"run",
+						"start"
+					],
+					"upstream": "unix//run/yoal-workloads/prj_1899462c7d064f74becb512f2c38459d.sock",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/healthz",
+					"socketActivation": true,
+					"activationVersion": "98cb051158d10758396a3fd41bc1bfabb939e2ae23cb0bc2b4b4232b4219725c",
+					"env": {
+						"NODE_ENV": "production"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true
+				},
+				{
+					"id": "db_dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"projectId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"projectSlug": "orders",
+					"deploymentId": "dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": null,
+					"image": "docker.io/library/postgres:17-alpine",
+					"upstream": "127.0.0.1:15432",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 15432,
+					"healthPath": "/",
+					"socketActivation": false,
+					"activationVersion": "a824b0f13f904d46a9db13a8fd770ca75fe517128e3b921ef880283c749d4631",
+					"env": {
+						"POSTGRES_USER": "orders",
+						"POSTGRES_DB": "orders",
+						"PGDATA": "/data/pgdata"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"database": {
+						"engine": "postgres",
+						"version": "17",
+						"tls": true,
+						"replica": {
+							"slot": "yoal_dbr_6ced675ba60f4984a6bffb6f901f56f8"
+						}
+					}
+				}
+			],
+			"volumes": [],
+			"shareMounts": [],
+			"shareUnmounts": [],
+			"diskMounts": [],
+			"diskUnmounts": [],
+			"volumeProfileTasks": [],
+			"linkProbes": [
+				{
+					"nodeId": "nod_19eac9a57d014d7a8b4dc8294b8432d6",
+					"address": "10.47.1.2",
+					"port": 8080
+				},
+				{
+					"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+					"address": "10.47.1.4",
+					"port": 8080
+				}
+			],
+			"linkTests": [],
+			"appVolumes": [],
+			"appVolumePurges": [],
+			"appVolumeTasks": [],
+			"databasePurges": [],
+			"databaseBackupTasks": [],
+			"databasePitrTasks": [],
+			"databaseRotations": [],
+			"databaseCredentialTasks": [],
+			"databaseStudioPrincipals": [],
+			"databasePoolerRestarts": [],
+			"databaseReplication": [],
+			"databaseReplicaLinks": [
+				{
+					"workloadId": "db_dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"databaseId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"upstream": {
+						"kind": "remote",
+						"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+						"address": "10.47.1.4",
+						"port": 15432,
+						"tlsFingerprint": "6e0be922932c63eb40f2d80c99d03fe5895c150a6383fda5cda8c080aee56ff8"
+					}
+				}
+			],
+			"databaseReplicaPromotions": [],
+			"storageGateway": {
+				"listen": null,
+				"routes": []
+			},
+			"studio": {
+				"port": 8083,
+				"sessions": []
+			},
+			"databaseGateway": {
+				"listen": null,
+				"routes": [
+					{
+						"host": "n-nod8ee75bcf0c014a07b0983a30d0c8e7e3.console.internal",
+						"upstream": "127.0.0.1:8084"
+					}
+				]
+			},
+			"containerConsole": {
+				"port": 8084
+			},
+			"storageRoutes": [],
+			"registryMirror": null,
+			"storagePurges": [],
+			"brokerPurges": [],
+			"kubernetesPurges": [],
+			"kubernetesRoutes": [],
+			"kubernetesManifests": [],
+			"kubernetesComponentRequest": null,
+			"kubernetesBackupTasks": [],
+			"mail": null,
+			"identity": null,
+			"domains": [
+				{
+					"host": "docs.example.com",
+					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
+					"kind": "custom",
+					"redirectTo": null
+				}
+			],
+			"serviceEndpoints": [
+				{
+					"id": "sep_nod_8ee75bcf0c014a07b0983a30d0c8e7e3_database_db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"kind": "database",
+					"serviceId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"localPort": 21000,
+					"upstream": {
+						"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+						"address": "10.47.1.4",
+						"port": 15432
+					},
+					"tlsFingerprint": "6e0be922932c63eb40f2d80c99d03fe5895c150a6383fda5cda8c080aee56ff8"
+				}
+			],
+			"serviceProviders": [
+				{
+					"id": "svp_sep_nod_e4d8b08da94341c68d4ac12b1d6d8b91_database_dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"listenAddress": "10.47.1.3",
+					"listenPort": 15432,
+					"targetPort": 15432,
+					"allowedClientFingerprints": [
+						"6e0be922932c63eb40f2d80c99d03fe5895c150a6383fda5cda8c080aee56ff8",
+						"ce0b1cca833c3725a57f2ab115a8cb9b0823f9d0036cc0cdbcb6720b6ef44b4a"
+					]
+				}
+			],
+			"wireguard": {
+				"mode": "yoal",
+				"address": "10.47.1.3",
+				"cidr": "10.47.0.0/22",
+				"mtu": 1420,
+				"listenPort": 51820,
+				"peers": [
+					{
+						"nodeId": "nod_19eac9a57d014d7a8b4dc8294b8432d6",
+						"publicKey": "nCJyQvZSRfBbSJc5lWnt1e/j0zeChTrVd/G3TMfPifM=",
+						"endpoint": "edge.internal:51820",
+						"allowedIps": [
+							"10.47.1.2/32",
+							"10.47.1.4/32"
+						],
+						"persistentKeepalive": 25
+					}
+				],
+				"routes": [],
+				"machineSubnet": null
+			}
+		},
+		"worker-b": {
+			"version": 36,
+			"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+			"agentVersion": "0.1.0",
+			"nodeUpdate": null,
+			"generatedAt": "2026-11-20T12:00:55.000Z",
+			"contentDomain": "sites.test",
+			"platformOrigin": "https://control.test",
+			"sliceMemoryMb": 8192,
+			"sliceCpuWeight": 200,
+			"storage": {
+				"dataDir": null,
+				"buildDir": null
+			},
+			"releases": [
+				{
+					"sha256": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"sizeBytes": 18,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99.zip?exp=1795179655&sig=z3ks9WUZz8gpp4wMe6tfD6LVV2gmxmkDrMWHELeJ6co"
+				},
+				{
+					"sha256": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
+					"sizeBytes": 26,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f.zip?exp=1795179655&sig=zT8uPxkoBQrjq_0_fITB9G8ItehvvoAvrlo193wIjvk"
+				},
+				{
+					"sha256": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"sizeBytes": 37,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf.zip?exp=1795179655&sig=WrNS4jMHO-y6ASbuIRoZ54ePV1qb--CS3eSTB_9qEbI"
+				},
+				{
+					"sha256": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
+					"sizeBytes": 20,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7.zip?exp=1795179655&sig=d4kr04roRhbxY3h5l7n40kqvFSf6jHGHFpmFd6zaQcA"
+				},
+				{
+					"sha256": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
+					"sizeBytes": 20,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a.zip?exp=1795179655&sig=Eaz__fCVMadxoArHZh-NA1kGzUcjWZtjrdAsojh5v0k"
+				}
+			],
+			"routes": [
+				{
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"slug": "web",
+					"deploymentId": "dep_59891ae3caff43248a6d1da86e58c901",
+					"release": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"host": "web--5yjzw7c376.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"slug": "web",
+					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"host": "web--cqrckke1az.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"slug": "shop",
+					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:3000",
+					"host": "shop--w009xg1ewy.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"slug": "fresh-copies",
+					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"host": "fresh-copies--06mdpw5hg4.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"slug": "mover",
+					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "http://worker-a.internal:8080",
+					"host": "mover--m24ytq2qvx.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"slug": "web",
+					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"host": "web.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"slug": "shop",
+					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "127.0.0.1:3000",
+					"host": "shop.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"slug": "fresh-copies",
+					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"host": "fresh-copies.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"slug": "mover",
+					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "http://worker-a.internal:8080",
+					"host": "mover.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"policyId": null
+					}
+				}
+			],
+			"revocations": [],
+			"hostRedirects": [],
+			"placeholders": [],
+			"workloads": [
+				{
+					"id": "wld_9505b4a218fa4004ae226fac2912aad6-r1",
+					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectSlug": "web",
+					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "process",
+					"status": "running",
+					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
+					"command": [
+						"bun",
+						"run",
+						"start"
+					],
+					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/healthz",
+					"socketActivation": true,
+					"activationVersion": "3600170de94b82f7cbf3c2d3c6d7073f30dbab5d31bfe765185383df8779094b",
+					"env": {
+						"NODE_ENV": "production"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true,
+					"replica": {
+						"index": 1
+					}
+				},
+				{
+					"id": "wld_dd34deed2e8e4004945b10e9cf5c035d-r1",
+					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"projectSlug": "shop",
+					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
+					"image": "ghcr.io/acme/shop:2",
+					"upstream": "127.0.0.1:3000",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/",
+					"socketActivation": true,
+					"activationVersion": "2fde287d1242733cfa41e6f20e378c92090c20f696493c2f56336be5f2263266",
+					"env": {},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true,
+					"replica": {
+						"index": 1
+					}
+				},
+				{
+					"id": "wld_80feb8764281462ab55242b3e60eedef-r1",
+					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"projectSlug": "fresh-copies",
+					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "process",
+					"status": "running",
+					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
+					"command": [
+						"bun",
+						"run",
+						"start"
+					],
+					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"memoryMb": 128,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/ready",
+					"socketActivation": true,
+					"activationVersion": "98cb051158d10758396a3fd41bc1bfabb939e2ae23cb0bc2b4b4232b4219725c",
+					"env": {
+						"NODE_ENV": "production"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true,
+					"replica": {
+						"index": 1
+					}
+				},
+				{
+					"id": "wld_80feb8764281462ab55242b3e60eedef-r2",
+					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"projectSlug": "fresh-copies",
+					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "process",
+					"status": "running",
+					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
+					"command": [
+						"bun",
+						"run",
+						"start"
+					],
+					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"memoryMb": 128,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/ready",
+					"socketActivation": true,
+					"activationVersion": "98cb051158d10758396a3fd41bc1bfabb939e2ae23cb0bc2b4b4232b4219725c",
+					"env": {
+						"NODE_ENV": "production"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true,
+					"replica": {
+						"index": 2
+					}
+				},
+				{
+					"id": "wld_053073115d8645d2860e6bef2973517a",
+					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"projectSlug": "mover",
+					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "process",
+					"status": "running",
+					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
+					"command": [
+						"bun",
+						"run",
+						"start"
+					],
+					"upstream": "unix//run/yoal-workloads/prj_1899462c7d064f74becb512f2c38459d.sock",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3000,
+					"healthPath": "/healthz",
+					"socketActivation": true,
+					"activationVersion": "98cb051158d10758396a3fd41bc1bfabb939e2ae23cb0bc2b4b4232b4219725c",
+					"env": {
+						"NODE_ENV": "production"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true
+				},
+				{
+					"id": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"projectId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"projectSlug": "orders",
+					"deploymentId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": null,
+					"image": "docker.io/library/postgres:17-alpine",
+					"upstream": "127.0.0.1:15432",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 15432,
+					"healthPath": "/",
+					"socketActivation": false,
+					"activationVersion": "5a72cc16fc4132729a0f4dca2a0b87136e8dc9808e3c30e4b8213adccb80fa7a",
+					"env": {
+						"POSTGRES_USER": "orders",
+						"POSTGRES_DB": "orders",
+						"PGDATA": "/data/pgdata"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"database": {
+						"engine": "postgres",
+						"version": "17",
+						"tls": true
+					},
+					"pooler": {
+						"port": 16432
+					}
+				},
+				{
+					"id": "st_453d33cb3c3c494381087b156cfe43bc",
+					"projectId": "st_453d33cb3c3c494381087b156cfe43bc",
+					"projectSlug": "assets",
+					"deploymentId": "st_453d33cb3c3c494381087b156cfe43bc",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": null,
+					"image": "docker.io/rustfs/rustfs:1.0.4",
+					"upstream": "127.0.0.1:19000",
+					"memoryMb": 512,
+					"cpus": 1,
+					"port": 19000,
+					"healthPath": "/health",
+					"socketActivation": false,
+					"activationVersion": "49bb5361f0a0b542098a09c2ac2c92e461ec3cba4661c4c445fcc0321513ace3",
+					"env": {
+						"RUSTFS_VOLUMES": "/data",
+						"RUSTFS_ADDRESS": ":9000",
+						"RUSTFS_CONSOLE_ENABLE": "false",
+						"RUSTFS_OBS_LOG_DIRECTORY": "",
+						"RUSTFS_IDENTITY_OPENID_ENABLE": "on",
+						"RUSTFS_IDENTITY_OPENID_CONFIG_URL": "https://control.test/.well-known/openid-configuration",
+						"RUSTFS_IDENTITY_OPENID_ISSUER": "https://control.test",
+						"RUSTFS_IDENTITY_OPENID_CLIENT_ID": "yoal",
+						"RUSTFS_IDENTITY_OPENID_CLAIM_NAME": "groups",
+						"RUSTFS_IDENTITY_OPENID_GROUPS_CLAIM": "groups"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"objectStorage": {
+						"engine": "rustfs",
+						"version": "1.0.4",
+						"buckets": [
+							{
+								"name": "public",
+								"access": "private",
+								"versioning": false,
+								"lifecycle": [],
+								"cors": [],
+								"quotaBytes": null,
+								"objectLock": null,
+								"configVersion": 1,
+								"notifications": false
+							}
+						],
+						"users": [],
+						"deleteBuckets": [],
+						"keysVersion": "145eb5e19fc7649a9be46a91914324c6c598e85f550e92988bc2d47322696246",
+						"replication": []
+					}
+				}
+			],
+			"volumes": [],
+			"shareMounts": [],
+			"shareUnmounts": [],
+			"diskMounts": [],
+			"diskUnmounts": [],
+			"volumeProfileTasks": [],
+			"linkProbes": [
+				{
+					"nodeId": "nod_19eac9a57d014d7a8b4dc8294b8432d6",
+					"address": "10.47.1.2",
+					"port": 8080
+				},
+				{
+					"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+					"address": "10.47.1.3",
+					"port": 8080
+				}
+			],
+			"linkTests": [],
+			"appVolumes": [],
+			"appVolumePurges": [],
+			"appVolumeTasks": [],
+			"databasePurges": [],
+			"databaseBackupTasks": [],
+			"databasePitrTasks": [],
+			"databaseRotations": [],
+			"databaseCredentialTasks": [],
+			"databaseStudioPrincipals": [
+				{
+					"databaseId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"generation": 1
+				}
+			],
+			"databasePoolerRestarts": [],
+			"databaseReplication": [
+				{
+					"databaseId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"version": "f6c542144a39e38f49b486468726752de81a7f7d349c675922c9be4062c2af72",
+					"slots": [
+						"yoal_dbr_6ced675ba60f4984a6bffb6f901f56f8"
+					]
+				}
+			],
+			"databaseReplicaLinks": [],
+			"databaseReplicaPromotions": [],
+			"storageGateway": {
+				"listen": null,
+				"routes": [
+					{
+						"host": "s3-453d33cb3c3c494381087b156cfe43bc.storage.internal",
+						"upstream": "127.0.0.1:19000"
+					}
+				]
+			},
+			"studio": {
+				"port": 8083,
+				"sessions": [
+					"dss_H0XdrWFf5JJW0GDl2pnr5lO7"
+				]
+			},
+			"databaseGateway": {
+				"listen": null,
+				"routes": [
+					{
+						"host": "n-node4d8b08da94341c68d4ac12b1d6d8b91.studio.internal",
+						"upstream": "127.0.0.1:8083"
+					},
+					{
+						"host": "n-node4d8b08da94341c68d4ac12b1d6d8b91.console.internal",
+						"upstream": "127.0.0.1:8084"
+					}
+				]
+			},
+			"containerConsole": {
+				"port": 8084
+			},
+			"storageRoutes": [],
+			"registryMirror": null,
+			"storagePurges": [],
+			"brokerPurges": [],
+			"kubernetesPurges": [],
+			"kubernetesRoutes": [],
+			"kubernetesManifests": [],
+			"kubernetesComponentRequest": null,
+			"kubernetesBackupTasks": [],
+			"mail": null,
+			"identity": null,
+			"domains": [],
+			"serviceEndpoints": [
+				{
+					"id": "sep_nod_e4d8b08da94341c68d4ac12b1d6d8b91_database_dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"kind": "database",
+					"serviceId": "dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"localPort": 21000,
+					"upstream": {
+						"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+						"address": "10.47.1.3",
+						"port": 15432
+					},
+					"tlsFingerprint": "971142cf8e3654f7759d6337773cbbbbadaad0f0ec31b7bb0b96eee29e29973d"
+				}
+			],
+			"serviceProviders": [
+				{
+					"id": "svp_sep_nod_8ee75bcf0c014a07b0983a30d0c8e7e3_database_db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"listenAddress": "10.47.1.4",
+					"listenPort": 15432,
+					"targetPort": 15432,
+					"allowedClientFingerprints": [
+						"971142cf8e3654f7759d6337773cbbbbadaad0f0ec31b7bb0b96eee29e29973d",
+						"ce0b1cca833c3725a57f2ab115a8cb9b0823f9d0036cc0cdbcb6720b6ef44b4a"
+					]
+				}
+			],
+			"wireguard": {
+				"mode": "yoal",
+				"address": "10.47.1.4",
+				"cidr": "10.47.0.0/22",
+				"mtu": 1420,
+				"listenPort": 51820,
+				"peers": [
+					{
+						"nodeId": "nod_19eac9a57d014d7a8b4dc8294b8432d6",
+						"publicKey": "nCJyQvZSRfBbSJc5lWnt1e/j0zeChTrVd/G3TMfPifM=",
+						"endpoint": "edge.internal:51820",
+						"allowedIps": [
+							"10.47.1.2/32",
+							"10.47.1.3/32"
+						],
+						"persistentKeepalive": 25
+					}
+				],
+				"routes": [],
+				"machineSubnet": null
+			}
+		}
+	},
+	"configured-edge": {
+		"first": {
+			"version": 7,
+			"nodeId": "nod_74dc746c4a8644cbb61e7b56c7095609",
+			"agentVersion": "0.1.0",
+			"nodeUpdate": null,
+			"generatedAt": "2026-11-20T12:00:58.000Z",
+			"contentDomain": "sites.test",
+			"platformOrigin": "https://control.test",
+			"sliceMemoryMb": 8192,
+			"sliceCpuWeight": 200,
+			"storage": {
+				"dataDir": null,
+				"buildDir": null
+			},
+			"releases": [],
+			"routes": [
+				{
+					"projectId": "prj_e9434af5565b4942a60fa0c1ea8cc633",
+					"slug": "site",
+					"deploymentId": "dep_e09853315ff44e8db580624f2fced1ba",
+					"release": "cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": "http://second.internal:8080",
+					"host": "site--33kcpfhf2t.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "-VAExroiBAYYetXfYPCk2Ze4wTwYF9Uh0RE_POzhxkE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e9434af5565b4942a60fa0c1ea8cc633",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_e9434af5565b4942a60fa0c1ea8cc633",
+					"slug": "site",
+					"deploymentId": "dep_e09853315ff44e8db580624f2fced1ba",
+					"release": "cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": "http://second.internal:8080",
+					"host": "site.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "-VAExroiBAYYetXfYPCk2Ze4wTwYF9Uh0RE_POzhxkE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e9434af5565b4942a60fa0c1ea8cc633",
+						"policyId": null
+					}
+				}
+			],
+			"revocations": [],
+			"hostRedirects": [],
+			"placeholders": [
+				{
+					"host": "pending.sites.test",
+					"projectId": "prj_9a7ebe205ab245828f20e006e9f5db4b",
+					"dashboardUrl": "https://control.test/projects/pending"
+				}
+			],
+			"workloads": [],
+			"volumes": [],
+			"shareMounts": [],
+			"shareUnmounts": [],
+			"diskMounts": [],
+			"diskUnmounts": [],
+			"volumeProfileTasks": [],
+			"linkProbes": [],
+			"linkTests": [],
+			"appVolumes": [],
+			"appVolumePurges": [],
+			"appVolumeTasks": [],
+			"databasePurges": [],
+			"databaseBackupTasks": [],
+			"databasePitrTasks": [],
+			"databaseRotations": [],
+			"databaseCredentialTasks": [],
+			"databaseStudioPrincipals": [],
+			"databasePoolerRestarts": [],
+			"databaseReplication": [],
+			"databaseReplicaLinks": [],
+			"databaseReplicaPromotions": [],
+			"storageGateway": {
+				"listen": "127.0.0.1:8081",
+				"routes": []
+			},
+			"studio": {
+				"port": 8083,
+				"sessions": []
+			},
+			"databaseGateway": {
+				"listen": "127.0.0.1:8082",
+				"routes": []
+			},
+			"containerConsole": {
+				"port": 8084
+			},
+			"storageRoutes": [],
+			"registryMirror": null,
+			"storagePurges": [],
+			"brokerPurges": [],
+			"kubernetesPurges": [],
+			"kubernetesRoutes": [],
+			"kubernetesManifests": [],
+			"kubernetesComponentRequest": null,
+			"kubernetesBackupTasks": [],
+			"mail": null,
+			"identity": null,
+			"domains": [],
+			"serviceEndpoints": [],
+			"serviceProviders": []
+		},
+		"second": {
+			"version": 7,
+			"nodeId": "nod_f2af730b26634a6ca9906a5cd5dcb5f8",
+			"agentVersion": "0.1.0",
+			"nodeUpdate": null,
+			"generatedAt": "2026-11-20T12:00:58.000Z",
+			"contentDomain": "sites.test",
+			"platformOrigin": "https://control.test",
+			"sliceMemoryMb": 8192,
+			"sliceCpuWeight": 200,
+			"storage": {
+				"dataDir": null,
+				"buildDir": null
+			},
+			"releases": [
+				{
+					"sha256": "cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a",
+					"sizeBytes": 103,
+					"fileCount": 4,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a.zip?exp=1795179658&sig=DYIuKG-XePdYkDMFjG8TnhoA7J-8qByUSx3-PAHLbBw"
+				}
+			],
+			"routes": [
+				{
+					"projectId": "prj_e9434af5565b4942a60fa0c1ea8cc633",
+					"slug": "site",
+					"deploymentId": "dep_e09853315ff44e8db580624f2fced1ba",
+					"release": "cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "site--33kcpfhf2t.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "-VAExroiBAYYetXfYPCk2Ze4wTwYF9Uh0RE_POzhxkE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e9434af5565b4942a60fa0c1ea8cc633",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_e9434af5565b4942a60fa0c1ea8cc633",
+					"slug": "site",
+					"deploymentId": "dep_e09853315ff44e8db580624f2fced1ba",
+					"release": "cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "site.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "-VAExroiBAYYetXfYPCk2Ze4wTwYF9Uh0RE_POzhxkE",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e9434af5565b4942a60fa0c1ea8cc633",
+						"policyId": null
+					}
+				}
+			],
+			"revocations": [],
+			"hostRedirects": [],
+			"placeholders": [
+				{
+					"host": "pending.sites.test",
+					"projectId": "prj_9a7ebe205ab245828f20e006e9f5db4b",
+					"dashboardUrl": "https://control.test/projects/pending"
+				}
+			],
+			"workloads": [],
+			"volumes": [],
+			"shareMounts": [],
+			"shareUnmounts": [],
+			"diskMounts": [],
+			"diskUnmounts": [],
+			"volumeProfileTasks": [],
+			"linkProbes": [],
+			"linkTests": [],
+			"appVolumes": [],
+			"appVolumePurges": [],
+			"appVolumeTasks": [],
+			"databasePurges": [],
+			"databaseBackupTasks": [],
+			"databasePitrTasks": [],
+			"databaseRotations": [],
+			"databaseCredentialTasks": [],
+			"databaseStudioPrincipals": [],
+			"databasePoolerRestarts": [],
+			"databaseReplication": [],
+			"databaseReplicaLinks": [],
+			"databaseReplicaPromotions": [],
+			"storageGateway": {
+				"listen": "127.0.0.1:8081",
+				"routes": []
+			},
+			"studio": {
+				"port": 8083,
+				"sessions": []
+			},
+			"databaseGateway": {
+				"listen": "127.0.0.1:8082",
+				"routes": []
+			},
+			"containerConsole": {
+				"port": 8084
+			},
+			"storageRoutes": [],
+			"registryMirror": null,
+			"storagePurges": [],
+			"brokerPurges": [],
+			"kubernetesPurges": [],
+			"kubernetesRoutes": [],
+			"kubernetesManifests": [],
+			"kubernetesComponentRequest": null,
+			"kubernetesBackupTasks": [],
+			"mail": null,
+			"identity": {
+				"generation": 3403115143,
+				"host": "auth.sites.test",
+				"upstream": "127.0.0.1:8788",
+				"pools": []
+			},
+			"domains": [],
+			"serviceEndpoints": [],
+			"serviceProviders": []
+		}
+	}
+}
