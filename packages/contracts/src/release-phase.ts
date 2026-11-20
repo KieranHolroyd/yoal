@@ -73,16 +73,32 @@ export type ReleasePhaseSpecField = (typeof RELEASE_PHASE_SPEC_FIELDS)[number];
  * Refusals for a spec that sets release-phase fields while `RELEASE_PHASE` is off: one per field,
  * empty when the flag is on or no field is set. Callers throw a `ValidationError` with the first
  * message, as the other flag-gated refusals in `workloads.ts` do.
+ *
+ * `current` is the stored spec. A field whose value equals the stored one is not refused: it was
+ * set while the flag was on, and saves that re-send the stored spec (image deploys, pipelines,
+ * the dashboard) must keep working after the flag is turned off. Such leftovers are inert: the
+ * capability gate strips them from desired state while the flag is off.
  */
 export function releasePhaseSpecIssues(
 	spec: Partial<Record<ReleasePhaseSpecField, unknown>>,
 	features: Pick<FeatureFlags, 'RELEASE_PHASE'>,
+	current?: Partial<Record<ReleasePhaseSpecField, unknown>> | null,
 ): { path: ReleasePhaseSpecField; message: string }[] {
 	if (features.RELEASE_PHASE) return [];
-	return RELEASE_PHASE_SPEC_FIELDS.filter((field) => spec[field] !== undefined).map((field) => ({
+	const same = (field: ReleasePhaseSpecField) =>
+		current?.[field] !== undefined && JSON.stringify(normalizeField(field, spec[field])) === JSON.stringify(normalizeField(field, current[field]));
+	return RELEASE_PHASE_SPEC_FIELDS.filter((field) => spec[field] !== undefined && !same(field)).map((field) => ({
 		path: field,
 		message: `${field} needs the release phase, which is not enabled on this platform (YOAL_FEATURE_RELEASE_PHASE).`,
 	}));
+}
+
+/** Parse a field the way the spec schema does, so `{ command }` equals its stored `{ command, timeoutSeconds: 600 }`. */
+function normalizeField(field: ReleasePhaseSpecField, value: unknown): unknown {
+	const schema = { release: releaseCommandSpecSchema, rollout: rolloutSpecSchema, placement: workloadPlacementSpecSchema }[field as 'release'];
+	if (!schema) return value;
+	const parsed = schema.safeParse(value);
+	return parsed.success ? parsed.data : value;
 }
 
 /** The drain and stop values a copy runs with: the defaults reproduce today's behaviour. */

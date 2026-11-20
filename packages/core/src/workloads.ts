@@ -43,6 +43,7 @@ import {
 	type WorkloadReplica,
 } from '@yoal/contracts';
 import { featureEnabled } from './config.ts';
+import { assertReleasePhaseSpec } from './release-phase-gate.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import { matchingPlacementSpec, resolvePlacement, type PlacementCandidate } from './placement.ts';
@@ -167,6 +168,7 @@ export class WorkloadService {
 			);
 		if (runtime === 'function' && !featureEnabled(this.ctx.config, 'FUNCTIONS'))
 			throw new ValidationError('Functions are not enabled on this platform (YOAL_FEATURE_FUNCTIONS).');
+		if (input) assertReleasePhaseSpec(this.ctx.config, input, this.projectSpec(project));
 		if (runtime === 'compose') {
 			if (!featureEnabled(this.ctx.config, 'COMPOSE'))
 				throw new ValidationError('Compose stacks are not enabled on this platform (YOAL_FEATURE_COMPOSE).');
@@ -331,6 +333,7 @@ export class WorkloadService {
 			throw new ValidationError('Compose stacks are not enabled on this platform (YOAL_FEATURE_COMPOSE).');
 		// The digest is Yoal's to set at deploy time (R1); an input never carries one.
 		const { imageDigest: _ignored, ...specInput } = input as WorkloadSpecInput & { imageDigest?: string };
+		assertReleasePhaseSpec(this.ctx.config, specInput as Partial<WorkloadSpec>, this.projectSpec(project));
 		let spec = workloadSpecSchema.parse({ ...specInput, runtime });
 		if (spec.compose)
 			spec = {
