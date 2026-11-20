@@ -61,16 +61,32 @@ Every lane was reviewed by an agent that did not write it (diff + exit criteria 
 | E | DO NOT SHIP as the W3 exit | Fixed: cancel the wrapped upload stream on failure; cancel the Azure multipart source; GCS reports `objectLock: false` for a readable bucket without a retention policy. Open blocker: Azure `presignPut` cannot carry `x-ms-blob-type`, so real Azure presigned uploads/backup targets fail; needs `{url, headers}` in the contract. Also open: GCS presign path encoding, real-service immutability, no CI job for the e2e suites. |
 | Lab | integrator read-through | The independent reviewer could not run (Claude quota). Integrator checked that `rolling-deploy-under-load` judges zero non-2xx at ≥95% of 10,000/min and the failing-command path, and that `attachments-three-nodes` asserts spread, promotion env/restart per copy, the port scan and the checker. This is **not** the required independent review; re-run it when quota allows. |
 
-## M1 exit criteria
+## M1 exit criteria — lab evidence (four-node container lab)
 
-| Criterion | Status |
-|---|---|
-| Container app in three copies on three nodes uses one Postgres on a fourth | Asserted in `attach-gateway.test.ts`; **not yet run in the lab** in this session |
-| A deploy with a release command drops no request | Unit/integration level: gate holds every copy, failure keeps the old release; **lab scenario not run** |
-| The lab kills a node and the checker is clean | Scenario exists and `bun test tests/ha` is green; the live four-node run was done for lane A's install, not for the full M1 suite |
+| Scenario | Verdict | Numbers |
+|---|---|---|
+| `single-node-gate` | **pass** | 2,675 requests, 0 failures outside the redeploy; 2×503 while the only copy restarted; 0 lost writes |
+| `kill-node`, edge bypassed | **pass** | offline at 33 s; re-placed copy answering at 124 s (bound 240 s); 0 lost writes |
+| `kill-node`, through the edge | **fail** | offline at 28–29 s; copy re-placed and running, but the edge never sends it traffic; 0 lost writes |
+| `freeze-agent` | **fail** | 0 of 17 database health probes answered during the 60 s freeze; no restart, no re-placement |
+| `attachments-three-nodes`, container | **skip** | the platform refuses to spread a container to a database's other node on the integrated tree (should pass with W4; re-run) |
+| `attachments-three-nodes`, process | **fail** | promotion took 58 s; all 3 copies changed env and restarted; 916 failed requests; 0 lost writes |
+| `rolling-deploy-under-load` | **fail** | 10,020 requests a minute; rollout done in 39.5 s; 3 of 30,061 requests not 2xx; release-command parts skipped |
 
-So M1 is **code-complete and unit/integration-green, not yet ticked**: the lab run is the missing
-evidence, and W3's Azure half has a known blocker.
+So **M1 is not met**: one criterion (kill a node, checker clean) fails only on the edge path, and
+the no-failed-request deploy misses by 3 requests. W3's Azure half also has a known blocker.
+
+### Platform bugs the lab found (not fixed in Wave 1)
+
+1. A copy re-placed by failover enters the edge's upstream list only on the next unrelated
+   desired-state change; its move to `running` does not bump the version.
+2. The cross-node database forwarder runs in the agent: freezing or restarting the agent cuts
+   every remote copy on that node off from Postgres (matters for H24/S10 and W11).
+3. G10 is wider than the plan: a manual promotion restarts every consumer, not only those on the
+   old or new primary's node.
+4. A workload has no copy id, so checker I15 cannot attribute a late request to a copy; W5 drain
+   needs something like `YOAL_COPY_ID`.
+5. A protected-route health check was not exercised (no scenario uses one).
 
 ## What the work proved wrong in the plan
 
@@ -99,5 +115,5 @@ evidence, and W3's Azure half has a known blocker.
 4. **Canary window loss** (C): a control-plane restart mid-canary can pass on readiness; require
    the baseline to be quiet too.
 5. **Operator retry** (C): no REST/CLI surface for "retry a failed release command" yet.
-6. **Lab evidence**: run `attachments-three-nodes`, `rolling-deploy-under-load`, `kill-node` and
-   `single-node-gate` on the four-node lab and record the numbers.
+6. **Lab evidence**: the four-node run is recorded above; the three failures are tracked as the
+   platform bugs above and are Wave 2/M2 fix candidates (the edge upstream bump is the first).
