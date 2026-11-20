@@ -110,3 +110,68 @@ Numbers, verdict and what could not be tested: `docs/SPIKES.md`, section S4. In 
   early renewals and is a lab property; real Let's Encrypt windows were not tested.
 - One run reached public Let's Encrypt (production and staging) by accident: six accounts, refused
   orders, no certificate. See `docs/SPIKES.md`. The rig now has no egress and asserts on it.
+
+## Cloud half: DNS-01 on a real Cloudflare zone (branch `ha/w0-spike-s4-cloud`)
+
+### Question
+
+HA-PLAN H20 item 1 and §4 W2 (S4): does ACME DNS-01 against a real **Cloudflare** zone work for both
+issuing designs the local half compared?
+
+- **(a) Control-plane issuer (design B):** lego v5.6.0 with its `cloudflare` provider, standing in
+  for the issuer the control plane would run.
+- **(b) Yoal's pinned Caddy build** (2.11.8, xcaddy v0.4.7, Go 1.24, caddy-dns/cloudflare v0.2.4,
+  exactly as `release.yml` builds it, with no extra module), which is what Yoal ships today.
+
+### Pass criteria (judged per design)
+
+The plan gives the measurements but no thresholds; the thresholds below are added here and only
+tighten.
+
+1. **Issues.** One order for `*.<label>.<zone>` and `<label>.<zone>` yields a staging certificate
+   whose SANs are exactly those two names, using DNS-01 only (HTTP-01 and TLS-ALPN-01 disabled).
+   *Time to issue* is measured from client start to the certificate on disk; pass ≤ 300 s. If a
+   client cannot put both names in one order, that is recorded, and the criterion is judged on the
+   orders it does make.
+2. **Propagation.** Measured two ways: the client's own wait (TXT created → the client tells the CA
+   to validate), and an outside probe (TXT created at the API → first answer from every
+   authoritative nameserver of `<zone>`). Pass: the client's default propagation check succeeds
+   with no tuning, and the CA marks every authorization valid on the first try.
+3. **Token.** The one token in `creds.env` (`Zone:DNS:Edit` on `<zone>`; the plan's scope, CLUSTERING
+   §7.2) is enough on its own: no `Zone:Read` token, no global key.
+4. **Cleanup.** After a successful issuance, no `_acme-challenge.<label>` TXT record remains (listed
+   through the API) within 60 s of the certificate.
+5. **Cloudflare API unreachable for 60 s mid-issue.** Every connection from the client to
+   `api.cloudflare.com` goes through a rig proxy that, for 60 s, closes open tunnels and refuses new
+   ones. Two placements:
+   - **5a, from the client's first API call** (before the TXT exists). Pass: the client fails the
+     attempt without hanging, retries (the client's own backoff for Caddy; the issuer loop's for
+     lego), issues after the block lifts, uses ≤ 3 orders in total, and leaves no TXT record.
+   - **5b, from the moment the TXT record exists** (so cleanup falls inside the block). Pass:
+     issuance either completes or retries as in 5a, and **no stale TXT record** is left 120 s after
+     the block lifts. Retry and backoff behaviour is reported as measured.
+
+### Agreed fallback (HA-PLAN §4 W2)
+
+As for the local half: per-ingress ACME with the HTTP-01 relay; BYO certificates only for wildcard;
+Cloudflare Origin CA for installs where every name is proxied (CLUSTERING §15.4). If only (b)
+passes, the control-plane issuer keeps Caddy's DNS-01 code path (certmagic as a library) instead
+of lego.
+
+### Approved scope (owner)
+
+- **Let's Encrypt staging only** (`https://acme-staging-v02.api.letsencrypt.org/directory`). Every
+  Caddy automation policy sets an explicit ACME issuer with that `ca`; lego always gets `--server`.
+  Before each run the rig greps every rendered config and lego argument list and refuses to run if
+  any names `acme-v02.api.letsencrypt.org` or `zerossl`. As extra guards (added here), the client
+  containers resolve the production and ZeroSSL ACME hosts to `127.0.0.1`, and the run fails if a
+  client log names either.
+- One ACME account, no contact email, registered once and reused by both clients (lego registers it;
+  Caddy gets the same key through `account_key`).
+- DNS: only TXT records named `_acme-challenge.<label>.<zone>`, `<label>` = `yoal-w0-s4-` plus random
+  lowercase characters. No other record type, no zone settings. At the end the rig lists the zone's
+  TXT records starting `_acme-challenge.yoal-w0-s4-`, deletes any left, and proves none remain.
+- At most **10 orders** in total.
+- `creds.env` is sourced only inside the command that needs it; the token, zone ID and zone name are
+  never printed, logged or committed (logs pass through a redactor; docs write `<zone>`).
+- Issued certificates, keys and the account key are deleted at the end.
