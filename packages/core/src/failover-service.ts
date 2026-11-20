@@ -16,6 +16,7 @@ import {
 	type LeasePolicy,
 	type NodeRole,
 	type Principal,
+	type SteeringDriverKind,
 } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { chooseReplicaForPromotion } from './database-replicas.ts';
@@ -101,6 +102,15 @@ export interface FailoverTickReport {
 	blocked: number;
 	expired: number;
 	ingress: { withdrawn: string[]; added: string[] };
+	/** What the steering driver did this tick (HA-PLAN H18). */
+	steering: {
+		kind: SteeringDriverKind;
+		active: boolean;
+		applied: boolean;
+		waitingForLease: boolean;
+		refused: number;
+		error: string | null;
+	};
 	databases: { manual: number; started: number; advanced: number; failed: number };
 }
 
@@ -194,6 +204,7 @@ export class FailoverService {
 			blocked: 0,
 			expired: 0,
 			ingress: { withdrawn: [], added: [] },
+			steering: { kind: 'direct', active: false, applied: false, waitingForLease: false, refused: 0, error: null },
 			databases: { manual: 0, started: 0, advanced: 0, failed: 0 },
 		};
 		// A slow tick (a handler awaiting a node) must not overlap the next one.
@@ -229,6 +240,30 @@ export class FailoverService {
 				alerts.push(...this.ctx.relocations.tick(now));
 				this.ctx.scheduling.autoTick(now, config, [...facts.values()].some((fact) => fact.unreachable || fact.status !== 'online'));
 				this.#ingressTick(now, fence, facts, report, alerts);
+				// Steering (HA-PLAN H18): read-only drivers run every tick; a write is fenced.
+				const steering = await this.ctx.steering.reconcile(fence);
+				report.steering = {
+					kind: steering.kind,
+					active: steering.active,
+					applied: steering.applied,
+					waitingForLease: steering.waitingForLease,
+					refused: steering.findings.length,
+					error: steering.error,
+				};
+				if (steering.error)
+					alerts.push({
+						key: 'steering:error',
+						title: `Steering driver ${steering.kind} could not act`,
+						detail: steering.error,
+						severity: 'warning',
+					});
+				if (steering.findings.length > 0)
+					alerts.push({
+						key: 'steering:preflight',
+						title: `Steering driver ${steering.kind} is not usable`,
+						detail: steering.findings.map((finding) => finding.reason).join(' '),
+						severity: 'warning',
+					});
 				await this.#databaseTick(config, fence, facts, report, alerts);
 			} catch (error) {
 				if (!(error instanceof FencedError)) throw error;
@@ -593,6 +628,9 @@ export class FailoverService {
 		const policies = this.ctx.policies.get();
 		const ingressNodes = [...facts.values()].filter((fact) => fact.roles.includes('ingress'));
 		for (const fact of ingressNodes) this.#ingress.observe({ nodeId: fact.id, ok: ingressHealthy(fact), at: now });
+		// Steering owns the record set once a driver is active (HA-PLAN H18). Keeping the legacy
+		// manual rotation running beside it would page about records the driver already handles.
+		if (this.ctx.steering.active()) return;
 		if (!ROTATING_DRIVERS.has(policies.ingressDriver)) return;
 
 		const ids = ingressNodes.map((fact) => fact.id);
@@ -968,7 +1006,18 @@ export class FailoverService {
 		for (const copy of copies) copiesByNode.set(copy.nodeId, (copiesByNode.get(copy.nodeId) ?? 0) + 1);
 		const policies = this.ctx.policies.get();
 		const rotation = this.#rotation();
-		const rotates = ROTATING_DRIVERS.has(policies.ingressDriver);
+		const selection = this.ctx.steering.selection();
+		const steeringActive = this.ctx.steering.active();
+		let steers = false;
+		if (steeringActive) {
+			try {
+				steers = this.ctx.steering.driver(selection.kind).capabilities.writes;
+			} catch {
+				// Selection names an implemented driver, so this should not happen; preflight still
+				// reports the selected kind rather than failing the whole status read.
+			}
+		}
+		const rotates = !steeringActive && ROTATING_DRIVERS.has(policies.ingressDriver);
 		const handler = this.#handler !== null;
 
 		// A replica being removed is torn down next: it is never a promotion candidate.
@@ -1028,8 +1077,8 @@ export class FailoverService {
 				copies: copiesByNode.get(fact.id) ?? 0,
 			})),
 			ingress: {
-				driver: policies.ingressDriver,
-				steers: false,
+				driver: steeringActive ? selection.kind : policies.ingressDriver,
+				steers,
 				rotates,
 				nodes: [...facts.values()]
 					.filter((fact) => fact.roles.includes('ingress'))
