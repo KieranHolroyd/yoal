@@ -8,7 +8,7 @@ const flagsOn = { CONTROL_STANDBY: true } as never;
 function context(options: {
 	enabled: boolean;
 	controlNodeId?: string;
-	addresses?: string[];
+	addresses?: Array<{ nodeId: string; url: string }>;
 	holder?: string | null;
 	epoch?: number;
 }) {
@@ -45,7 +45,10 @@ describe('control-plane desired state (W9-SPEC §4.4)', () => {
 
 	test('on: the lease holder is first and the epoch comes from the control plane', async () => {
 		const desired = await part(
-			context({ enabled: true, holder: 'nod_b', epoch: 7, addresses: ['https://b.example.com', 'https://a.example.com'] }),
+			context({ enabled: true, holder: 'nod_b', epoch: 7, addresses: [
+				{ nodeId: 'nod_a', url: 'https://a.example.com' },
+				{ nodeId: 'nod_b', url: 'https://b.example.com' },
+			] }),
 			nodes,
 		).desired();
 		expect(desired).toEqual({

@@ -44,6 +44,7 @@ import { DiskMountRunner } from './disk-mounts.ts';
 import { VolumeProfileRunner } from './volume-profiles.ts';
 import { LinkTestRunner } from './link-tests.ts';
 import { ControlEndpoints } from './control-endpoints.ts';
+import { readControlReport } from './control-report.ts';
 import { RunLeaseClock, leaseState } from './run-lease.ts';
 import { DatabasePitrRunner } from './database-pitr.ts';
 import { DatabaseCredentialRunner } from './database-credentials.ts';
@@ -130,6 +131,8 @@ class AgentRuntime {
 	private readonly store: DesiredStateStore;
 	/** The control address list and persisted epoch (W9). Rotates on silence or a non-primary. */
 	private readonly control: ControlEndpoints;
+	/** This host's local control-plane `/readyz` for the heartbeat, or null when not co-located. */
+	private readonly controlReadyzUrl: string | null;
 	private readonly releases: ReleaseManager;
 	private readonly caddy: CaddyAdmin;
 	private readonly stats: StatsCollector;
@@ -282,6 +285,11 @@ class AgentRuntime {
 			initialUrl: config.controlUrl,
 			log: (level, message) => log(level, message),
 		});
+		// The socket path is what makes `controlUrl/readyz` this host's control plane. Without one, an
+		// explicit local URL is required: reading the public origin would report another node.
+		this.controlReadyzUrl =
+			config.controlLocalUrl ??
+			(config.controlSocket ? `${config.controlUrl.replace(/\/+$/, '')}/readyz` : null);
 		this.releases = new ReleaseManager(config.dataDir);
 		this.caddy = new CaddyAdmin(config.caddyAdminSocket);
 		this.stats = new StatsCollector(config.dataDir);
@@ -1685,6 +1693,7 @@ class AgentRuntime {
 			.catch((error: unknown) => log('warn', `Could not request a storage move: ${errorText(error)}`));
 		// The endpoint is Caddy's answer from the state file; refresh it so the fleet view matches.
 		await this.refreshIngressHealth().catch((error) => log('warn', `Ingress health update failed: ${errorText(error)}`));
+		const controlReport = this.controlReadyzUrl ? await readControlReport(this.controlReadyzUrl) : null;
 		const body: Heartbeat = {
 			nodeId: this.config.nodeId,
 			agentVersion: this.config.agentVersion,
@@ -1697,6 +1706,9 @@ class AgentRuntime {
 			certificateFingerprint: this.certificateDelivery.fingerprint(),
 			stats,
 			...(this.latestIngressHealth ? { ingressHealth: this.latestIngressHealth } : {}),
+			// A control node reports its own lease view so `/api/v1/ha/status` can show standbys
+			// instead of only the primary's row (W9-SPEC §4.6).
+			...(controlReport ? { control: controlReport } : {}),
 			...(hardware ? { hardware } : {}),
 			...(nodeCertificate ? { nodeCertificate } : {}),
 			...(nodeCsr ? { nodeCsr } : {}),

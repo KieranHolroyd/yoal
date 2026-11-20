@@ -116,6 +116,14 @@ export interface ControlStandbyOptions {
 	nodeId: string;
 	/** `primary` for the node that already owns the install; `standby` for an enrolled node. */
 	roleHint: 'primary' | 'standby';
+	/**
+	 * Whether this host holds an enrolment record from the primary (master-key fingerprint, config
+	 * digest). Promotion is refused without it: an unverified node must not win a term. This is a
+	 * property of the host, not the static role hint.
+	 */
+	enrolled?: boolean;
+	/** The highest epoch already on disk, so status and promotion start above it. */
+	initialEpoch?: number;
 	/** Read fresh on every tick; may be async (a file or a helper call). */
 	evidence: () => PromotionEvidence | Promise<PromotionEvidence>;
 	/** Persist the highest epoch before this node serves or writes at it. */
@@ -168,6 +176,7 @@ export class ControlStandby {
 	readonly #lease: ControlLease;
 	readonly #nodeId: string;
 	readonly #roleHint: 'primary' | 'standby';
+	readonly #enrolled: boolean;
 	readonly #evidence: () => PromotionEvidence | Promise<PromotionEvidence>;
 	readonly #persistEpoch: (epoch: number, reason: string) => void | Promise<void>;
 	readonly #monotonic: () => number;
@@ -199,6 +208,7 @@ export class ControlStandby {
 		this.#lease = options.lease;
 		this.#nodeId = options.nodeId;
 		this.#roleHint = options.roleHint;
+		this.#enrolled = options.enrolled ?? false;
 		this.#evidence = options.evidence;
 		this.#persistEpoch = options.persistEpoch ?? (() => undefined);
 		this.#monotonic = options.monotonic ?? (() => performance.now());
@@ -206,6 +216,8 @@ export class ControlStandby {
 		this.#autoPromote = options.autoPromote ?? true;
 		this.#rejoinAfterFenceMs = options.rejoinAfterFenceMs ?? CONTROL_STANDBY_TIMERS.rejoinAfterFenceMs;
 		this.#log = options.log;
+		this.#epoch = options.initialEpoch ?? 0;
+		this.#persistedEpoch = options.initialEpoch ?? 0;
 		this.#changedAt = this.#monotonic();
 	}
 
@@ -239,10 +251,12 @@ export class ControlStandby {
 		this.#promotionCheck = this.#check(evidence);
 
 		// A standby may promote only from healthy `standby`, and only when every check passes. The
-		// lease's own 40 s quiet window is the final gate: `mayTakeOver` cannot shorten it.
+		// node must be enrolled (the fingerprint/digest comparison is evidence, not a role hint), so
+		// an ex-primary that was re-seeded and enrolled can take over again. The lease's own 40 s
+		// quiet window is the final gate: `mayTakeOver` cannot shorten it.
 		const mayTakeOver =
 			this.#autoPromote &&
-			this.#roleHint === 'standby' &&
+			this.#enrolled &&
 			this.#state === 'standby' &&
 			this.#promotionCheck.ok;
 
@@ -268,10 +282,27 @@ export class ControlStandby {
 	}
 
 	/**
-	 * Operator promotion (`yoal ha control promote`). Still a compare-and-swap at the ETag just
-	 * read; the readiness checks run before the CAS, so an unverifiable node never wins it.
+	 * Operator promotion (`yoal ha control promote`). The readiness checks run before the CAS, so
+	 * an unverifiable or unenrolled node never wins it. The lease still applies expiry and the 40 s
+	 * quiet window unless `breakGlass` is explicit, and `expectedEpoch` is compared against the
+	 * record read for this CAS, not a cached value.
 	 */
-	async promoteNow(expectedEpoch?: number): Promise<ControlStandbySnapshot> {
+	async promoteNow(expectedEpoch?: number, options: { breakGlass?: boolean } = {}): Promise<ControlStandbySnapshot> {
+		if (this.#state === 'primary' && this.#lease.holds()) {
+			// Already serving: still verify --expect-epoch against the object just read, so the command
+			// never reports success for the wrong term. No CAS happens here.
+			if (expectedEpoch === undefined) return this.snapshot();
+			try {
+				await this.#lease.operatorTakeOver({ expectedEpoch });
+			} catch (error) {
+				this.#reason = `promotion refused: ${error instanceof Error ? error.message : String(error)}`;
+			}
+			return this.snapshot();
+		}
+		if (!this.#enrolled) {
+			this.#reason = 'promotion refused: this host has no enrolment record, so the master key and config cannot be verified';
+			return this.snapshot();
+		}
 		const evidence = await this.#evidence();
 		this.#evidenceSnapshot = evidence;
 		this.#promotionCheck = this.#check(evidence);
@@ -279,16 +310,18 @@ export class ControlStandby {
 			this.#reason = `promotion refused: ${this.#promotionCheck.reasons.join('; ')}`;
 			return this.snapshot();
 		}
-		if (expectedEpoch !== undefined && this.#epoch !== expectedEpoch) {
-			this.#reason = `promotion refused: the lease is at epoch ${this.#epoch}, not ${expectedEpoch}`;
-			return this.snapshot();
-		}
 		if (this.#state === 'fenced') {
 			this.#reason = 'promotion refused: a fenced node is re-seeded before it can be promoted';
 			return this.snapshot();
 		}
 		const now = this.#monotonic();
-		const status = await this.#lease.forcePromote();
+		let status: ControlLeaseStatus;
+		try {
+			status = await this.#lease.operatorTakeOver({ expectedEpoch, breakGlass: options.breakGlass });
+		} catch (error) {
+			this.#reason = `promotion refused: ${error instanceof Error ? error.message : String(error)}`;
+			return this.snapshot();
+		}
 		await this.#absorb(status, now, 'operator');
 		if (this.#state === 'primary' || this.#state === 'promoting') await this.#confirm(now);
 		return this.snapshot();
@@ -370,7 +403,12 @@ export class ControlStandby {
 	}
 
 	#check(evidence: PromotionEvidence): PromotionCheck {
-		return this.#roleHint === 'primary' ? evaluatePrimaryReadiness(evidence) : evaluatePromotion(evidence);
+		// An enrolled node is a candidate even if its static hint says `primary`: after a failover the
+		// old primary must be able to win a later term once re-seeded and enrolled. Only the initial
+		// unenrolled owner uses the lighter primary check, and it is not allowed to take over.
+		return this.#enrolled || this.#roleHint === 'standby'
+			? evaluatePromotion(evidence)
+			: evaluatePrimaryReadiness(evidence);
 	}
 
 	async #absorb(status: ControlLeaseStatus, now: number, source: 'tick' | 'operator' = 'tick'): Promise<void> {
@@ -388,7 +426,7 @@ export class ControlStandby {
 			this.#fencedAt ??= now;
 			return;
 		}
-		if (status.role === 'unavailable') {
+		if (status.role === 'unavailable' || !status.reachable) {
 			this.#noteArbiterError(now, status.reason);
 			return;
 		}
@@ -431,7 +469,7 @@ export class ControlStandby {
 			return;
 		}
 		this.#set('standby', status.reason, now);
-		if (this.#autoPromote && this.#promotionCheck.ok && this.#roleHint === 'standby' && previous === 'standby')
+		if (this.#autoPromote && this.#enrolled && this.#promotionCheck.ok && previous === 'standby')
 			this.#reason = `${status.reason}; takeover needs the object unchanged for ${Math.round(this.#lease.policy.takeoverAfterMs / 1000)} s`;
 	}
 

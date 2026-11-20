@@ -12,8 +12,9 @@ import { DesiredStatePart } from './context.ts';
  * off, so a single-node install's payload is byte-identical.
  *
  * Order: the current lease holder, then other online control nodes, then the rest. The address is
- * the operator-declared direct endpoint (`YOAL_CONTROL_ADDRESSES`, comma separated) where given,
- * else the platform origin — which is the ingress route that prefers the primary.
+ * the operator-declared direct endpoint for that node (`YOAL_CONTROL_ADDRESSES`, `nodeId=url`
+ * pairs) where given, else the platform origin — which is the ingress route that prefers the
+ * primary. The declaration is bound by node id, so re-ordering never hands a node another's URL.
  */
 export class ControlState extends DesiredStatePart {
 	async desired(): Promise<DesiredState['control'] | undefined> {
@@ -28,10 +29,12 @@ export class ControlState extends DesiredStatePart {
 			const online = Number(b.status === 'online') - Number(a.status === 'online');
 			return online !== 0 ? online : a.id.localeCompare(b.id);
 		});
-		const addresses = this.ctx.config.controlAddresses ?? [];
-		const nodes = ordered.map((node, index) => ({
+		const declared = new Map((this.ctx.config.controlAddresses ?? []).map((address) => [address.nodeId, address.url]));
+		const nodes = ordered.map((node) => ({
 			nodeId: node.id,
-			url: (addresses[index] ?? this.ctx.config.platformOrigin).replace(/\/+$/, ''),
+			// Bound by node id: reordering the list (the holder moves to the front) must not hand a
+			// node another host's address.
+			url: declared.get(node.id) ?? this.ctx.config.platformOrigin.replace(/\/+$/, ''),
 			zone: 'default',
 		}));
 		return {

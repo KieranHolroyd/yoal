@@ -32,7 +32,9 @@ byte-identical (the desired-state golden test pins that).
    `{"restored":true,"lagSeconds":0.2,"position":"ltx:42/9f"}`. Until it exists the node stays
    `joining` and `canPromote:false`. Set `YOAL_CONTROL_REPLICA_STATUS` to change the path.
 5. **Overlay reachability**: peer control nodes are dialled at `<private address>:8080` for the
-   platform upstream list. A node without an overlay address is omitted from the list.
+   platform upstream list. A node without an overlay address is omitted from the list. Declare a
+   direct endpoint per node with `YOAL_CONTROL_ADDRESSES=nod_a=https://a.example.com,nod_b=…`; the
+   binding is by node id, never by position.
 
 ## Enable on the primary
 
@@ -70,28 +72,32 @@ yoal ha control enrol --node nod_b --csr /tmp/control.csr --out /tmp/nod_b.enrol
 ```
 
 The command prints a certificate serial and a **one-time activation code**, and writes the sealed
-bundle (master key + allowlisted `yoal.env` values) to a 0600 file. The bundle and the code are not
-stored on the platform and never appear in desired state, the audit log or a server log.
+bundle and certificate to a 0600 file. The activation code is *not* written to that file. The bundle
+and the code are not stored on the platform and never appear in desired state, the audit log or a
+server log.
 
 On the standby:
 
-1. Open the bundle with the activation code; write `/etc/yoal/master.key` 0400 and the allowlisted
-   values to `/etc/yoal/yoal.env`. Verify `sha256` of the key equals the bundle's
-   `masterKeyFingerprint` (the CLI prints the digest and the runbook check is
-   `printf '%s' … | sha256sum`).
-2. Write `<dataDir>/ha-control-enrolment.json`:
-   ```json
-   {"version":1,"nodeId":"nod_b","primaryNodeId":"nod_a","masterKeyFingerprint":"…",
-    "configDigest":"…","replica":{"restored":true,"lagSeconds":0,"position":"ltx:1/0"},
-    "enrolledAt":"2026-11-20T00:00:00.000Z"}
-   ```
-3. Set `YOAL_CONTROL_ROLE=standby`, `YOAL_FEATURE_CONTROL_STANDBY=1`, `YOAL_NODE_ID=nod_b`, and the
+```sh
+yoal ha control enrol --open /tmp/nod_b.enrol.json --code <activation-code>
+```
+
+This unseals the bundle, verifies the master-key fingerprint and the config digest, writes
+`/etc/yoal/master.key` (0400) and the allowlisted values into `/etc/yoal/yoal.env` (0600, merged),
+and writes `<dataDir>/ha-control-enrolment.json` (0600). The record is promotion evidence: a node
+without it never wins a term, automatically or by operator command. Use `--data-dir`,
+`--master-key` and `--env` for non-default paths. Then:
+
+1. Set `YOAL_CONTROL_ROLE=standby`, `YOAL_FEATURE_CONTROL_STANDBY=1`, `YOAL_NODE_ID=nod_b`, and the
    same `BETTER_AUTH_SECRET` as the primary (dashboard sessions survive a promotion only when it is
    identical).
-4. Restore the control DB replica into its own data directory, start `yoal-control-plane`, and keep
-   `ha-control-replica.json` current from the Litestream follow.
-5. Check `curl -fsS http://localhost/readyz` → `role: standby`, `epoch` equal to the primary's,
-   `canPromote: true`, `replication.lagSeconds < 1`.
+2. Restore the control DB replica into its own data directory, start `yoal-control-plane`, and keep
+   `ha-control-replica.json` current from the Litestream follow. Re-running the `--open` command
+   after the restore refreshes the record's replica fallback.
+3. Check `curl -fsS http://localhost/readyz` → `role: standby`, `epoch` equal to the primary's,
+   `canPromote: true`, `replication.lagSeconds < 1`. The co-located agent reports the same document
+   in its heartbeat (`YOAL_CONTROL_LOCAL_URL`, or the control socket), so `yoal ha control status`
+   shows the standby too.
 
 The dashboard enrolment UI is owner-gated and not part of this lane; the API and CLI are the
 supported path.
@@ -106,7 +112,13 @@ yoal ha control status                     # every node reports epoch 8
 
 Promotion reads the lease, checks the evidence, then CASes at the current ETag. A stale ETag loses
 the CAS (the old primary may still renew), so the command fails rather than bumping twice. A fenced
-node is refused until it is re-seeded.
+node is refused until it is re-seeded, and a host with no enrolment record is always refused.
+`--expect-epoch` is compared with the record read for the CAS, not a cached value.
+
+The ordinary operator path applies the same gate as an automatic takeover: the lease must be
+released, or expired by the arbiter's clock and unchanged for 40 s. `--break-glass` skips only that
+wait, for §18.5 recovery after the old primary's units are stopped; it is still a CAS, so it cannot
+create two holders.
 
 Planned switchover: stop writes on the old primary, wait for its lease to be released or to expire,
 then promote the standby. An unplanned promotion waits out the 40 s quiet window; the old primary
@@ -120,7 +132,7 @@ it from going backwards.
 
 | Fault | Behaviour |
 |---|---|
-| Arbiter unreachable | The primary keeps serving for 20 s, then fences. A standby cannot take over. Fix the store or restore to a second target and claim a new epoch. |
+| Arbiter unreachable | The primary keeps serving for 20 s, then fences. A standby cannot take over and reports `unavailable` after 30 s. Fix the store or restore to a second target and claim a new epoch. |
 | Primary control node killed | A standby takes over after 40 s quiet + CAS at E+1. Agents rotate to the next address. |
 | Stale primary returns | It sees the higher epoch, fences; after 5 s with the holder stable and its replica current it may rejoin as a standby, but a new term still needs a fresh CAS. |
 | One ingress/control node partitioned | The CAS decides. The loser fences within 20 s. |

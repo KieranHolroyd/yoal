@@ -553,9 +553,12 @@ export class ApiClient {
 	}
 
 	/** A control-plane standby promotion (W9): a CAS; a stale expectedEpoch is a 409. */
-	async promoteControl(expectedEpoch?: number): Promise<{ result: unknown; raw: unknown }> {
+	async promoteControl(expectedEpoch?: number, breakGlass?: boolean): Promise<{ result: unknown; raw: unknown }> {
 		const raw = await this.request('POST', '/api/v1/ha/control/promote', {
-			body: expectedEpoch === undefined ? {} : { expectedEpoch },
+			body: {
+				...(expectedEpoch === undefined ? {} : { expectedEpoch }),
+				...(breakGlass ? { breakGlass: true } : {}),
+			},
 		});
 		return { result: raw, raw };
 	}

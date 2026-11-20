@@ -15,6 +15,8 @@ export const POST: RequestHandler = (event) =>
 	route(async () => {
 		const principal = requirePrincipal(event);
 		const input = await readJson(event.request, controlPromoteRequestSchema);
-		const status = await core.controlPlane.promote(principal, input.expectedEpoch);
+		const status = await core.controlPlane.promote(principal, input.expectedEpoch, {
+			breakGlass: input.breakGlass === true,
+		});
 		return json({ promoted: true, controlPlane: status }, 200, { 'cache-control': 'no-store' });
 	});

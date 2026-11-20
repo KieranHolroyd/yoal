@@ -89,6 +89,7 @@ root:yoal`.
 | `YOAL_EDGE_NODE_ID` | empty | no | Node identity for single-node mode. |
 | `YOAL_CONTROL_URL` | — | no | Agent only (`/etc/yoal/agent.env`): control-plane origin, `http(s)://…`. |
 | `YOAL_CONTROL_SOCKET` | `/run/yoal/control.sock` on the control-plane host | no | Agent only: send control-plane requests to this unix socket instead of through Caddy (D105). Set for the edge agent by the installer and by Settings → Domains; leave unset on worker nodes. |
+| `YOAL_CONTROL_LOCAL_URL` | derived from `YOAL_CONTROL_URL` when `YOAL_CONTROL_SOCKET` is set | no | Agent on a control-plane host only: this host's own `/readyz`, read each heartbeat and reported as `control` for `yoal ha control status`. Leave unset on worker nodes so they never report another node's role. |
 | `YOAL_NODE_ID` | — | no | Agent only: node id from `yoal-agent join`. |
 | `YOAL_NODE_TOKEN` | — | **yes** | Agent only: bearer token from the single-use join token. |
 | `YOAL_CADDY_LISTEN` | `:443,:80` | no | Agent only: listeners Caddy should bind. |

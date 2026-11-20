@@ -85,6 +85,11 @@ export type ControlStatus = z.infer<typeof controlStatusSchema>;
 export const controlPromoteRequestSchema = z.object({
 	/** Refuse with 409 when the lease is not at this epoch (CLUSTERING §6.5). */
 	expectedEpoch: z.number().int().positive().optional(),
+	/**
+	 * Break-glass (§18.5): skip expiry and the quiet window after the old primary is stopped. Still
+	 * a CAS at the read ETag, so it cannot create two holders.
+	 */
+	breakGlass: z.boolean().optional(),
 });
 export type ControlPromoteRequest = z.infer<typeof controlPromoteRequestSchema>;
 

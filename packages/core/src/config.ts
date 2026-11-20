@@ -18,6 +18,12 @@ export interface EmailTransport {
 	send(message: EmailMessage): Promise<void>;
 }
 
+/** One directly reachable control node, declared by the operator as `nodeId=url`. */
+export interface ControlAddress {
+	nodeId: string;
+	url: string;
+}
+
 /**
  * What a notifier receives. `status`, `url` and `labels` are set by metric alert rules
  * (docs/ALERTS.md); system alerts leave them out, and a notifier may ignore them.
@@ -80,10 +86,11 @@ export interface CoreConfig {
 	/** `YOAL_CONTROL_ROLE=standby` marks an enrolled warm standby; absent means primary-capable. */
 	controlRole?: 'primary' | 'standby';
 	/**
-	 * Direct control endpoints an agent may try, in order (`YOAL_CONTROL_ADDRESSES`, comma
-	 * separated). Empty falls back to the platform origin.
+	 * Direct control endpoints an agent may try, bound to a node id (`YOAL_CONTROL_ADDRESSES`,
+	 * comma separated, each `nodeId=url`). A node without a declared address falls back to the
+	 * platform origin. Position is never used to pair an address with a node.
 	 */
-	controlAddresses?: string[];
+	controlAddresses?: ControlAddress[];
 	/** The allowlisted config digest the primary delivered at enrolment; promotion compares it. */
 	controlConfigDigest?: string;
 	/** File the enrolment wrote with the expected key/config fingerprints (default under dataDir). */
@@ -154,6 +161,36 @@ export interface CoreConfig {
 }
 
 /**
+ * `YOAL_CONTROL_ROLE` is fail-closed: an unknown value is a configuration error, not a silent
+ * `primary`. Absent still means primary-capable for an existing single-node install.
+ */
+export function parseControlRole(value: string | undefined): 'primary' | 'standby' | undefined {
+	if (value === undefined || value.trim() === '') return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === 'primary' || normalized === 'standby') return normalized;
+	throw new Error(`Invalid YOAL_CONTROL_ROLE "${value}": use primary or standby.`);
+}
+
+/** `YOAL_CONTROL_ADDRESSES=nodeId=url,nodeId=url`; the node id is the binding, never the order. */
+export function parseControlAddresses(value: string | undefined): ControlAddress[] | undefined {
+	if (value === undefined || value.trim() === '') return undefined;
+	const addresses: ControlAddress[] = [];
+	for (const entry of value.split(',')) {
+		const text = entry.trim();
+		if (!text) continue;
+		const separator = text.indexOf('=');
+		if (separator <= 0)
+			throw new Error(`Invalid YOAL_CONTROL_ADDRESSES entry "${text}": use nodeId=url.`);
+		const nodeId = text.slice(0, separator).trim();
+		const url = text.slice(separator + 1).trim().replace(/\/+$/, '');
+		if (!nodeId || !/^https?:\/\/[^\s]+$/i.test(url))
+			throw new Error(`Invalid YOAL_CONTROL_ADDRESSES entry "${text}": use nodeId=http(s)://url.`);
+		addresses.push({ nodeId, url });
+	}
+	return addresses.length > 0 ? addresses : undefined;
+}
+
+/**
  * The service-layer config: `overrides` first, then `YOAL_*` environment variables (docs/OPS.md §2),
  * then defaults. The control plane builds its config through this, so every variable read here
  * reaches the running platform; pass `env` to resolve against something other than `process.env`.
@@ -191,20 +228,8 @@ export function coreConfigFromEnv(
 					: undefined)),
 		platformUpstream: overrides.platformUpstream ?? (env.YOAL_PLATFORM_UPSTREAM?.trim() || undefined),
 		controlNodeId: overrides.controlNodeId ?? (env.YOAL_NODE_ID?.trim() || undefined),
-		controlRole:
-			overrides.controlRole ??
-			(env.YOAL_CONTROL_ROLE?.trim().toLowerCase() === 'standby'
-				? 'standby'
-				: env.YOAL_CONTROL_ROLE?.trim()
-					? 'primary'
-					: undefined),
-		controlAddresses:
-			overrides.controlAddresses ??
-			(env.YOAL_CONTROL_ADDRESSES
-				? env.YOAL_CONTROL_ADDRESSES.split(',')
-						.map((address) => address.trim())
-						.filter(Boolean)
-				: undefined),
+		controlRole: overrides.controlRole ?? parseControlRole(env.YOAL_CONTROL_ROLE),
+		controlAddresses: overrides.controlAddresses ?? parseControlAddresses(env.YOAL_CONTROL_ADDRESSES),
 		controlConfigDigest: overrides.controlConfigDigest ?? (env.YOAL_CONTROL_CONFIG_DIGEST?.trim() || undefined),
 		controlEnrolmentPath:
 			overrides.controlEnrolmentPath ?? (env.YOAL_CONTROL_ENROLMENT_FILE?.trim() || undefined),

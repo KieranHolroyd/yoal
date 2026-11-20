@@ -103,6 +103,7 @@ export class ControlPlaneService {
 			store,
 			nodeId: this.#nodeId,
 			version: this.ctx.config.desiredAgentVersion,
+			durableEpoch: () => this.#highestEpoch(),
 			policy: {
 				ttlMs: CONTROL_STANDBY_TIMERS.ttlMs,
 				fenceAfterMs: CONTROL_STANDBY_TIMERS.fenceAfterMs,
@@ -125,6 +126,8 @@ export class ControlPlaneService {
 			lease: this.#lease,
 			nodeId: this.#nodeId,
 			roleHint,
+			enrolled: this.#enrolment !== null,
+			initialEpoch: baseline,
 			evidence: () => this.#evidence(roleHint),
 			persistEpoch: (epoch, reason) => this.#persistEpoch(epoch, reason),
 			autoPromote: true,
@@ -305,10 +308,10 @@ export class ControlPlaneService {
 	 * `yoal ha control promote`: still a compare-and-swap at the ETag just read. The readiness check
 	 * runs before the CAS, so an unverifiable node cannot win; a stale `expectedEpoch` is a 409.
 	 */
-	async promote(principal: Principal, expectedEpoch?: number): Promise<ControlStatus[]> {
+	async promote(principal: Principal, expectedEpoch?: number, options: { breakGlass?: boolean } = {}): Promise<ControlStatus[]> {
 		this.#assertPlatformAdmin(principal);
 		if (!this.#runtime) throw new CoreError('conflict', 'Control-plane standby is not running on this node.', 409);
-		const result = await this.#runtime.promoteNow(expectedEpoch);
+		const result = await this.#runtime.promoteNow(expectedEpoch, options);
 		if (result.role !== 'primary')
 			throw new CoreError('conflict', `Promotion refused: ${result.reason}`, 409);
 		this.ctx.audit.record({
@@ -317,7 +320,7 @@ export class ControlPlaneService {
 			resource: 'control-plane',
 			resourceId: this.#nodeId,
 			result: 'ok',
-			args: { epoch: result.epoch, expectedEpoch: expectedEpoch ?? null },
+			args: { epoch: result.epoch, expectedEpoch: expectedEpoch ?? null, breakGlass: options.breakGlass === true },
 		});
 		await this.#record();
 		return this.status();
@@ -371,11 +374,15 @@ export class ControlPlaneService {
 	async #evidence(roleHint: 'primary' | 'standby'): Promise<PromotionEvidence> {
 		const enrolment = this.#enrolment ?? (await readControlEnrolment(this.#enrolmentPath()));
 		this.#enrolment = enrolment;
+		// Only the original unenrolled owner may treat its live database as a current replica. Every
+		// other host (an enrolled standby, or an ex-primary that is following) reads the restore
+		// status, whatever its static hint says.
 		const replica =
-			roleHint === 'primary'
+			!enrolment && roleHint === 'primary'
 				? ({ restored: true, lagSeconds: 0, position: 'primary' } satisfies ControlReplicaState)
 				: await readControlReplicaStatus(
 						this.ctx.config.controlReplicaStatusPath ?? join(this.ctx.config.dataDir, REPLICA_FILE),
+						enrolment?.replica,
 					);
 		const actualKey = masterKeyFingerprint(this.ctx.config.masterKey);
 		const actualConfig = controlConfigDigest(process.env);
@@ -413,12 +420,15 @@ export class ControlPlaneService {
 		await mkdir(directory, { recursive: true, mode: 0o755 });
 		const path = join(directory, EPOCH_FILE);
 		const temporary = `${path}.tmp-${process.pid}`;
-		await writeFile(temporary, `${JSON.stringify({ epoch, reason, at: new Date(this.ctx.now()).toISOString() })}\n`, {
+		// Never write a lower epoch over one already durable on this host: a stale lease object must
+		// not let the file that fences agents go backwards.
+		const durable = Math.max(await this.#readEpochFile(), epoch);
+		await writeFile(temporary, `${JSON.stringify({ epoch: durable, reason, at: new Date(this.ctx.now()).toISOString() })}\n`, {
 			mode: 0o600,
 		});
 		await rename(temporary, path);
 		if (this.#runtime?.snapshot().role === 'primary') {
-			this.ctx.db.update(nodes).set({ haEpoch: epoch, updatedAt: this.ctx.now() }).where(eq(nodes.id, this.#nodeId)).run();
+			this.ctx.db.update(nodes).set({ haEpoch: durable, updatedAt: this.ctx.now() }).where(eq(nodes.id, this.#nodeId)).run();
 		}
 	}
 

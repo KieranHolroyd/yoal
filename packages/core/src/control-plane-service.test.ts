@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDb, migrations } from '@yoal/db';
@@ -18,14 +18,14 @@ function flags(control: boolean): FeatureFlags {
 	});
 }
 
-function open(options: { control: boolean; role?: 'primary' | 'standby'; objectStore?: MemoryObjectStore }): Core {
+function open(options: { control: boolean; role?: 'primary' | 'standby'; objectStore?: MemoryObjectStore; dataDir?: string }): Core {
 	const opened = createDb({ path: ':memory:' });
 	return createCore({
 		db: opened.db,
 		sqlite: opened.sqlite,
 		version: '0.16.3',
 		config: {
-			dataDir: join(dir, options.control ? (options.role ?? 'primary') : 'off'),
+			dataDir: options.dataDir ?? join(dir, options.control ? (options.role ?? 'primary') : 'off'),
 			platformOrigin: 'https://control.test',
 			contentDomain: 'sites.test',
 			objectStore: options.objectStore ?? new MemoryObjectStore({ now: () => Date.now() }),
@@ -73,11 +73,26 @@ describe('ControlPlaneService (W9-SPEC §4)', () => {
 		]);
 	});
 
+	test('the durable epoch never goes backwards: a fresh primary starts above the file and the file keeps the max', async () => {
+		const store = new MemoryObjectStore();
+		const dataDir = join(dir, 'epoch-floor');
+		mkdirSync(dataDir, { recursive: true });
+		writeFileSync(join(dataDir, CONTROL_EPOCH_FILE), `${JSON.stringify({ epoch: 5 })}\n`);
+		const core = open({ control: true, role: 'primary', objectStore: store, dataDir });
+		await core.controlPlane.start();
+		core.controlPlane.stop();
+		const lease = await store.readVersioned(CONTROL_LEASE_KEY);
+		expect(JSON.parse(lease.body ?? '{}').epoch).toBeGreaterThanOrEqual(6);
+		expect(JSON.parse(readFileSync(join(dataDir, CONTROL_EPOCH_FILE), 'utf8')).epoch).toBeGreaterThanOrEqual(6);
+	});
+
 	test('a standby follows, never bootstraps and returns 503 for agents', async () => {
 		const store = new MemoryObjectStore();
 		const primary = open({ control: true, role: 'primary', objectStore: store });
 		await primary.controlPlane.start();
 		primary.controlPlane.stop();
+		const before = await store.readVersioned(CONTROL_LEASE_KEY);
+		const leaseBefore = JSON.parse(before.body ?? '{}');
 		const standbyDb = createDb({ path: ':memory:' });
 		const standby = createCore({
 			db: standbyDb.db,
@@ -105,8 +120,14 @@ describe('ControlPlaneService (W9-SPEC §4)', () => {
 		expect(gate?.status).toBe(503);
 		expect(gate?.headers['x-yoal-role']).not.toBe('primary');
 		expect(standby.controlPlane.mayRenewRunLease()).toBe(false);
-		// The standby did not create or overwrite the lease at another epoch.
-		expect(await store.readVersioned(CONTROL_LEASE_KEY)).toMatchObject({ status: 200 });
+		// The standby did not create or overwrite the lease at another epoch: the object still
+		// names the primary at the same epoch, not the standby and not epoch + 1.
+		const lease = await store.readVersioned(CONTROL_LEASE_KEY);
+		expect(lease.status).toBe(200);
+		expect(JSON.parse(lease.body ?? '{}')).toMatchObject({
+			epoch: leaseBefore.epoch,
+			holderNodeId: 'nod_a',
+		});
 	});
 
 	test('the schema the migration check reads is present, so a primary can confirm', async () => {

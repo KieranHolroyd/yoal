@@ -49,15 +49,19 @@ function standby(
 	nodeId: string,
 	options: {
 		roleHint?: 'primary' | 'standby';
+		enrolled?: boolean;
 		evidence?: () => PromotionEvidence | Promise<PromotionEvidence>;
 		persisted?: number[];
 		now: () => number;
+		initialEpoch?: number;
 	} = { now: Date.now },
 ) {
 	return new ControlStandby({
 		lease,
 		nodeId,
 		roleHint: options.roleHint ?? 'standby',
+		enrolled: options.enrolled ?? true,
+		initialEpoch: options.initialEpoch,
 		evidence: options.evidence ?? (() => readyEvidence()),
 		persistEpoch: (epoch) => {
 			options.persisted?.push(epoch);
@@ -245,6 +249,91 @@ describe('W9 control-plane machine (W9-SPEC §4)', () => {
 		const wrong = await control.promoteNow(6);
 		expect(wrong.role).toBe('standby');
 		expect(wrong.reason).toContain('not 6');
+	});
+
+	test('operator promotion waits for expiry and the quiet window unless break-glass is explicit', async () => {
+		const w = world();
+		const a = w.node('a');
+		await a.lease.bootstrap(4);
+		const b = w.node('b');
+		const control = standby(b.lease, 'b', { now: () => w.now });
+		await control.start();
+		await control.tick();
+		const early = await control.promoteNow();
+		expect(early.role).toBe('standby');
+		expect(early.reason).toMatch(/not expired|unchanged/);
+
+		// The object is unchanged for 41 s and the arbiter clock says it expired, so the ordinary
+		// operator path may take it without break-glass.
+		w.advance(41_000);
+		const promoted = await control.promoteNow();
+		expect(promoted).toMatchObject({ role: 'primary', epoch: 5 });
+	});
+
+	test('a fresh lease needs explicit break-glass for an operator promotion', async () => {
+		const w = world();
+		const a = w.node('a');
+		await a.lease.bootstrap(2);
+		const b = w.node('b');
+		const control = standby(b.lease, 'b', { now: () => w.now });
+		await control.start();
+		await control.tick();
+		const promoted = await control.promoteNow(undefined, { breakGlass: true });
+		expect(promoted).toMatchObject({ role: 'primary', epoch: 3 });
+	});
+
+	test('a host with no enrolment record never wins a term', async () => {
+		const w = world();
+		const a = w.node('a');
+		await a.lease.bootstrap(1);
+		const b = w.node('b');
+		const control = standby(b.lease, 'b', { roleHint: 'primary', enrolled: false, now: () => w.now });
+		await control.start();
+		await control.tick();
+		w.advance(CONTROL_STANDBY_TIMERS.takeoverQuietMs + 1_000);
+		await control.tick();
+		expect(control.snapshot().role).toBe('standby');
+		const refused = await control.promoteNow();
+		expect(refused.role).toBe('standby');
+		expect(refused.reason).toContain('no enrolment record');
+	});
+
+	test('an enrolled node whose hint still says primary can take over (no static role gate)', async () => {
+		const w = world();
+		const a = w.node('a');
+		const b = w.node('b');
+		await b.lease.bootstrap(3);
+		const controlA = standby(a.lease, 'a', { roleHint: 'primary', enrolled: true, now: () => w.now });
+		await controlA.start();
+		await controlA.tick();
+		expect(controlA.snapshot().role).toBe('standby');
+		w.advance(CONTROL_STANDBY_TIMERS.takeoverQuietMs + 1_000);
+		await controlA.tick();
+		expect(controlA.snapshot()).toMatchObject({ role: 'primary', epoch: 4 });
+	});
+
+	test('a standby with an unreachable arbiter becomes unavailable after one TTL and recovers on success', async () => {
+		const w = world();
+		const a = w.node('a');
+		await a.lease.bootstrap(2);
+		const b = w.node('b');
+		const control = standby(b.lease, 'b', { now: () => w.now });
+		await control.start();
+		await control.tick();
+		expect(control.snapshot().role).toBe('standby');
+
+		b.view.partitioned = true;
+		for (let elapsed = 1_000; elapsed <= 31_000; elapsed += 1_000) {
+			w.advance(1_000);
+			await control.tick();
+		}
+		expect(control.snapshot().role).toBe('unavailable');
+		expect(control.readyz().status).toBe(503);
+		expect(control.readyz().body.ok).toBe(false);
+
+		b.view.partitioned = false;
+		await control.tick();
+		expect(control.snapshot().role).toBe('standby');
 	});
 
 	test('fenced/standby write gates refuse writes and allow reads', async () => {

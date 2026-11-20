@@ -18,6 +18,9 @@ export const GET: RequestHandler = async () => {
 	const report = await core.upgrades.readyz();
 	const ha = core.controlPlane.readyz();
 	if (!ha) return json(report, report.ok ? 200 : 503, { 'cache-control': 'no-store' });
-	const body = { ...report, ...ha.body };
-	return json(body, report.ok && ha.status === 200 ? 200 : 503, { 'cache-control': 'no-store' });
+	const status = report.ok && ha.status === 200 ? 200 : 503;
+	// `ok` must agree with the status line: a 503 body with ok:true would let a caller that reads
+	// only the body treat a fenced/joining control plane as healthy.
+	const body = { ...report, ...ha.body, ok: status === 200 };
+	return json(body, status, { 'cache-control': 'no-store' });
 };
