@@ -447,3 +447,18 @@ describe('spread precedence: app over project over cluster (reviewer item 6)', (
 		expect(resolvedSpread(null, {}, 'node')).toBe('node');
 	});
 });
+
+describe('trust in mixed versions (reviewer item 7)', () => {
+	test('install-ca only when the provider and every allowed consumer advertise endpoints-gateway', async () => {
+		const { endpointTrustMode } = await import('./index.ts');
+		const capable = { capabilities: ['jobs', 'endpoints-gateway'] };
+		const old = { capabilities: ['jobs'] };
+		expect(endpointTrustMode(capable, [capable, capable])).toBe('install-ca');
+		expect(endpointTrustMode(capable, [capable, old])).toBe('pinned');
+		expect(endpointTrustMode(old, [capable])).toBe('pinned');
+		expect(endpointTrustMode(capable, [{ capabilities: [] }])).toBe('pinned');
+		// No consumer yet: nothing to be incompatible with.
+		expect(endpointTrustMode(capable, [])).toBe('install-ca');
+		expect(endpointTrustMode(old, [])).toBe('pinned');
+	});
+});

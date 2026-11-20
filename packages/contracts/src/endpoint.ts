@@ -57,6 +57,23 @@ export const gatewayAddressSchema = z.ipv4();
 export const endpointTrustModes = ['pinned', 'install-ca'] as const;
 export type EndpointTrustMode = (typeof endpointTrustModes)[number];
 
+/**
+ * The trust mode for one provider listener and the consumers it allows, in a mixed-version fleet.
+ * `install-ca` only when the provider **and every node in its `allowedClientNodeIds`** advertise
+ * `endpoints-gateway`; otherwise both sides stay `pinned` (fingerprints, as in C2). A provider
+ * takes one client-auth mode per listener, so a single older consumer keeps the whole listener
+ * pinned; every consumer endpoint of that provider uses the provider's mode as its `trust`. Lane B
+ * calls this when it renders `serviceProviders[].clientAuth` and `serviceEndpoints[].trust`; the
+ * pinned fingerprints are rendered in both modes, so a downgrade needs no re-pinning.
+ */
+export function endpointTrustMode(
+	provider: { capabilities: readonly string[] },
+	consumers: readonly { capabilities: readonly string[] }[],
+): EndpointTrustMode {
+	const capable = (node: { capabilities: readonly string[] }) => node.capabilities.includes(ENDPOINTS_GATEWAY_CAPABILITY);
+	return capable(provider) && consumers.every(capable) ? 'install-ca' : 'pinned';
+}
+
 export const serviceEndpointSchema = z.object({
 	id: z.string().min(1).max(100),
 	kind: z.enum(serviceKinds),
@@ -81,7 +98,7 @@ export const serviceEndpointSchema = z.object({
 	 * container reaches the endpoint as `db-<id>:<localPort>` through its `AddHost` entry.
 	 */
 	gatewayAddress: gatewayAddressSchema.optional(),
-	/** `endpoints-gateway` only. Absent means `pinned`. */
+	/** `endpoints-gateway` only. Absent means `pinned`. Always the provider's mode (`endpointTrustMode`). */
 	trust: z.enum(endpointTrustModes).optional(),
 	/**
 	 * `endpoints-gateway` only: bumps on every re-point of the upstream (CLUSTERING §13.5), so the
@@ -165,7 +182,9 @@ export const serviceProviderSchema = z.object({
 	 * `endpoints-gateway` only. Absent means `pinned` (the fingerprints above). With `install-ca` the
 	 * listener requires a client certificate that chains to `nodeTrust.caBundlePem`, is not in
 	 * `nodeTrust.revokedSerials`, and names one of `allowedClientNodeIds`; nftables still allows
-	 * only those consumers' overlay addresses (CLUSTERING §4.3).
+	 * only those consumers' overlay addresses (CLUSTERING §4.3). Set it to `install-ca` only when
+	 * `endpointTrustMode` says so: the provider and every allowed consumer advertise
+	 * `endpoints-gateway`. Keep `allowedClientFingerprints` filled either way.
 	 */
 	clientAuth: z.enum(endpointTrustModes).optional(),
 	allowedClientNodeIds: z.array(z.string().min(1).max(100)).max(64).optional(),
