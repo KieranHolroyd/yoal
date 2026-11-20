@@ -131,7 +131,7 @@ export function applyIngressPrototype(config: Record<string, any>, options: Ingr
 
 // ---- lab-only pieces below: sites, instrumentation, TLS without ACME ---------------------------
 
-function site(host: string, extra: Partial<SiteCompileInput>): SiteCompileInput {
+export function site(host: string, extra: Partial<SiteCompileInput>): SiteCompileInput {
 	return {
 		host,
 		projectId: host.split('.')[0]!,
@@ -146,7 +146,7 @@ function site(host: string, extra: Partial<SiteCompileInput>): SiteCompileInput 
 }
 
 /** Echoes what each matcher family would read; a lab route, not part of the prototype. */
-function whoamiRoute(node: string): CaddyRoute {
+export function whoamiRoute(node: string): CaddyRoute {
 	return {
 		'@id': 'lab-whoami',
 		match: [{ host: [`whoami.${LAB.domain}`] }],
@@ -163,7 +163,7 @@ function whoamiRoute(node: string): CaddyRoute {
 }
 
 /** The same allowlist as today's Kubernetes route, but matching the resolved client address. */
-function clientIpAllowRoute(allow: string[]): CaddyRoute {
+export function clientIpAllowRoute(allow: string[]): CaddyRoute {
 	return {
 		'@id': 'lab-allow-client-ip',
 		match: [{ host: [`allowci.${LAB.domain}`] }],

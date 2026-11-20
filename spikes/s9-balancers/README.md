@@ -227,9 +227,69 @@ private network, `use_private_ip`), does a Yoal ingress set meet the S9 targets?
 Per HA-PLAN §4 W2: the Hetzner LB is documented as unsupported for the failed property (for
 criterion 4, recorded against the plan's choice already raised by the local half).
 
-### Cloud run status (2026-11-20)
+### Cloud rig (2026-11-20)
 
-Stopped at the safety inventory: the supplied token's project holds the owner's servers (`plausible`,
-`edge-b`), so nothing was created and nothing spent. `cloud/hcloud.ts inventory` is the guard every
-future cloud run starts with; it needs a token for a dedicated, otherwise empty project. See
-docs/SPIKES.md, "S9 (cloud)".
+Results: docs/SPIKES.md, "S9 (cloud): Hetzner Load Balancer". One command, with a token for a dedicated
+Hetzner project that holds nothing else:
+
+```sh
+HCLOUD_TOKEN=... spikes/s9-balancers/cloud/run-cloud.sh          # or name steps: deploy lb address kill ...
+```
+
+- `cloud/hcloud.ts`: API client; `inventory` refuses any project holding a resource not named
+  `yoal-w0*` (or edge-b's address); writes only to resources labelled `yoal-w0=s9`; the token is
+  never printed and is scrubbed from errors.
+- `cloud/infra.ts`: `up` (inventory, live prices, abort over €2, fresh SSH key, network, 3 servers
+  of the cheapest Debian 13 type, LB11, a detached 2.5 h teardown watchdog), `down` (deletes only
+  labelled resources, then proves none remain), `cost` (ledger of lifetimes × live prices).
+- `cloud/scenarios-cloud.ts`: deploys the pinned Caddy (`cloud/build-caddy.sh`, linux/amd64, same pins
+  as the image) and the rig's `app.ts`, configures the LB, runs the criteria. `cloud/render-cloud.ts`
+  renders the same `applyIngressPrototype()` JSON with cloud addresses, plus `lab_l7`, a plain-HTTP copy
+  of the content server for Hetzner's `http` service. `cloud/probe-cloud.ts` is criterion 3 from this Mac.
+- `run-cloud.sh` traps EXIT/INT/TERM/HUP and runs `infra.ts down`; it leaves `tmp/cloud/out/` (results,
+  per-request logs, cost) and nothing in the project.
+
+### Recipe sketch: Hetzner Load Balancer (tested)
+
+The API calls the rig makes (`cloud/infra.ts`, `cloud/scenarios-cloud.ts`); same location and network
+zone as the ingress nodes, LB on the private network at a fixed address:
+
+```jsonc
+POST /load_balancers  { "load_balancer_type": "lb11", "location": "hel1", "algorithm": { "type": "least_connections" } }
+POST /load_balancers/{id}/actions/attach_to_network  { "network": <id>, "ip": "10.0.1.5" }
+POST /load_balancers/{id}/actions/add_service {
+  "protocol": "tcp", "listen_port": 443, "destination_port": 443, "proxyprotocol": true,
+  "health_check": { "protocol": "http", "port": 8099, "interval": 3, "timeout": 1, "retries": 1,   // API minimums
+                    "http": { "path": "/.well-known/yoal/health", "status_codes": ["200"], "tls": false } } }
+POST /load_balancers/{id}/actions/add_target  { "type": "server", "server": { "id": <ingress> }, "use_private_ip": true }
+```
+
+The API refuses `interval` < 3 ("Must be between 3 and 60") and `retries` < 1 ("between 1 and 5");
+`timeout` 1 is accepted.
+
+```yaml
+ingress: { proxyProtocol: v2, trustedProxies: [10.0.1.5/32] }   # the LB's private address, nothing else
+```
+
+- Probes and proxied connections both come from the LB's **private** address; probes carry **no**
+  PROXY header and send `Host: <LB public IPv4>`; that is why the health route answers any Host.
+- `--proxy-protocol` sends v2 (Caddy's wrapper reads it); a client cannot smuggle its own header
+  through a `tcp` service (the TLS handshake breaks).
+- An `http` service (L7) keeps client keep-alives across Caddy reloads but needs a plain-HTTP target
+  port (it cannot re-encrypt to 443) and puts the LB's address in `remote_ip`: allowlists must match
+  `client_ip`. Not recommended as the default (see SPIKES.md: one 502 per reload in some runs; a
+  burst of 1,000 concurrent requests overwhelms LB11 L7).
+- Untested: a Cloud Firewall that closes the nodes' public 443/8099 (recommended: only the private
+  network reaches them), targets on public addresses, IPv6, TLS termination on the LB.
+
+### Cloud deviations
+
+- Server type: `cpx02` (1 vCPU, 1 GB, hel1), the cheapest Debian 13 type by live price; Caddy built
+  with Go on the Mac (`GOOS=linux GOARCH=amd64`, same pins and `GOTOOLCHAIN=auto`), not on the server.
+- Each node runs its own upstream app on loopback (the local half used two separate app containers),
+  so a killed node takes its app with it.
+- `load.ts` gained `--verify-spread` (default 0 = unchanged): the cloud reload runs spread the final
+  1,000 verify requests over 5 s, because a burst of 1,000 through the L7 service times out with or
+  without a reload (measured; reported).
+- Two runs: an interactive run (run 1, steps one at a time, same infrastructure) and one end-to-end
+  `run-cloud.sh` run (run 2). Numbers are pooled and labelled.

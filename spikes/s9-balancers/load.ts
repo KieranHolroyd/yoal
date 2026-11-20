@@ -31,6 +31,8 @@ const { values: args } = parseArgs({
 		newrps: { type: 'string', default: '20' },
 		out: { type: 'string', default: '/out/load.jsonl' },
 		timeout: { type: 'string', default: '5000' },
+		/** hold mode: spread the final verify requests over this many ms (0 = all at once). */
+		'verify-spread': { type: 'string', default: '0' },
 	},
 });
 
@@ -290,7 +292,13 @@ async function hold() {
 
 	// Verify: every held connection that is still open sends one more request.
 	const alive = held.filter((c) => !c.closed);
-	const verify = await Promise.all(alive.map((c) => c.request(args.path!)));
+	const spread = Number(args['verify-spread']);
+	const verify = await Promise.all(
+		alive.map(async (c, i) => {
+			if (spread > 0) await Bun.sleep((spread * i) / alive.length);
+			return c.closed ? { ok: false, err: 'closed-before-verify', ms: 0 } : c.request(args.path!);
+		}),
+	);
 	for (const [i, r] of verify.entries()) record('verify', alive[i]!.id, r);
 	for (const c of held) c.sock.destroy();
 	return { held: held.length, openFailures, drops: drops.length, dropsInflight: drops.filter((d) => d.inflight).length, aliveAtEnd: alive.length, firstDrop: drops[0]?.t, lastDrop: drops.at(-1)?.t };

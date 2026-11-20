@@ -72,11 +72,10 @@ export async function inventory(): Promise<{ safe: boolean; report: Record<strin
 	for (const collection of ['servers', 'load_balancers', 'networks', 'firewalls', 'ssh_keys']) {
 		const items = await list<any>(collection);
 		report[collection] = { count: items.length, names: items.map((i) => i.name) };
-		if (collection === 'servers') {
-			for (const s of items) {
-				const ip = s.public_net?.ipv4?.ip;
-				if (ip === FORBIDDEN_IPV4 || s.name === 'edge-b' || s.name === 'edge' || !String(s.name).startsWith('yoal-w0')) safe = false;
-			}
+		// Any resource of any kind not named `yoal-w0*` means this is not a throwaway project.
+		for (const r of items) {
+			const ip = r.public_net?.ipv4?.ip;
+			if (ip === FORBIDDEN_IPV4 || ['edge-b', 'edge', 'plausible'].includes(r.name) || !String(r.name).startsWith('yoal-w0')) safe = false;
 		}
 	}
 	return { safe, report };
