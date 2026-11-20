@@ -74,6 +74,8 @@ export const nodes = sqliteTable(
 		diskInventoryJson: text('volume_inventory_json'),
 		/** Capabilities from the last heartbeat (JSON array); `[]` for agents that predate them. */
 		capabilitiesJson: text('capabilities_json'),
+		/** The fleet certificate fingerprint the agent last reported (HA-PLAN H20, 0124). */
+		certificateFingerprint: text('certificate_fingerprint'),
 		/** Outstanding dashboard update target (D99); NULL when none is pending. */
 		updateVersion: text('update_version'),
 		/** Bumped on every update request, so a retry is a new task. */
@@ -3237,6 +3239,8 @@ export const ingressCertificates = sqliteTable(
 		notAfter: integer('not_after').notNull(),
 		renewedAt: integer('renewed_at'),
 		revokedAt: integer('revoked_at'),
+		/** Set when an ingress left the fleet (0124); the next sweep renews the host. */
+		reissueRequestedAt: integer('reissue_requested_at'),
 		createdAt: integer('created_at').notNull(),
 	},
 	(t) => [

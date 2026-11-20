@@ -60,7 +60,7 @@ export class IngressSetService {
 					status: node.status,
 					first: node.id === (this.ctx.config.edgeNodeId ?? null) || this.isFirst(node.id),
 					capable: this.capable(node.id),
-					certificateFingerprint: null,
+					certificateFingerprint: this.ctx.certificates.reportedFingerprint(node.id),
 				})),
 			settings,
 			steering: { kind: 'direct', stacked: [] },
@@ -94,15 +94,14 @@ export class SteeringService {
 }
 
 /**
- * Shared certificates (HA-PLAN H20, Wave 2 lane B). The tables are reserved by 0122; nothing writes
- * them while `SHARED_CERTIFICATES` is off, and a single-node install keeps its per-node issuance.
+ * Shared certificates (HA-PLAN H20, W7). Implemented in `certificates/service.ts`; re-exported here
+ * because the foundation's context and `createCore` name this module.
  */
-export class CertificateService {
-	constructor(private readonly ctx: CoreContext) {}
-
-	/** The fleet fingerprint a node reports in its heartbeat; null until the flag is on. */
-	fingerprint(): string | null {
-		if (!featureEnabled(this.ctx.config, 'SHARED_CERTIFICATES')) return null;
-		throw new Error('not implemented (HA Wave 2 lane B): shared certificate fingerprint');
-	}
-}
+export {
+	CertificateService,
+	type CertificateAlert,
+	type CertificateListView,
+	type CertificateRenewalReport,
+	type CertificateSweepReport,
+	type ClaimedLease,
+} from './certificates/service.ts';

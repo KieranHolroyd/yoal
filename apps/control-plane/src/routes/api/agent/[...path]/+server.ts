@@ -4,6 +4,7 @@ import {
 	agentJobHeartbeatSchema,
 	agentJobResultSchema,
 	agentNodeTaskResultSchema,
+	certificateUploadSchema,
 	heartbeatSchema,
 	mailEventsBatchSchema,
 	mailOutboxAckSchema,
@@ -84,6 +85,23 @@ const handler: RequestHandler = async (event) => {
 			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
 			const node = core.nodes.authenticate(token);
 			return core.workloads.activationFor(node.id, activation[1]!);
+		}
+
+		// Shared certificates (HA-PLAN H20, W7). An ingress fetches the pairs it serves; the holder
+		// uploads the pair its issuer produced. Both are node-authenticated, and the private key
+		// travels only here — never in desired state, logs or an audit argument. With the flag off
+		// the activation is empty, so the agent keeps today's per-node issuance.
+		if (action === 'certificates/activation') {
+			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+			const node = core.nodes.authenticate(token);
+			return json(core.certificates.distribute(node.id), 200, { 'cache-control': 'no-store' });
+		}
+
+		if (action === 'certificates/upload') {
+			if (method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
+			const input = await readJson(request, certificateUploadSchema);
+			const node = core.nodes.authenticate(token);
+			return core.certificates.ingest(node.id, input);
 		}
 
 		// Kubernetes manifests (docs/KUBERNETES.md K9, K12, K19): RBAC, access-key bindings and

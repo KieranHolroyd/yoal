@@ -283,6 +283,9 @@ describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () =
 		const names = tables(sqlite);
 		for (const table of ['node_ca', 'node_ca_certificates', 'release_command_runs', 'deployment_canaries']) expect(names.has(table)).toBe(true);
 		expect(columns(sqlite, 'backup_targets')).toEqual(expect.arrayContaining(['store_kind', 'store_options_json', 'immutable_retention_days']));
+		// W7 certificates (0123): a durable reissue request and the fingerprint each node reports.
+		expect(columns(sqlite, 'ingress_certificates')).toContain('reissue_requested_at');
+		expect(columns(sqlite, 'nodes')).toContain('certificate_fingerprint');
 		expect(migrate(sqlite)).toEqual([]);
 		sqlite.close();
 	});
@@ -305,7 +308,11 @@ describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () =
 			 VALUES ('bt_local', 'org_1', 'local-main', 'local', '/var/lib/yoal/backups', 1, 1)`,
 		);
 
-		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql']);
+		expect(migrate(sqlite)).toEqual([
+			...wave1,
+			'0122_ingress_certificates.sql',
+			'0123_ingress_certificate_state.sql',
+		]);
 
 		const rows = sqlite
 			.query<{ id: string; kind: string; store_kind: string | null; store_options_json: string; object_lock: number; immutable_retention_days: number | null; secret_sealed: string | null }, []>(

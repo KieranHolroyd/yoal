@@ -520,6 +520,13 @@ export const heartbeatSchema = z.object({
 	 * due to renew. The key pair is generated on the node; only the request travels.
 	 */
 	nodeCsr: nodeCsrSchema.optional(),
+	/**
+	 * The fleet certificate fingerprint this ingress serves (HA-PLAN H20, W7), from
+	 * `certificateFleetFingerprint` over its delivered certificates. Every ingress reports the same
+	 * value when distribution is healthy; a mismatch is what the preflight and dashboard compare.
+	 * Null with `SHARED_CERTIFICATES` off, so a single-node install is unchanged.
+	 */
+	certificateFingerprint: z.string().max(128).nullable().optional(),
 	/** Progress and outcomes of `releaseCommands` since the last heartbeat (HA-PLAN H25). */
 	releaseCommandResults: z.array(releaseCommandResultSchema).max(20).optional(),
 	/**

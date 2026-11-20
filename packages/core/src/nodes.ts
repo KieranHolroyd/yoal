@@ -1,6 +1,6 @@
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { featureFlagsForGate, gateDesiredState, nodeHasCapability } from './capability-gate';
-import { ingressNodeIds, isIngressNode } from './ingress.ts';
+import { ingressNodeIds, isIngressNode, nodeRoles } from './ingress.ts';
 import { featureEnabled } from './config.ts';
 import {
 	appVolumes,
@@ -538,6 +538,10 @@ export class NodeService {
 			})
 			.where(eq(nodes.id, node.id))
 			.run();
+		// The fleet certificate fingerprint this ingress serves (HA-PLAN H20, W7). Ignored while
+		// `SHARED_CERTIFICATES` is off, so the single-node install reports nothing new.
+		if (input.certificateFingerprint !== undefined)
+			this.ctx.certificates.report(node.id, input.certificateFingerprint);
 		// Every peer's desired state now carries this node's key.
 		if (adoptedKey) this.bump();
 		if (input.workloads?.length) {
@@ -734,6 +738,8 @@ export class NodeService {
 			result: 'ok',
 		});
 		this.bump();
+		// The old edge leaves the ingress set, and its copy of the wildcard key must be replaced.
+		if (previous) this.ctx.certificates.onIngressRemoved(previous.id);
 		return this.view({ ...target, mode: 'edge', updatedAt: now });
 	}
 
@@ -815,6 +821,7 @@ export class NodeService {
 		}
 
 		const changes: Partial<typeof nodesTable.$inferInsert> = {};
+		let removedRoles: NodeRole[] = [];
 		if (patch.name !== undefined && patch.name !== node.name) changes.name = patch.name;
 		if (patch.publicAddress !== undefined) {
 			const address = patch.publicAddress || null;
@@ -830,6 +837,7 @@ export class NodeService {
 			const next = [...new Set(patch.roles)] as NodeRole[];
 			const removed = rolesFor(node).filter((role) => !next.includes(role));
 			if (removed.length) this.assertRolesRemovable(node, removed);
+			removedRoles = removed;
 			if (JSON.stringify(next) !== node.rolesJson) changes.rolesJson = JSON.stringify(next);
 		}
 		if (patch.labels !== undefined) {
@@ -873,6 +881,9 @@ export class NodeService {
 		});
 		// Address, slice and storage changes all reach agents through desired state.
 		this.bump();
+		// Removing the ingress role takes the key away with the payload, but not from the machine:
+		// every ACME certificate is reissued (HA-PLAN H20, CLUSTERING §7.3 "Key security").
+		if (removedRoles.includes('ingress')) this.ctx.certificates.onIngressRemoved(nodeId);
 		return this.view({ ...node, ...changes, updatedAt: now });
 	}
 
@@ -1008,6 +1019,12 @@ export class NodeService {
 				`"${node.name}" still hosts ${blockers.join('; ')}. Move or delete them first.`,
 			);
 
+		// Before the row goes: if it terminated ingress, certificates it held are reissued. The call
+		// is a no-op while `SHARED_CERTIFICATES` is off or no certificate exists.
+		const terminatedIngress =
+			isIngressNode(nodeId, ingressNodeIds(allNodes, this.ctx.config.edgeNodeId ?? null)) ||
+			nodeRoles(node).includes('ingress');
+		if (terminatedIngress) this.ctx.certificates.onIngressRemoved(nodeId);
 		let requeuedBuilds = 0;
 		this.ctx.db.transaction(() => {
 			requeuedBuilds = this.ctx.builds.releaseNodeClaims(nodeId);

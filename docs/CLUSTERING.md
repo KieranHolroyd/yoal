@@ -1369,15 +1369,32 @@ multiply the duplicate risk and the key copies.
 - **ACME lease.** `yoal/ha/acme-lease.json` in the platform object store, separate from the control
   lease: `{holderNodeId, expiresAt, generation}`, 600 s TTL renewed every 120 s. Only the holder
   runs the ACME issuer; if it dies another ingress takes the lease. Renewal starts 30 days before
-  expiry and retries every 6 h, so a slow issuance does not lose the lease.
-- **Custody.** After issuance the holder's agent copies the PEM pair out of Caddy's storage and
-  uploads it over the node-authenticated agent API, as database credentials do. The control plane
-  seals it with the master key (D18) and bumps `ingressCertificates.generation`; certificates never
-  enter desired state, logs or audit arguments.
+  expiry and retries every 6 h, so a slow issuance does not lose the lease. (S4 moved the issuer
+  from Caddy to the control plane — O1 below — so the lease now elects the ingress through which
+  the control-plane issuer answers: the relay target and the uploader.)
+- **Custody.** S4 chose the control-plane issuer over Caddy as the holder: `lego` performs one order
+  per name set, and its pair is uploaded over the node-authenticated agent API, as database
+  credentials are. The control plane seals it with the master key (D18) and bumps the certificate
+  generation; the sealed column is not selected by a view, and certificates never enter desired
+  state, logs or audit arguments.
 - **Distribution.** Other ingresses fetch the pair from the node-authenticated activation endpoint on
-  start, when the generation changes and every 6 h; the agent writes it 0640 root:caddy and loads it
-  from file (`certificates.load_files`; `load_pem` in Caddyfile terms) with no ACME issuer. On
-  success every ingress reloads and reports the new fingerprint.
+  start, after a desired-state bump and every 6 h. The agent serves it to Caddy through the standard
+  `get_certificate http` manager at handshake time, so a renewal swaps the certificate with **no
+  config reload and no dropped keep-alive connection** (S4 `B-hot`; `certificates.load_files` plus
+  `POST /load` closed every idle connection and failed S4 criterion 3). The manager policy carries a
+  dead-end issuer, because a policy with a manager and no issuer silently falls back to public CAs.
+  On success every ingress reports the same fingerprint in its heartbeat.
+- **Bring your own.** An operator uploads a PEM pair per hostname (or references a sealed one). It is
+  distributed exactly like an issued certificate, is **never renewed** by Yoal, and alerts at 30, 14
+  and 3 days before expiry. Reissue requests and ingress removal skip it; the key is the operator's.
+- **DNS-01 providers.** One provider interface (`present`, `cleanup`, `sweep`); `cloudflare` ships,
+  `azure-dns`, `route53` and `rfc2136` fill the same interface. Cleanup throws rather than returning
+  success on an API failure, and a sweep removes stale `_acme-challenge` TXT records after an
+  incident (S4's Cloudflare run leaked them silently).
+- **HTTP-01 relay.** While a host's lease is live, every other ingress renders one terminal route for
+  `/.well-known/acme-challenge/*` on that host, proxying to the holder's overlay address. The relay
+  is what makes a challenge that lands on the wrong node succeed; without it S4's orders were
+  invalid on every attempt.
 - **Failure handling.** A dead holder costs one lease TTL, not the certificate. A follower that
   cannot fetch keeps its last file and shows a fingerprint mismatch. A control plane down for longer
   than the certificate lifetime cannot be repaired here, and that outage is out of scope.

@@ -205,6 +205,48 @@ describe('buildCaddyConfig', () => {
 		expect(JSON.stringify(issuer)).toContain('cf-token');
 	});
 
+	test('shared certificates replace per-node issuance with get_certificate and add the relay', () => {
+		const tls = { email: 'ops@example.com', cloudflareApiToken: 'cf-token', subjects: ['*.example.com', 'example.com'] };
+		const withShared = buildCaddyConfig({
+			state: state(),
+			listen: [':443'],
+			dataDir: '/data',
+			agentSocket: '/run/yoal-agent/agent.sock',
+			caddyAdminSocket: '/var/lib/caddy/admin.sock',
+			tls,
+			certificateManager: { url: 'http://127.0.0.1:2020/pair?token=t', subjects: ['*.example.com', 'example.com', 'public.example.com'] },
+			acmeRelays: [{ host: 'public.example.com', upstream: 'http://10.47.0.2:8089' }],
+		});
+		const policies = (((withShared.apps as Json).tls as Json).automation as Json).policies as Json[];
+		// First match wins: the manager comes before the ACME policy compiled from `tls.subjects`.
+		expect(policies[0]).toEqual({
+			subjects: ['*.example.com', 'example.com', 'public.example.com'],
+			get_certificate: [{ via: 'http', url: 'http://127.0.0.1:2020/pair?token=t' }],
+			// A dead-end issuer: a manager supplies the pair, and a failure must never reach a public CA.
+			issuers: [{ module: 'acme', ca: 'https://127.0.0.1:9/no-issuance-here' }],
+		});
+		expect(policies[1]!.get_certificate).toBeUndefined();
+
+		const relay = routes(withShared)[0]!;
+		expect(relay['@id']).toBe('acme-relay:public.example.com');
+		expect(relay.terminal).toBe(true);
+		expect(relay.match).toEqual([{ host: ['public.example.com'], path: ['/.well-known/acme-challenge/*'] }]);
+		const proxy = (relay.handle as Json[])[0]!;
+		expect(proxy).toMatchObject({ handler: 'reverse_proxy', upstreams: [{ dial: '10.47.0.2:8089' }] });
+
+		// Flag off: no manager, no relay, exactly the config compiled before this lane.
+		const plain = buildCaddyConfig({
+			state: state(),
+			listen: [':443'],
+			dataDir: '/data',
+			agentSocket: '/run/yoal-agent/agent.sock',
+			caddyAdminSocket: '/var/lib/caddy/admin.sock',
+			tls: { ...tls },
+		});
+		expect(JSON.stringify(plain)).not.toContain('get_certificate');
+		expect(JSON.stringify(plain)).not.toContain('acme-relay:');
+	});
+
 	test('builds wildcard and apex TLS subjects', () => {
 		expect(tlsSubjects('Example.COM.')).toEqual(['*.example.com', 'example.com']);
 		expect(() => tlsSubjects('bad domain')).toThrow(/Invalid content domain/);

@@ -85,6 +85,11 @@ export interface CoreConfig {
 	studioPort?: number;
 	/** Loopback port of each node's container console front (D127, `YOAL_CONTAINER_CONSOLE_PORT`). */
 	containerConsolePort?: number;
+	/**
+	 * The overlay port the ACME lease holder answers HTTP-01 challenges on, where every other
+	 * ingress relays (HA-PLAN H20, W7). Default 8089 (`YOAL_ACME_CHALLENGE_PORT`).
+	 */
+	acmeChallengePort?: number;
 	/** Largest object a single dashboard/API upload may send, in bytes (default 100 MiB). */
 	storageObjectMaxBytes?: number;
 	/** Injected S3 transport for tests; production uses the global fetch. */
@@ -145,6 +150,7 @@ export function coreConfigFromEnv(
 		studioPort: overrides.studioPort ?? positiveInteger(env.YOAL_STUDIO_PORT, STUDIO_DEFAULT_PORT),
 		containerConsolePort:
 			overrides.containerConsolePort ?? positiveInteger(env.YOAL_CONTAINER_CONSOLE_PORT, CONTAINER_CONSOLE_DEFAULT_PORT),
+		acmeChallengePort: overrides.acmeChallengePort ?? positiveInteger(env.YOAL_ACME_CHALLENGE_PORT, 8089),
 		storageObjectMaxBytes:
 			overrides.storageObjectMaxBytes ?? positiveInteger(env.YOAL_STORAGE_OBJECT_MAX_BYTES, 104_857_600),
 		features: overrides.features ?? parseFeatureFlags(env),

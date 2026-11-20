@@ -55,6 +55,13 @@ export interface MaintenanceReport {
 	iamKeys?: {
 		actions: IamKeyRotationAction[];
 	};
+	/** Shared certificates (W7); null while `SHARED_CERTIFICATES` is off. */
+	certificates?: {
+		due: string[];
+		renewed: string[];
+		expiredLeases: number;
+		skipped: string | null;
+	} | null;
 }
 
 /**
@@ -218,6 +225,33 @@ export class MaintenanceService {
 
 		alertsFired.push(...(await this.promoteSpikeAlerts()));
 
+		// Shared certificates (HA-PLAN H20, W7): expire leases, alert on brought certificates at
+		// 30/14/3 days, and let the issuer renew what is due. Both calls are no-ops with the flag off.
+		const certificates = this.ctx.certificates.sweep();
+		for (const alert of certificates.alerts) {
+			alertsFired.push(alert.key);
+			await this.notify(alert);
+		}
+		let certificateRenewal: MaintenanceReport['certificates'] = certificates.skipped
+			? null
+			: { due: certificates.due, renewed: [], expiredLeases: certificates.expiredLeases.length, skipped: null };
+		// A flag-on fleet with no rows yet has nothing for the sweep to renew; seed the wanted hosts.
+		const wanted = this.ctx.certificates.bootstrap();
+		if (certificates.due.length > 0 || wanted.length > 0) {
+			const renewal = await this.ctx.certificates.renewDue().catch((error: unknown) => {
+				console.error('[maintenance] certificate renewal failed:', error);
+				return null;
+			});
+			if (renewal?.errors.length)
+				console.error('[maintenance] certificate renewal errors:', renewal.errors);
+			certificateRenewal = {
+				due: [...new Set([...certificates.due, ...wanted])].sort(),
+				renewed: renewal?.renewed ?? [],
+				expiredLeases: certificates.expiredLeases.length,
+				skipped: renewal?.skipped ?? null,
+			};
+		}
+
 		let telemetry: MaintenanceReport['telemetry'];
 		if (this.ctx.telemetry && (await this.ctx.telemetry.ready())) {
 			try {
@@ -239,6 +273,7 @@ export class MaintenanceService {
 			telemetry,
 			iam,
 			iamKeys,
+			certificates: certificateRenewal,
 		};
 	}
 
