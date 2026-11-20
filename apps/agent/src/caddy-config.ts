@@ -824,7 +824,6 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 			drainSeconds: options.ingress.drainSeconds,
 		});
 		// Probes are not requests to a site: keep them out of the 1-minute analytics buckets.
-		if (server.logs) (server.logs as Record<string, unknown>).skip_uris = [INGRESS_HEALTH_PATH];
 	}
 
 	// Preserve the unix-socket admin endpoint when replacing the config; a full /load without it

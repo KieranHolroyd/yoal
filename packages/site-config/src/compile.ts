@@ -533,6 +533,8 @@ export function compileIngressHealthRoute(server: string, healthDir: string): Ca
 		match: [{ path: [INGRESS_HEALTH_PATH] }],
 		terminal: true,
 		handle: [
+			// Probes are not traffic: keep them out of the access log's analytics buckets.
+			{ handler: 'vars', log_skip: true },
 			{
 				handler: 'subroute',
 				routes: [
@@ -598,7 +600,7 @@ function trustedProxyConfig(options: IngressProtectionOptions): Record<string, u
 	return {
 		trusted_proxies: { source: 'static', ranges: assertTrustedProxies(options.trustedProxies) },
 		client_ip_headers: ['X-Forwarded-For'],
-		trusted_proxies_strict: true,
+		trusted_proxies_strict: 1,
 	};
 }
 

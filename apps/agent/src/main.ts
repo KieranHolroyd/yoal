@@ -22,6 +22,7 @@ import {
 	type VolumeInventory,
 	type WireguardStatus,
 	type WorkloadActivation,
+	INGRESS_SET_CAPABILITY,
 } from '@yoal/contracts';
 import type { TlsOptions } from '@yoal/site-config';
 import { startAnalyticsSink, type AnalyticsSink } from './analytics-sink.ts';
@@ -985,7 +986,8 @@ class AgentRuntime {
 			// With TLS on, the secure listeners come from YOAL_CADDY_LISTEN and site-config adds the
 			// plain-HTTP redirect server on its :80 entries (H19 "Listen addresses").
 			listen: listen.content,
-			...(listen.http.length > 0 ? { httpListen: listen.http } : {}),
+			// An empty list is meaningful with TLS: the operator asked for no :80 listener.
+			...(tls ? { httpListen: listen.http } : {}),
 			dataDir: this.config.dataDir,
 			agentSocket: this.config.agentSocket,
 			caddyAdminSocket: this.config.caddyAdminSocket,
@@ -1269,7 +1271,17 @@ class AgentRuntime {
 	 * Atomically replace the one state file Caddy stats: write the new word first, then remove the
 	 * others, so a probe never lands in an empty directory and sees an invented reason.
 	 */
-	private async writeIngressHealthWord(word: string | null): Promise<void> {
+	private healthWriteChain: Promise<void> = Promise.resolve();
+
+	/** Serialise word writes and never let a stale `ok` land while the node is draining. */
+	private writeIngressHealthWord(word: string | null): Promise<void> {
+		const effective = word === ingressHealthWords.ok && this.lameDuck.draining ? ingressHealthWords.draining : word;
+		const next = this.healthWriteChain.then(() => this.writeIngressHealthWordNow(effective));
+		this.healthWriteChain = next.catch(() => undefined);
+		return next;
+	}
+
+	private async writeIngressHealthWordNow(word: string | null): Promise<void> {
 		const dir = this.config.ingressHealthDir;
 		await fs.mkdir(dir, { recursive: true, mode: 0o755 }).catch(() => undefined);
 		if (word !== null && word !== this.healthWord) {
@@ -2129,6 +2141,8 @@ export function advertisedCapabilities(
 	// HA-PLAN H24: gateway listeners, AddHost, read endpoints and install-CA trust. The forwarder
 	// and helper verbs ship in this build; the CSR needs openssl, as the C2 identity already does.
 	if (nodeCaAvailable) capabilities.push(ENDPOINTS_GATEWAY_CAPABILITY);
+	// This build serves the full edge payload and the health endpoint (W6/W8).
+	capabilities.push(INGRESS_SET_CAPABILITY);
 	return capabilities;
 }
 

@@ -51,7 +51,7 @@ describe('ingress protection (HA-PLAN H19)', () => {
 
 	test('every answer is one padded word: 200 ok, 503 with the agent\'s reason', () => {
 		const value = config();
-		const subroutes = (serversOf(value).content.routes[0].handle as Json[])[0]!.routes as Json[];
+		const subroutes = (serversOf(value).content.routes[0].handle as Json[]).find((handler) => handler.handler === 'subroute')!.routes as Json[];
 		const answers = subroutes.flatMap((route) => route.handle as Json[]).filter((handler) => handler.handler === 'static_response');
 		const words = ['draining', 'caddy', 'desired-state', 'releases', 'certificates', 'caddy', 'ok'];
 		expect(answers.map((answer) => answer.status_code)).toEqual([503, 503, 503, 503, 503, 503, 200]);
@@ -79,7 +79,7 @@ describe('ingress protection (HA-PLAN H19)', () => {
 				expect(servers[name]).toMatchObject({
 					trusted_proxies: { source: 'static', ranges: ['10.0.0.5/32'] },
 					client_ip_headers: ['X-Forwarded-For'],
-					trusted_proxies_strict: true,
+					trusted_proxies_strict: 1,
 				});
 		}
 	});

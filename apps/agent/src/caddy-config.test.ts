@@ -933,7 +933,10 @@ describe('ingress health, lame duck, PROXY and trusted proxies (HA-PLAN H19)', (
 	test('health probes stay out of the analytics buckets, and healthDir is configurable', () => {
 		const value = ingressConfig({}, { accessLog: '/var/log/caddy/access.log' });
 		const content = (((value.apps as Json).http as Json).servers as Json).content as Json;
-		expect(content.logs).toMatchObject({ skip_uris: ['/.well-known/yoal/health'] });
+		// Caddy has no `skip_uris` field (it rejects the whole config); the health route itself is
+		// marked `log_skip` so probes stay out of the buckets.
+		expect(JSON.stringify(content.logs)).not.toContain('skip_uris');
+		expect(JSON.stringify(value)).toContain('"log_skip":true');
 	});
 	test('a worker (no ingress settings) gets none of the edge config', () => {
 		const value = buildCaddyConfig({
