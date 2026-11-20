@@ -248,7 +248,7 @@ flowchart TD
 | `/var/lib/yoal/data/yoal.db` | The SQLite database. Local objects are in `data/objects`. |
 | `/var/lib/yoal/backups` | Pre-upgrade snapshots. |
 | `/var/lib/yoal/clickhouse` | Telemetry data, with ClickHouse only. Not backed up. |
-| `/etc/caddy/Caddyfile` | Caddy configuration. The installer writes a bootstrap version and the agent replaces it. Your original is kept as `Caddyfile.dist`. |
+| `/etc/caddy/Caddyfile` | Caddy configuration. The installer writes a bootstrap version and the agent replaces it. This happens even when Caddy was already installed, so its admin API is never on TCP. Your original is kept as `Caddyfile.dist`, and the installer prints the backup's path. |
 | `/var/lib/caddy` | Caddy's data, certificates and admin socket. |
 | `/var/log/caddy/yoal-access.log` | Caddy's JSON access log, read by the agent. |
 | `/run/yoal` | Runtime sockets, including `control.sock`. Recreated at boot. |
