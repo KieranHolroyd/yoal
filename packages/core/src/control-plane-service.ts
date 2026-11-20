@@ -151,8 +151,9 @@ export class ControlPlaneService {
 			this.#lastSnapshot = this.#runtime.snapshot();
 			await this.#record();
 		} catch (error) {
-			this.#failure = `control standby tick failed: ${error instanceof Error ? error.message : String(error)}`;
-			console.error('[ha]', this.#failure);
+			// A tick failure is transient (SQLITE_BUSY, a disk write, a provider read). The lease
+			// still decides; the gates read the runtime's own role, so do not wedge the process.
+			console.error('[ha] control standby tick failed:', error instanceof Error ? error.message : error);
 		}
 	}
 
@@ -197,6 +198,12 @@ export class ControlPlaneService {
 		if (!this.enabled()) return true;
 		if (this.#failure || !this.#runtime) return false;
 		return this.#runtime.mayRenewRunLease();
+	}
+
+	/** True only while this node is a confirmed primary (the flag off keeps today's behaviour). */
+	mayActAsPrimary(): boolean {
+		if (!this.enabled()) return true;
+		return this.#runtime?.snapshot().role === 'primary';
 	}
 
 	/** The live snapshot for tests and the HTTP layer; null with the flag off. */
@@ -369,7 +376,6 @@ export class ControlPlaneService {
 				? ({ restored: true, lagSeconds: 0, position: 'primary' } satisfies ControlReplicaState)
 				: await readControlReplicaStatus(
 						this.ctx.config.controlReplicaStatusPath ?? join(this.ctx.config.dataDir, REPLICA_FILE),
-						enrolment?.replica,
 					);
 		const actualKey = masterKeyFingerprint(this.ctx.config.masterKey);
 		const actualConfig = controlConfigDigest(process.env);
