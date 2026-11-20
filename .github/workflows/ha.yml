@@ -3,12 +3,18 @@ name: HA
 # High-availability test lanes (docs/HA-PLAN.md W1 and §7, docs/CLUSTERING.md §19.5).
 #
 #   ha-sim          every PR and main push: the deterministic lease/failover simulation
-#   ha-integration  PRs and main pushes touching HA paths: the four-node nested-container lab
-#                   (tests/lab), the fault verbs and the kill-node-b scenario with the checker
+#   ha-integration  PRs and main pushes touching HA paths: the single-node gate on a one-node lab,
+#                   then the four-node nested-container lab (tests/lab), the fault verbs and the
+#                   kill-node scenario with the checker
+#   ha-chaos        nightly on the self-hosted `yoal-lab` runner: every §7.2 family that has a
+#                   scenario, 20 repetitions each (matrix), plus the Lima VM form's smoke run
+#   ha-soak         weekly 24 h soak on `yoal-lab`; placeholder
+#
+# Scenario exit codes (tests/ha/scenarios/lib/report.ts): pass 0, fail 1, invalid 2, skip 3,
+# error 4. `--accept <verdicts>` turns named verdicts into 0 for a step that is known invalid or
+# skipped on this tree; each such step says why and what removes the `--accept`.
 #
 # Actions are pinned by commit SHA (the tag is in the comment beside each).
-#   ha-chaos        nightly on the self-hosted `yoal-lab` runner (VM lane); placeholder
-#   ha-soak         weekly 24 h soak on `yoal-lab`; placeholder
 #
 # No secrets: the lab is self-contained (its own control plane, MinIO and a throwaway owner).
 # Invariant tests are never retried (CLUSTERING §19.5 flake policy): a second-attempt pass is a fail.
@@ -99,7 +105,7 @@ jobs:
       ((github.event_name == 'pull_request' || github.event_name == 'push') && needs.changes.outputs.ha == 'true') ||
       (github.event_name == 'workflow_dispatch' && inputs.lane == 'integration')
     runs-on: ubuntu-24.04
-    timeout-minutes: 75
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
@@ -122,21 +128,32 @@ jobs:
           df -h /
           docker info --format 'cgroup v{{.CgroupVersion}} {{.CgroupDriver}}, {{.NCPU}} CPUs, {{.MemTotal}} bytes'
 
-      - name: lab up (four nodes + s3lab, Yoal installed from this checkout)
+      # The single-node gate first, on a plain one-node install (no overlay, no cluster settings):
+      # HA-PLAN §7.3 "no phase merges without the single-node gate". Must pass.
+      - name: lab up --only lab-a (one node, every HA flag off)
+        run: bun tests/lab/lab.ts up --only lab-a
+
+      - name: Scenario single-node-gate (deploy, scale, redeploy under the checker)
+        run: bun tests/ha/scenarios/single-node-gate.ts --out "$RUNNER_TEMP/ha/single-node-gate"
+
+      # The same lab grows to four nodes: the workers join, failover and the overlay are turned on.
+      - name: lab up (four nodes + s3lab)
         run: bun tests/lab/lab.ts up
 
       - name: Fault verbs against a lab node (apply and auto-revert each)
         run: bun tests/lab/verify-faults.ts --out "$RUNNER_TEMP/ha/faults.json"
 
-      # Edge bypassed: the scenario's own balancer to each copy, so the copy failover path is
-      # measured even while the edge run below is invalid.
-      - name: Scenario kill-node-b, direct to each copy (edge bypassed)
-        run: bun tests/ha/scenarios/kill-node-b.ts --target direct --duration-s 240 --kill-after-s 30 --out "$RUNNER_TEMP/ha/kill-node-b-direct"
+      # Edge bypassed: the scenario's own balancer to each copy, so copy failover and re-placement are
+      # judged on their own. Judged strictly (no --accept).
+      - name: Scenario kill-node (lab-b powered off), direct to each copy
+        run: bun tests/ha/scenarios/kill-node.ts --node lab-b --method kill --target direct --duration-s 240 --kill-after-s 30 --out "$RUNNER_TEMP/ha/kill-node-direct"
 
-      # Through the edge. Exit 2 (invalid) while lab-b's copy takes no traffic through the edge: the
-      # edge health check sends no app Host (packages/site-config/src/compile.ts).
-      - name: Scenario kill-node-b through the edge
-        run: bun tests/ha/scenarios/kill-node-b.ts --duration-s 240 --kill-after-s 30 --out "$RUNNER_TEMP/ha/kill-node-b"
+      # Through the edge (valid since F7 in ha/w1-fixes). Judged strictly: M1's "the lab kills a node
+      # and the checker is clean" is this step. On 2026-11-20 it fails on `replaced`: a copy re-placed
+      # by failover reaches the edge's upstreams only on the next unrelated desired-state change
+      # (tests/ha/README.md, "What the scenarios found").
+      - name: Scenario kill-node (lab-b powered off) through the edge
+        run: bun tests/ha/scenarios/kill-node.ts --node lab-b --method kill --duration-s 240 --kill-after-s 30 --out "$RUNNER_TEMP/ha/kill-node-edge"
 
       - name: Lab diagnostics
         if: always()
@@ -164,19 +181,86 @@ jobs:
   # self-hosted runner labelled `yoal-lab`. Until one is registered these jobs are skipped; set the
   # repository variable YOAL_LAB_RUNNER=true once it exists (a variable, not a secret).
   ha-chaos:
-    name: ha-chaos (nightly, VM lab)
+    name: ha-chaos ${{ matrix.family }} x${{ matrix.repetitions }} (nightly)
     if: >-
       vars.YOAL_LAB_RUNNER == 'true' &&
       ((github.event_name == 'schedule' && github.event.schedule == '17 2 * * *') ||
        (github.event_name == 'workflow_dispatch' && inputs.lane == 'chaos'))
     runs-on: [self-hosted, yoal-lab]
-    timeout-minutes: 240
+    timeout-minutes: 600
+    strategy:
+      fail-fast: false
+      # One lab per runner: families run one after another.
+      max-parallel: 1
+      matrix:
+        repetitions: [20]
+        # HA-PLAN §7.2 families with a scenario today. Each line is "<family>|<scenario> <flags>".
+        family:
+          - 'node-power-off|kill-node.ts --node lab-b --method kill --duration-s 300'
+          - 'node-stop|kill-node.ts --node lab-c --method stop --duration-s 300'
+          - 'network-partition|kill-node.ts --node lab-b --method partition --duration-s 300'
+          - 'process-freeze-agent|freeze-agent.ts --node lab-b'
+          - 'change-rolling-deploy|rolling-deploy-under-load.ts'
+          - 'attachments|attachments-three-nodes.ts --runtime container'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
-      - name: Placeholder
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - name: lab up
+        run: bun tests/lab/lab.ts up
+      # Never retried (CLUSTERING §19.5): every repetition's verdict is kept; any fail fails the job.
+      # skip and invalid are recorded but do not fail it (a feature another lane is building).
+      - name: ${{ matrix.family }}, ${{ matrix.repetitions }} repetitions
+        shell: bash
         run: |
-          echo "ha-chaos: the fault catalogue (HA-PLAN §7.2) x20 on the VM lab lands with W2+."
-          echo "Today: bun tests/lab/lab.ts up && bun tests/ha/scenarios/kill-node-b.ts"
+          set -uo pipefail
+          family="${{ matrix.family }}"; name="${family%%|*}"; cmd="${family#*|}"
+          failed=0
+          for i in $(seq 1 ${{ matrix.repetitions }}); do
+            # shellcheck disable=SC2086
+            bun tests/ha/scenarios/$cmd --seed "$i" --accept invalid,skip --out "$RUNNER_TEMP/ha/$name/$i" || failed=$((failed + 1))
+          done
+          echo "$name: $failed of ${{ matrix.repetitions }} repetitions failed" | tee -a "$GITHUB_STEP_SUMMARY"
+          test "$failed" -eq 0
+      - name: Lab diagnostics
+        if: always()
+        run: bun tests/lab/lab.ts status --json > "$RUNNER_TEMP/ha/status.json" || true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: ha-chaos-${{ strategy.job-index }}
+          path: ${{ runner.temp }}/ha
+          retention-days: 14
+          if-no-files-found: ignore
+      - name: lab down
+        if: always()
+        run: bun tests/lab/lab.ts down
+
+  # The real-VM form (Lima): up, a partition and a power-off, down. Needs a runner that can run VMs.
+  ha-chaos-vm:
+    name: ha-chaos VM form smoke (nightly)
+    if: >-
+      vars.YOAL_LAB_RUNNER == 'true' &&
+      ((github.event_name == 'schedule' && github.event.schedule == '17 2 * * *') ||
+       (github.event_name == 'workflow_dispatch' && inputs.lane == 'chaos'))
+    runs-on: [self-hosted, yoal-lab]
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - run: bun install --frozen-lockfile
+      - run: bun tests/lab/vm/lab-vm.ts up
+      - run: bun tests/lab/vm/lab-vm.ts status
+      - run: bun tests/lab/vm/lab-vm.ts fault lab-b partition --peers lab-a --duration 60
+      - run: bun tests/lab/vm/lab-vm.ts fault lab-b clear-all
+      - run: bun tests/lab/vm/lab-vm.ts kill lab-c && bun tests/lab/vm/lab-vm.ts start lab-c
+      - name: VM lab down
+        if: always()
+        run: bun tests/lab/vm/lab-vm.ts down
 
   ha-soak:
     name: ha-soak (weekly, 24 h)

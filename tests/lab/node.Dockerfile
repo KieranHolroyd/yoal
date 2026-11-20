@@ -48,11 +48,8 @@ RUN systemctl mask systemd-modules-load.service systemd-udevd.service systemd-ud
  && printf '[storage]\ndriver = "overlay"\n[storage.options.overlay]\nmount_program = ""\n' > /etc/containers/storage.conf.lab \
  && echo 'lab node' > /etc/yoal-lab-node
 
-# The installer writes this bootstrap Caddyfile only when it installs Caddy itself; with Caddy
-# preinstalled (as here) it keeps the package's stock file, whose admin API is on TCP, and the agent
-# cannot reach Caddy. Ship the installer's own bootstrap file (scripts/install/main.ts
-# ensureBootstrapCaddyfile) so the lab node looks like a host the installer prepared.
-COPY node/bootstrap.Caddyfile /etc/caddy/Caddyfile
+# No bootstrap Caddyfile here: the installer writes its own (admin API on a unix socket) even
+# when Caddy is preinstalled, as on this image (HA-PLAN Wave 1 F12, scripts/install/caddyfile.ts).
 
 STOPSIGNAL SIGRTMIN+3
 CMD ["/sbin/init"]

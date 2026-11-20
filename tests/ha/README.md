@@ -1,9 +1,10 @@
 # tests/ha — the HA checker and the lease simulator
 
-HA-PLAN §4 W1 (bullets 3–4). Two tools:
+HA-PLAN §4 W1 (bullets 3–4) and the M1 acceptance scenarios. Three tools:
 
 | Path | What it is |
 |---|---|
+| `scenarios/` | The **scenarios**: each deploys the checker app on the lab (tests/lab), applies a fault or a change under the checker, and writes numbers plus a verdict. See [Scenarios](#scenarios). |
 | `checker/` | The **checker**: a client that writes numbered rows and reads them back through the public route, plus invariants I1–I7 (CLUSTERING §19.1) and I11–I16 (HA-PLAN §1.3) as pure functions over its request log and the lab's observations. |
 | `checker/app/` | The **checker app** it talks to, deployable on Yoal as a process or container app with a Postgres database attached. |
 | `sim/` | The **deterministic simulator** for `ControlLease` (`packages/core/src/ha-lease.ts`). |
@@ -108,6 +109,87 @@ PORT=46732 HOST=127.0.0.1 DATABASE_URL=postgres://postgres:w0lab@127.0.0.1:46731
   bun tests/ha/checker/app/server.ts &
 bun tests/ha/checker/cli.ts --url http://127.0.0.1:46732 --duration-s 30 --rate 50 --seed 11 --out /tmp/report.json
 ```
+
+## Scenarios
+
+Each scenario runs against a lab brought up with `bun tests/lab/lab.ts up` (the single-node gate:
+`up --only lab-a`), and writes into `tests/lab/.out/<scenario>-<time>/` (or `--out`):
+`scenario.json` (verdict, checks, timings, measures, timeline), `summary.md` (the same, readable),
+`report.json` (the checker's), `observations.jsonl` (what the scenario told the checker), and the
+checker's logs.
+
+| Scenario | For | What it does | Today on `ha/integration` |
+|---|---|---|---|
+| `single-node-gate.ts` | Every lane (§7.3) | One node, every HA flag off: deploy, scale 1→2→1, redeploy, under the checker | **pass** |
+| `kill-node.ts` | M1, §1.2 node loss | Two copies (keeper + `--node`); power off (`--method kill`), stop, or partition the node; time offline (≤ 40 s), re-placement, answering (≤ grace + 120 s), rejoin | **pass** direct, **fail** edge |
+| `kill-node-b.ts` | W1 exit | `kill-node.ts --node lab-b` | as kill-node |
+| `freeze-agent.ts` | §7.2 Process | `SIGSTOP` the agent on a copy's node for 60 s; the copy must keep serving with its database, nothing restarts or moves | **fail** |
+| `attachments-three-nodes.ts` | W4 exit, M1 | Container app, three copies on lab-a/b/c, Postgres on lab-ctl; manual promotion must change no env and restart nothing; port scan from the lab bridge | **skip** (container); `--runtime process` **fail** |
+| `rolling-deploy-under-load.ts` | W5 exit, M1 | 10,000 requests a minute through a rolling deploy; a failing release command; a release command under a partition (I16) | B **fail** (3 non-2xx); C, D **skip** |
+
+### Verdicts
+
+Every scenario ends with one verdict (`scenarios/lib/report.ts`), and every check inside it has one:
+
+| Verdict | Exit | Means |
+|---|---|---|
+| `pass` | 0 | every judged bound and invariant held |
+| `fail` | 1 | one did not; the reason names it, with the number and, for a known bug, `path:line` |
+| `invalid` | 2 | the run cannot measure what it is for, because of how the platform is today (a copy the edge never sends traffic to); its numbers would mislead |
+| `skip` | 3 | it needs a feature another lane is building; the reason quotes the platform's refusal or the missing field |
+| `error` | 4 | the harness could not run (lab down, a deploy timed out); never a statement about the platform |
+
+The overall verdict is the worst check (`error` > `fail` > `invalid` > `skip` > `pass`), or an early
+stop's. `--accept invalid,skip` maps those verdicts to exit 0 for a CI step that is known to be
+invalid or skipped on this tree (each such step in `.github/workflows/ha.yml` says why).
+
+**Targets.** `--target edge` (default) sends the checker through lab-a's public route, as a user.
+`--target direct` bypasses the edge: the scenario's own balancer sends each request straight to a
+copy (relayed through lab-a). A direct run judges re-placement, restarts and the checker's
+invariants, and records request failures without judging them (they describe the harness balancer
+as much as the platform); its report says "Edge bypassed" at the top. On a tree without F7
+(`ha/w1-fixes`), every edge run with a remote copy is `invalid`: the edge's active health check
+sends no app Host (`packages/site-config/src/compile.ts`), so remote copies take no traffic.
+
+### The library (`scenarios/lib/`)
+
+| Module | Gives |
+|---|---|
+| `scenario.ts` | `Scenario`: output directory, observation log, timeline, `check()`, `stop()`, cleanups that run on any exit (Ctrl-C too), the report written last; `waitFor`, `COMMON_OPTIONS` |
+| `app.ts` | `deployChecker()` (project, Postgres on a chosen node, process or container workload, N copies placed on named nodes by drain/resume), `placeCopies`, `copies`, `scaling`, `unitInfo` (a copy's unit invocation, start time and env-file hash, never the values), `loadCheckerImage` (the checker app's image into every node's Podman as `localhost/…`), `appPort` (one port per project in 24000–24999) |
+| `ingress.ts` | `openTarget(edge\|direct)`, `share` (who answers), the direct `CopyBalancer` |
+| `faults.ts` | `Faults.apply(power-off\|stop\|partition\|freeze)` with revert, timeline entries and `fault` observations; everything reverted on exit unless `keep()` |
+| `checker.ts` | `startChecker()`: the checker CLI against a target, reading the scenario's observations |
+| `portscan.ts` | `scanFromBridge()`: a TCP connect scan from a throwaway container on the lab bridge (not the overlay) |
+| `report.ts` | verdicts, exit codes, `scenario.json` and `summary.md` |
+
+`fixtures/release-command.ts` is the release command the W5 scenario ships into each release (it
+records `release:<marker>` through the app's `/singleton`, and can fail or sleep on purpose).
+
+### What the scenarios found on `ha/integration` (2026-11-20)
+
+On `ha/w1-lab` = `ha/integration` + `ha/w1-fixes` (F7–F12), container lab on OrbStack (arm64).
+Every run's `scenario.json` has the full numbers.
+
+| Scenario | Verdict | Numbers | Why |
+|---|---|---|---|
+| `single-node-gate` | **pass** | 3,001 requests: 0 failed outside the redeploy, 2×503 during the single copy's in-place restart; 0 lost writes; scale to 2 refused (422), first copy untouched; redeploy running in 10 s | — |
+| `kill-node --node lab-b --target direct` | **pass** | offline 33 s; re-placed on lab-c, answering at 124 s (bound 240 s); 0 lost of 3,200 writes; 9 of 4,801 failed (harness balancer, not judged) | — |
+| `kill-node --node lab-b` (edge) | **fail** | offline 29 s; re-placed and `running` at 126–182 s, never in the edge's upstreams; 0–2 of 4,801 failed; 0 lost writes | a copy re-placed by failover reaches the edge only on the next unrelated desired-state change: its move to `running` bumps no version, and the edge's list is built from copies `running` at build time (`packages/core/src/nodes.ts:1249-1268`). Proved by bumping the project by hand: the next version listed it |
+| `kill-node --node lab-b --method partition` (edge) | **fail** | offline 28 s; re-placed `running` at 135 s, never in the edge; 2 of 4,801 failed (1×503, 1 timeout) | as above |
+| `freeze-agent --node lab-b` (edge) | **fail** | 0 of 17 `/healthz?db=1` probes answered during the 60 s freeze; 6 of 3,601 requests timed out; offline at 30 s, online 0.4 s after the thaw; no restart, no re-placement | the cross-node database endpoint lives in the agent process (`apps/agent/src/endpoints.ts`), so a frozen agent cuts every remote copy on its node off from Postgres. With `/whoami` probes (no database) the direct run passed |
+| `attachments-three-nodes` (container) | **skip** | port scan: 8,000 ports on 4 nodes, 0 open | the platform's own refusal: "an HTTP app runs one copy per node, and this one must stay on its node because it runs next to its attached database (D56)" (G9, `crossNodeAllowed()`, `packages/core/src/databases.ts:3636`); W4 |
+| `attachments-three-nodes --runtime process` (edge) | **fail** | 3 copies on a/b/c, Postgres on lab-ctl; manual promotion to lab-a completed in 58 s; **all three** copies' env changed and all three restarted (the remote ones too, not only the same-node one); 916 of 4,801 requests failed around it; 0 lost writes; port scan 0 open | G10 (`packages/core/src/databases.ts:2943-2963`), wider than HA-PLAN states: every consumer restarts, not only those on the old or new primary's node |
+| `rolling-deploy-under-load` (edge) | **fail** (B), **skip** (C, D) | 10,020 requests a minute; rollout of 3 copies done in 39.5 s; 3 of 30,061 not 2xx (1×503, 2 connection) | G22: no drain (a copy leaves the upstreams in the version that restarts it). C and D: the workload API accepts and drops `release` and `readinessPath` (`RELEASE_PHASE`, W5) |
+
+Not seen: the "protected site health check passes on the login redirect" problem; no scenario uses a
+protected route.
+
+**Checker caveat (I15).** Yoal injects no copy id into a workload, so the app's `x-checker-copy`
+(`host:port:pid`) never matches the platform's copy id in a `route` observation, and I15's
+late-request half cannot match. The scenarios therefore emit no `route stopped` events for
+unplanned losses (a crash stops a copy while it is in the upstreams by definition). W5's drain
+scenarios need a per-copy id in the workload environment (e.g. `YOAL_COPY_ID`) to judge I15.
 
 ## The simulator
 

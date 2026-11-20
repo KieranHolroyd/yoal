@@ -10,6 +10,8 @@ export interface RunResult {
 	code: number;
 	stdout: string;
 	stderr: string;
+	/** stdout as bytes, when `binary` was asked for (an image archive, say). */
+	bytes?: Uint8Array;
 }
 
 export function assertLabName(name: string): string {
@@ -17,14 +19,19 @@ export function assertLabName(name: string): string {
 	return name;
 }
 
-export function run(argv: string[], options: { stdin?: string | Uint8Array; allowFailure?: boolean; env?: Record<string, string> } = {}): RunResult {
+export function run(argv: string[], options: { stdin?: string | Uint8Array; allowFailure?: boolean; env?: Record<string, string>; binary?: boolean } = {}): RunResult {
 	const result = Bun.spawnSync(argv, {
 		stdin: options.stdin === undefined ? 'ignore' : typeof options.stdin === 'string' ? new TextEncoder().encode(options.stdin) : options.stdin,
 		stdout: 'pipe',
 		stderr: 'pipe',
 		env: { ...process.env, ...(options.env ?? {}) },
 	});
-	const out = { code: result.exitCode ?? 1, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+	const out: RunResult = {
+		code: result.exitCode ?? 1,
+		stdout: options.binary ? '' : result.stdout.toString(),
+		stderr: result.stderr.toString(),
+		...(options.binary ? { bytes: new Uint8Array(result.stdout) } : {}),
+	};
 	if (out.code !== 0 && !options.allowFailure)
 		throw new Error(`${argv.slice(0, 4).join(' ')} … exited ${out.code}: ${(out.stderr || out.stdout).trim().slice(-1500)}`);
 	return out;
