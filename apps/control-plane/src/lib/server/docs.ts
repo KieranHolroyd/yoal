@@ -1,5 +1,6 @@
 import { resolve } from '$app/paths';
 import { createLibrary, filesBySlug } from '@yoal/docs';
+import { buildDocsBundle, type DocsBundle } from '@yoal/docs/bundle';
 import { createDocsDatabase } from '@yoal/docs/database';
 import { platformOrigin } from './config';
 import { platformVersion } from './version';
@@ -26,3 +27,11 @@ export const docsDatabase = createDocsDatabase(docs, {
 	version: platformVersion,
 	url: (slug, anchor) => `${platformOrigin}${pagePath(slug)}${anchor ? `#${anchor}` : ''}`
 });
+
+let bundle: DocsBundle | null = null;
+
+/** Every page split into sections: what `yoal docs` searches, served at `GET /api/v1/docs/bundle`. */
+export function docsBundle(): DocsBundle {
+	bundle ??= buildDocsBundle(filesBySlug(files));
+	return bundle;
+}

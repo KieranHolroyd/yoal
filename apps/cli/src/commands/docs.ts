@@ -1,20 +1,24 @@
 import pkg from '../../package.json' with { type: 'json' };
 import { parseArgs, type FlagSpec, type ParsedArgs } from '../args.ts';
-import { bundledLibrary, DocsNotFound, parseRef, type DocsLibrary, type DocsReadResult } from '../docs.ts';
+import { DocsNotFound, parseRef, type DocsLibrary, type DocsReadResult } from '../docs.ts';
+import { resolveDocsSource, type DocsSource } from '../docs-source.ts';
 import { CliError, UsageError } from '../errors.ts';
 import { printJson } from '../output.ts';
 
 /**
  * `yoal docs`: the Yoal user documentation from the terminal, for people and especially for AI
- * coding agents. The docs are bundled into the CLI (no network, no sign-in) and match this CLI's
- * version; slugs, anchors and JSON fields are the same as the MCP `search_docs` / `read_docs`
- * tools (packages/docs/content is the single source).
+ * coding agents. The docs are bundled into the CLI (no network, no sign-in needed). When the CLI
+ * is logged in to a platform running a different version, it reads that platform's own docs
+ * instead (`docs-source.ts`, HA-PLAN F5). Slugs, anchors and JSON fields are the same as the MCP
+ * `search_docs` / `read_docs` tools (packages/docs/content is the single source).
  */
 
 const usage = `Usage: yoal docs [command] [options]
 
-Search and read the Yoal documentation offline. The docs are bundled into this CLI (${pkg.version}),
-so nothing needs a network connection or \`yoal login\`.
+Search and read the Yoal documentation. The docs are bundled into this CLI (${pkg.version}), so
+nothing needs a network connection or \`yoal login\`. When you are logged in to a platform that
+runs a different version, yoal docs reads that platform's own docs (cached locally) so they match
+what is running; --bundled uses the bundled docs regardless.
 
 Commands:
   list [--section <id>]          Table of contents: every page's slug and what it covers (default)
@@ -29,6 +33,7 @@ Options:
       --max-chars <n>    context: stop after about this many characters (default 20000)
       --outline          read: list the page's sections (anchors) instead of its text
       --json             JSON output (same fields as the MCP search_docs/read_docs tools)
+      --bundled          Use the docs bundled with this CLI, never the platform's
   -h, --help             Show this help
 
 Refs:
@@ -62,6 +67,7 @@ const flags: FlagSpec = {
 	'max-chars': { type: 'string' },
 	outline: { type: 'boolean' },
 	json: { type: 'boolean' },
+	bundled: { type: 'boolean' },
 	help: { type: 'boolean', short: 'h' },
 };
 
@@ -84,7 +90,9 @@ export async function docsCommand(argv: string[]): Promise<void> {
 		console.log(usage);
 		return;
 	}
-	const library = bundledLibrary();
+	const source = await resolveDocsSource({ bundledOnly: args.boolean('bundled') });
+	if (source.notice) console.error(source.notice);
+	const library = source.library;
 	const [first, ...rest] = args.positionals;
 	let command = first === undefined ? 'list' : SUBCOMMANDS[first];
 	let operands = first === undefined ? [] : rest;
@@ -98,13 +106,13 @@ export async function docsCommand(argv: string[]): Promise<void> {
 		switch (command) {
 			case 'list':
 				if (operands.length > 0) throw new UsageError(`\`yoal docs list\` takes no arguments.\n\n${usage}`);
-				return list(library, args);
+				return list(source, args);
 			case 'search':
-				return search(library, args, operands);
+				return search(source, args, operands);
 			case 'read':
-				return read(library, args, operands);
+				return read(source, args, operands);
 			case 'context':
-				return context(library, args, operands);
+				return context(source, args, operands);
 		}
 	} catch (error) {
 		if (error instanceof DocsNotFound)
@@ -118,15 +126,16 @@ function isPageRef(library: DocsLibrary, value: string): boolean {
 	return library.pages().some((page) => page.slug === slug);
 }
 
-function list(library: DocsLibrary, args: ParsedArgs): void {
+function list(source: DocsSource, args: ParsedArgs): void {
+	const library = source.library;
 	const outline = library.outline(args.string('section'));
 	if (args.boolean('json')) {
-		printJson({ version: pkg.version, sections: outline });
+		printJson({ version: pkg.version, docs: docsMeta(source), sections: outline });
 		return;
 	}
 	const width = Math.max(...outline.flatMap((section) => section.pages.map((page) => page.slug.length)));
 	const pages = outline.reduce((total, section) => total + section.pages.length, 0);
-	console.log(`Yoal docs, bundled with yoal ${pkg.version}: ${pages} pages. Read one with \`yoal docs read <slug>\`.`);
+	console.log(`${describeSource(source)}: ${pages} pages. Read one with \`yoal docs read <slug>\`.`);
 	for (const section of outline) {
 		console.log('');
 		console.log(`${section.title} (${section.id})`);
@@ -136,7 +145,8 @@ function list(library: DocsLibrary, args: ParsedArgs): void {
 	console.log('Search: yoal docs search <words>   Answer a question: yoal docs context "<question>"');
 }
 
-function search(library: DocsLibrary, args: ParsedArgs, operands: string[]): void {
+function search(source: DocsSource, args: ParsedArgs, operands: string[]): void {
+	const library = source.library;
 	const query = operands.join(' ').trim();
 	if (!query) throw new UsageError(`Missing search words.\n\nExample: yoal docs search custom domain`);
 	const results = library.search(query, { limit: positiveInt(args, 'limit', 8), section: args.string('section') });
@@ -144,7 +154,7 @@ function search(library: DocsLibrary, args: ParsedArgs, operands: string[]): voi
 		? 'Read one in full with `yoal docs read <ref>`.'
 		: 'No matches. Try fewer or different words, or browse with `yoal docs list`.';
 	if (args.boolean('json')) {
-		printJson({ version: pkg.version, query, results, hint });
+		printJson({ version: pkg.version, docs: docsMeta(source), query, results, hint });
 		return;
 	}
 	if (results.length === 0) {
@@ -162,15 +172,16 @@ function search(library: DocsLibrary, args: ParsedArgs, operands: string[]): voi
 	console.log(hint);
 }
 
-function read(library: DocsLibrary, args: ParsedArgs, operands: string[]): void {
+function read(source: DocsSource, args: ParsedArgs, operands: string[]): void {
+	const library = source.library;
 	if (operands.length === 0)
 		throw new UsageError('Missing page ref, e.g. `yoal docs read data/databases#connections-and-tls`.');
 	if (operands.length > 2) throw new UsageError(`Too many arguments.\n\n${usage}`);
 	// `read <slug> <anchor>` works too.
 	const page = library.read(operands[0]!, operands[1]);
-	if (args.boolean('outline')) return outline(page, args);
+	if (args.boolean('outline')) return outline(source, page, args);
 	if (args.boolean('json')) {
-		printJson({ version: pkg.version, ...page });
+		printJson({ version: pkg.version, docs: docsMeta(source), ...page });
 		return;
 	}
 	const heading = page.anchor ? page.sections.find((section) => section.anchor === page.anchor)?.heading : undefined;
@@ -180,7 +191,7 @@ function read(library: DocsLibrary, args: ParsedArgs, operands: string[]): void 
 		console.log(page.description);
 		console.log('');
 	}
-	console.log(`ref: ${page.ref} · ${page.section} · yoal ${pkg.version}`);
+	console.log(`ref: ${page.ref} · ${page.section} · platform ${source.docsVersion} docs`);
 	console.log('');
 	console.log(page.markdown);
 	if (!page.anchor) {
@@ -192,10 +203,10 @@ function read(library: DocsLibrary, args: ParsedArgs, operands: string[]): void 
 	}
 }
 
-function outline(page: DocsReadResult, args: ParsedArgs): void {
+function outline(source: DocsSource, page: DocsReadResult, args: ParsedArgs): void {
 	if (args.boolean('json')) {
 		const { markdown: _markdown, ...rest } = page;
-		printJson({ version: pkg.version, ...rest });
+		printJson({ version: pkg.version, docs: docsMeta(source), ...rest });
 		return;
 	}
 	console.log(`# ${page.title}`);
@@ -209,7 +220,8 @@ function outline(page: DocsReadResult, args: ParsedArgs): void {
 	console.log('Read a section with `yoal docs read <ref>`; a ## section includes its ### subsections.');
 }
 
-function context(library: DocsLibrary, args: ParsedArgs, operands: string[]): void {
+function context(source: DocsSource, args: ParsedArgs, operands: string[]): void {
+	const library = source.library;
 	const query = operands.join(' ').trim();
 	if (!query) throw new UsageError('Missing question, e.g. `yoal docs context "how do I add a custom domain"`.');
 	const result = library.context(query, {
@@ -218,14 +230,14 @@ function context(library: DocsLibrary, args: ParsedArgs, operands: string[]): vo
 		maxChars: positiveInt(args, 'max-chars', 20_000),
 	});
 	if (args.boolean('json')) {
-		printJson({ version: pkg.version, ...result });
+		printJson({ version: pkg.version, docs: docsMeta(source), ...result });
 		return;
 	}
 	if (result.sections.length === 0) {
 		console.log('No matching docs. Try fewer or different words, or browse with `yoal docs list`.');
 		return;
 	}
-	console.log(`Yoal docs (yoal ${pkg.version}) for: ${query}`);
+	console.log(`Yoal docs (platform ${source.docsVersion}) for: ${query}`);
 	console.log(`${result.sections.length} sections, best match first. Each starts with its ref; cite refs in answers.`);
 	for (const section of result.sections) {
 		console.log('');
@@ -247,3 +259,14 @@ function positiveInt(args: ParsedArgs, name: string, fallback: number): number {
 	return value;
 }
 
+
+/** Where the docs came from, for `--json` output: agents can tell bundled docs from the platform's. */
+function docsMeta(source: DocsSource): { source: DocsSource['kind']; platformVersion: string; platform: string | null } {
+	return { source: source.kind, platformVersion: source.docsVersion, platform: source.platform?.url ?? null };
+}
+
+function describeSource(source: DocsSource): string {
+	return source.kind === 'platform'
+		? `Yoal docs from ${source.platform!.url} (platform ${source.docsVersion})`
+		: `Yoal docs, bundled with yoal ${pkg.version} (platform ${source.docsVersion})`;
+}
