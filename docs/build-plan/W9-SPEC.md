@@ -1,8 +1,25 @@
 # W9 spec — control-plane lease, epoch, and the database member machine
 
-Status: **draft for owner approval.** This is step 1 of HA-PLAN §6.4. Nothing in Wave 3 lanes A–C
-may be implemented until this document is approved. The model (step 2) is written from this text
-alone; a counterexample changes this document, not the code.
+Status: **approved 2026-11-20** (owner delegated the five open questions; decisions below). This is
+step 1 of HA-PLAN §6.4. The model (step 2) is written from this text alone; a counterexample changes
+this document, not the code.
+
+**Decisions (2026-11-20).**
+
+1. **Control-plane fencing, no keep-alive quorum.** A holder that cannot confirm the lease for 20 s
+   fences, even when the arbiter alone is unreachable. Agents serve cached desired state (I11), so
+   the cost is a read-only dashboard, not traffic. A quorum would add a second failure mode without
+   protecting I3.
+2. **`on_sync_loss` defaults to `downgrade` after 30 s**, with a critical alert and
+   `durability_effective = async` recorded in the lease. `block` is opt-in per database.
+3. **A standby serves read-only status**: `/readyz`, `/metrics`, `/api/v1/ha/status` and read-only
+   dashboard reads. It never serves `/api/agent/*` and never writes.
+4. **`accept_data_loss` exists but is never automatic**: platform-admin only, per database, typed
+   confirmation, audited, and refused while the lease names the database `sync` unless the operator
+   first downgrades it.
+5. **An unverifiable master key blocks promotion** (`canPromote: false`, fence and page). A primary
+   that cannot decrypt its own state is not a primary; promoting it would look healthy and fail
+   every secret read.
 
 Scope: HA-PLAN H21 (arbiter and failsafe), H22 (member-decided database failover), H23
 (`sync` as a recorded synchronous replica), plus the control-plane half of C6 (CLUSTERING §6.3).
@@ -235,14 +252,7 @@ without member loss, asymmetric partition (A reaches arbiter, B reaches A), cloc
 lease, stale leader resume, sync-set change racing a promotion, and a member that answered a
 keep-alive trying to acquire.
 
-## 8. Open questions for the owner
+## 8. Decisions
 
-1. Does the control plane need a keep-alive quorum like the database failsafe, or is fencing after
-   20 s without confirmation the intended rule? This spec assumes the latter (CLUSTERING §6.3).
-2. `on_sync_loss` default: `downgrade` after 30 s, or `block`? This spec assumes `downgrade` with a
-   loud alert, per H23.
-3. Should a standby serve the dashboard read-only at all, or only `/readyz`/`/metrics`? CLUSTERING
-   says read-only status; this spec keeps that.
-4. May `accept_data_loss` be offered for a sync database at all, and by whom (platform admin only)?
-5. Promotion when the master key cannot be verified: fence and page, or promote without secrets
-   (apps keep running on cached secrets)? This spec says `canPromote: false`.
+All five questions are resolved in the decision block at the top. The model treats them as fixed
+inputs.
