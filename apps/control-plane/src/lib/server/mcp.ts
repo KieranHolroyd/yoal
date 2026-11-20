@@ -80,6 +80,8 @@ import {
 	storageCreateSchema,
 	storageObjectKeySchema,
 	workloadSpecSchema,
+	RELEASE_PHASE_SPEC_FIELDS,
+	type WorkloadSpecInput,
 	planStackInputSchema,
 	applyStackInputSchema,
 	getTaskInputSchema,
@@ -2364,12 +2366,26 @@ function buildServer(
 			title: 'Set workload',
 			description:
 				'Set the runtime spec for a process/container project. Secrets are references only; values never leave the platform. A reference resolves to the project\'s own secret, then the organisation\'s; unknown names, missing pinned versions and names set both as plain env and by a secret are refused.',
-			inputSchema: workloadSpecSchema.extend({ project: z.string() }),
+			// HA-PLAN H25: the release-phase fields are advertised only while RELEASE_PHASE is on.
+			// While it is off the schema passes unknown keys through, so `setSpec` refuses one with
+			// the flag's message instead of the tool dropping it without a word.
+			inputSchema: featureEnabled(core.ctx.config, 'RELEASE_PHASE')
+				? workloadSpecSchema.extend({ project: z.string() })
+				: z.looseObject({
+						...Object.fromEntries(
+							Object.entries(workloadSpecSchema.shape).filter(
+								([key]) => !(RELEASE_PHASE_SPEC_FIELDS as readonly string[]).includes(key)
+							)
+						),
+						project: z.string()
+					}),
 			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
 			scopeChallenge: requires('project:update'),
 		},
-		async ({ project, ...input }) =>
-			run(() => core.workloads.setSpec(principal, core.projects.requireRow(principal, project), input)),
+		async ({ project, ...input }: { project: string } & Record<string, unknown>) =>
+			run(() =>
+				core.workloads.setSpec(principal, core.projects.requireRow(principal, project), input as WorkloadSpecInput)
+			),
 	);
 
 	tool(

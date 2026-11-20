@@ -14,6 +14,15 @@ import {
 	functionIsPython,
 	functionRuntimeSpecSchema,
 } from './function.ts';
+import {
+	drainSecondsSchema,
+	readinessPathSchema,
+	releaseCommandSpecSchema,
+	rolloutSpecSchema,
+	stopTimeoutSecondsSchema,
+	workloadPlacementSpecSchema,
+} from './release-phase.ts';
+import { containerAddHostSchema } from './endpoint.ts';
 
 /**
  * Tier 2 (process), tier 3 (container) and tier 4 (function) workloads (DESIGN §3.4, §3.4.1, D41,
@@ -206,8 +215,40 @@ export const workloadSpecSchema = z
 		 * only a marker; the services are the program.
 		 */
 		compose: composeSpecSchema.optional(),
+		/*
+		 * Release phase (HA-PLAN H25, `RELEASE_PHASE`). All optional with no zod default, so a spec
+		 * saved before them parses, hashes and renders exactly as it did; `resolvedStopSettings`
+		 * give the values a missing field means; an absent `rollout` is today's rollout path. Refused while the flag is off
+		 * (`releasePhaseSpecIssues`).
+		 */
+		/** Run once per release, before the first copy rolls; failure fails the deployment (I16). */
+		release: releaseCommandSpecSchema.optional(),
+		/** Gates traffic (edge checks and the rollout gate); `healthPath` stays liveness. Absent = `healthPath`. */
+		readinessPath: readinessPathSchema.optional(),
+		/** Seconds a copy keeps serving after it leaves the upstream lists. Absent = 10. */
+		drainSeconds: drainSecondsSchema.optional(),
+		/** `TimeoutStopSec` for each copy. Absent = 30, today's fixed value. */
+		stopTimeoutSeconds: stopTimeoutSecondsSchema.optional(),
+		/** Canary and surge for deploys. Absent = exactly today's path (see `rolloutSpecSchema`). */
+		rollout: rolloutSpecSchema.optional(),
+		/** Per-app placement; `spread` overrides the cluster's `replicas.spread`. */
+		placement: workloadPlacementSpecSchema.optional(),
 	})
 	.superRefine((spec, ctx) => {
+		if (spec.release && (spec.runtime === 'function' || spec.runtime === 'compose'))
+			ctx.addIssue({
+				code: 'custom',
+				path: ['release'],
+				message: 'A release command is for process and container apps.',
+			});
+		if (spec.rollout && spec.rollout.canary > 0 && spec.rollout.canary >= spec.replicas)
+			ctx.addIssue({
+				code: 'custom',
+				path: ['rollout', 'canary'],
+				message: 'A canary must be fewer copies than replicas, or there is nothing left to compare it with.',
+			});
+		if (spec.readinessPath !== undefined && spec.ingress === 'none')
+			ctx.addIssue({ code: 'custom', path: ['readinessPath'], message: 'Workers take no traffic; a readiness path needs HTTP ingress.' });
 		if (spec.runtime === 'compose' && !spec.compose)
 			ctx.addIssue({ code: 'custom', path: ['compose'], message: 'Compose workloads need a parsed compose spec.' });
 		if (spec.compose && spec.runtime !== 'compose')
@@ -597,6 +638,22 @@ export const workloadDesiredSchema = z.object({
 	 * sent to an agent that declares `run-leases`.
 	 */
 	runLease: z.object({ ttlSeconds: z.number().int().min(10).max(3_600) }).optional(),
+	/*
+	 * Release phase (HA-PLAN H25). Sent only to an agent that declares `release-phase`, and only
+	 * when the spec sets them, so other desired state is byte-for-byte unchanged.
+	 */
+	/** The readiness path the agent waits for before reporting the copy ready; absent = `healthPath`. */
+	readinessPath: z.string().startsWith('/').max(512).optional(),
+	/** Seconds the agent waits after this copy leaves desired state before stopping it; absent = 10. */
+	drainSeconds: z.number().int().min(0).max(600).optional(),
+	/** `TimeoutStopSec` for this copy's unit; absent = 30. */
+	stopTimeoutSeconds: z.number().int().min(1).max(3_600).optional(),
+	/**
+	 * Container units only (HA-PLAN H24): `AddHost=<host>:<address>` lines, so `db-<id>` reaches
+	 * the endpoint forwarder on the node's container gateway. Sent only to an agent that declares
+	 * `endpoints-gateway`.
+	 */
+	addHosts: z.array(containerAddHostSchema).max(64).optional(),
 });
 export type WorkloadDesired = z.infer<typeof workloadDesiredSchema>;
 

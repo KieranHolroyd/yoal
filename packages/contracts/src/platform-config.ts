@@ -31,6 +31,38 @@ export const PLATFORM_CONFIG_DEFAULTS = {
 	backupsDir: '/var/lib/yoal/backups',
 } as const;
 
+/**
+ * The platform object store (`YOAL_OBJECT_STORE`, read once at start-up). `local` and `r2` (any S3
+ * endpoint) are today's values; `azure` and `gcs` are HA-PLAN W3, each refused while its
+ * `OBJECT_STORE_*` flag is off. The platform store is configured in `yoal.env`, not the database,
+ * because the control plane needs it before anything else; secrets stay in the env file like
+ * every other platform credential.
+ */
+export const PLATFORM_OBJECT_STORE_KINDS = ['local', 'r2', 'azure', 'gcs'] as const;
+export type PlatformObjectStoreKind = (typeof PLATFORM_OBJECT_STORE_KINDS)[number];
+
+/** Parse `YOAL_OBJECT_STORE`. Unset is `local`; an unknown value is null (refuse to start). */
+export function parsePlatformObjectStoreKind(value: string | undefined): PlatformObjectStoreKind | null {
+	const kind = (value ?? 'local').trim();
+	return (PLATFORM_OBJECT_STORE_KINDS as readonly string[]).includes(kind) ? (kind as PlatformObjectStoreKind) : null;
+}
+
+/**
+ * The env keys each platform store kind reads (lane E wires the non-`r2` ones). `R2_REGION`
+ * (default `auto`, today's hard-coded value) and `R2_PATH_STYLE` (default `1`) are the W3 `s3`
+ * options. Secret keys among them are never returned to the browser.
+ */
+export const PLATFORM_OBJECT_STORE_ENV = {
+	r2: ['R2_ACCOUNT_ID', 'R2_BUCKET', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT', 'R2_REGION', 'R2_PATH_STYLE'],
+	azure: ['YOAL_AZURE_ACCOUNT', 'YOAL_AZURE_CONTAINER', 'YOAL_AZURE_ACCOUNT_KEY', 'YOAL_AZURE_SAS_TOKEN', 'YOAL_AZURE_ENDPOINT'],
+	gcs: ['YOAL_GCS_BUCKET', 'YOAL_GCS_CREDENTIALS_FILE', 'YOAL_GCS_ENDPOINT'],
+} as const;
+export const PLATFORM_OBJECT_STORE_SECRET_KEYS: ReadonlySet<string> = new Set([
+	'R2_SECRET_ACCESS_KEY',
+	'YOAL_AZURE_ACCOUNT_KEY',
+	'YOAL_AZURE_SAS_TOKEN',
+]);
+
 /** Litestream release the helper installs when the host has none (sha256 pinned in the helper). */
 export const LITESTREAM_VERSION = '0.3.13';
 

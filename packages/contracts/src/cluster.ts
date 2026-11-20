@@ -188,14 +188,29 @@ export interface TopologyView {
 	nodes: TopologyNodeView[];
 }
 
+/**
+ * Per-resource redundancy (CLUSTERING §8.1, HA-PLAN G24): `L0` single, `L1` recoverable (a
+ * verified backup), `L2` failover (a replica or standby elsewhere), `L3` active (several copies
+ * across zones). Computed from placement (`packages/core/src/ha-level.ts`), never stored as intent.
+ */
+export const haLevels = ['L0', 'L1', 'L2', 'L3'] as const;
+export type HaLevel = (typeof haLevels)[number];
+
+/** A computed HA level and why it is not the next one up. */
+export interface HaLevelAssessment {
+	level: HaLevel;
+	/** What the next level needs that this resource lacks, e.g. "no second zone"; empty at `L3`. */
+	blockers: string[];
+}
+
 export interface BlastRadiusItem {
 	kind: 'workload' | 'database' | 'storage' | 'disk';
 	id: string;
 	name: string;
 	nodeId: string;
 	orgId: string | null;
-	/** `L0` is the only level that exists today; the field is present so the view can grow. */
-	haLevel: string;
+	/** Today always `L0`; Wave 1 lane C computes it (`ha-level.ts`). */
+	haLevel: HaLevel;
 }
 
 export interface BlastRadiusView {

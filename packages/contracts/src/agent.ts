@@ -4,7 +4,16 @@ import { nodeContainerConsoleDesiredSchema } from './container-console.ts';
 import { nodeStudioDesiredSchema } from './database-studio.ts';
 import { nodeHardwareSchema } from './cluster.ts';
 import { wireguardPublicKeySchema, wireguardStateSchema, wireguardStatusSchema } from './overlay.ts';
-import { nodeIdentityCertificateSchema, serviceEndpointSchema, serviceProviderSchema } from './endpoint.ts';
+import {
+	ENDPOINTS_GATEWAY_CAPABILITY,
+	nodeIdentityCertificateSchema,
+	readEndpointSchema,
+	serviceEndpointSchema,
+	serviceProviderSchema,
+} from './endpoint.ts';
+import { nodeCsrSchema, nodeTrustDesiredSchema, pemCsrSchema } from './node-ca.ts';
+import { RELEASE_PHASE_CAPABILITY, releaseCommandResultSchema, releaseCommandTaskSchema } from './release-phase.ts';
+import { OBJECT_STORE_KINDS_CAPABILITY } from './object-store-target.ts';
 import { databaseStudioPrincipalResultSchema, databaseStudioPrincipalTaskSchema } from './database-studio-principal.ts';
 import { accessModes, deploymentStatuses, nodeStatuses, runtimes } from './model.ts';
 import { domainKinds } from './domain.ts';
@@ -143,9 +152,14 @@ export const routeSpecSchema = z.object({
 	 */
 	unavailable: z.string().max(500).optional(),
 	/** Health path used by Caddy's active checks across replicas. */
-	healthPath: z.string().max(200).optional(),
+	healthPath: z.string().max(512).optional(),
 	/** Seconds between those active checks (`replicas.healthIntervalSeconds`); agents default to 5. */
 	healthIntervalSeconds: z.number().int().min(1).max(300).optional(),
+	/**
+	 * HA-PLAN H25: the path the edge's active checks use to decide whether a copy takes traffic,
+	 * when it differs from `healthPath`. Sent only to an agent that declares `release-phase`.
+	 */
+	readinessPath: z.string().max(512).optional(),
 	/**
 	 * Functions only (D110): static assets are served first from the release, with the workerd
 	 * host as the fallback (and the target for `runWorkerFirst` globs). Present only on the node
@@ -294,6 +308,21 @@ export const desiredStateSchema = z.object({
 	serviceEndpoints: z.array(serviceEndpointSchema).default([]),
 	/** Provider-side overlay listeners for services this node hosts (C2). */
 	serviceProviders: z.array(serviceProviderSchema).default([]),
+	/**
+	 * Read endpoints on this consumer node (HA-PLAN H24): stable ports in 23000–23999 that follow a
+	 * database's read replicas. Only for an agent that declares `endpoints-gateway`.
+	 */
+	readEndpoints: z.array(readEndpointSchema).max(1_000).optional(),
+	/**
+	 * The install CA bundle, this node's signed leaf and the revoked serials (HA-PLAN H24 "Trust").
+	 * Public material only. Only for an agent that declares `endpoints-gateway`.
+	 */
+	nodeTrust: nodeTrustDesiredSchema.optional(),
+	/**
+	 * Release commands this node must run once each (HA-PLAN H25, I16), keyed by `runId` under a
+	 * `releaseId`. Only for an agent that declares `release-phase`.
+	 */
+	releaseCommands: z.array(releaseCommandTaskSchema).max(20).optional(),
 	/** Public storage endpoints this node serves (S3): byte-for-byte proxies, not sites. */
 	storageRoutes: z.array(storageRouteSchema).default([]),
 	/**
@@ -381,6 +410,27 @@ export type DesiredState = z.infer<typeof desiredStateSchema>;
 /** The agent capability that says a build fences leased workloads by itself. */
 export const RUN_LEASES_CAPABILITY = 'run-leases';
 
+/**
+ * HA Wave 1 capabilities (HA-PLAN §9, docs/build-plan/HA-WAVE-1.md). Declared here, but not in
+ * `nodeCapabilities` yet: an agent build adds each one to that list in the same change that makes
+ * it act on the fields it gates, so no node claims what it cannot do.
+ * - `endpoints-gateway` (lane A): `serviceEndpoints[].role|gatewayAddress|trust|version`,
+ *   `serviceProviders[].clientAuth|allowedClientNodeIds`, `readEndpoints`, `nodeTrust`,
+ *   `workloads[].addHosts`, and sends `nodeCsr`.
+ * - `release-phase` (lane D): `releaseCommands`, `workloads[].readinessPath|drainSeconds|
+ *   stopTimeoutSeconds`, `routes[].readinessPath`, and sends `releaseCommandResults`.
+ * - `object-store-kinds` (lane E): parses PITR activations with `databasePitrAnyActivationSchema`
+ *   and renders `azure`/`gcs` repositories from their top-level `store` and `storeCredentials`.
+ *   This group is not in desired state: a PITR repository reaches the node only through the
+ *   activation endpoint, which refuses a non-`s3` repository to a node without the capability
+ *   (`packages/core/src/pitr-store-gate.ts`) and leaves `repo` out of it, so an older agent's
+ *   parse fails closed instead of writing an S3 config.
+ * `packages/core/src/capability-gate.ts` strips the first two groups from desired state for a node
+ * without the capability, or for every node while the feature's flag is off.
+ */
+export const haWave1Capabilities = [ENDPOINTS_GATEWAY_CAPABILITY, RELEASE_PHASE_CAPABILITY, OBJECT_STORE_KINDS_CAPABILITY] as const;
+export type HaWave1Capability = (typeof haWave1Capabilities)[number];
+
 export const nodeCapabilities = [
 	'studio-principal',
 	'node-update',
@@ -450,6 +500,13 @@ export const heartbeatSchema = z.object({
 	wireguardPublicKey: wireguardPublicKeySchema.optional(),
 	/** Public node certificate for C2 mTLS; the private key never leaves the node. */
 	nodeCertificate: nodeIdentityCertificateSchema.optional(),
+	/**
+	 * A CSR for the install CA (HA-PLAN H24 "Trust"), sent while the node has no valid leaf or is
+	 * due to renew. The key pair is generated on the node; only the request travels.
+	 */
+	nodeCsr: nodeCsrSchema.optional(),
+	/** Progress and outcomes of `releaseCommands` since the last heartbeat (HA-PLAN H25). */
+	releaseCommandResults: z.array(releaseCommandResultSchema).max(20).optional(),
 	/** What the node's storage service last applied (D48). */
 	storage: nodeStorageStatusSchema.optional(),
 	/** Mounts and block devices the node reports, from which Settings → Storage lists disk candidates (D72, D80). */
@@ -650,6 +707,12 @@ export const nodeJoinSchema = z.object({
 	networkMode: z.enum(['yoal', 'external']).default('external'),
 	/** Public key generated by the node's helper; the private key never travels. */
 	wireguardPublicKey: z.string().trim().regex(/^[A-Za-z0-9+/]{43}=$/).optional(),
+	/**
+	 * A CSR for the install CA, from a key pair the node generated (HA-PLAN H24 "Trust"). The
+	 * signed leaf arrives in desired state (`nodeTrust`); without a CSR here the node sends one in
+	 * its first heartbeat instead.
+	 */
+	csrPem: pemCsrSchema.optional(),
 });
 export type NodeJoin = z.infer<typeof nodeJoinSchema>;
 

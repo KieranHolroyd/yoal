@@ -99,6 +99,49 @@ export const nodeCertificates = sqliteTable('node_certificates', {
 	revokedAt: integer('revoked_at'),
 });
 
+/**
+ * The per-install CA (0118, HA-PLAN H24 "Trust"). `keySealed` is the CA private key sealed with the
+ * platform master key; it is never selected by a view. One `active` row signs.
+ */
+export const nodeCa = sqliteTable('node_ca', {
+	id: text('id').primaryKey(),
+	state: text('state', { enum: ['active', 'previous', 'retired'] }).notNull().default('active'),
+	certPem: text('cert_pem').notNull(),
+	keySealed: text('key_sealed').notNull(),
+	fingerprint: text('fingerprint').notNull(),
+	subject: text('subject').notNull(),
+	notBefore: integer('not_before').notNull(),
+	notAfter: integer('not_after').notNull(),
+	issuedCount: integer('issued_count').notNull().default(0),
+	createdAt: integer('created_at').notNull().$defaultFn(now),
+	updatedAt: integer('updated_at').notNull().$defaultFn(now),
+});
+
+/**
+ * Leaves the install CA signed from node CSRs (0118); public material only. A partial unique index
+ * allows one unrevoked leaf per `(nodeId, publicKeySha256)`.
+ */
+export const nodeCaCertificates = sqliteTable(
+	'node_ca_certificates',
+	{
+		serial: text('serial').primaryKey(),
+		caId: text('ca_id').notNull(),
+		nodeId: text('node_id').notNull(),
+		certPem: text('cert_pem').notNull(),
+		publicKeySha256: text('public_key_sha256').notNull(),
+		reason: text('reason', { enum: ['enrol', 'renew', 'rekey'] }).notNull().default('enrol'),
+		notBefore: integer('not_before').notNull(),
+		notAfter: integer('not_after').notNull(),
+		revokedAt: integer('revoked_at'),
+		revokeReason: text('revoke_reason'),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+	},
+	(t) => [
+		index('node_ca_certificates_node_idx').on(t.nodeId, t.notAfter),
+		index('node_ca_certificates_revoked_idx').on(t.revokedAt),
+	],
+);
+
 /** One measured link between two nodes: the passive round trip and the last throughput test (D216). */
 export const nodeLinks = sqliteTable(
 	'node_links',
@@ -1345,6 +1388,15 @@ export const backupTargets = sqliteTable(
 		lastCheckedAt: integer('last_checked_at'),
 		lastError: text('last_error'),
 		lastTestJson: text('last_test_json'),
+		/**
+		 * 0120 (HA-PLAN W3): which object store an `s3`-kind row is. NULL for `local`; existing rows
+		 * were backfilled as `s3`. The API kinds `azure` and `gcs` are rows with `kind = 's3'`.
+		 */
+		storeKind: text('store_kind', { enum: ['s3', 'azure', 'gcs'] }),
+		/** Credential-free options for `storeKind` (Azure account and container, emulator endpoint). */
+		storeOptionsJson: text('store_options_json').notNull().default('{}'),
+		/** Write-once retention in days; NULL means the bucket default (with `objectLock`) or none. */
+		immutableRetentionDays: integer('immutable_retention_days'),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
 		updatedAt: integer('updated_at').notNull().$defaultFn(now),
 	},
@@ -1800,7 +1852,7 @@ export const jobRuns = sqliteTable(
 		projectId: text('project_id').notNull(),
 		jobId: text('job_id'),
 		jobName: text('job_name'),
-		trigger: text('trigger', { enum: ['schedule', 'manual', 'retry'] }).notNull(),
+		trigger: text('trigger', { enum: ['schedule', 'manual', 'retry', 'release'] }).notNull(),
 		attempt: integer('attempt').notNull().default(1),
 		retryOf: text('retry_of'),
 		status: text('status', {
@@ -1829,6 +1881,59 @@ export const jobRuns = sqliteTable(
 		index('job_runs_project_idx').on(t.projectId, t.createdAt),
 		index('job_runs_status_idx').on(t.status, t.runAt),
 	],
+);
+
+/**
+ * Release-command attempts (0119, HA-PLAN H25). The partial unique index on `release_id` over
+ * `queued`, `running` and `succeeded` is the I16 run lease: one of those per release, ever.
+ */
+export const releaseCommandRuns = sqliteTable(
+	'release_command_runs',
+	{
+		id: text('id').primaryKey(),
+		releaseId: text('release_id').notNull(),
+		orgId: text('org_id').notNull(),
+		projectId: text('project_id').notNull(),
+		workloadId: text('workload_id').notNull(),
+		attempt: integer('attempt').notNull().default(1),
+		status: text('status', { enum: ['queued', 'running', 'succeeded', 'failed', 'timeout', 'cancelled'] })
+			.notNull()
+			.default('queued'),
+		commandJson: text('command_json').notNull(),
+		timeoutSeconds: integer('timeout_seconds').notNull(),
+		nodeId: text('node_id'),
+		startBy: integer('start_by'),
+		exitCode: integer('exit_code'),
+		error: text('error'),
+		createdBy: text('created_by'),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+		startedAt: integer('started_at'),
+		finishedAt: integer('finished_at'),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+	},
+	(t) => [
+		index('release_command_runs_node_idx').on(t.nodeId, t.status),
+		index('release_command_runs_project_idx').on(t.projectId, t.createdAt),
+	],
+);
+
+/** A deployment's canary soak and verdict (0119, HA-PLAN H25 "Canary"). */
+export const deploymentCanaries = sqliteTable(
+	'deployment_canaries',
+	{
+		deploymentId: text('deployment_id').primaryKey(),
+		workloadId: text('workload_id').notNull(),
+		state: text('state', { enum: ['soaking', 'passed', 'failed', 'skipped'] }).notNull().default('soaking'),
+		canaryCopies: integer('canary_copies').notNull().default(1),
+		soakSeconds: integer('soak_seconds').notNull(),
+		copiesJson: text('copies_json').notNull().default('[]'),
+		sampleJson: text('sample_json'),
+		reason: text('reason'),
+		startedAt: integer('started_at').notNull(),
+		judgedAt: integer('judged_at'),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+	},
+	(t) => [index('deployment_canaries_state_idx').on(t.state, t.startedAt)],
 );
 
 /**
@@ -3059,6 +3164,10 @@ export const k8sTrustedOrgs = sqliteTable('k8s_trusted_orgs', {
 });
 
 export const schema = {
+	nodeCa,
+	nodeCaCertificates,
+	releaseCommandRuns,
+	deploymentCanaries,
 	k8sClusters,
 	k8sMachines,
 	k8sRoutes,

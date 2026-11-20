@@ -206,6 +206,10 @@ the default below (on). Set `0` to turn a feature off, then restart
 | `YOAL_FEATURE_SERVICE_ENDPOINTS` | **on** | networking | Cross-node database attachments through consumer loopback endpoints (CLUSTERING.md C2). |
 | `YOAL_FEATURE_MULTI_NODE_REPLICAS` | **on** | workloads | Spread HTTP workload replicas across nodes behind a load-balanced route (CLUSTERING.md C4). |
 | `YOAL_FEATURE_DB_AUTO_PROMOTE` | off | databases | Let the failover controller (with `failover.enabled`) promote a Postgres read replica when its primary's node goes silent (CLUSTERING.md §9.3). Opt-in, and ignored with a startup warning until database self-fencing (HA-PLAN H22) is active, which it is not yet: setting it today changes nothing. |
+| `YOAL_FEATURE_ENDPOINTS_GATEWAY` | off | networking | HA Wave 1 (HA-PLAN H24): every attachment through a loopback endpoint, containers included (forwarder on the container gateway, `AddHost=db-<id>`), pooled and read endpoints, per-install CA. Rendered only to nodes that advertise `endpoints-gateway`. Not built yet: setting it changes nothing. |
+| `YOAL_FEATURE_RELEASE_PHASE` | off | workloads | HA Wave 1 (HA-PLAN H25): release command, readiness path, drain, stop timeout, canary and per-app spread. While off, every write that sets or changes one of those fields is refused (REST, dashboard, MCP, which also stops advertising them, blueprints, config import, deploys), and none is rendered to any node; a value saved while it was on is kept but inert. Rendered only to nodes that advertise `release-phase`. Not built yet. |
+| `YOAL_FEATURE_OBJECT_STORE_AZURE` | off | storage | HA Wave 1 (HA-PLAN W3, G17): Azure Blob as a backup target, PITR repository and platform store. While off, Azure targets are refused. Not built yet. |
+| `YOAL_FEATURE_OBJECT_STORE_GCS` | off | storage | HA Wave 1 (HA-PLAN W3, G17): Google Cloud Storage as a backup target, PITR repository and platform store. While off, GCS targets are refused. Not built yet. |
 | `YOAL_FEATURE_APP_VOLUMES` | **on** | workloads | Persistent application volumes attached to deployed workloads. |
 | `YOAL_FEATURE_JOBS` | **on** | automation | Scheduled one-off and cron jobs. |
 | `YOAL_FEATURE_PREVIEW_DATA` | **on** | automation | Clone database and bucket data into previews (can copy production data). |
@@ -219,7 +223,7 @@ the default below (on). Set `0` to turn a feature off, then restart
 the control plane logs a warning at startup; remove it from `yoal.env`. An unknown
 `YOAL_FEATURE_*` is never an error.
 
-Because every flag except `DB_AUTO_PROMOTE` is on, set `YOAL_FEATURE_PREVIEW_DATA=0`, `YOAL_FEATURE_AGENT_DATA_WRITE=0`
+Because every flag except the opt-in ones (`DB_AUTO_PROMOTE` and the HA Wave 1 flags above) is on, set `YOAL_FEATURE_PREVIEW_DATA=0`, `YOAL_FEATURE_AGENT_DATA_WRITE=0`
 and `YOAL_FEATURE_BLUEPRINTS=0` on a host whose data you are not prepared to have copied, changed
 or pruned. `DB_TLS` and `ORG_NETWORKS` change existing databases and workloads at the next
 reconcile (TLS URLs with `sslmode=require`, per-org Podman networks). `MULTI_NODE_REPLICAS` refuses a

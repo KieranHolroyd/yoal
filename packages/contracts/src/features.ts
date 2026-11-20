@@ -207,6 +207,39 @@ export const FEATURE_FLAGS = {
 		default: false,
 		area: 'databases',
 		description: 'Let the failover controller promote a Postgres read replica automatically (CLUSTERING C8).'
+	},
+	ENDPOINTS_GATEWAY: {
+		name: 'ENDPOINTS_GATEWAY',
+		// HA Wave 1, W4. Opt-in, not a kill switch: `SERVICE_ENDPOINTS` (default on) keeps its
+		// meaning, so a single-node install sees no change until this is set and every involved node
+		// advertises `endpoints-gateway`.
+		default: false,
+		area: 'networking',
+		description:
+			'Every attachment goes through a loopback endpoint, for containers too: the forwarder also listens on the container gateway, units get AddHost=db-<id>, pooled and read endpoints, per-install CA (HA-PLAN H24).'
+	},
+	RELEASE_PHASE: {
+		name: 'RELEASE_PHASE',
+		// HA Wave 1, W5. Opt-in: a release command, readiness path, drain, stop timeout, canary and
+		// per-app spread are refused while it is off, and rendered only to nodes with `release-phase`.
+		default: false,
+		area: 'workloads',
+		description:
+			'Release command run once per release before a rollout, readiness path, drain before stop, stop timeout, canary rollouts and per-app spread (HA-PLAN H25).'
+	},
+	OBJECT_STORE_AZURE: {
+		name: 'OBJECT_STORE_AZURE',
+		// HA Wave 1, W3. Opt-in until the backend passes the object-store conformance suite.
+		default: false,
+		area: 'storage',
+		description: 'Azure Blob Storage as a backup target, PITR repository and platform store (HA-PLAN W3, G17).'
+	},
+	OBJECT_STORE_GCS: {
+		name: 'OBJECT_STORE_GCS',
+		// HA Wave 1, W3. Opt-in until the backend passes the object-store conformance suite.
+		default: false,
+		area: 'storage',
+		description: 'Google Cloud Storage as a backup target, PITR repository and platform store (HA-PLAN W3, G17).'
 	}
 } as const satisfies Record<string, FeatureFlagDefinition>;
 
@@ -216,8 +249,19 @@ export type FeatureName = keyof typeof FEATURE_FLAGS;
  * Flags that default off. Each needs a safety prerequisite before it may be on by default, and a
  * new entry needs a reason here, not just `default: false`.
  * - `DB_AUTO_PROMOTE`: automatic promotion without self-fencing can leave two primaries (HA-PLAN F1).
+ * - `ENDPOINTS_GATEWAY`: changes how every attachment is reached; off until W4 passes its lab
+ *   scenario (HA-PLAN H24, docs/build-plan/HA-WAVE-1.md).
+ * - `RELEASE_PHASE`: changes how every deploy rolls; off until W5 passes its lab scenario (H25).
+ * - `OBJECT_STORE_AZURE`, `OBJECT_STORE_GCS`: new backends; off until each passes the
+ *   object-store conformance suite (W3).
  */
-export const OPT_IN_FEATURES: ReadonlySet<FeatureName> = new Set<FeatureName>(['DB_AUTO_PROMOTE']);
+export const OPT_IN_FEATURES: ReadonlySet<FeatureName> = new Set<FeatureName>([
+	'DB_AUTO_PROMOTE',
+	'ENDPOINTS_GATEWAY',
+	'RELEASE_PHASE',
+	'OBJECT_STORE_AZURE',
+	'OBJECT_STORE_GCS'
+]);
 
 export type FeatureFlags = {
 	readonly [Name in FeatureName]: boolean;

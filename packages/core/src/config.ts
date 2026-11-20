@@ -1,4 +1,4 @@
-import type { DatabasePitrRepoConfig, FeatureFlags, FeatureName } from '@yoal/contracts';
+import type { DatabasePitrRepoConfig, DatabasePitrRepository, FeatureFlags, FeatureName } from '@yoal/contracts';
 import { CONTAINER_CONSOLE_DEFAULT_PORT, FEATURE_FLAGS, parseFeatureFlags, STUDIO_DEFAULT_PORT } from '@yoal/contracts';
 import type { ObjectStore } from './object-store.ts';
 import { hmac } from './util.ts';
@@ -108,7 +108,8 @@ export interface CoreConfig {
 	 * control-plane process and are handed to a node through the authenticated activation endpoint,
 	 * never through desired state or the SQLite index.
 	 */
-	pitrRepository?: DatabasePitrRepoConfig;
+	/** S3 from the environment today; an Azure or GCS store (HA-PLAN W3) is lane E's to configure. */
+	pitrRepository?: DatabasePitrRepository;
 }
 
 /**

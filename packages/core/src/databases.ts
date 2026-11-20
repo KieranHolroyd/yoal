@@ -75,6 +75,8 @@ import {
 	type DatabaseMetricBucket,
 	type DatabaseMetricPoint,
 	type DatabasePitrActivation,
+	type DatabasePitrStoreActivation,
+	pitrRepositoryView,
 	type DatabasePitrResult,
 	type DatabasePitrStatus,
 	type DatabasePitrTask,
@@ -103,6 +105,7 @@ import {
 	type WorkloadStatus,
 } from '@yoal/contracts';
 import { featureEnabled } from './config.ts';
+import { pitrActivationFor, pitrStoreProblem } from './pitr-store-gate.ts';
 import type { CoreContext } from './context.ts';
 import { nextCronTime } from './cron.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
@@ -2153,6 +2156,10 @@ export class DatabaseService {
 		const input = databasePitrPolicySchema.parse(raw);
 		this.ctx.moves.assertNotMoving(row);
 		this.requireCapability(row, 'pitr', 'Point-in-time recovery');
+		if (input.enabled && this.ctx.config.pitrRepository) {
+			const storeProblem = pitrStoreProblem(this.ctx, this.ctx.config.pitrRepository, row.nodeId);
+			if (storeProblem) throw new ValidationError(storeProblem);
+		}
 		if (input.enabled) {
 			// Only the standard Postgres 18 image has a pgBackRest build (docs/PITR.md).
 			const unsupported = pitrUnsupportedReason(row.engine, row.version, row.variant);
@@ -2384,7 +2391,7 @@ export class DatabaseService {
 	}
 
 	/** Repository credentials for one node task; never reaches desired state or SQLite. */
-	pitrActivation(nodeId: string, taskId: string): DatabasePitrActivation {
+	pitrActivation(nodeId: string, taskId: string): DatabasePitrActivation | DatabasePitrStoreActivation {
 		this.requirePitrFeature();
 		const row = this.ctx.db
 			.select({ task: databasePitrTasks, db: databases, state: databasePitr })
@@ -2398,14 +2405,18 @@ export class DatabaseService {
 			throw new CoreError('forbidden', 'This PITR task belongs to another node.', 403);
 		const repo = this.ctx.config.pitrRepository;
 		if (!repo) throw new ValidationError(this.pitrRepoMissingMessage());
-		return {
-			taskId: row.task.id,
-			databaseId: row.db.id,
-			action: row.task.action,
-			stanza: row.state?.stanza ?? pitrStanzaFor(row.db.id),
+		const storeProblem = pitrStoreProblem(this.ctx, repo, nodeId);
+		if (storeProblem) throw new ConflictError(storeProblem);
+		return pitrActivationFor(
+			{
+				taskId: row.task.id,
+				databaseId: row.db.id,
+				action: row.task.action,
+				stanza: row.state?.stanza ?? pitrStanzaFor(row.db.id),
+				archiveTimeoutSeconds: PITR_ARCHIVE_TIMEOUT_SECONDS,
+			},
 			repo,
-			archiveTimeoutSeconds: PITR_ARCHIVE_TIMEOUT_SECONDS,
-		};
+		);
 	}
 
 	/** Record base-backup, restore and status outcomes from a node heartbeat. */
@@ -2607,8 +2618,7 @@ export class DatabaseService {
 	private pitrRepoView(): DatabasePitrStatus['repo'] {
 		const repo = this.ctx.config.pitrRepository;
 		if (!repo) throw new ValidationError(this.pitrRepoMissingMessage());
-		const { accessKeyId: _accessKeyId, secretAccessKey: _secretAccessKey, ...view } = repo;
-		return view;
+		return pitrRepositoryView(repo);
 	}
 
 	/**
