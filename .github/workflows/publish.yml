@@ -214,8 +214,8 @@ jobs:
         run: sudo env BUN_BIN="$(command -v bun)" repo/scripts/release/ci-canary.sh repo
 
       # Same gzip format hosts already unpack; pigz just compresses on every core. Everything a
-      # host never reads at runtime (docs, tests, source of compiled apps, source maps, spikes,
-      # examples) stays in CI.
+      # host never reads at runtime (docs, tests, source maps, spikes, examples) stays in CI. The
+      # helper source is kept: the shipped installer script imports it for the opt-in k3s component.
       - name: Package
         run: |
           gz='gzip -9'
@@ -239,7 +239,6 @@ jobs:
             --exclude='repo/apps/control-plane/.svelte-kit' \
             --exclude='repo/apps/agent/src' \
             --exclude='repo/apps/cli/src' \
-            --exclude='repo/apps/helper/src' \
             --exclude='repo/scripts/dev' \
             --exclude='repo/scripts/e2e' \
             --exclude='*.test.ts' \
@@ -251,6 +250,8 @@ jobs:
             repo updater caddy
           tar -tzf "yoal-${VERSION}-linux-${{ matrix.arch }}.tar.gz" > "$RUNNER_TEMP/entries.txt"
           grep -qx 'repo/apps/control-plane/build/index.js' "$RUNNER_TEMP/entries.txt"
+          # scripts/install/kubernetes.ts imports this source at update time, on every host.
+          grep -qx 'repo/apps/helper/src/kubernetes-component.ts' "$RUNNER_TEMP/entries.txt"
           grep -qx 'updater/yoal-updated' "$RUNNER_TEMP/entries.txt"
           grep -qx 'caddy/caddy' "$RUNNER_TEMP/entries.txt"
           ls -l yoal-*.tar.gz
