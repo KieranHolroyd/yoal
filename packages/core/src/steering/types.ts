@@ -18,6 +18,8 @@ export interface SteeringNode {
 	ingress: boolean;
 	/** The agent advertises `ingress-set`, so it can answer the health endpoint (H19). */
 	capable: boolean;
+	/** The node's public/overlay address when the snapshot has one; drivers may also resolve it. */
+	address?: string | null;
 	lastHeartbeatAt: number | null;
 }
 

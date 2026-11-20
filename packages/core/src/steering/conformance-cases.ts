@@ -21,6 +21,8 @@ export interface SteeringConformanceSubject {
 	apply?: () => Promise<void>;
 	/** A simulation that fails every ingress. Required for a driver that writes records. */
 	lastHealthy?: () => Promise<{ withdrawn: string[]; records: string[] }> | { withdrawn: string[]; records: string[] };
+	/** Driver-specific contract cases (a signature, a VRRP address) run beside the shared ones. */
+	extraCases?: SteeringConformanceCase[];
 }
 
 export interface SteeringConformanceCase {
@@ -82,6 +84,7 @@ export function steeringConformanceCases(subject: SteeringConformanceSubject): S
 				if (!result.records.length) throw new Error('the record set was emptied');
 			},
 		},
+		...(subject.extraCases ?? []),
 	];
 }
 
