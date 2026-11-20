@@ -1918,6 +1918,26 @@ cat /var/lib/yoal/drill/status.json
 journalctl -u yoal-litestream -n 100 --no-pager
 ```
 
+### 7.3 Health probes of copies on other nodes (security note)
+
+An app spread over several nodes with a `healthPath` is probed by every ingress every
+`replicas.healthIntervalSeconds`: a copy on another node is reached through that node's Caddy,
+with the route's own `Host` and no session cookie. On a protected route (`platform`, `password`,
+a policy; preview routes are `platform` by default) the node holding the copy therefore lets one
+request shape skip the access check: a `GET` or `HEAD` of exactly the app's `healthPath`
+(case-sensitive, no wildcard), from a source address inside the managed overlay CIDR. The address
+is the connection's own peer (Caddy `remote_ip`); `X-Forwarded-For` and other headers are never
+consulted. Everything else on the route, including any other method, path or query of the app,
+still needs a session.
+
+**Consequence:** the health path of a protected app is readable without signing in by anything
+that can open a connection from an overlay address: every fleet node, and any process or
+container on one that uses the node's overlay address as its source. Keep the health path free of
+data (`200 ok`, not a status page with versions or user counts). A path that is not a plain
+literal (it contains `*`, `%`, `{`, spaces) gets no exemption, and a node on a bring-your-own
+network (`network_mode: external`) has no overlay CIDR, so its protected copies are never exempt
+and an ingress marks them unhealthy.
+
 ---
 
 ## 8. Restore drill

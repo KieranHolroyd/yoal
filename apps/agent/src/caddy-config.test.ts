@@ -407,6 +407,59 @@ describe('per-deployment roots, worker routes and logging', () => {
 		expect(JSON.stringify(config(value))).toContain('"active":{"uri":"/healthz","interval":"5s",');
 	});
 
+	test('a protected copy lets only an overlay health probe past the access check (F7 review)', () => {
+		// The node holding a copy of a spread app: its route has the app's health path but no
+		// upstreams, and its desired state carries the overlay it is on.
+		const value = state();
+		value.routes[1] = { ...value.routes[1]!, healthPath: '/healthz' };
+		value.wireguard = {
+			mode: 'yoal',
+			address: '10.47.1.3',
+			cidr: '10.47.0.0/16',
+			mtu: 1380,
+			listenPort: 51820,
+			peers: [],
+			routes: [],
+			machineSubnet: null,
+		};
+		const authRunsFor = (compiled: Json, request: { method: string; path: string; remoteIp: string; headers?: Record<string, string> }) => {
+			const route = routes(compiled).find((entry) => JSON.stringify(entry.match).includes('secret.example.com'))!;
+			const subroutes = ((route.handle as Json[])[0]!.routes as Json[]);
+			const auth = subroutes.find((sub) => JSON.stringify(sub.handle).includes('/_yoal/verify'))!;
+			if (!auth.match) return true;
+			// Caddy: a route runs when any matcher set matches; `not` negates one AND-ed set.
+			const [set] = (auth.match as Json[]) as Array<{ not: Array<Record<string, any>> }>;
+			const inner = set!.not[0]!;
+			const inCidr = (ip: string, cidr: string) => {
+				const [base, bits] = cidr.split('/');
+				const toInt = (value: string) => value.split('.').reduce((acc, part) => (acc << 8) + Number(part), 0) >>> 0;
+				const mask = Number(bits) === 0 ? 0 : (~0 << (32 - Number(bits))) >>> 0;
+				return (toInt(ip) & mask) === (toInt(base!) & mask);
+			};
+			const matched =
+				inner.method.includes(request.method) &&
+				inner.path.some((path: string) => path.toLowerCase() === request.path.toLowerCase()) &&
+				new RegExp(inner.path_regexp.pattern).test(request.path) &&
+				inner.remote_ip.ranges.some((range: string) => inCidr(request.remoteIp, range));
+			return !matched;
+		};
+		const compiled = config(value);
+		const probe = { method: 'GET', path: '/healthz', remoteIp: '10.47.1.2' };
+		expect(authRunsFor(compiled, probe)).toBe(false);
+		expect(authRunsFor(compiled, { ...probe, method: 'HEAD' })).toBe(false);
+		// Anything else still needs a session.
+		expect(authRunsFor(compiled, { ...probe, method: 'POST' })).toBe(true);
+		expect(authRunsFor(compiled, { ...probe, path: '/healthz/x' })).toBe(true);
+		expect(authRunsFor(compiled, { ...probe, path: '/HEALTHZ' })).toBe(true);
+		expect(authRunsFor(compiled, { ...probe, path: '/' })).toBe(true);
+		expect(authRunsFor(compiled, { ...probe, remoteIp: '203.0.113.9' })).toBe(true);
+		// A forwarded header claiming an overlay address is not consulted at all.
+		expect(JSON.stringify(compiled)).not.toMatch(/client_ip|X-Forwarded-For/i);
+		// The public route is untouched, and a node without a managed overlay exempts nothing.
+		expect(authRunsFor(config({ ...value, wireguard: undefined }), probe)).toBe(true);
+		expect(authRunsFor(config({ ...value, wireguard: { ...value.wireguard!, mode: 'external', cidr: null } }), probe)).toBe(true);
+	});
+
 	test('a copy on another node passes the active health check through that node\'s Caddy (F7)', async () => {
 		// Stands in for the remote node's Caddy: it routes by Host and has no route for anything else.
 		const remoteNode = Bun.serve({

@@ -1458,7 +1458,11 @@ export class NodeService {
 									}
 								: {}),
 						}
-						: {}),
+						: everyCopyNode.length > 1 && everyCopyNode.includes(node.id) && deploymentSpec?.healthPath
+							? // A node holding one copy of a spread app: ingresses probe this path through its
+								// Caddy with no session, so a protected route must know it (F7).
+								{ healthPath: deploymentSpec.healthPath }
+							: {}),
 					...functionRoute,
 				} satisfies Omit<RouteSpec, 'host' | 'access' | 'accessMode'>;
 				baseByDeployment.set(deployment.id, base);

@@ -156,6 +156,54 @@ describe('compileSiteRoute', () => {
 		expect(json).toContain('private');
 	});
 
+	describe('health probes of a protected copy (F7 review)', () => {
+		const authOf = (input: SiteCompileInput) => {
+			const route = compileSiteRoute(input) as { handle: Array<{ routes: Array<{ match?: unknown; handle: Array<Record<string, unknown>> }> }> };
+			return route.handle[0]!.routes.find((sub) => JSON.stringify(sub.handle).includes('/_yoal/verify'));
+		};
+		const protectedCopy: SiteCompileInput = { ...base, accessMode: 'platform', healthPath: '/healthz', healthProbeCidr: '10.47.0.0/16' };
+
+		test('only GET or HEAD of exactly the health path from the overlay skips the access check', () => {
+			const auth = authOf(protectedCopy)!;
+			// The access check runs unless every condition holds together (one matcher set: AND).
+			expect(auth.match).toEqual([
+				{
+					not: [
+						{
+							method: ['GET', 'HEAD'],
+							path: ['/healthz'],
+							// Caddy's `path` is case-insensitive; the anchored regexp is not.
+							path_regexp: { pattern: '^/healthz$' },
+							// The connection's own peer address, never a forwarded header.
+							remote_ip: { ranges: ['10.47.0.0/16'] },
+						},
+					],
+				},
+			]);
+			expect(JSON.stringify(auth)).not.toContain('client_ip');
+		});
+
+		test('without a known overlay, a health path, or protection, nothing is exempt', () => {
+			expect(authOf({ ...protectedCopy, healthProbeCidr: undefined })!.match).toBeUndefined();
+			expect(authOf({ ...protectedCopy, healthProbeCidr: null })!.match).toBeUndefined();
+			expect(authOf({ ...protectedCopy, healthPath: undefined })!.match).toBeUndefined();
+			expect(authOf({ ...protectedCopy, accessMode: 'public' })).toBeUndefined();
+		});
+
+		test('a health path that is a pattern, an escape or a placeholder is never exempt', () => {
+			for (const healthPath of ['/*', '/health*', '/a%2Fb', '/{http.request.uri}', '/a b', 'healthz'])
+				expect(authOf({ ...protectedCopy, healthPath })!.match).toBeUndefined();
+			// A malformed CIDR would fail the node's whole Caddy load: no exemption instead.
+			expect(authOf({ ...protectedCopy, healthProbeCidr: '0.0.0.0/0 ' })!.match).toBeUndefined();
+			expect(authOf({ ...protectedCopy, healthProbeCidr: 'any' })!.match).toBeUndefined();
+		});
+
+		test('regexp metacharacters in the path are escaped', () => {
+			const auth = authOf({ ...protectedCopy, healthPath: '/v1.0/health-check_x~' })!;
+			expect(JSON.stringify(auth.match)).toContain('"pattern":"^/v1\\\\.0/health-check_x~$"');
+		});
+	});
+
 	test('redirects compile to redir handlers and rewrites to rewrite handlers', () => {
 		const route = compileSiteRoute({
 			...base,

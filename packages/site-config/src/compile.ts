@@ -36,6 +36,13 @@ export interface SiteCompileInput {
 	healthPath?: string;
 	/** Seconds between active checks (cluster `replicas.healthIntervalSeconds`); 5 when absent. */
 	healthIntervalSeconds?: number;
+	/**
+	 * The fleet's overlay CIDR, on a node that holds a copy of a spread app. An ingress probes the
+	 * copy's `healthPath` through this node's Caddy with no session cookie, so on a protected site a
+	 * GET or HEAD of exactly that path from an overlay address skips the access check (F7). Null or
+	 * absent: nothing is exempt.
+	 */
+	healthProbeCidr?: string | null;
 }
 
 const SECURITY_HEADERS = {
@@ -53,9 +60,37 @@ function headerHandler(set: Record<string, string[]>, extra?: Record<string, str
 	return { handler: 'headers', response: { set: { ...set, ...extra } } };
 }
 
+/** A path Caddy's `path` matcher takes literally: no wildcard, escape, placeholder or space. */
+const LITERAL_HEALTH_PATH = /^\/[A-Za-z0-9._~/-]*$/;
+const IPV4_CIDR = /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\/(?:3[0-2]|[12]?\d)$/;
+
+/**
+ * The only requests a protected site lets through unauthenticated: an ingress's active health
+ * probe of a copy. Method, exact path (Caddy's case-insensitive `path` and a case-sensitive
+ * anchored regexp) and the connection's own peer address (`remote_ip`, never a forwarded header)
+ * must all match. Null when anything is missing or not plainly literal, so nothing is exempt.
+ */
+function healthProbeMatcher(healthPath: string | undefined, cidr: string | null | undefined): unknown[] | null {
+	if (!healthPath || !cidr || !LITERAL_HEALTH_PATH.test(healthPath) || !IPV4_CIDR.test(cidr)) return null;
+	const pattern = `^${healthPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`;
+	return [
+		{
+			not: [
+				{
+					method: ['GET', 'HEAD'],
+					path: [healthPath],
+					path_regexp: { pattern },
+					remote_ip: { ranges: [cidr] },
+				},
+			],
+		},
+	];
+}
+
 /** forward_auth against the local agent; the agent verifies the host-only HMAC cookie statelessly. */
-function authRoute(agentSocket: string): CaddyRoute {
+function authRoute(agentSocket: string, match?: unknown[] | null): CaddyRoute {
 	return {
+		...(match ? { match } : {}),
 		handle: [
 			{
 				handler: 'reverse_proxy',
@@ -192,7 +227,8 @@ export function compileSiteRoute(input: SiteCompileInput): CaddyRoute {
 	const protectedSite = input.accessMode !== 'public';
 	const routes: CaddyRoute[] = [];
 
-	if (protectedSite && input.agentSocket) routes.push(authRoute(input.agentSocket));
+	if (protectedSite && input.agentSocket)
+		routes.push(authRoute(input.agentSocket, healthProbeMatcher(input.healthPath, input.healthProbeCidr)));
 
 	routes.push({
 		handle: [
