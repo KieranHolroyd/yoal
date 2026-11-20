@@ -484,7 +484,7 @@ describe('ServiceForwarder install-CA trust (HA-PLAN H24)', () => {
 
 describe('gateway address validation (W4)', () => {
 	test('only a private container-gateway address may be bound', () => {
-		for (const address of ['10.89.0.1', '172.16.4.1', '192.168.1.1', '100.64.0.1']) expect(isGatewayAddress(address)).toBe(true);
+		for (const address of ['10.89.0.1', '172.16.4.1', '192.168.1.1', '100.64.0.1', '127.0.0.2']) expect(isGatewayAddress(address)).toBe(true);
 		for (const address of ['127.0.0.1', '0.0.0.0', '203.0.113.7', '8.8.8.8', '10.89.0.1 evil', '010.0.0.1', '10.89.0']) expect(isGatewayAddress(address)).toBe(false);
 	});
 });

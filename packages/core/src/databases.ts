@@ -3673,7 +3673,9 @@ export class DatabaseService {
 				];
 			}
 			// Without the gateway this is C2 exactly: a remote process app uses its endpoint, everything
-			// else must share the database's node.
+			// else must share the database's node. A container left on another node (the flag was
+			// turned off) must get no URL at all: `127.0.0.1` would point at the container itself.
+			if (container && !sameNode) return [];
 			if (!sameNode && !primary) return [];
 			const pooler = sameNode && !credential && db.poolerEnabled && db.poolerPort !== null && info.capabilities.pooler;
 			return [
