@@ -132,7 +132,8 @@ export const readEndpointSchema = z.object({
 		.min(1)
 		.max(8),
 	gatewayAddress: gatewayAddressSchema.optional(),
-	trust: z.enum(endpointTrustModes).default('install-ca'),
+	/** The providers' mode (`endpointTrustMode`); `pinned` unless every node involved can verify the CA. */
+	trust: z.enum(endpointTrustModes).default('pinned'),
 	tlsFingerprints: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(8).optional(),
 	version: z.number().int().nonnegative().default(0),
 });

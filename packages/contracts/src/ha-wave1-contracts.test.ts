@@ -238,7 +238,7 @@ describe('desired state', () => {
 			],
 		});
 		expect(parsed.workloads[0]!.addHosts).toEqual([{ host: 'db-db_1', address: '10.89.0.1' }]);
-		expect(parsed.readEndpoints?.[0]?.trust).toBe('install-ca');
+		expect(parsed.readEndpoints?.[0]?.trust).toBe('pinned');
 		expect(parsed.nodeTrust?.revokedSerials).toEqual([]);
 		expect(routeSpecSchema.shape.readinessPath).toBeDefined();
 	});
