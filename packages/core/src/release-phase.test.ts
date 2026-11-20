@@ -163,6 +163,19 @@ describe('release command gates the rollout (I16, H25)', () => {
 		expect(rendered.every((entry) => entry.deploymentId === deployment.id)).toBe(true);
 	});
 
+	test('saving a release command on a live app keeps its copies serving (no deploy)', async () => {
+		const { core, project, app, settle, desired } = fleet(['a']);
+		for (const name of ['a']) core.nodes.heartbeat.bind(core.nodes);
+		await app('live-add');
+		await settle('live-add');
+		const before = await desired('a', 'live-add');
+		expect(before.length).toBeGreaterThan(0);
+		// The first step of H25: set the command, then deploy. With no run yet there is nothing to
+		// wait for, and the running copies must not disappear.
+		core.workloads.setSpec(principal, project('live-add'), { ...baseSpec, release: { command: ['bin/migrate'] } });
+		expect((await desired('a', 'live-add')).length).toBe(before.length);
+	});
+
 	test('a release command runs once and no copy moves before it succeeds', async () => {
 		const f = fleet(['a', 'b']);
 		const first = await f.app('web', { replicas: 2 });
