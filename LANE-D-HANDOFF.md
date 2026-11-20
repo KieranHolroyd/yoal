@@ -1,5 +1,8 @@
 # Lane D hand-off — W8 driver contract + `external-lb`
 
+> Wave 1's lane D hand-off (W5 runtime/drain) is preserved as `LANE-D-HANDOFF-W1.md`; this file is
+> Wave 2 lane D's.
+
 Branch `ha/w2-d-external-lb`, base `ha/integration` at `416996dd`. Implementation commit
 **`80c681d3`**. No merge to `main`, no cloud spend, no `VERSION` bump.
 
