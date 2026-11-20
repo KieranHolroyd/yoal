@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import * as z from 'zod';
 
 /** Ingress high availability drivers and health policy (docs/CLUSTERING.md §7.2, C5). */
@@ -181,6 +182,8 @@ export const ingressCertificateSchema = z.object({
 	notAfter: z.number().int(),
 	renewedAt: z.number().int().nullable(),
 	revokedAt: z.number().int().nullable(),
+	/** Set when an ingress left the fleet: the old node still holds the key, so reissue (H20). */
+	reissueRequestedAt: z.number().int().nullable().optional(),
 });
 
 export type IngressCertificateView = z.infer<typeof ingressCertificateSchema>;
@@ -203,3 +206,126 @@ export const acmeLeaseSchema = z.object({
 });
 
 export type AcmeLease = z.infer<typeof acmeLeaseSchema>;
+
+// ---------------------------------------------------------------- shared certificates (W7)
+
+/**
+ * H20's ACME lease: 600 s TTL, renewed every 120 s (CLUSTERING §7.3). A holder that dies costs one
+ * lease TTL, not the certificate: another ingress takes the host on the next sweep.
+ */
+export const ACME_LEASE_TTL_MS = 600_000;
+export const ACME_LEASE_RENEW_MS = 120_000;
+
+/** Renewal starts this far ahead of `not_after` (CLUSTERING §7.3). */
+export const CERT_RENEWAL_WINDOW_MS = 30 * 86_400_000;
+
+/** Bring-your-own certificates are never renewed by Yoal; it alerts at each of these. */
+export const BYO_EXPIRY_ALERT_DAYS = [30, 14, 3] as const;
+
+/** The path every ingress relays to the ACME holder (H20 item 2). */
+export const ACME_CHALLENGE_PATH = '/.well-known/acme-challenge/';
+
+/** DNS-01 providers (H20 item 1). `cloudflare` ships; the rest fill the same interface. */
+export const dnsChallengeProviderKinds = ['cloudflare', 'azure-dns', 'route53', 'rfc2136'] as const;
+export type DnsChallengeProviderKind = (typeof dnsChallengeProviderKinds)[number];
+
+/** One TXT record a DNS-01 provider presents and later removes. */
+export const dnsChallengeRecordSchema = z.object({
+	/** The certificate host, e.g. `app.example.com` or `*.example.com`. */
+	host: z.string().min(1).max(253),
+	/** The record name, e.g. `_acme-challenge.app.example.com`. */
+	fqdn: z.string().min(1).max(253),
+	/** The TXT value the CA will look up. */
+	value: z.string().min(1).max(512),
+});
+export type DnsChallengeRecord = z.infer<typeof dnsChallengeRecordSchema>;
+
+/** The interface every DNS-01 provider implements (the provider plugins H20 item 1 adds). */
+export interface DnsChallengeProvider {
+	readonly name: DnsChallengeProviderKind;
+	/** Create the TXT record. Throws (so the issuer retries) rather than reporting success falsely. */
+	present(record: DnsChallengeRecord): Promise<void>;
+	/** Delete exactly this record. Throws so a failed cleanup is visible, never silent (S4). */
+	cleanup(record: DnsChallengeRecord): Promise<void>;
+	/** Delete stale challenge records for `hosts` older than `olderThanMs`; returns how many went. */
+	sweep(hosts: readonly string[], olderThanMs: number): Promise<number>;
+}
+
+/** The fingerprint every ingress reports: one value for the whole live set, sorted so order is free. */
+export function certificateFleetFingerprint(
+	entries: ReadonlyArray<{ host: string; fingerprint: string }>,
+): string | null {
+	if (entries.length === 0) return null;
+	const canonical = entries
+		.map((entry) => `${normalizeCertificateHost(entry.host)}=${entry.fingerprint.toLowerCase()}`)
+		.sort()
+		.join('\n');
+	return createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+}
+
+/** Lower-case, strip a trailing dot. A leading `*.` is kept (wildcards are certificate hosts). */
+export function normalizeCertificateHost(host: string): string {
+	return host.trim().toLowerCase().replace(/\.$/, '');
+}
+
+const certificateHostSchema = z
+	.string()
+	.min(1)
+	.max(253)
+	.transform(normalizeCertificateHost)
+	.refine((host) => /^(\*\.)?[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$/.test(host), {
+		message: 'not a hostname',
+	});
+
+/** A PEM pair uploaded by the ACME holder or by an operator (BYO). */
+export const certificateUploadSchema = z
+	.object({
+		host: certificateHostSchema,
+		certPem: z.string().min(64).max(1_000_000),
+		keyPem: z.string().min(64).max(1_000_000),
+	})
+	.strict();
+
+export type CertificateUpload = z.infer<typeof certificateUploadSchema>;
+
+/** One certificate as the activation endpoint delivers it. The key never appears in any view. */
+export const certificateActivationEntrySchema = z.object({
+	host: z.string().min(1).max(253),
+	fingerprint: z.string().min(1).max(128),
+	chainPem: z.string().min(64).max(1_000_000),
+	keyPem: z.string().min(64).max(1_000_000),
+	notAfter: z.number().int(),
+	source: z.enum(['acme', 'byo']),
+});
+
+export type CertificateActivationEntry = z.infer<typeof certificateActivationEntrySchema>;
+
+/** A host whose challenges this node must relay to the lease holder over the overlay. */
+export const certificateRelaySchema = z.object({
+	host: z.string().min(1).max(253),
+	/** `http://<overlay address>:<port>` of the node answering the challenge. */
+	upstream: z.string().min(1).max(300),
+});
+
+export type CertificateRelay = z.infer<typeof certificateRelaySchema>;
+
+/**
+ * The node-authenticated certificate activation (CLUSTERING §7.3 "Distribution"). Fetched by an
+ * ingress agent on start, after a desired-state bump and every 6 h; never part of desired state.
+ */
+export const certificateActivationSchema = z.object({
+	generation: z.number().int().nonnegative(),
+	/** The fleet fingerprint this set produces; equals the control plane's `fingerprint()`. */
+	fingerprint: z.string().max(128).nullable(),
+	certificates: z.array(certificateActivationEntrySchema).max(1_000),
+	relays: z.array(certificateRelaySchema).max(1_000),
+});
+
+export type CertificateActivation = z.infer<typeof certificateActivationSchema>;
+
+/** Where an ingress relays one host's challenges; derived from the live lease. */
+export interface CertificateRelayTarget {
+	host: string;
+	nodeId: string;
+	upstream: string;
+}

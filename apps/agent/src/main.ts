@@ -26,6 +26,7 @@ import type { TlsOptions } from '@yoal/site-config';
 import { startAnalyticsSink, type AnalyticsSink } from './analytics-sink.ts';
 import { CaddyAdmin } from './caddy.ts';
 import { CertProbe, certProbeTargets, tlsCertReader } from './certs.ts';
+import { CERTIFICATE_REFRESH_MS, CertificateDelivery } from './certificates.ts';
 import { buildCaddyConfig, isProductionRoute, tlsSubjects } from './caddy-config.ts';
 import { loadConfig, type AgentConfig } from './config.ts';
 import { controlSocketFetch } from './control-socket.ts';
@@ -134,6 +135,8 @@ class AgentRuntime {
 	private wireguardPublicKey: string | null = null;
 	private wireguardStatusAt = 0;
 	private readonly certs: CertProbe | null;
+	/** Shared certificates delivered by the control plane (HA-PLAN H20); empty with the flag off. */
+	private readonly certificateDelivery: CertificateDelivery;
 	private readonly helper: HelperClient;
 	/** Email (docs/EMAIL.md): runs and feeds yoal-mail when this node is the mail node. */
 	private readonly mail: MailBridge;
@@ -187,6 +190,8 @@ class AgentRuntime {
 	/** Whether this process has pulled a full desired state yet; see `desiredStateRequest`. */
 	private desiredPulledThisRun = false;
 	private convergedVersion: number | null = null;
+	/** The last config body applied, so a certificate delivery does not trigger a needless reload. */
+	private appliedCaddyJson: string | null = null;
 	private actualStateVersion = 0;
 	private projectByHost = new Map<string, string>();
 	private readonly usedTokens: UsedTokenCache;
@@ -252,6 +257,12 @@ class AgentRuntime {
 		this.serviceForwarder = new ServiceForwarder({
 			log: (level, message) => log(level, message),
 			...(this.nodeCertificate.ensure() ? { certificate: this.nodeCertificate.ensure()! } : {}),
+		});
+		this.certificateDelivery = new CertificateDelivery({
+			controlUrl: config.controlUrl,
+			nodeToken: config.nodeToken,
+			dataDir: config.dataDir,
+			log,
 		});
 		this.certs = config.certProbe
 			? new CertProbe(
@@ -543,6 +554,7 @@ class AgentRuntime {
 		this.loops = [
 			this.reconcileLoop(),
 			this.heartbeatLoop(),
+			this.certificateLoop(),
 			this.identityLoop(),
 			this.telemetryLoop(),
 			this.databaseStatsLoop(),
@@ -594,6 +606,7 @@ class AgentRuntime {
 		await this.mail.close();
 		await this.poolIdentity.close();
 		this.serviceForwarder.close();
+		this.certificateDelivery.close();
 		await this.replicaLinks.close();
 		this.server?.stop(true);
 		this.server = null;
@@ -690,6 +703,21 @@ class AgentRuntime {
 				log('warn', `Desired-state pull failed: ${errorText(error)}`);
 				await sleep(this.reconcileBackoff.next(), this.shutdownController.signal);
 			}
+		}
+	}
+
+	/**
+	 * The 6-hour refresh of the shared-certificate activation (CLUSTERING §7.3). Converge also
+	 * checks after a desired-state change, which is what a renewal causes; this covers a change that
+	 * somehow did not bump the version.
+	 */
+	private async certificateLoop(): Promise<void> {
+		while (this.running) {
+			await sleep(CERTIFICATE_REFRESH_MS, this.shutdownController.signal).catch(() => undefined);
+			if (!this.running) break;
+			await this.certificateDelivery.refresh().catch((error: unknown) => {
+				log('warn', `Shared certificate refresh failed: ${errorText(error)}`);
+			});
 		}
 	}
 
@@ -982,6 +1010,11 @@ class AgentRuntime {
 			log('error', `Workload converge failed: ${errorText(error)}`);
 		}
 
+		// Shared certificates (H20): pick up a new generation before rendering the manager policy. A
+		// failure keeps the last delivery (and the last fingerprint) rather than dropping TLS.
+		await this.certificateDelivery.ensureFresh().catch((error: unknown) => {
+			log('warn', `Shared certificate activation failed; keeping the last delivery: ${errorText(error)}`);
+		});
 		const tls = this.config.tls || state.ingress?.tls ? this.tlsOptions(state) : undefined;
 		const caddyConfig = buildCaddyConfig({
 			// An unhealthy identity unit falls back to the control plane's hosted/OIDC routes, so a
@@ -999,6 +1032,9 @@ class AgentRuntime {
 			caddyAdminSocket: this.config.caddyAdminSocket,
 			accessLog: this.config.caddyAccessLog,
 			...(tls ? { tls } : {}),
+			// With the flag off the manager is null and the relay list empty: today's per-node ACME.
+			...(this.certificateDelivery.manager() ? { certificateManager: this.certificateDelivery.manager() } : {}),
+			...(this.certificateDelivery.relays().length > 0 ? { acmeRelays: this.certificateDelivery.relays() } : {}),
 			...(state.ingress?.platform ?? this.config.platformHost
 				? {
 						platform: state.ingress?.platform ?? {
@@ -1008,7 +1044,11 @@ class AgentRuntime {
 					}
 				: {}),
 		});
-		await this.caddy.applyFullConfig(caddyConfig, this.shutdownController.signal);
+		const caddyJson = JSON.stringify(caddyConfig);
+		if (caddyJson !== this.appliedCaddyJson) {
+			await this.caddy.applyFullConfig(caddyConfig, this.shutdownController.signal);
+			this.appliedCaddyJson = caddyJson;
+		}
 
 		this.caddyOk = true;
 		this.projectByHost = new Map(
@@ -1464,6 +1504,9 @@ class AgentRuntime {
 			status: requestedStatus === 'draining' ? 'draining' : this.caddyOk ? 'online' : 'offline',
 			caddyOk: this.caddyOk,
 			capabilities: advertisedCapabilities(undefined, undefined, this.nodeCa.available()),
+			// The same value on every ingress when distribution is healthy (HA-PLAN H20, W7). Null
+			// with the flag off, where Caddy issues per node.
+			certificateFingerprint: this.certificateDelivery.fingerprint(),
 			stats,
 			...(hardware ? { hardware } : {}),
 			...(nodeCertificate ? { nodeCertificate } : {}),

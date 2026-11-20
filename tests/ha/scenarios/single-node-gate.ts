@@ -53,7 +53,16 @@ const { values: flags } = parseArgs({
  * The flags of HA-PLAN §4/§9 (one per workstream). Those not on this tree yet are listed so the gate
  * picks them up the day a lane registers them; DB_AUTO_PROMOTE is the existing opt-in (F1).
  */
-const HA_FLAGS = ['INGRESS_SET', 'RELEASE_PHASE', 'CONTROL_STANDBY', 'DB_SYNC', 'DB_AUTO_FAILOVER', 'DB_AUTO_PROMOTE', 'REGIONS'];
+const HA_FLAGS = [
+	'INGRESS_SET',
+	'SHARED_CERTIFICATES',
+	'RELEASE_PHASE',
+	'CONTROL_STANDBY',
+	'DB_SYNC',
+	'DB_AUTO_FAILOVER',
+	'DB_AUTO_PROMOTE',
+	'REGIONS',
+];
 
 const project = flags.project ?? 'ha-single';
 const scenario = new Scenario('single-node-gate', { ...flags, project }, flags);

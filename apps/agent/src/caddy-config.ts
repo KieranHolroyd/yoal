@@ -9,6 +9,7 @@ import {
 	type SiteCompileInput,
 	type TlsOptions,
 } from '@yoal/site-config';
+import { ACME_RELAY_PATH_MATCH, certificateManagerPolicy } from './certificates.ts';
 import { compileFunctionRoute } from './function-routing.ts';
 import { normalizeHost } from './verify.ts';
 
@@ -29,6 +30,13 @@ export interface CompileAgentConfigOptions {
 	platform?: { host: string; upstream: string };
 	/** Caddy JSON access log the agent tails for telemetry (DESIGN §8). */
 	accessLog?: string | null;
+	/**
+	 * Shared certificates (HA-PLAN H20, W7): when present, Caddy gets every pair from the agent at
+	 * handshake time and never issues ACME itself for those hosts.
+	 */
+	certificateManager?: { url: string; subjects: string[] } | null;
+	/** Hosts whose ACME challenge every ingress relays to the lease holder over the overlay. */
+	acmeRelays?: Array<{ host: string; upstream: string }> | null;
 }
 
 const ACCESS_LOGGER = 'yoal_access';
@@ -806,6 +814,44 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 		const policies = (automation.policies as Record<string, unknown>[] | undefined) ?? [];
 		policies.push({ subjects: names, issuers: customDomainIssuers(options.tls) });
 		automation.policies = policies;
+	}
+
+	// Shared certificates (H20, S4 `B-hot`): the agent serves the pair over loopback and Caddy asks
+	// at each new handshake. Nothing reloads, so a renewal closes no keep-alive connection. The
+	// policy is first, so it wins over the per-host ACME policies compiled above for these subjects.
+	if (options.certificateManager && apps?.tls) {
+		const tls = apps.tls as Record<string, unknown>;
+		const automation = (tls.automation ??= {}) as Record<string, unknown>;
+		const policies = (automation.policies as Record<string, unknown>[] | undefined) ?? [];
+		automation.policies = [certificateManagerPolicy(options.certificateManager), ...policies];
+		const certificates = tls.certificates as Record<string, unknown> | undefined;
+		if (certificates?.automate)
+			certificates.automate = (certificates.automate as string[]).filter(
+				(name) => !options.certificateManager!.subjects.includes(normalizeHost(name)),
+			);
+	}
+
+	// H20 item 2: every ingress forwards a challenge that lands on it to the current lease holder
+	// over the overlay, because a CA with multi-perspective validation fails the whole order if one
+	// perspective times out (S4).
+	if (options.acmeRelays?.length) {
+		const relayRoutes = options.acmeRelays.map((relay) => ({
+			'@id': `acme-relay:${normalizeHost(relay.host)}`,
+			match: [{ host: [normalizeHost(relay.host)], path: [ACME_RELAY_PATH_MATCH] }],
+			terminal: true,
+			handle: [
+				{
+					handler: 'reverse_proxy',
+					upstreams: [{ dial: relay.upstream.replace(/^https?:\/\//, '') }],
+					headers: { request: { set: { Host: ['{http.request.host}'] } } },
+					flush_interval: -1,
+				},
+			],
+		}));
+		// ACME HTTP-01 always arrives on :80; the content server listens on :443 and cannot answer it.
+		const servers = apps.http.servers as Record<string, { listen?: string[]; routes?: unknown[] }>;
+		const plain = (servers.http_redirect ??= { listen: [':80'], routes: [] });
+		plain.routes = [...relayRoutes, ...(plain.routes ?? [])];
 	}
 
 	if (options.accessLog) {
