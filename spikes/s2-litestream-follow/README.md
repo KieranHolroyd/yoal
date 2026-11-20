@@ -53,3 +53,47 @@ control-plane-sized database and swap time.
 - **Database:** generated with the real `packages/db` migrations, not a copy of a live `yoal.db`
   (the brief forbids production files).
 - **Duration:** ≥ 1 h, not 24 h (above).
+
+## Running it
+
+```sh
+bun spikes/s2-litestream-follow/run.ts          # every scenario, about 2 h 15 min
+S2_SCENARIOS=tuned S2_TUNED_MIN=5 bun spikes/s2-litestream-follow/run.ts
+```
+
+Needs Docker (OrbStack) and Bun on the host. It builds `yoal-w0-s2-node:1` (Debian 13, Bun 1.4.4,
+Litestream 0.3.13 and 0.5.18 checked against pinned sha256), starts `yoal-w0-s2-*` containers on
+their own network, seeds the database from `packages/db` (`seed.ts`), runs the scenarios and
+removes the containers, volumes and network. Output (logs, lag CSVs, `summary.json`) goes to
+`out/<stamp>/`, which is gitignored. Point it at R2 with `S2_S3_ENDPOINT`, `S2_S3_ACCESS_KEY`,
+`S2_S3_SECRET_KEY` and `S2_S3_BUCKET`; the store freeze and request counts are MinIO-only.
+
+| Scenario | What it does |
+|---|---|
+| `unit` | Unit config (`scripts/litestream.yml`, sync 1 s), followers at 1 s and 250 ms, `S2_SOAK_MIN` steady, then follower cut, primary cut, store freeze, follower `kill -9`, follower container restart, promotion, the promoted node replicating to the same path |
+| `tuned` | Sync and monitor 250 ms, follow 250 ms, steady, then `kill -9` of the primary |
+| `fallback` | 0.3.13 primary; restore-to-staging and swap every 60 s; 0.5.18 restore and follow of a v3 replica |
+| `walstall` | A reader opened before the first follow apply (WAL header) blocks follow |
+| `gap` | Follower down 7 min, past L0 retention |
+| `cuts` | Second 60 s cut samples, and a follower cut with the no-progress watchdog prototype |
+| `idle` | Store requests per second by phase (follower 1 s and 250 ms, writing and idle) |
+
+Results: `docs/SPIKES.md`, section "S2 — Litestream follow lag (2026-11-20)".
+
+## Deviations found while running
+
+- **Litestream version.** The pin (0.3.13) cannot follow, so the follow measurements use 0.5.18
+  (follow exists since 0.5.9); 0.3.13 is measured only through the fallback.
+- **Follower command.** Yoal has no follower command, so it uses upstream's
+  `restore -f -follow-interval <i> -o /data/yoal.db /data/yoal.db` with the unit's config file.
+- **Tuned configuration.** Beyond the unit's own config, a `tuned` run shortens `sync-interval`
+  and `monitor-interval` to 250 ms, because the unit config cannot meet p95 ≤ 1 s. The criteria
+  are unchanged.
+- **Probe.** It waits for the follower file's rollback-mode header before opening, after the
+  first smoke run showed that an earlier reader stalls follow (`walstall` reproduces it).
+- **Watchdog.** The `cuts` scenario runs a no-progress watchdog inside the rig (spike rule 5:
+  prototype in the rig, not in production code).
+- **Extra scenarios.** `gap`, `cuts` and `idle` were added after the main run to explain a failed
+  cut and the request rates.
+- **Faults.** Cuts are `docker network disconnect`, not `tc`. `kill -9` of the primary kills the
+  whole container; the page cache survives, so this is not a power loss.

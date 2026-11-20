@@ -4,7 +4,8 @@
  *   bun spikes/s2-litestream-follow/run.ts            # all scenarios, defaults below
  *
  * Env (all optional):
- *   S2_SCENARIOS   unit,tuned,fallback,walstall   which scenarios to run, in order
+ *   S2_SCENARIOS   unit,tuned,fallback,walstall,gap,cuts,idle   which scenarios to run, in order
+ *   S2_GAP_MIN     7      follower downtime in `gap` (longer than the 5 min L0 retention)
  *   S2_SOAK_MIN    60     steady minutes in `unit` before faults
  *   S2_TUNED_MIN   15     steady minutes in `tuned`
  *   S2_CUT_S       60     length of each network cut / store freeze
@@ -31,7 +32,7 @@ const MINIO_IMAGE = 'quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf
 const NET = 'yoal-w0-s2-net';
 const P = 'yoal-w0-s2';
 const env = process.env;
-const SCENARIOS = (env.S2_SCENARIOS ?? 'unit,tuned,fallback,walstall').split(',').filter(Boolean);
+const SCENARIOS = (env.S2_SCENARIOS ?? 'unit,tuned,fallback,walstall,gap,cuts,idle').split(',').filter(Boolean);
 const SOAK_MIN = Number(env.S2_SOAK_MIN ?? 60);
 const TUNED_MIN = Number(env.S2_TUNED_MIN ?? 15);
 const CUT_S = Number(env.S2_CUT_S ?? 60);
@@ -152,6 +153,9 @@ interface Scenario {
 	kill9: boolean;
 	fallback: boolean;
 	walstall?: boolean;
+	gapMin?: number;
+	cuts?: boolean;
+	idle?: boolean;
 }
 
 function bucketFor(name: string) {
@@ -239,6 +243,7 @@ async function scenario(sc: Scenario, results: Record<string, unknown>) {
 
 	if (sc.fallback) return fallback(sc, r, bucket, req0);
 	if (sc.walstall) return walstall(sc, r);
+	if (sc.idle) return idle(sc, r);
 
 	for (const f of sc.followers) {
 		const t = Date.now();
@@ -307,6 +312,40 @@ async function scenario(sc: Scenario, results: Record<string, unknown>) {
 		await sampleResources(sc, 'after-faults');
 	}
 
+	if (sc.cuts) {
+		// Second samples of the 60 s cuts, and a follower cut with a no-progress watchdog: if the
+		// follower's -txid file has not moved for 10 s it is killed and restarted (it resumes from
+		// the file in about 1 s). Prototype only; a real one would compare with the replica's
+		// latest TXID so a quiet primary does not cause restarts.
+		const cut = async (fault: string, c: string, observe: number) => {
+			event('fault-start', { fault });
+			docker('network', 'disconnect', NET, c);
+			await sleep(CUT_S * 1000);
+			docker('network', 'connect', NET, c);
+			event('fault-end', { fault });
+			await sleep(observe);
+		};
+		await cut('follower-cut-2', F, OBSERVE_MS + 30_000);
+		const wd = `last=; n=0; while sleep 1; do t=$(cat /data/yoal.db-txid 2>/dev/null); if [ "$t" = "$last" ]; then n=$((n+1)); else n=0; last=$t; fi; if [ $n -ge 10 ]; then echo "$(date -u +%FT%T.%3NZ) watchdog restart at $t" >> /out/${sc.name}-watchdog.log; kill -9 $(cat /run/ls.pid); sleep 0.2; sh -c '${lsFollow(sc, main).replace(/'/g, "")}' & n=0; fi; done`;
+		bg(F, `echo $$ > /run/wd.pid; ${wd}`);
+		await cut('follower-cut-watchdog', F, OBSERVE_MS);
+		sh(F, 'kill $(cat /run/wd.pid)');
+		await cut('primary-cut-2', `${P}-primary`, OBSERVE_MS + 30_000);
+		r.watchdogLog = existsSync(join(OUT, `${sc.name}-watchdog.log`)) ? readFileSync(join(OUT, `${sc.name}-watchdog.log`), 'utf8').trim().split('\n') : [];
+	}
+	if (sc.gapMin) {
+		// Follower down longer than L0 retention (5 min): on restart it must bridge the gap from
+		// compacted levels (fillFollowGap) rather than fail or re-restore.
+		const log0 = readFileSync(join(OUT, `${sc.name}-${main.name}-ls.log`), 'utf8').length;
+		event('fault-start', { fault: `follower-down-${sc.gapMin}m` });
+		sh(F, 'kill -9 $(cat /run/ls.pid)');
+		await sleep(sc.gapMin * 60_000);
+		bg(F, lsFollow(sc, main));
+		event('fault-end', { fault: `follower-down-${sc.gapMin}m` });
+		await sleep(OBSERVE_MS);
+		const after = readFileSync(join(OUT, `${sc.name}-${main.name}-ls.log`), 'utf8').slice(log0);
+		r.gap = { resumed: /resuming follow mode/.test(after), errors: after.split('\n').filter((l) => /level=(WARN|ERROR)/.test(l)).slice(0, 6), first: after.split('\n').slice(0, 5) };
+	}
 	if (sc.promote) await promote(sc, r, bucket);
 	if (sc.kill9) await kill9(sc, r);
 	r.requestsTotal = diff(req0, await minioRequests());
@@ -448,6 +487,36 @@ async function walstall(sc: Scenario, r: Record<string, unknown>) {
 	sh(`${P}-primary`, 'kill -TERM $(cat /run/writer.pid); kill -TERM $(cat /run/ls.pid)');
 }
 
+async function idle(sc: Scenario, r: Record<string, unknown>) {
+	// Store requests per second by phase, to price a follower on R2 (Class A = PUT/LIST/multipart).
+	// Phases run one follower at a time so the deltas can be attributed.
+	const window = async (label: string) => {
+		const a = await minioRequests();
+		await sleep(60_000);
+		const d = diff(a, await minioRequests());
+		const perS = Object.fromEntries(Object.entries(d).map(([k, v]) => [k, Math.round(((v as number) / 60) * 100) / 100]));
+		log(`idle ${label}: ${JSON.stringify(perS)}`);
+		return perS;
+	};
+	const [slow, fast] = sc.followers as [{ name: string; interval: string }, { name: string; interval: string }];
+	const phases: Record<string, unknown> = {};
+	phases.primaryOnlyWriting = await window('primary only, writing');
+	bg(`${P}-${slow.name}`, lsFollow(sc, slow));
+	await sleep(10_000);
+	phases.follower1sWriting = await window('follower 1s, writing');
+	sh(`${P}-primary`, 'kill -TERM $(cat /run/writer.pid)');
+	await sleep(10_000);
+	phases.follower1sIdle = await window('follower 1s, idle');
+	sh(`${P}-${slow.name}`, 'kill -TERM $(cat /run/ls.pid)');
+	await sleep(3000);
+	phases.primaryOnlyIdle = await window('primary only, idle');
+	bg(`${P}-${fast.name}`, lsFollow(sc, fast));
+	await sleep(10_000);
+	phases.follower250msIdle = await window('follower 250ms, idle');
+	r.requestsPerSecond = phases;
+	sh(`${P}-primary`, 'kill -TERM $(cat /run/ls.pid)');
+}
+
 function diffFingerprints(a: string, b: string): string[] {
 	try {
 		const A = JSON.parse(a).tables ?? JSON.parse(a);
@@ -519,6 +588,9 @@ const all: Scenario[] = [
 	{ name: 'fallback', primaryVersion: '0.3.13', config: join(REPO, 'scripts/litestream.yml'), followers: [{ name: 'follower', interval: '1s' }], steadyMin: 0, faults: false, promote: false, kill9: false, fallback: true },
 ];
 all.push({ name: 'walstall', primaryVersion: '0.5.18', config: join(REPO, 'scripts/litestream.yml'), followers: [{ name: 'follower', interval: '1s' }], steadyMin: 0, faults: false, promote: false, kill9: false, fallback: false, walstall: true });
+all.push({ name: 'gap', primaryVersion: '0.5.18', config: join(REPO, 'scripts/litestream.yml'), followers: [{ name: 'follower', interval: '1s' }], steadyMin: 2, faults: false, promote: false, kill9: false, fallback: false, gapMin: Number(env.S2_GAP_MIN ?? 7) });
+all.push({ name: 'cuts', primaryVersion: '0.5.18', config: join(REPO, 'scripts/litestream.yml'), followers: [{ name: 'follower', interval: '1s' }], steadyMin: 2, faults: false, promote: false, kill9: false, fallback: false, cuts: true });
+all.push({ name: 'idle', primaryVersion: '0.5.18', config: join(REPO, 'scripts/litestream.yml'), followers: [{ name: 'follower', interval: '1s' }, { name: 'follower-fast', interval: '250ms' }], steadyMin: 0, faults: false, promote: false, kill9: false, fallback: false, idle: true });
 const results: Record<string, unknown> = {};
 let failed = false;
 try {

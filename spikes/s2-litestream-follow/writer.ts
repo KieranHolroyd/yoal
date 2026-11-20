@@ -29,8 +29,7 @@ const tx = db.transaction((n: number) => {
 });
 
 let stop = false;
-process.on('SIGTERM', () => (stop = true));
-process.on('SIGINT', () => (stop = true));
+for (const sig of ['SIGTERM', 'SIGINT'] as const) (process as unknown as NodeJS.EventEmitter).on(sig, () => (stop = true));
 
 const start = performance.now();
 const startSeq = seq;
