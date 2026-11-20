@@ -2,7 +2,7 @@ import { createHash } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { building } from '$app/env';
-import { parseFeatureFlags, parseSmsRecipients, retiredFeatureFlagsSet } from '@yoal/contracts';
+import { parseFeatureFlags, parsePlatformObjectStoreKind, parseSmsRecipients, retiredFeatureFlagsSet } from '@yoal/contracts';
 import { isSharedDomain } from './domains';
 import { mcpCapableOrigin } from './mcp-origin';
 import { loadLocalSettings } from './local-settings';
@@ -102,7 +102,10 @@ export const smtp = env.YOAL_SMTP_HOST
 		}
 	: undefined;
 
-export const objectStoreKind = (env.YOAL_OBJECT_STORE ?? 'local') as 'local' | 'r2';
+/** `YOAL_OBJECT_STORE`: `local`, `r2`, or an HA-PLAN W3 backend (`azure`, `gcs`). */
+export const objectStoreKind = parsePlatformObjectStoreKind(env.YOAL_OBJECT_STORE);
+if (!objectStoreKind && !building)
+	throw new Error('YOAL_OBJECT_STORE must be one of local, r2, azure or gcs.');
 export const objectStoreSecret =
 	env.YOAL_OBJECT_STORE_SECRET ?? env.BETTER_AUTH_SECRET ?? 'dev-object-store-secret-change-me';
 export const siteCookieSecret =
@@ -165,6 +168,12 @@ if (!building) {
 		console.warn(`[config] ${flag.env} is no longer used and is ignored. ${flag.reason}`);
 }
 
+// HA-PLAN W3: a non-`r2` platform store is opt-in, so a typo in YOAL_OBJECT_STORE never selects it.
+if (!building && objectStoreKind === 'azure' && !features.OBJECT_STORE_AZURE)
+	throw new Error('YOAL_OBJECT_STORE=azure needs YOAL_FEATURE_OBJECT_STORE_AZURE=1.');
+if (!building && objectStoreKind === 'gcs' && !features.OBJECT_STORE_GCS)
+	throw new Error('YOAL_OBJECT_STORE=gcs needs YOAL_FEATURE_OBJECT_STORE_GCS=1.');
+
 export const r2 =
 	objectStoreKind === 'r2'
 		? {
@@ -172,7 +181,33 @@ export const r2 =
 				bucket: required('R2_BUCKET'),
 				accessKeyId: required('R2_ACCESS_KEY_ID'),
 				secretAccessKey: required('R2_SECRET_ACCESS_KEY'),
+				// W3 additive options; the defaults reproduce today's `auto` region and path-style addressing.
+				region: env.R2_REGION || 'auto',
+				forcePathStyle: env.R2_PATH_STYLE === undefined ? undefined : env.R2_PATH_STYLE !== '0',
 				endpoint: env.R2_ENDPOINT
+			}
+		: undefined;
+
+/** Azure Blob platform store (`YOAL_OBJECT_STORE=azure`, `YOAL_FEATURE_OBJECT_STORE_AZURE=1`). */
+export const azureStore =
+	objectStoreKind === 'azure'
+		? {
+				account: required('YOAL_AZURE_ACCOUNT'),
+				container: required('YOAL_AZURE_CONTAINER'),
+				accountKey: env.YOAL_AZURE_ACCOUNT_KEY,
+				sasToken: env.YOAL_AZURE_SAS_TOKEN,
+				endpoint: env.YOAL_AZURE_ENDPOINT
+			}
+		: undefined;
+
+/** GCS platform store (`YOAL_OBJECT_STORE=gcs`, `YOAL_FEATURE_OBJECT_STORE_GCS=1`). */
+export const gcsStore =
+	objectStoreKind === 'gcs'
+		? {
+				bucket: required('YOAL_GCS_BUCKET'),
+				// A path, like other Yoal secrets; read by core's config when the store is built.
+				credentialsFile: env.YOAL_GCS_CREDENTIALS_FILE,
+				endpoint: env.YOAL_GCS_ENDPOINT
 			}
 		: undefined;
 

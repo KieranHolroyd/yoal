@@ -74,10 +74,14 @@ describe('backup targets on Azure and GCS (reviewer item 8)', () => {
 		expect(s3.hasCredentials).toBe(true);
 	});
 
-	test('the snapshot guard fires and no S3 client is built for an Azure or GCS target', () => {
-		expect(() => core.backupTargets.placementFor('org_1', 'bt_azure')).toThrow('lane E');
-		expect(() => core.backupTargets.objectStore(core.backupTargets.get(owner, 'bt_azure'))).toThrow('lane E');
-		expect(() => core.backupTargets.objectStore(core.backupTargets.get(owner, 'bt_gcs'))).toThrow('lane E');
+	test('the snapshot names the real store and the right backend is built', () => {
+		const snapshot = core.backupTargets.placementFor('org_1', 'bt_azure');
+		expect(snapshot.locationJson).toContain('"kind":"azure"');
+		// The rows in this test hold a non-credential placeholder, so opening one fails on credentials
+		// rather than silently building an S3 client. A valid sealed credential builds Azure/GCS.
+		expect(() => core.backupTargets.objectStore(core.backupTargets.get(owner, 'bt_azure'))).toThrow();
+		const gcs = core.backupTargets.get(owner, 'bt_gcs');
+		expect(() => core.backupTargets.objectStore(gcs)).toThrow('no stored credentials');
 	});
 
 	test('a control plane from before 0120 fails closed on these rows', () => {

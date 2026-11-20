@@ -253,18 +253,16 @@ describe('stubs are in place and fail loudly', () => {
 				baseline: null,
 			}),
 		).toThrow('lane C');
-		expect(() =>
-			createAzureObjectStore(
-				{ kind: 'azure', account: 'acct1', container: 'yoal', endpoint: null, pathPrefix: '', immutability: null },
-				{ kind: 'azure', accountKey: 'k'.repeat(20) },
-			),
-		).toThrow('lane E');
-		expect(() =>
-			createGcsObjectStore(
-				{ kind: 'gcs', bucket: 'yoal-ha', endpoint: null, pathPrefix: '', immutability: null },
-				{ kind: 'gcs', serviceAccountJson: '{}' },
-			),
-		).toThrow('lane E');
+		const azure = createAzureObjectStore(
+			{ kind: 'azure', account: 'acct1', container: 'yoal', endpoint: null, pathPrefix: '', immutability: null },
+			{ kind: 'azure', accountKey: 'k'.repeat(20) },
+		);
+		expect(azure.kind).toBe('azure');
+		const gcs = createGcsObjectStore(
+			{ kind: 'gcs', bucket: 'yoal-ha', endpoint: null, pathPrefix: '', immutability: null },
+			{ kind: 'gcs', serviceAccountJson: JSON.stringify({ client_email: 'a@b', private_key: 'k' }) },
+		);
+		expect(gcs.kind).toBe('gcs');
 		const ctx = {} as never;
 		expect(() => new ReleaseCommandScheduler(ctx).gate('dep_1')).toThrow('lane C');
 		expect(() => new NodeCaService(ctx).bundle()).toThrow('lane B');
@@ -325,10 +323,20 @@ describe('backup targets refuse azure and gcs while their flags are off (W3)', (
 		expect(opened.sqlite.query('SELECT COUNT(*) AS n FROM backup_targets').get()).toEqual({ n: 0 });
 	});
 
-	test('flags on: still not built, says which lane builds it', () => {
+	test('flags on: the target is stored as store_kind azure or gcs, credentials sealed once', () => {
 		const core = make({ OBJECT_STORE_AZURE: true, OBJECT_STORE_GCS: true });
-		expect(() => core.backupTargets.create(owner, azure)).toThrow('lane E');
-		expect(() => core.backupTargets.create(owner, gcs)).toThrow('lane E');
+		const createdAzure = core.backupTargets.create(owner, azure);
+		expect(createdAzure.target).toMatchObject({ kind: 'azure', hasCredentials: true, endpoint: null, bucket: null });
+		expect(createdAzure.target.store).toMatchObject({ kind: 'azure', account: 'acct1', container: 'yoal' });
+		const createdGcs = core.backupTargets.create(owner, gcs);
+		expect(createdGcs.target.store).toMatchObject({ kind: 'gcs', bucket: 'yoal-ha' });
+		const rows = opened.sqlite
+			.query<{ store_kind: string; store_options_json: string; access_key_sealed: string | null; bucket: string | null }, []>(
+				"SELECT store_kind, store_options_json, access_key_sealed, bucket FROM backup_targets WHERE name IN ('az-main','gcs-main') ORDER BY name",
+			)
+			.all();
+		expect(rows.map((row) => row.store_kind).sort()).toEqual(['azure', 'gcs']);
+		for (const row of rows) expect(row).toMatchObject({ access_key_sealed: null, bucket: null });
 	});
 
 	test('an s3 target is created as before and stored as store kind s3', () => {
