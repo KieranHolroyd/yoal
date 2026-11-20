@@ -286,6 +286,10 @@ describe('ServiceForwarder gateway address (HA-PLAN H24)', () => {
 		forwarder.converge([plainEndpoint('sep_g3', port, target)], [], { gatewayAllowed: true });
 		await Bun.sleep(50);
 		expect(forwarder.listening()[port]).toEqual(['127.0.0.1']);
+		// Bringing the gateway back on the same route binds it again, with no restart.
+		forwarder.converge([endpoint], [], { gatewayAllowed: true });
+		await Bun.sleep(50);
+		expect(forwarder.listening()[port]).toEqual(['127.0.0.1', '127.0.0.2']);
 	});
 });
 
