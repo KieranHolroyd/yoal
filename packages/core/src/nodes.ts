@@ -12,6 +12,7 @@ import {
 	projects,
 	storageInstances,
 	nodeCertificates,
+	serviceEndpoints,
 	workloads,
 	type nodes as nodesTable,
 } from '@yoal/db';
@@ -1015,6 +1016,10 @@ export class NodeService {
 			this.ctx.disks.forgetNode(nodeId);
 			// Share mounts on it are forgotten with it; the share definitions stay.
 			this.ctx.db.delete(shareMounts).where(eq(shareMounts.nodeId, nodeId)).run();
+			// Its certificates stay trusted by every peer until revoked; do it with the removal.
+			this.ctx.nodeCa.revoke(nodeId, 'node removed');
+			this.ctx.db.delete(serviceEndpoints).where(eq(serviceEndpoints.consumerNodeId, nodeId)).run();
+			this.ctx.db.delete(serviceEndpoints).where(eq(serviceEndpoints.upstreamNodeId, nodeId)).run();
 			this.ctx.db.delete(nodes).where(eq(nodes.id, nodeId)).run();
 			// A removed node can never confirm a purge an earlier move left for it.
 			this.ctx.moves.forgetNode(nodeId);

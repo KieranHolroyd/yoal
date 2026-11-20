@@ -1359,6 +1359,11 @@ export class WorkloadService {
 	private canHost(nodeId: string, spec: WorkloadSpec, projectId?: string): boolean {
 		// A node where another app holds this one's port can never take it (D225).
 		if (projectId && nodePortConflict(this.ctx, projectId, spec, nodeId)) return false;
+		// With the gateway on, a container needs the node's forwarder and CA: an agent that does not
+		// declare the capability cannot host one, wherever the move was planned (H24, mixed versions).
+		if (spec.runtime === 'container' && featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY')) {
+			if (!this.nodeHasCapability(nodeId, ENDPOINTS_GATEWAY_CAPABILITY)) return false;
+		}
 		try {
 			if (spec.runtime === 'function') this.assertFunctionTarget(nodeId, Boolean(spec.function && functionIsPython(spec.function)));
 			if (spec.runtime === 'process' && spec.engine === 'node') this.assertNodeEngineTarget(nodeId);

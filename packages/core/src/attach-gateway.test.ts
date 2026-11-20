@@ -288,6 +288,12 @@ describe('promotion changes no app environment and restarts none', () => {
 		const beforeState = await core.nodes.desiredState(workerB.token);
 		const beforeWorkload = beforeState.workloads.find((item) => item.projectId === project.id)!;
 		const beforePort = Number(beforeEnv.DATABASE_PORT);
+		// Assert the capture is real before comparing it: two empty envs must not pass.
+		expect(beforePort).toBeGreaterThanOrEqual(21_000);
+		expect(beforeEnv.DATABASE_URL).toContain(`@${databaseAlias(db.id)}:${beforePort}/`);
+		expect(beforeEnv.DATABASE_HOST).toBe(databaseAlias(db.id));
+		expect(beforeWorkload.activationVersion).not.toBe('');
+		const beforePrimary = endpointRows(workerB.nodeId, db.id).find((row) => row.role === 'primary')!;
 		const started = core.databaseReplicas.promote(owner, 'promotion-db', replica.id, { confirm: true }, { ifMatch: 0 });
 		beat(data, { workloads: [] });
 		beat(workerB, {
@@ -307,6 +313,8 @@ describe('promotion changes no app environment and restarts none', () => {
 		const rows = endpointRows(workerB.nodeId, db.id);
 		expect(rows.find((row) => row.role === 'primary')!.upstreamNodeId).toBe(workerB.nodeId);
 		expect(rows.find((row) => row.role === 'primary')!.localPort).toBe(beforePort);
+		// Only the upstream changed, so the version the agent reloads on is bumped.
+		expect(rows.find((row) => row.role === 'primary')!.version).toBeGreaterThan(beforePrimary.version!);
 	});
 
 	test('a stable read endpoint follows a replica across nodes', async () => {

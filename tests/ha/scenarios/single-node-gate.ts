@@ -164,7 +164,16 @@ await scenario.run(async (s) => {
 	const report = readCheckerReport(s.checkerReportPath);
 	if (!report) s.check('checker', 'error', `no checker report (exit ${checkerExit})`);
 	else {
-		s.check('checker', report.failedInvariants.length ? 'fail' : 'pass', report.failedInvariants.length ? `invariants failed: ${report.failedInvariants.join(', ')}` : null, { exit: checkerExit, lostAcknowledgedWrites: report.lostAcknowledgedWrites });
+		s.check(
+			'checker',
+			report.failedInvariants.length || report.invariants?.I6 !== 'pass' ? 'fail' : 'pass',
+			report.failedInvariants.length
+				? `invariants failed: ${report.failedInvariants.join(', ')}`
+				: report.invariants?.I6 !== 'pass'
+					? `I6 was ${report.invariants?.I6 ?? 'missing'}: no write survived to judge`
+					: null,
+			{ exit: checkerExit, lostAcknowledgedWrites: report.lostAcknowledgedWrites },
+		);
 		// One copy on one node has nowhere to surge to: its redeploy restarts it, and a request in
 		// that moment may fail (HA-PLAN §1.2 promises no failed request on a deploy only with 2+
 		// copies). Outside the redeploy window nothing may fail; inside it, at most a few.

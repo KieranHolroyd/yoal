@@ -181,12 +181,21 @@ await scenario.run(async (s) => {
 		const report = readCheckerReport(s.checkerReportPath);
 		if (!report) s.check('checker', 'error', `no checker report (exit ${checkerExit})`);
 		else {
-			s.check('checker', report.failedInvariants.length ? 'fail' : 'pass', report.failedInvariants.length ? `invariants failed: ${report.failedInvariants.join(', ')}` : null, { exit: checkerExit });
+			s.check(
+				'checker',
+				report.failedInvariants.length || report.invariants?.I6 !== 'pass' ? 'fail' : 'pass',
+				report.failedInvariants.length
+					? `invariants failed: ${report.failedInvariants.join(', ')}`
+					: report.invariants?.I6 !== 'pass'
+						? `I6 was ${report.invariants?.I6 ?? 'missing'}: no write survived to judge`
+						: null,
+				{ exit: checkerExit },
+			);
 			const perMinute = report.requests ? Math.round((report.requests / durationS) * 60) : null;
 			s.measure('achievedRequestsPerMinute', perMinute);
 			if (target === 'edge') {
 				s.check('zero-non-2xx', report.failedRequests === 0 ? 'pass' : 'fail', report.failedRequests ? `${report.failedRequests} of ${report.requests} requests were not 2xx during the rolling deploy (${JSON.stringify(report.failedByStatus)})` : null, { requests: report.requests, failed: report.failedRequests, perMinute });
-				if (perMinute !== null && perMinute < 10_000 * 0.95) s.check('load', 'invalid', `the checker achieved ${perMinute} requests a minute, below the 10,000 the W5 exit asks for`, { perMinute });
+				if (perMinute !== null && perMinute < 10_000 * 0.95) s.check('load', 'fail', `the checker achieved ${perMinute} requests a minute, below the 10,000 the W5 exit asks for`, { perMinute });
 			} else s.measure('non2xx (not judged: harness balancer)', { failed: report.failedRequests, byStatus: report.failedByStatus });
 		}
 	}
@@ -204,7 +213,16 @@ await scenario.run(async (s) => {
 			const after = snapshot(await copies(project));
 			const changed = [...before].filter(([id, info]) => after.get(id)?.invocationId !== info.invocationId).map(([id, info]) => `${id}@${info.node}`);
 			const starts = await releaseStarts(route, marker);
-			s.check('failing-release-command', changed.length ? 'fail' : 'pass', changed.length ? `copies restarted onto the failed release: ${changed.join(', ')}` : null, { restarted: changed, releaseCommandStarts: starts });
+			// The command must have run and failed; a refused or ignored deploy proves nothing.
+			const ok = changed.length === 0 && after.size === before.size && starts === 1;
+			const why = starts !== 1
+				? `the failing release command ran ${starts ?? 0} times, so the deploy never reached it`
+				: changed.length
+					? `copies restarted onto the failed release: ${changed.join(', ')}`
+					: after.size !== before.size
+						? `the copy set changed from ${before.size} to ${after.size} across a failed release command`
+						: null;
+			s.check('failing-release-command', ok ? 'pass' : 'fail', why, { restarted: changed, releaseCommandStarts: starts, copiesBefore: before.size, copiesAfter: after.size });
 		}
 	}
 

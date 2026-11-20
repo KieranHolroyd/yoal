@@ -65,6 +65,8 @@ export interface CheckerSummary {
 	duplicateSingletonRuns: number | null;
 	invariants: Record<string, string> | null;
 	failedInvariants: string[];
+	/** Invariants the checker could not observe in this run: never a pass. */
+	notObservedInvariants: string[];
 }
 
 export function readCheckerReport(path: string): CheckerSummary | null {
@@ -82,6 +84,9 @@ export function readCheckerReport(path: string): CheckerSummary | null {
 		invariants,
 		failedInvariants: Object.entries(invariants)
 			.filter(([, status]) => status === 'fail')
+			.map(([key]) => key),
+		notObservedInvariants: Object.entries(invariants)
+			.filter(([, status]) => status !== 'pass' && status !== 'fail')
 			.map(([key]) => key),
 	};
 }

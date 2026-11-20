@@ -1,4 +1,4 @@
-import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNotNull, isNull, gt } from 'drizzle-orm';
 import { nodeCa, nodeCaCertificates } from '@yoal/db';
 import {
 	NODE_CERT_VALIDITY_DAYS,
@@ -175,10 +175,13 @@ export class NodeCaService {
 				.where(and(eq(nodeCaCertificates.nodeId, nodeId), isNull(nodeCaCertificates.revokedAt)))
 				.orderBy(desc(nodeCaCertificates.notAfter))
 				.get() ?? null;
+		// Only unexpired revocations matter: an expired leaf is refused by its dates anyway. The cap
+		// then counts real, still-usable revocations rather than history (a compromised node that
+		// re-keys repeatedly must not push an older revoked leaf out of the list while it is valid).
 		const revokedSerials = this.ctx.db
 			.select({ serial: nodeCaCertificates.serial })
 			.from(nodeCaCertificates)
-			.where(isNotNull(nodeCaCertificates.revokedAt))
+			.where(and(isNotNull(nodeCaCertificates.revokedAt), gt(nodeCaCertificates.notAfter, this.ctx.now())))
 			.orderBy(desc(nodeCaCertificates.revokedAt))
 			.limit(1_000)
 			.all()

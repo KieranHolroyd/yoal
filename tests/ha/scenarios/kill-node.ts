@@ -239,6 +239,8 @@ await scenario.run(async (s) => {
 	if (!report) s.check('checker', 'error', `no checker report (exit ${checkerExit})`, {});
 	else if (report.failedInvariants.length)
 		s.check('checker', 'fail', `invariants failed: ${report.failedInvariants.join(', ')} (lost writes ${report.lostAcknowledgedWrites})`, { exit: checkerExit });
+	else if (report.invariants?.I6 !== 'pass')
+		s.check('checker', 'fail', `I6 was ${report.invariants?.I6 ?? 'missing'}: no write survived to judge, so the checker is not evidence`, { exit: checkerExit });
 	else s.check('checker', 'pass', null, { exit: checkerExit, lostAcknowledgedWrites: report.lostAcknowledgedWrites });
 	if (report) {
 		if (target === 'edge')

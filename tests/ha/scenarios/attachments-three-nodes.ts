@@ -120,6 +120,10 @@ await scenario.run(async (s) => {
 		s.stop('skip', `${runtime} app with a database on another node cannot spread on this tree: ${error.message}`);
 	}
 	s.check('spread', 'pass', null, { copies: describeCopies(placed) });
+	// The exit says one database on a *fourth* node, not merely a database somewhere.
+	const dbRow = (await api<any>('GET', `/api/v1/databases/${project}-db`)).body;
+	const dbNode = dbRow?.nodeName ?? dbRow?.database?.nodeName ?? null;
+	s.check('database-node', dbNode === DB_NODE ? 'pass' : 'fail', dbNode === DB_NODE ? null : `the database is on ${dbNode ?? 'an unknown node'}, not ${DB_NODE}`, { node: dbNode });
 	s.measure('copiesBefore', describeCopies(placed));
 
 	// --- 2. traffic through the target ------------------------------------------------------------
@@ -160,6 +164,17 @@ await scenario.run(async (s) => {
 		if (wait > 0) await Bun.sleep(wait);
 		const before = new Map<string, UnitInfo>((await copies(project)).map((copy) => [copy.id, unitInfo(copy)]));
 		s.measure('unitsBeforePromotion', [...before.values()]);
+		const baseline = [...before.values()];
+		s.check(
+			'promotion-baseline',
+			before.size === placed.length && baseline.every((info) => info.unit && info.invocationId && info.envHash)
+				? 'pass'
+				: 'fail',
+			before.size === placed.length && baseline.every((info) => info.unit && info.invocationId && info.envHash)
+				? null
+				: `could not read a unit, invocation and env hash for every copy (${before.size} of ${placed.length}); "no restart" would pass vacuously`,
+			{ copies: before.size },
+		);
 		s.say(`promoting the replica on ${replicaNode} (If-Match ${streaming.generation})`);
 		s.setZero();
 		const promoted = await api<any>('POST', `/api/v1/databases/${project}-db/replicas/${replica.id}/promote`, { confirm: true }, { allowStatus: [400, 409, 412, 422] });
@@ -202,5 +217,19 @@ await scenario.run(async (s) => {
 	s.measure('copiesAfter', describeCopies(await copies(project).catch(() => [])));
 	const report = readCheckerReport(s.checkerReportPath);
 	if (!report) s.check('checker', 'error', `no checker report (exit ${checkerExit})`);
-	else s.check('checker', report.failedInvariants.length ? 'fail' : 'pass', report.failedInvariants.length ? `invariants failed: ${report.failedInvariants.join(', ')} (lost writes ${report.lostAcknowledgedWrites})` : null, { exit: checkerExit, failedRequests: report.failedRequests });
+	else
+		s.check(
+			'checker',
+			report.failedInvariants.length || report.invariants?.I6 !== 'pass' || (report.acknowledgedWrites ?? 0) === 0
+				? 'fail'
+				: 'pass',
+			report.failedInvariants.length
+				? `invariants failed: ${report.failedInvariants.join(', ')} (lost writes ${report.lostAcknowledgedWrites})`
+				: report.invariants?.I6 !== 'pass'
+					? `I6 was ${report.invariants?.I6 ?? 'missing'}: the app may never have reached its database`
+					: (report.acknowledgedWrites ?? 0) === 0
+						? 'no write was acknowledged: the app was not proven to serve from the database'
+						: null,
+			{ exit: checkerExit, failedRequests: report.failedRequests, acknowledgedWrites: report.acknowledgedWrites },
+		);
 });

@@ -1,5 +1,5 @@
-import { eq } from 'drizzle-orm';
-import { databases, nodeCertificates, nodes, serviceEndpoints, storageInstances } from '@yoal/db';
+import { and, eq, isNull } from 'drizzle-orm';
+import { databaseReplicas, databases, nodeCertificates, nodes, serviceEndpoints, storageInstances } from '@yoal/db';
 import {
 	CONTAINER_GATEWAY_ADDRESS,
 	ENDPOINTS_GATEWAY_CAPABILITY,
@@ -23,7 +23,7 @@ export class EndpointState {
 
 	/** Whether this node gets H24's same-node and gateway fields. */
 	gatewayAt(nodeId: string): boolean {
-		if (!featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY')) return false;
+		if (!featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY') || !featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS')) return false;
 		const node = this.ctx.db.select({ capabilitiesJson: nodes.capabilitiesJson }).from(nodes).where(eq(nodes.id, nodeId)).get();
 		return node ? nodeHasCapability(node, ENDPOINTS_GATEWAY_CAPABILITY) : false;
 	}
@@ -85,13 +85,18 @@ export class EndpointState {
 				.where(eq(nodeCertificates.nodeId, row.consumerNodeId))
 				.get();
 			const trust = this.trustForProvider(nodeId);
+			// The primary's listener is also the replication listener: a replica on another node is
+			// a client of the same port and must be in the install-ca allowlist (H24, C7).
+			const replicaClients = row.serviceKind === 'database' ? this.replicaClientIds(row.serviceId, nodeId) : [];
 			add({
 				id: `svp_${row.id}`.slice(0, 100),
 				listenAddress: node.privateAddress,
 				listenPort: row.upstreamPort,
 				targetPort,
 				allowedClientFingerprints: consumerCert ? [consumerCert.serial] : [],
-				...(gateway ? { clientAuth: trust, allowedClientNodeIds: [row.consumerNodeId] } : {}),
+				...(gateway
+					? { clientAuth: trust, allowedClientNodeIds: [...new Set([row.consumerNodeId, ...replicaClients])] }
+					: {}),
 			});
 		}
 		for (const provider of this.ctx.databaseReplicas.providersForNode(nodeId, node.privateAddress)) add(provider);
@@ -119,6 +124,7 @@ export class EndpointState {
 		return rows
 			.map((row) => {
 				const upstream = nodesById.get(row.upstreamNodeId);
+				const sameNode = row.consumerNodeId === row.upstreamNodeId;
 				return {
 					id: row.id,
 					kind: row.serviceKind,
@@ -131,17 +137,21 @@ export class EndpointState {
 						address: row.consumerNodeId === row.upstreamNodeId ? '127.0.0.1' : (upstream?.privateAddress ?? null),
 						port: row.upstreamPort,
 					},
-					tlsFingerprint:
-						this.ctx.db
-							.select({ serial: nodeCertificates.serial })
-							.from(nodeCertificates)
-							.where(eq(nodeCertificates.nodeId, row.upstreamNodeId))
-							.get()?.serial ?? null,
+					// A same-node endpoint dials the service's own loopback port: that listener
+					// presents the service's certificate, not the node identity, so the forwarder
+					// passes the connection through with no node TLS (and no client certificate).
+					tlsFingerprint: sameNode
+						? null
+						: (this.ctx.db
+								.select({ serial: nodeCertificates.serial })
+								.from(nodeCertificates)
+								.where(eq(nodeCertificates.nodeId, row.upstreamNodeId))
+								.get()?.serial ?? null),
 					...(gateway
 						? {
 								role: row.role === 'pool' ? ('pool' as const) : ('primary' as const),
 								gatewayAddress: CONTAINER_GATEWAY_ADDRESS,
-								trust: this.trustForProvider(row.upstreamNodeId),
+								...(sameNode ? {} : { trust: this.trustForProvider(row.upstreamNodeId) }),
 								version: row.version,
 							}
 						: {}),
@@ -213,6 +223,18 @@ export class EndpointState {
 	 * One provider listener has one client-auth mode. `install-ca` only when the provider and every
 	 * remote consumer advertise `endpoints-gateway`; otherwise the listeners stay pinned (C2).
 	 */
+	/** Replica nodes on other hosts that stream from this primary and thus use its listener. */
+	private replicaClientIds(databaseId: string, providerNodeId: string): string[] {
+		return this.ctx.db
+			.select({ nodeId: databaseReplicas.nodeId, replicaGeneration: databaseReplicas.primaryGeneration, generation: databases.primaryGeneration })
+			.from(databaseReplicas)
+			.innerJoin(databases, eq(databases.id, databaseReplicas.databaseId))
+			.where(and(eq(databaseReplicas.databaseId, databaseId), isNull(databaseReplicas.removingAt), isNull(databases.deletedAt)))
+			.all()
+			.filter((row) => row.nodeId !== providerNodeId && row.replicaGeneration === row.generation)
+			.map((row) => row.nodeId);
+	}
+
 	private trustForProvider(providerNodeId: string): EndpointTrustMode {
 		const provider = this.ctx.db.select().from(nodes).where(eq(nodes.id, providerNodeId)).get();
 		if (!provider) return 'pinned';
@@ -223,7 +245,14 @@ export class EndpointState {
 			.all()
 			.map((row) => row.consumerNodeId)
 			.filter((nodeId) => nodeId !== providerNodeId);
-		const consumerNodes = [...new Set(consumers)]
+		const replicaConsumers = this.ctx.db
+			.select({ nodeId: databaseReplicas.nodeId })
+			.from(databaseReplicas)
+			.innerJoin(databases, eq(databases.id, databaseReplicas.databaseId))
+			.where(and(eq(databases.nodeId, providerNodeId), isNull(databaseReplicas.removingAt), isNull(databases.deletedAt)))
+			.all()
+			.map((row) => row.nodeId);
+		const consumerNodes = [...new Set([...consumers, ...replicaConsumers])]
 			.map((nodeId) => this.ctx.db.select().from(nodes).where(eq(nodes.id, nodeId)).get())
 			.filter((node) => node !== undefined);
 		return endpointTrustMode(
