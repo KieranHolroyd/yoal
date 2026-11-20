@@ -55,9 +55,12 @@ No migration. `0127` is unused; all state is the existing `settings` JSON row.
 
 - `bun run check` — all packages pass (one pre-existing Svelte warning in
   `settings/registry/+page.svelte`).
-- `bun test` — **6295 pass, 74 skip, 0 fail** (6369 tests, 572 files), including
+- `bun test` — **6296 pass, 74 skip, 0 fail** (6370 tests, 572 files), including
   `packages/core/src/desired-state/golden.test.ts`, whose `singleNode()` fixture is the
   code-level single-node gate (one node, every flag at its default; desired state unchanged).
+  (One run under full-suite load flaked `apps/builder/src/pipeline/step-runner.test.ts`
+  "StepRunner end-to-end"; it passes in isolation and on the next full run. Unrelated to this
+  lane.)
 - Conformance: `direct` + `external-lb` (21 suite assertions plus driver-specific tests).
 - Preflight refusals: empty fleet, missing `ingress-set`, never-heartbeated node, PROXY header with
   no trusted proxy, drain below the 15 s removal bound; all return a reason and the right `nodeId`.
