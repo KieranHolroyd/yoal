@@ -637,11 +637,11 @@ export class NodeService {
 		const stale = this.ctx.db
 			.select()
 			.from(nodes)
-			.where(and(eq(nodes.status, 'online'), sql`coalesce(${nodes.lastHeartbeatAt}, 0) < ${now - OFFLINE_AFTER_MS}`))
+			.where(and(eq(nodes.status, 'online'), sql`coalesce(${nodes.lastHeartbeatAt}, ${nodes.createdAt}) < ${now - OFFLINE_AFTER_MS}`))
 			.all();
 		for (const node of stale)
 			this.ctx.db.update(nodes).set({ status: 'offline', updatedAt: now }).where(eq(nodes.id, node.id)).run();
-		return stale.map((node) => ({ nodeId: node.id, offlineForMs: now - (node.lastHeartbeatAt ?? 0) }));
+		return stale.map((node) => ({ nodeId: node.id, offlineForMs: now - (node.lastHeartbeatAt ?? node.createdAt) }));
 	}
 
 	/**

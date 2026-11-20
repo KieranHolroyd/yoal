@@ -623,6 +623,22 @@ describe('offline detection (F9)', () => {
 		expect(fresh()).toBe('offline');
 	});
 
+	test('the maintenance sweep agrees: a node that never heartbeated counts from its join', () => {
+		const h = harness(['w1'], { enabled: false });
+		h.core.nodes.join({ token: h.core.nodes.createJoinToken(principal, 'fresh').token, name: 'fresh' });
+		const fresh = () =>
+			h.sqlite.query<{ status: string }, [string]>("SELECT status FROM nodes WHERE name = ?").get('fresh')!.status;
+		expect(h.core.nodes.markStale()).toEqual([]);
+		expect(fresh()).toBe('online');
+		h.advance(29_000);
+		h.heartbeat('fresh');
+		expect(h.core.nodes.markStale()).toEqual([]);
+		h.advance(1_001);
+		h.heartbeat('fresh');
+		expect(h.core.nodes.markStale().map((entry) => entry.offlineForMs)).toEqual([30_001]);
+		expect(fresh()).toBe('offline');
+	});
+
 	test('a standby control plane does not mark nodes offline', async () => {
 		const h = harness(['w1'], { enabled: false });
 		h.core.cluster.update(principal, { controlPlane: { leaseTtlSeconds: 60, renewSeconds: 5 } });
