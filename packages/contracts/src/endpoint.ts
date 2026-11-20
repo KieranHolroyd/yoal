@@ -120,21 +120,27 @@ export const readEndpointSchema = z.object({
 	serviceId: z.string().min(1).max(100),
 	role: z.enum(readEndpointRoles),
 	localPort: z.number().int().min(readEndpointPortRange.min).max(readEndpointPortRange.max),
-	/** Every healthy replica the forwarder may balance over; at least one, the primary as a fallback last. */
+	/**
+	 * Every healthy replica the forwarder may balance over; at least one, the primary as a fallback
+	 * last. Trust is per upstream, not per endpoint: each provider listener has its own mode
+	 * (`endpointTrustMode` over that provider and its allowed consumers), so in a mixed-version fleet
+	 * one replica can be `install-ca` while another is still `pinned`. The pinned fingerprint is
+	 * rendered in both modes, so a downgrade needs no re-pinning.
+	 */
 	upstreams: z
 		.array(
 			z.object({
 				nodeId: z.string().min(1).max(100),
 				address: z.string().max(64).nullable().default(null),
 				port: z.number().int().min(1).max(65_535),
+				trust: z.enum(endpointTrustModes).default('pinned'),
+				/** SHA-256 of this provider's leaf certificate, for the pinned mode. */
+				tlsFingerprint: z.string().regex(/^[a-f0-9]{64}$/).nullable().default(null),
 			}),
 		)
 		.min(1)
 		.max(8),
 	gatewayAddress: gatewayAddressSchema.optional(),
-	/** The providers' mode (`endpointTrustMode`); `pinned` unless every node involved can verify the CA. */
-	trust: z.enum(endpointTrustModes).default('pinned'),
-	tlsFingerprints: z.array(z.string().regex(/^[a-f0-9]{64}$/)).max(8).optional(),
 	version: z.number().int().nonnegative().default(0),
 });
 export type ReadEndpoint = z.infer<typeof readEndpointSchema>;

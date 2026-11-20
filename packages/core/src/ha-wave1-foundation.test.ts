@@ -86,13 +86,26 @@ function withWave1(state: DesiredState): DesiredState {
 			stopTimeoutSeconds: 45,
 			addHosts: [{ host: 'db-db_1', address: '10.89.0.1' }],
 		})),
-		serviceEndpoints: state.serviceEndpoints.map((endpoint) => ({
-			...endpoint,
-			role: 'pool' as const,
-			gatewayAddress: '10.89.0.1',
-			trust: 'install-ca' as const,
-			version: 2,
-		})),
+		serviceEndpoints: [
+			...state.serviceEndpoints.map((endpoint) => ({
+				...endpoint,
+				role: 'primary' as const,
+				gatewayAddress: '10.89.0.1',
+				trust: 'install-ca' as const,
+				version: 2,
+			})),
+			// A pooled endpoint exists only under the gateway; without it, it must be dropped, not
+			// turned into a primary forwarder.
+			...state.serviceEndpoints.slice(0, 1).map((endpoint) => ({
+				...endpoint,
+				id: `${endpoint.id}_pool`,
+				localPort: endpoint.localPort + 1,
+				role: 'pool' as const,
+				gatewayAddress: '10.89.0.1',
+				trust: 'install-ca' as const,
+				version: 2,
+			})),
+		],
 		serviceProviders: state.serviceProviders.map((provider) => ({ ...provider, clientAuth: 'install-ca' as const, allowedClientNodeIds: ['nod_1'] })),
 		readEndpoints: [
 			{
@@ -101,8 +114,7 @@ function withWave1(state: DesiredState): DesiredState {
 				serviceId: 'db_1',
 				role: 'read',
 				localPort: 23_000,
-				upstreams: [{ nodeId: 'nod_3', address: '10.47.1.4', port: 15433 }],
-				trust: 'install-ca',
+				upstreams: [{ nodeId: 'nod_3', address: '10.47.1.4', port: 15433, trust: 'install-ca', tlsFingerprint: null }],
 				version: 0,
 			},
 		],
@@ -159,7 +171,9 @@ describe('capability gate (HA-PLAN §9 "Mixed versions")', () => {
 		const gated = gateDesiredState(withWave1(plain), ['endpoints-gateway'], flagsOn);
 		expect(gated.readEndpoints).toHaveLength(1);
 		expect(gated.nodeTrust?.generation).toBe(1);
-		expect(gated.serviceEndpoints[0]).toMatchObject({ role: 'pool', gatewayAddress: '10.89.0.1', trust: 'install-ca', version: 2 });
+		expect(gated.serviceEndpoints[0]).toMatchObject({ role: 'primary', gatewayAddress: '10.89.0.1', trust: 'install-ca', version: 2 });
+		expect(gated.serviceEndpoints.at(-1)).toMatchObject({ role: 'pool' });
+		expect(gated.serviceEndpoints).toHaveLength(plain.serviceEndpoints.length + 1);
 		expect(gated.serviceProviders[0]).toMatchObject({ clientAuth: 'install-ca', allowedClientNodeIds: ['nod_1'] });
 		expect(gated.workloads[0]!.addHosts).toHaveLength(1);
 		expect('releaseCommands' in gated).toBe(false);
@@ -175,7 +189,7 @@ describe('capability gate (HA-PLAN §9 "Mixed versions")', () => {
 		expect('addHosts' in gated.workloads[0]!).toBe(false);
 		expect('readEndpoints' in gated).toBe(false);
 		expect('nodeTrust' in gated).toBe(false);
-		expect(gated.serviceEndpoints[0]).toEqual(plain.serviceEndpoints[0]!);
+		expect(gated.serviceEndpoints).toEqual(plain.serviceEndpoints);
 		expect(gated.serviceProviders[0]).toEqual(plain.serviceProviders[0]!);
 	});
 

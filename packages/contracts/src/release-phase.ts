@@ -52,19 +52,22 @@ export const stopTimeoutSecondsSchema = z.number().int().min(1).max(MAX_STOP_TIM
  * single-copy HTTP app surges (a temporary second copy on another node takes the traffic first),
  * when `scheduling.surgeDeploys` allows it. No field below has a default that differs from that:
  * - `canary` (default 0, no canary): this many copies roll first and soak before the rest; needs
- *   `soakSeconds` of at least 1.
+ *   `soakSeconds` of at least `MIN_CANARY_SOAK_SECONDS` (10), and fewer canary copies than `replicas`.
  * - `soakSeconds` (default 0): how long the canary copies are judged (`judgeCanary`).
  * - `maxUnavailable` (no default): absent keeps today's choice above; 0 means surge every copy
  *   (start the new one before stopping the old); n means up to n copies may be down at once.
  */
+/** Two edge health intervals (5 s each): the least window `judgeCanary` can sample. */
+export const MIN_CANARY_SOAK_SECONDS = 10;
+
 export const rolloutSpecSchema = z
 	.strictObject({
 		canary: z.number().int().min(0).max(5).default(0),
 		soakSeconds: z.number().int().min(0).max(3_600).default(0),
 		maxUnavailable: z.number().int().min(0).max(10).optional(),
 	})
-	.refine((rollout) => rollout.canary === 0 || rollout.soakSeconds > 0, {
-		message: 'A canary needs soakSeconds of at least 1.',
+	.refine((rollout) => rollout.canary === 0 || rollout.soakSeconds >= MIN_CANARY_SOAK_SECONDS, {
+		message: `A canary needs soakSeconds of at least ${MIN_CANARY_SOAK_SECONDS}, so the judge sees two health intervals.`,
 		path: ['soakSeconds'],
 	});
 export type RolloutSpec = z.infer<typeof rolloutSpecSchema>;

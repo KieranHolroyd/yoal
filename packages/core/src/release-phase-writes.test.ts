@@ -39,7 +39,7 @@ function makeCore(features: Partial<FeatureFlags>): { core: Core; close: () => v
 }
 
 const principal = buildPrincipal({ kind: 'user', userId: 'user_1', orgId: 'org_1', role: 'owner', platformAdmin: true });
-const base = { runtime: 'process' as const, command: ['bun', 'run', 'start'], port: 3000 };
+const base = { runtime: 'process' as const, command: ['bun', 'run', 'start'], port: 3000, replicas: 2 };
 const fields = {
 	release: { command: ['bin/migrate'] },
 	readinessPath: '/ready',

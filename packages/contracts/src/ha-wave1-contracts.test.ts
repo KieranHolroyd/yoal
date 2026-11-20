@@ -139,6 +139,7 @@ describe('workload spec (H25)', () => {
 	test('accepts the release-phase fields', () => {
 		const parsed = workloadSpecSchema.parse({
 			...oldProcessSpec,
+			replicas: 3,
 			release: { command: ['bun', 'run', 'migrate'] },
 			readinessPath: '/ready',
 			drainSeconds: 15,
@@ -219,7 +220,10 @@ describe('desired state', () => {
 					serviceId: 'db_1',
 					role: 'read',
 					localPort: 23_000,
-					upstreams: [{ nodeId: 'nod_3', address: '10.47.1.4', port: 15433 }],
+					upstreams: [
+						{ nodeId: 'nod_3', address: '10.47.1.4', port: 15433 },
+						{ nodeId: 'nod_4', address: '10.47.1.5', port: 15433, trust: 'install-ca', tlsFingerprint: 'c'.repeat(64) },
+					],
 				},
 			],
 			nodeTrust: { generation: 1, caBundlePem: CERT, certificatePem: CERT, serial: 'ab12', notAfter: '2027-02-18T00:00:00Z' },
@@ -238,7 +242,9 @@ describe('desired state', () => {
 			],
 		});
 		expect(parsed.workloads[0]!.addHosts).toEqual([{ host: 'db-db_1', address: '10.89.0.1' }]);
-		expect(parsed.readEndpoints?.[0]?.trust).toBe('pinned');
+		// Trust is per upstream: a mixed-version replica set keeps an older replica pinned.
+		expect(parsed.readEndpoints?.[0]?.upstreams.map((u) => u.trust)).toEqual(['pinned', 'install-ca']);
+		expect(parsed.readEndpoints?.[0]?.upstreams[0]?.tlsFingerprint).toBeNull();
 		expect(parsed.nodeTrust?.revokedSerials).toEqual([]);
 		expect(routeSpecSchema.shape.readinessPath).toBeDefined();
 	});
@@ -431,8 +437,16 @@ describe('rollout defaults are today\'s behaviour (reviewer item 5)', () => {
 		expect('maxUnavailable' in parsed.rollout!).toBe(false);
 	});
 
-	test('a canary needs a soak', () => {
-		expect(workloadSpecSchema.safeParse({ ...oldProcessSpec, rollout: { canary: 1 } }).success).toBe(false);
+	test('a canary needs a soak of at least two health intervals', () => {
+		expect(workloadSpecSchema.safeParse({ ...oldProcessSpec, replicas: 3, rollout: { canary: 1 } }).success).toBe(false);
+		expect(workloadSpecSchema.safeParse({ ...oldProcessSpec, replicas: 3, rollout: { canary: 1, soakSeconds: 9 } }).success).toBe(false);
+		expect(workloadSpecSchema.safeParse({ ...oldProcessSpec, replicas: 3, rollout: { canary: 1, soakSeconds: 10 } }).success).toBe(true);
+	});
+
+	test('a canary must be fewer copies than replicas', () => {
+		expect(workloadSpecSchema.safeParse({ ...oldProcessSpec, replicas: 1, rollout: { canary: 1, soakSeconds: 60 } }).success).toBe(false);
+		expect(workloadSpecSchema.safeParse({ ...oldProcessSpec, replicas: 2, rollout: { canary: 2, soakSeconds: 60 } }).success).toBe(false);
+		expect(workloadSpecSchema.safeParse({ ...oldProcessSpec, replicas: 2, rollout: { canary: 1, soakSeconds: 60 } }).success).toBe(true);
 	});
 });
 

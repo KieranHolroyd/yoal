@@ -241,6 +241,12 @@ export const workloadSpecSchema = z
 				path: ['release'],
 				message: 'A release command is for process and container apps.',
 			});
+		if (spec.rollout && spec.rollout.canary > 0 && spec.rollout.canary >= spec.replicas)
+			ctx.addIssue({
+				code: 'custom',
+				path: ['rollout', 'canary'],
+				message: 'A canary must be fewer copies than replicas, or there is nothing left to compare it with.',
+			});
 		if (spec.readinessPath !== undefined && spec.ingress === 'none')
 			ctx.addIssue({ code: 'custom', path: ['readinessPath'], message: 'Workers take no traffic; a readiness path needs HTTP ingress.' });
 		if (spec.runtime === 'compose' && !spec.compose)

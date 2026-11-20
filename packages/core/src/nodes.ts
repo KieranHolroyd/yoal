@@ -1,4 +1,5 @@
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
+import { featureFlagsForGate, gateDesiredState } from './capability-gate';
 import {
 	appVolumes,
 	databaseStudioSessions,
@@ -1130,7 +1131,8 @@ export class NodeService {
 			edgeId,
 		);
 
-		return {
+		// Every HA Wave 1 field passes the capability gate last (HA-PLAN §9 "Mixed versions").
+		return gateDesiredState({
 			version: this.stateVersion(),
 			nodeId: node.id,
 			agentVersion: this.ctx.config.desiredAgentVersion ?? '0.1.0',
@@ -1180,7 +1182,7 @@ export class NodeService {
 			...(node.networkMode === 'external'
 				? {}
 				: { wireguard: buildWireguardState(node.id, this.overlayNodes(), this.ctx.cluster.get().overlay.cidr, this.ctx.cluster.get().overlay) }),
-		};
+		}, capabilities(node.capabilitiesJson), featureFlagsForGate(this.ctx.config));
 	}
 }
 

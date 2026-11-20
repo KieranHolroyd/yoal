@@ -125,7 +125,7 @@ export function featureFlagsForGate(config: Pick<CoreConfig, 'features'>): Capab
  * AND the node declares its capability; with the flag off it is stripped for every node, so a
  * value stored while the flag was on, or a builder that forgot a check, never reaches an agent:
  * - without `ENDPOINTS_GATEWAY` and `endpoints-gateway`: `readEndpoints`, `nodeTrust`, `workloads[].addHosts`,
- *   `serviceEndpoints[].role|gatewayAddress|trust|version`,
+ *   `serviceEndpoints[].role|gatewayAddress|trust|version` (non-primary entries are dropped),
  *   `serviceProviders[].clientAuth|allowedClientNodeIds`;
  * - without `RELEASE_PHASE` and `release-phase`: `releaseCommands`, `workloads[].readinessPath|drainSeconds|
  *   stopTimeoutSeconds`, `routes[].readinessPath`.
@@ -144,7 +144,10 @@ export function gateDesiredState(state: DesiredState, capabilities: readonly str
 			const { readEndpoints: _read, nodeTrust: _trust, ...rest } = next;
 			next = rest;
 		}
-		set('serviceEndpoints', mapIfChanged(next.serviceEndpoints, stripEndpoint));
+		// A `pool` (or any non-primary) endpoint exists only under the gateway: drop it rather than
+		// strip its role, which would turn it into a primary forwarder to the pooler.
+		const primaries = next.serviceEndpoints.filter((endpoint) => endpoint.role === undefined || endpoint.role === 'primary');
+		set('serviceEndpoints', mapIfChanged(primaries.length === next.serviceEndpoints.length ? next.serviceEndpoints : primaries, stripEndpoint));
 		set('serviceProviders', mapIfChanged(next.serviceProviders, stripProvider));
 	}
 	if (!release) {

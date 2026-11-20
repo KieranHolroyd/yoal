@@ -152,14 +152,14 @@ export const routeSpecSchema = z.object({
 	 */
 	unavailable: z.string().max(500).optional(),
 	/** Health path used by Caddy's active checks across replicas. */
-	healthPath: z.string().max(200).optional(),
+	healthPath: z.string().max(512).optional(),
 	/** Seconds between those active checks (`replicas.healthIntervalSeconds`); agents default to 5. */
 	healthIntervalSeconds: z.number().int().min(1).max(300).optional(),
 	/**
 	 * HA-PLAN H25: the path the edge's active checks use to decide whether a copy takes traffic,
 	 * when it differs from `healthPath`. Sent only to an agent that declares `release-phase`.
 	 */
-	readinessPath: z.string().max(200).optional(),
+	readinessPath: z.string().max(512).optional(),
 	/**
 	 * Functions only (D110): static assets are served first from the release, with the workerd
 	 * host as the fallback (and the target for `runWorkerFirst` globs). Present only on the node
