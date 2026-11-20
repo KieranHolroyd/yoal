@@ -115,9 +115,25 @@ describe('compileSiteRoute', () => {
 		// Caddy's JSON field names; the Caddyfile spellings (`lb_policy`, `health_uri`) are refused
 		// as unknown fields and fail the whole config load.
 		expect(json).toContain('"load_balancing":{"selection_policy":{"policy":"least_conn"},"try_duration":"3s","try_interval":"250ms"}');
-		expect(json).toContain('"health_checks":{"active":{"uri":"/health","interval":"5s"},"passive":{"fail_duration":"30s"}}');
+		expect(json).toContain(
+			'"health_checks":{"active":{"uri":"/health","interval":"5s","headers":{"Host":["blog.example.dev"]}},"passive":{"fail_duration":"30s"}}',
+		);
 		expect(json).not.toContain('lb_policy');
 		expect(json).not.toContain('health_uri');
+	});
+
+	test('active health checks carry the route host, so a copy behind another node\'s Caddy is reachable', () => {
+		const route = compileSiteRoute({
+			...base,
+			upstreams: ['127.0.0.1:19001', '10.47.1.3:80'],
+			healthPath: '/health',
+		});
+		const json = JSON.stringify(route);
+		// Without a Host, Caddy probes with the dial address; the remote node's Caddy routes by Host
+		// and answers 404/no route, so every remote copy stayed unhealthy (F7).
+		expect(json).toContain('"active":{"uri":"/health","interval":"5s","headers":{"Host":["blog.example.dev"]}}');
+		// Proxied requests already keep the client's Host (Caddy's default): nothing rewrites it.
+		expect(json).not.toContain('"Host":["{');
 	});
 
 	test('the active health-check interval follows replicas.healthIntervalSeconds', () => {
@@ -125,7 +141,7 @@ describe('compileSiteRoute', () => {
 			JSON.stringify(
 				compileSiteRoute({ ...base, upstreams: ['10.47.1.2:8080', '10.47.1.3:8080'], healthPath: '/health', healthIntervalSeconds }),
 			);
-		expect(route(15)).toContain('"active":{"uri":"/health","interval":"15s"}');
+		expect(route(15)).toContain('"active":{"uri":"/health","interval":"15s",');
 		// Out of range (or absent, from an older control plane) is Caddy's documented 5 s.
 		expect(route(0)).toContain('"interval":"5s"');
 		expect(route(2.5)).toContain('"interval":"5s"');

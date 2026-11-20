@@ -30,6 +30,7 @@ D107 (clustering and HA, [CLUSTERING.md](./CLUSTERING.md)), D25 (object store), 
 | `/opt/yoal/releases/<version>/caddy/caddy` | `root:root 0755` | Caddy 2.11.8 + `caddy-dns/cloudflare`, shipped in signed releases (source builds have none). The updater copies it over the binary the running Caddy unit executes (§4.1, *Caddy is part of the release*). |
 | `/usr/bin/caddy` (+ `.yoal-previous`) | `root:root 0755` | The binary the apt `caddy.service` runs. Installed by the official Caddy package; replaced by the release's Caddy on each signed update, with the previous copy kept beside it. |
 | `/etc/systemd/system/caddy.service.d/yoal-admin-socket.conf` | `root:root 0644` | Installer drop-in for the packaged unit: `SupplementaryGroups=yoal` (read release artifacts) and `chmod 0660` on the admin socket after start. |
+| `/etc/systemd/system/caddy.service.d/yoal-restart.conf` | `root:root 0644` | Installer and release-convergence drop-in for the packaged unit: restart on failure every 2 s, with no start limit. |
 | `/etc/yoal/yoal.env` | `root:yoal 0640` | Runtime environment and secrets (see §2). |
 | `/etc/yoal/master.key.cred` | `root:root 0400` | Master key sealed with `systemd-creds` (TPM2 + host key, or the host key alone), delivered via `LoadCredentialEncrypted=`. Opens only on this machine; the recovery kit (§6.2) is the copy that survives losing it. |
 | `/etc/yoal/master.key` | `root:root 0400` | Plaintext master key, delivered via `LoadCredential=`, never sourced by shell. Only on hosts without `systemd-creds` (systemd < 250), or briefly as `master.key.pre-seal` while an upgrade seals an existing key. |
@@ -367,7 +368,10 @@ mail node (the unit sets the paths). None of them is secret: DKIM keys and crede
     `Caddyfile.dist` and replaced with a bootstrap that puts the admin API on
     `unix//var/lib/caddy/admin.sock|0660` (never TCP); the agent pushes the real config through it.
     If the module download fails the install continues (HTTP works); HTTPS needs it later. An
-    existing Caddy is used as is: HTTPS installs need it built with `caddy-dns/cloudflare`.
+    existing Caddy binary is used as is (HTTPS installs need it built with `caddy-dns/cloudflare`),
+    but not its Caddyfile: unless the admin API is already on a unix socket, the installer backs the
+    file up (`Caddyfile.dist`, or `Caddyfile.dist.<ms>` when that exists), prints where it went,
+    writes the same bootstrap and restarts Caddy, so the admin API is never left on TCP.
   - **Podman** (agent installs only): `podman uidmap passt netavark aardvark-dns`. Managed
     Postgres and RustFS run as rootful Quadlet containers (Podman 4.4+). Project and runner
     containers get a user namespace of their own, so the helper uses `uidmap` and adds a
@@ -2013,8 +2017,11 @@ control-plane standby and database replicas are planned in CLUSTERING.md §6–�
 | Setgid `/run/yoal` | The alternative to a root socket helper: socket ownership is controlled by directory group inheritance, and no service joins another's primary group. |
 
 **Caddy runs as the packaged `caddy.service`.** The installer installs Caddy from the official apt
-repository and keeps the package's unit and its sandboxing, adding only the
-`yoal-admin-socket.conf` drop-in (`SupplementaryGroups=yoal`, `chmod 0660` on the admin socket).
+repository and keeps the package's unit and its sandboxing, adding only two drop-ins:
+`yoal-admin-socket.conf` (`SupplementaryGroups=yoal`, `chmod 0660` on the admin socket) and
+`yoal-restart.conf` (`Restart=on-failure`, `RestartSec=2`, `StartLimitIntervalSec=0`, because the
+package's unit has no `Restart=` and a crashed Caddy would take every site on the node down). Release
+convergence installs `yoal-restart.conf` on existing hosts at their next update.
 Caddy's admin API is never on TCP `:2019` (D7): the bootstrap Caddyfile puts it at
 `/var/lib/caddy/admin.sock` (mode `0660`, group `caddy`) and the agent is the only consumer
 (`YOAL_CADDY_ADMIN_SOCKET`, detected by the installer and written into the agent unit).

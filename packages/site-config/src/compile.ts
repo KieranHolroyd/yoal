@@ -259,7 +259,15 @@ export function compileSiteRoute(input: SiteCompileInput): CaddyRoute {
 							...(input.healthPath
 								? {
 									health_checks: {
-										active: { uri: input.healthPath, interval: `${healthInterval(input.healthIntervalSeconds)}s` },
+										active: {
+											uri: input.healthPath,
+											interval: `${healthInterval(input.healthIntervalSeconds)}s`,
+											// Caddy probes with the dial address as Host unless told otherwise. A copy on
+											// another node sits behind that node's Caddy, which routes by Host, so the
+											// probe must carry the route's host just as a proxied request does (Caddy
+											// keeps the client's Host on proxied requests by default).
+											headers: { Host: [input.host] },
+										},
 										passive: { fail_duration: '30s' },
 									},
 								}

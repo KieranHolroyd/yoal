@@ -29,6 +29,8 @@ Adding a node takes three steps: generate a join token, run one command on the n
 
 A join token is single-use and expires one hour after you create it. Only a platform admin can create one, from their dashboard session.
 
+If the join command fails after the control plane has accepted it, run it again with the same token. Until the node sends its first heartbeat, the control plane returns the same node to the same token, name and WireGuard key. A different token can't take over a WireGuard key that another node already holds. That join is refused with a message that names the node. To join that machine again, first remove the node on the **Nodes** page.
+
 On a Yoal network, the join exchanges the token for a node identity and an overlay address before the agent starts converging:
 
 ```mermaid

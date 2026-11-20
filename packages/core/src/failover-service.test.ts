@@ -571,3 +571,66 @@ describe('database primaries', () => {
 		expect(h.events('database')).toMatchObject([{ status: 'in-progress', stage: 'decide' }]);
 	});
 });
+
+describe('offline detection (F9)', () => {
+	test('a silent node is marked offline 30 s after its last heartbeat, within one controller tick', async () => {
+		// Failover off: marking a node offline is not a failover action, and must not wait for the
+		// 60 s maintenance sweep (which made "offline at 30 s" anything from 30 to 90 s).
+		const h = harness(['w1'], { enabled: false });
+		const queue: Array<{ run: () => void; ms: number }> = [];
+		const stop = startFailoverLoop(h.core.failover, {
+			schedule: (run, ms) => {
+				queue.push({ run, ms });
+				return { cancel: () => queue.splice(queue.findIndex((item) => item.run === run), 1) };
+			},
+		});
+		const statusOf = () =>
+			h.sqlite.query<{ status: string }, [string]>('SELECT status FROM nodes WHERE id = ?').get(h.node.w1)!.status;
+		const lastHeartbeat = h.clock.now;
+		let offlineAt: number | null = null;
+		// Drive the loop on a fake clock: each scheduled tick runs once its delay has passed. The
+		// edge keeps heartbeating; w1 never does again.
+		while (h.clock.now - lastHeartbeat < 120_000 && offlineAt === null) {
+			const next = queue.shift()!;
+			h.advance(next.ms);
+			h.heartbeat('w1');
+			next.run();
+			await new Promise((resolve) => setTimeout(resolve, 0));
+			if (statusOf() === 'offline') offlineAt = h.clock.now;
+		}
+		await stop();
+		expect(offlineAt).not.toBeNull();
+		const after = offlineAt! - lastHeartbeat;
+		expect(after).toBeGreaterThanOrEqual(30_000);
+		// One tick (`controlPlane.renewSeconds`, 5 s by default) past the threshold at most.
+		expect(after).toBeLessThanOrEqual(30_000 + h.core.failover.intervalMs());
+	});
+
+	test('a node that has not sent its first heartbeat counts silence from its join', async () => {
+		const h = harness(['w1'], { enabled: false });
+		h.core.nodes.join({ token: h.core.nodes.createJoinToken(principal, 'fresh').token, name: 'fresh' });
+		const fresh = () =>
+			h.sqlite.query<{ status: string }, [string]>("SELECT status FROM nodes WHERE name = ?").get('fresh')!.status;
+		await h.core.failover.tick();
+		expect(fresh()).toBe('online');
+		h.advance(29_000);
+		h.heartbeat('fresh');
+		await h.core.failover.tick();
+		expect(fresh()).toBe('online');
+		h.advance(1_000);
+		h.heartbeat('fresh');
+		await h.core.failover.tick();
+		expect(fresh()).toBe('offline');
+	});
+
+	test('a standby control plane does not mark nodes offline', async () => {
+		const h = harness(['w1'], { enabled: false });
+		h.core.cluster.update(principal, { controlPlane: { leaseTtlSeconds: 60, renewSeconds: 5 } });
+		await h.core.failover.tick();
+		const standby = new FailoverService(h.core.ctx, { holderId: 'standby' });
+		h.advance(31_000);
+		h.heartbeat('w1');
+		expect((await standby.tick()).lease).toBe('standby');
+		expect(h.sqlite.query<{ status: string }, [string]>('SELECT status FROM nodes WHERE id = ?').get(h.node.w1)!.status).toBe('online');
+	});
+});
