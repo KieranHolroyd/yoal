@@ -1,7 +1,7 @@
 {
 	"single-node": {
 		"solo": {
-			"version": 84,
+			"version": 85,
 			"nodeId": "nod_588672b7687746748b108a01fa51bb17",
 			"agentVersion": "0.1.0",
 			"nodeUpdate": null,
@@ -1510,7 +1510,7 @@
 	},
 	"edge-and-two-workers": {
 		"edge": {
-			"version": 46,
+			"version": 59,
 			"nodeId": "nod_9876633285164cfc9259ce6171eaf6a5",
 			"agentVersion": "0.1.0",
 			"nodeUpdate": null,
@@ -2093,7 +2093,7 @@
 			}
 		},
 		"worker-a": {
-			"version": 46,
+			"version": 59,
 			"nodeId": "nod_2be00e74758a492f974fce5690b0d578",
 			"agentVersion": "0.1.0",
 			"nodeUpdate": null,
@@ -2734,7 +2734,7 @@
 			}
 		},
 		"worker-b": {
-			"version": 46,
+			"version": 59,
 			"nodeId": "nod_80b01a31d10f42caa4b6b881d01ca176",
 			"agentVersion": "0.1.0",
 			"nodeUpdate": null,
