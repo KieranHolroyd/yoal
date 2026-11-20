@@ -1,9 +1,11 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync, existsSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
+	agentControlTarget,
 	assertFaultUnit,
+	parseEnvFile,
 	FaultInjector,
 	faketimeOffset,
 	parseCidr,
@@ -122,8 +124,9 @@ describe('FaultInjector', () => {
 	});
 	afterEach(() => rmSync(root, { recursive: true, force: true }));
 
-	function injector(runner: CommandRunner): FaultInjector {
+	function injector(runner: CommandRunner, extra: Partial<ConstructorParameters<typeof FaultInjector>[0]> = {}): FaultInjector {
 		return new FaultInjector({
+			...extra,
 			runner,
 			systemctlPath: '/bin/systemctl',
 			runDir: join(root, 'run'),
@@ -255,5 +258,195 @@ describe('FaultInjector', () => {
 		expect((await call('POST', '/v1/faults/clear-all'))!.status).toBe(200);
 		expect((await call('DELETE', '/v1/faults'))!.status).toBe(405);
 		await expect(call('POST', '/v1/faults/partition', { peers: ['10.47.0.2'], durationS: 20, shell: 'x' })).rejects.toThrow(ValidationError);
+	});
+
+	// --- revert failures, rollback and persisted partial state ---------------------------------
+
+	test('a failed nft revert keeps the fault listed and re-arms it with backoff until it succeeds', async () => {
+		let tablePresent = true;
+		const runner = fakeRunner((argv) => {
+			if (argv.join(' ') === 'nft list tables') return { stdout: tablePresent ? `table inet ${'yoal_fault_'}${current}\n` : 'table inet filter\n' };
+			if (argv[0] === 'nft' && argv[1] === 'delete') return tablePresent ? { code: 1, stderr: 'Error: Could not process rule: Device or resource busy' } : {};
+			return {};
+		});
+		let current = '';
+		const faults = injector(runner);
+		const fault = await faults.apply(parseFaultRequest('partition', { peers: ['172.30.147.12'], durationS: 30 }));
+		current = fault.id;
+
+		const first = await faults.revert(fault.id);
+		expect(first).toMatchObject({ reverted: false, retryInS: 1 });
+		expect(first.error).toContain('still present');
+		expect(faults.list()).toHaveLength(1);
+		expect(faults.list()[0]).toMatchObject({ status: 'revert-failed', revertAttempts: 1 });
+		expect(timers.at(-1)!.ms).toBe(1000);
+		const persisted = JSON.parse(readFileSync(join(root, 'run', 'active.json'), 'utf8')) as { status: string }[];
+		expect(persisted[0]!.status).toBe('revert-failed');
+
+		timers.at(-1)!.fn();
+		await Bun.sleep(5);
+		expect(faults.list()[0]).toMatchObject({ revertAttempts: 2 });
+		expect(timers.at(-1)!.ms).toBe(2000);
+
+		tablePresent = false;
+		timers.at(-1)!.fn();
+		await Bun.sleep(5);
+		expect(faults.list()).toEqual([]);
+	});
+
+	test('a netem revert checks that the qdisc is really gone', async () => {
+		let qdisc = 'qdisc noqueue 0: root refcnt 2';
+		const runner = fakeRunner((argv) => {
+			if (argv.join(' ') === 'tc qdisc show dev eth0') return { stdout: qdisc };
+			if (argv[2] === 'add' && argv.includes('root')) qdisc = 'qdisc netem fa17: root refcnt 2 delay 10ms';
+			if (argv[2] === 'del') return { code: 2, stderr: 'RTNETLINK answers: Operation not permitted' };
+			return {};
+		});
+		const faults = injector(runner);
+		const fault = await faults.apply(parseFaultRequest('netem', { device: 'eth0', delayMs: 10, durationS: 5 }));
+		const result = await faults.revert(fault.id);
+		expect(result.reverted).toBe(false);
+		expect(result.error).toContain('still on eth0');
+		qdisc = 'qdisc noqueue 0: root refcnt 2';
+		expect((await faults.revert(fault.id)).reverted).toBe(true);
+	});
+
+	test('clock-skew whose restart fails is rolled back: drop-in removed, offset +0, unit restarted clean', async () => {
+		const library = join(root, 'libfaketime.so.1');
+		writeFileSync(library, '');
+		let restarts = 0;
+		const runner = fakeRunner((argv) => (argv[1] === 'restart' && ++restarts === 1 ? { code: 1, stderr: 'Job for yoal-agent.service failed' } : {}));
+		const faults = injector(runner, { faketimeLibraries: [library] });
+		await expect(faults.apply(parseFaultRequest('clock-skew', { unit: 'yoal-agent.service', offsetS: 60, durationS: 30 }))).rejects.toThrow(/Job for yoal-agent.service failed/);
+		expect(existsSync(join(root, 'dropins', 'yoal-agent.service.d', '90-yoal-fault-clock.conf'))).toBe(false);
+		expect(readFileSync(join(root, 'run', 'clock-yoal-agent.service'), 'utf8')).toBe('+0\n');
+		expect(restarts).toBe(2);
+		expect(faults.list()).toEqual([]);
+		expect(JSON.parse(readFileSync(join(root, 'run', 'active.json'), 'utf8'))).toEqual([]);
+	});
+
+	test('an apply whose rollback also fails stays listed, persisted and retried; clear-all reverts it later', async () => {
+		let broken = true;
+		const runner = fakeRunner((argv) => (broken && argv[1] === 'kill' ? { code: 1, stderr: 'Failed to kill unit' } : {}));
+		const faults = injector(runner);
+		await expect(faults.apply(parseFaultRequest('freeze', { unit: 'yoal-agent.service', durationS: 60 }))).rejects.toThrow(/rollback failed too/);
+		expect(faults.list()).toHaveLength(1);
+		expect(faults.list()[0]).toMatchObject({ status: 'revert-failed', state: { rollback: '1' } });
+		expect(timers.at(-1)!.ms).toBe(1000);
+		expect(JSON.parse(readFileSync(join(root, 'run', 'active.json'), 'utf8'))).toHaveLength(1);
+
+		const stillBroken = await faults.clearAll();
+		expect(stillBroken.failed).toHaveLength(1);
+		expect(faults.list()).toHaveLength(1);
+
+		broken = false;
+		const cleared = await faults.clearAll();
+		expect(cleared.failed).toEqual([]);
+		expect(cleared.reverted).toHaveLength(1);
+		expect(faults.list()).toEqual([]);
+	});
+
+	test('a fault a dead process left half-applied is found and rolled back by the next one', async () => {
+		mkdirSync(join(root, 'run'), { recursive: true });
+		mkdirSync(join(root, 'dropins', 'yoal-agent.service.d'), { recursive: true });
+		writeFileSync(join(root, 'dropins', 'yoal-agent.service.d', '90-yoal-fault-clock.conf'), '[Service]\n');
+		writeFileSync(join(root, 'run', 'clock-yoal-agent.service'), '+60\n');
+		const half = {
+			id: 'abcdef01',
+			verb: 'clock-skew',
+			params: { verb: 'clock-skew', unit: 'yoal-agent.service', offsetS: 60, durationS: 30 },
+			appliedAt: '2026-11-20T00:00:00.000Z',
+			expiresAt: null,
+			status: 'applying',
+			state: { offsetFile: join(root, 'run', 'clock-yoal-agent.service'), restarted: '1' },
+			evidence: [],
+		};
+		writeFileSync(join(root, 'run', 'active.json'), JSON.stringify([half]));
+		const runner = fakeRunner();
+		const result = await injector(runner).clearAll('startup sweep');
+		expect(result.swept).toEqual(['clock-skew:abcdef01']);
+		expect(existsSync(join(root, 'dropins', 'yoal-agent.service.d', '90-yoal-fault-clock.conf'))).toBe(false);
+		expect(readFileSync(join(root, 'run', 'clock-yoal-agent.service'), 'utf8')).toBe('+0\n');
+		expect(runner.calls.some((call) => call.argv.join(' ') === '/bin/systemctl restart yoal-agent.service')).toBe(true);
+	});
+
+	test('HTTP: a failed revert is a 409 that names the error; a failed clear-all is a 409 listing it', async () => {
+		let broken = false;
+		const faults = injector(fakeRunner((argv) => (broken && argv[1] === 'kill' ? { code: 1, stderr: 'nope' } : {})));
+		const call = (path: string, body?: unknown) =>
+			faults.handle(new Request(`http://helper${path}`, { method: 'POST', ...(body === undefined ? {} : { body: JSON.stringify(body) }) }), new URL(`http://helper${path}`));
+		const { fault } = (await (await call('/v1/faults/freeze', { unit: 'yoal-agent.service', durationS: 30 }))!.json()) as { fault: { id: string } };
+		broken = true;
+		const reverted = await call('/v1/faults/revert', { id: fault.id });
+		expect(reverted!.status).toBe(409);
+		expect(((await reverted!.json()) as { error: string }).error).toContain('nope');
+		const cleared = await call('/v1/faults/clear-all');
+		expect(cleared!.status).toBe(409);
+		expect(((await cleared!.json()) as { failed: { id: string }[] }).failed.map((entry) => entry.id)).toEqual([fault.id]);
+	});
+
+	// --- fill-disk bounds ----------------------------------------------------------------------
+
+	test('fill-disk scratch mode uses mount -o loop (autoclear), and caps fills by count and total size', async () => {
+		writeFileSync(join(root, 'mountinfo'), '22 1 8:1 / / rw - ext4 /dev/vda1 rw\n');
+		const runner = fakeRunner();
+		const faults = injector(runner, { mountInfoPath: join(root, 'mountinfo') });
+		const first = await faults.apply(parseFaultRequest('fill-disk', { sizeMb: 1024, durationS: 60 }));
+		const mount = runner.calls.find((call) => call.argv[0] === 'mount')!.argv;
+		expect(mount.slice(0, 3)).toEqual(['mount', '-o', 'loop']);
+		expect(runner.calls.some((call) => call.argv.join(' ').startsWith('losetup --find'))).toBe(false);
+		expect(first.state.scratch).toBe(join(root, 'data', `scratch-${first.id}`));
+		await faults.apply(parseFaultRequest('fill-disk', { sizeMb: 1024, durationS: 60 }));
+		await expect(faults.apply(parseFaultRequest('fill-disk', { sizeMb: 16, durationS: 60 }))).rejects.toThrow(/would total 2064 MiB; the limit is 2048/);
+		await faults.clearAll();
+		for (let i = 0; i < 4; i++) await faults.apply(parseFaultRequest('fill-disk', { sizeMb: 16, durationS: 60 }));
+		await expect(faults.apply(parseFaultRequest('fill-disk', { sizeMb: 16, durationS: 60 }))).rejects.toThrow(/at most 4 fill-disk faults/);
+		await faults.clearAll();
+		expect(faults.list()).toEqual([]);
+	});
+
+	test('fill-disk path mode refuses a loop device backed outside the data roots or by another namespace’s file', async () => {
+		const backing = join(root, 'data', 'vol.img');
+		mkdirSync(join(root, 'data'), { recursive: true });
+		writeFileSync(backing, '');
+		const ino = statSync(backing).ino;
+		writeFileSync(join(root, 'mountinfo'), '22 1 8:1 / / rw - ext4 /dev/vda1 rw\n40 22 7:7 / /var/lib/yoal/scratch rw - ext4 /dev/loop7 rw\n');
+		let answer = '';
+		const faults = injector(
+			fakeRunner((argv) => (argv[0] === 'losetup' && argv.includes('BACK-FILE,BACK-INO') ? { stdout: answer } : {})),
+			{ mountInfoPath: join(root, 'mountinfo'), fillBackingRoots: [join(root, 'data')] },
+		);
+		const fill = parseFaultRequest('fill-disk', { path: '/var/lib/yoal/scratch', sizeMb: 32, durationS: 5 });
+		answer = `/srv/other/disk.img ${ino}\n`;
+		await expect(faults.apply(fill)).rejects.toThrow(/backed by \/srv\/other\/disk.img, not a file under/);
+		answer = `${backing} ${ino + 1}\n`;
+		await expect(faults.apply(fill)).rejects.toThrow(/is not this node's file/);
+		answer = `${join(root, 'data', '..', 'etc', 'x.img')} ${ino}\n`;
+		await expect(faults.apply(fill)).rejects.toThrow(/not a file under/);
+		expect(faults.list()).toEqual([]);
+	});
+
+	// --- pause-heartbeat from the agent's own config -------------------------------------------
+
+	test('agent control target: env first, then node.json; a unix socket is refused', () => {
+		expect(parseEnvFile('# x\nYOAL_CONTROL_URL="http://172.30.147.11"\nYOAL_DATA_DIR=/var/lib/yoal-agent\n')).toEqual({ YOAL_CONTROL_URL: 'http://172.30.147.11', YOAL_DATA_DIR: '/var/lib/yoal-agent' });
+		expect(agentControlTarget({ YOAL_CONTROL_URL: 'https://control.example:8443' }, null).url.port).toBe('8443');
+		expect(agentControlTarget({}, '{"controlUrl":"http://10.47.0.1:8080","nodeId":"n","token":"t"}').source).toBe('node.json controlUrl');
+		expect(() => agentControlTarget({ YOAL_CONTROL_SOCKET: '/run/yoal/control.sock', YOAL_CONTROL_URL: 'http://x' }, null)).toThrow(/unix socket/);
+		expect(() => agentControlTarget({}, null)).toThrow(/pass endpoints/);
+	});
+
+	test('pause-heartbeat without endpoints blocks the agent’s configured control-plane address and port', async () => {
+		writeFileSync(join(root, 'agent.env'), 'YOAL_CONTROL_URL=https://control.lab:8443\n');
+		const runner = fakeRunner();
+		const faults = injector(runner, { agentEnvPath: join(root, 'agent.env'), resolveIpv4: async () => ['172.30.147.11', '10.47.0.1'] });
+		const fault = await faults.apply(parseFaultRequest('pause-heartbeat', { durationS: 20 }));
+		expect(fault.params).toMatchObject({ endpoints: [{ cidr: '172.30.147.11/32', port: 8443 }, { cidr: '10.47.0.1/32', port: 8443 }] });
+		expect(runner.calls[0]!.stdin).toContain('meta skuid "yoal" ip daddr 172.30.147.11/32 tcp dport 8443 drop');
+		expect(fault.evidence[0]).toContain('https://control.lab:8443');
+
+		writeFileSync(join(root, 'agent.env'), 'YOAL_CONTROL_SOCKET=/run/yoal/control.sock\n');
+		await expect(faults.apply(parseFaultRequest('pause-heartbeat', { durationS: 20 }))).rejects.toThrow(/unix socket/);
+		expect(faults.list()).toHaveLength(1);
 	});
 });

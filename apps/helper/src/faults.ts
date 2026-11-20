@@ -1,11 +1,10 @@
 /**
  * Fault verbs for the HA lab (docs/HA-PLAN.md W1, docs/CLUSTERING.md §19.3).
  *
- * TEST BUILDS ONLY. This module is reachable only behind the build-time define
- * `YOAL_FAULT_INJECTION` (see `apps/helper/package.json`): the release build defines it `false`, so
- * the bundler drops the `import('./faults.ts')` in `main.ts` and the route branch in `server.ts`,
- * and a release helper has no fault endpoint to call (HA-PLAN §10). `faults-release.test.ts` builds
- * the release helper and asserts that none of this survives.
+ * TEST BUILDS ONLY. Only the test entry point `main-faults.ts` (`bun run build:faults`) imports this
+ * module; the release entry `main.ts` and the router `server.ts` never do, so a release helper has no
+ * fault code at all, whatever it is built with (HA-PLAN §10). `faults-release.test.ts` builds the
+ * release entry with and without defines and asserts that none of this survives.
  *
  * Same rules as every other helper verb: fixed verbs, validated structured fields (CIDRs, device
  * names that exist, unit names from an allowlist, bounded numbers), argv only, never a shell
@@ -22,11 +21,6 @@ import { randomBytes } from 'node:crypto';
 import { join } from 'node:path';
 import type { CommandRunner, RunResult } from './systemd.ts';
 import { ValidationError } from './validate.ts';
-
-declare global {
-	/** Build-time define: `true` only in `build:faults`; `false` in the release build; absent under `bun test`. */
-	const YOAL_FAULT_INJECTION: boolean | undefined;
-}
 
 export const FAULT_VERBS = [
 	'partition',
@@ -55,12 +49,19 @@ const MAX_DURATION_S = 3600;
 const MAX_PEERS = 32;
 const MAX_ENDPOINTS = 8;
 const MAX_BODY_BYTES = 64 * 1024;
+/** fill-disk bounds: concurrent fills, and the sum of their `sizeMb`. */
+const MAX_FILLS = 4;
+const MAX_FILL_TOTAL_MB = 2048;
+/** A failed revert is retried after 1, 2, 4 … s, at most this far apart, until it succeeds. */
+const MAX_RETRY_S = 60;
 const NFT_TABLE_PREFIX = 'yoal_fault_';
 /** Root qdisc handle every netem fault uses, so a sweep never removes a qdisc it did not add. */
 const TC_HANDLE = 'fa17:';
 const TC_NETEM_HANDLE = 'fa18:';
 const CLOCK_DROP_IN = '90-yoal-fault-clock.conf';
 const AGENT_USER = 'yoal';
+const AGENT_ENV = '/etc/yoal/agent.env';
+const AGENT_DATA_DIR = '/var/lib/yoal-agent';
 const LIBFAKETIME = [
 	'/usr/lib/aarch64-linux-gnu/faketime/libfaketime.so.1',
 	'/usr/lib/x86_64-linux-gnu/faketime/libfaketime.so.1',
@@ -81,7 +82,8 @@ export type FaultParams =
 	| { verb: 'kill-unit'; unit: string; signal: 'KILL' | 'TERM'; mode: 'signal' | 'stop'; durationS: number }
 	| { verb: 'fill-disk'; path: string | null; sizeMb: number; leaveKb: number; durationS: number }
 	| { verb: 'block-arbiter'; endpoints: CidrEndpoint[]; action: 'drop' | 'reject'; durationS: number }
-	| { verb: 'pause-heartbeat'; endpoints: CidrEndpoint[]; durationS: number };
+	/** `endpoints` null: derived from the agent's own control-plane URL at apply time. */
+	| { verb: 'pause-heartbeat'; endpoints: CidrEndpoint[] | null; durationS: number };
 
 export interface ActiveFault {
 	id: string;
@@ -90,9 +92,18 @@ export interface ActiveFault {
 	appliedAt: string;
 	/** Null when the verb has nothing to revert (`kill-unit` with `mode: signal`). */
 	expiresAt: string | null;
-	/** Revert-time facts recorded at apply time (loop device, mount point, fill file). */
+	/**
+	 * `applying`: recorded before the first change, so a crash mid-apply is still found and undone.
+	 * `active`: applied, with a revert timer. `revert-failed`: a revert (or an apply's rollback)
+	 * failed; the fault stays listed and the revert is retried with backoff. `done`: nothing to revert.
+	 */
+	status: 'applying' | 'active' | 'revert-failed' | 'done';
+	/** Revert-time facts recorded as the apply goes (loop device, mount point, fill file). */
 	state: Record<string, string>;
 	evidence: string[];
+	revertAttempts?: number;
+	revertError?: string;
+	nextRetryAt?: string;
 }
 
 export class FaultError extends Error {
@@ -229,7 +240,7 @@ export function parseFaultRequest(verb: string, input: unknown): FaultParams {
 			return { verb: 'block-arbiter', endpoints: endpointList(body.endpoints, 'endpoints'), action: oneOf(body.action, 'action', ['drop', 'reject'] as const, 'drop'), durationS: durationS() };
 		case 'pause-heartbeat':
 			onlyKeys(body, ['endpoints', 'durationS']);
-			return { verb: 'pause-heartbeat', endpoints: endpointList(body.endpoints, 'endpoints'), durationS: durationS() };
+			return { verb: 'pause-heartbeat', endpoints: body.endpoints === undefined ? null : endpointList(body.endpoints, 'endpoints'), durationS: durationS() };
 	}
 }
 
@@ -263,6 +274,7 @@ export function renderNftRuleset(id: string, params: FaultParams): string {
 			lines.forward.push(`ip daddr ${endpoint.cidr} tcp dport ${endpoint.port} ${verdict}`);
 		}
 	} else if (params.verb === 'pause-heartbeat') {
+		if (!params.endpoints) throw new FaultError('pause-heartbeat endpoints are resolved before rendering');
 		// Only the agent's own sockets: Caddy, workloads and the forwarder keep serving.
 		for (const endpoint of params.endpoints)
 			lines.output.push(`meta skuid "${AGENT_USER}" ip daddr ${endpoint.cidr} tcp dport ${endpoint.port} drop`);
@@ -305,6 +317,48 @@ export function renderClockDropIn(library: string, offsetFile: string): string {
 	].join('\n');
 }
 
+// --- the agent's control-plane address (pause-heartbeat) ---------------------------------------
+
+/** `KEY=VALUE` lines of an EnvironmentFile; quotes stripped, comments and blanks skipped. */
+export function parseEnvFile(text: string): Record<string, string> {
+	const out: Record<string, string> = {};
+	for (const raw of text.split('\n')) {
+		const line = raw.trim();
+		if (!line || line.startsWith('#')) continue;
+		const eq = line.indexOf('=');
+		if (eq <= 0) continue;
+		out[line.slice(0, eq).trim()] = line.slice(eq + 1).trim().replace(/^(['"])(.*)\1$/, '$2');
+	}
+	return out;
+}
+
+/** The URL the agent dials for heartbeats, as the agent itself resolves it (env first, then node.json). */
+export function agentControlTarget(env: Record<string, string>, nodeJson: string | null): { url: URL; source: string } {
+	if (env.YOAL_CONTROL_SOCKET) throw new FaultError(`the agent reaches the control plane on a unix socket (${env.YOAL_CONTROL_SOCKET}); there is no TCP path to pause`);
+	let raw = env.YOAL_CONTROL_URL ?? null;
+	let source = 'YOAL_CONTROL_URL';
+	if (!raw && nodeJson) {
+		try {
+			const parsed = JSON.parse(nodeJson) as { controlUrl?: unknown };
+			if (typeof parsed.controlUrl === 'string') {
+				raw = parsed.controlUrl;
+				source = 'node.json controlUrl';
+			}
+		} catch {
+			// fall through to the error below
+		}
+	}
+	if (!raw) throw new FaultError('cannot find the agent control-plane URL (YOAL_CONTROL_URL or node.json); pass endpoints');
+	let url: URL;
+	try {
+		url = new URL(raw);
+	} catch {
+		throw new FaultError(`the agent control-plane URL is not a URL: ${raw}`);
+	}
+	if (url.protocol !== 'http:' && url.protocol !== 'https:') throw new FaultError(`the agent control-plane URL is not http(s): ${raw}`);
+	return { url, source };
+}
+
 // --- the injector --------------------------------------------------------------------------------
 
 export interface FaultInjectorOptions {
@@ -319,10 +373,27 @@ export interface FaultInjectorOptions {
 	/** `/sys/class/net` (tests point it elsewhere). */
 	netDir?: string;
 	mountInfoPath?: string;
+	/** Where a path-mode fill's loop backing file must live (default: `dataDir` and `/var/lib/yoal`). */
+	fillBackingRoots?: string[];
+	/** The agent's EnvironmentFile (default `/etc/yoal/agent.env`), for pause-heartbeat. */
+	agentEnvPath?: string;
+	/** libfaketime candidates (tests point it at a stub). */
+	faketimeLibraries?: string[];
+	/** Host name → IPv4 addresses, for a control-plane URL that is not an address literal. */
+	resolveIpv4?: (host: string) => Promise<string[]>;
 	now?: () => number;
 	setTimer?: (fn: () => void, ms: number) => unknown;
 	clearTimer?: (handle: unknown) => void;
 	log?: (level: 'info' | 'warn' | 'error', message: string) => void;
+}
+
+export interface RevertResult {
+	id: string;
+	reverted: boolean;
+	evidence: string[];
+	/** Set when the revert failed: the fault stays listed and is retried in `retryInS`. */
+	error?: string;
+	retryInS?: number;
 }
 
 export class FaultInjector {
@@ -333,6 +404,10 @@ export class FaultInjector {
 	private readonly dropInRoot: string;
 	private readonly netDir: string;
 	private readonly mountInfoPath: string;
+	private readonly fillBackingRoots: string[];
+	private readonly agentEnvPath: string;
+	private readonly faketimeLibraries: string[];
+	private readonly resolveIpv4: (host: string) => Promise<string[]>;
 	private readonly now: () => number;
 	private readonly setTimer: (fn: () => void, ms: number) => unknown;
 	private readonly clearTimer: (handle: unknown) => void;
@@ -345,10 +420,14 @@ export class FaultInjector {
 		this.runner = options.runner;
 		this.systemctl = options.systemctlPath ?? 'systemctl';
 		this.runDir = options.runDir ?? '/run/yoal-faults';
-		this.dataDir = options.dataDir ?? '/var/lib/yoal-faults';
+		this.dataDir = (options.dataDir ?? '/var/lib/yoal-faults').replace(/\/+$/, '');
 		this.dropInRoot = options.dropInRoot ?? '/run/systemd/system';
 		this.netDir = options.netDir ?? '/sys/class/net';
 		this.mountInfoPath = options.mountInfoPath ?? '/proc/self/mountinfo';
+		this.fillBackingRoots = (options.fillBackingRoots ?? [this.dataDir, '/var/lib/yoal']).map((root) => root.replace(/\/+$/, ''));
+		this.agentEnvPath = options.agentEnvPath ?? AGENT_ENV;
+		this.faketimeLibraries = options.faketimeLibraries ?? LIBFAKETIME;
+		this.resolveIpv4 = options.resolveIpv4 ?? defaultResolveIpv4;
 		this.now = options.now ?? Date.now;
 		this.setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
 		this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as ReturnType<typeof setTimeout>));
@@ -370,61 +449,131 @@ export class FaultInjector {
 		return this.serial(() => this.applyNow(params));
 	}
 
-	revert(id: string): Promise<{ id: string; reverted: boolean; evidence: string[] }> {
+	revert(id: string): Promise<RevertResult> {
 		return this.serial(() => this.revertNow(id));
 	}
 
-	/** Revert every fault this process knows, then sweep leftovers by naming convention. */
-	clearAll(reason = 'clear-all'): Promise<{ reverted: string[]; swept: string[] }> {
+	/**
+	 * Revert every fault this process knows, adopt and revert what an earlier process persisted,
+	 * then sweep leftovers by naming convention. A fault whose revert fails stays listed (with a
+	 * retry timer) and is reported in `failed`.
+	 */
+	clearAll(reason = 'clear-all'): Promise<{ reverted: string[]; swept: string[]; failed: { id: string; error: string }[] }> {
 		return this.serial(async () => {
 			const reverted: string[] = [];
+			const failed: { id: string; error: string }[] = [];
 			for (const id of [...this.active.keys()]) {
-				const result = await this.revertNow(id).catch((error: unknown) => {
-					this.log('warn', `fault ${id}: revert failed during ${reason}: ${message(error)}`);
-					return null;
-				});
-				if (result?.reverted) reverted.push(id);
+				const result = await this.revertNow(id);
+				if (result.reverted) reverted.push(id);
+				else if (result.error) failed.push({ id, error: result.error });
 			}
-			const swept = await this.sweep();
-			if (reverted.length || swept.length) this.log('info', `${reason}: reverted ${reverted.join(', ') || 'none'}; swept ${swept.join(', ') || 'none'}`);
-			return { reverted, swept };
+			const swept: string[] = [];
+			for (const fault of await this.readPersisted()) {
+				if (this.active.has(fault.id)) continue;
+				// Adopted: from here it is this process's fault, with the same revert and retry.
+				this.active.set(fault.id, { ...fault, state: { ...(fault.state ?? {}) }, evidence: fault.evidence ?? [], status: fault.status ?? 'active' });
+				const result = await this.revertNow(fault.id);
+				if (result.reverted) swept.push(`${fault.verb}:${fault.id}`);
+				else if (result.error) failed.push({ id: fault.id, error: result.error });
+			}
+			await this.sweepByName(swept, failed);
+			await this.persist();
+			if (reverted.length || swept.length || failed.length)
+				this.log(failed.length ? 'error' : 'info', `${reason}: reverted ${reverted.join(', ') || 'none'}; swept ${swept.join(', ') || 'none'}${failed.length ? `; FAILED ${failed.map((entry) => `${entry.id} (${entry.error})`).join(', ')}` : ''}`);
+			return { reverted, swept, failed };
 		});
 	}
 
-	private async applyNow(params: FaultParams): Promise<ActiveFault> {
+	private async applyNow(input: FaultParams): Promise<ActiveFault> {
 		const id = randomBytes(4).toString('hex');
 		const fault: ActiveFault = {
 			id,
-			verb: params.verb,
-			params,
+			verb: input.verb,
+			params: input,
 			appliedAt: new Date(this.now()).toISOString(),
 			expiresAt: null,
+			status: 'applying',
 			state: {},
 			evidence: [],
 		};
+		// Checks that change nothing come first: a refusal here leaves nothing to undo.
+		await this.precheck(fault);
+		// Recorded before the first change, so clear-all (or the next helper's startup sweep) finds
+		// a half-applied fault even if this process dies part-way.
+		this.active.set(id, fault);
+		await this.persist();
+		let revertible: boolean;
+		try {
+			revertible = await this.applyVerb(fault);
+		} catch (error) {
+			fault.state.rollback = '1';
+			try {
+				const undone = await this.undo(fault);
+				this.active.delete(id);
+				await this.persist();
+				this.log('warn', `fault ${id} (${fault.verb}) failed and was rolled back: ${message(error)}; ${undone.join('; ')}`);
+			} catch (rollbackError) {
+				this.markRevertFailed(fault, rollbackError);
+				await this.persist();
+				throw new FaultError(`${fault.verb} failed (${message(error)}) and its rollback failed too (${message(rollbackError)}): fault ${id} stays listed and its revert is retried`);
+			}
+			if (error instanceof ValidationError || error instanceof FaultError) throw error;
+			throw new FaultError(`${fault.verb} failed and was rolled back: ${message(error)}`);
+		}
+		if (!revertible) {
+			fault.status = 'done';
+			this.active.delete(id);
+			await this.persist();
+		} else {
+			fault.status = 'active';
+			fault.expiresAt = new Date(this.now() + fault.params.durationS * 1000).toISOString();
+			this.arm(fault, fault.params.durationS * 1000, 'auto-revert');
+			await this.persist();
+		}
+		this.log('warn', `fault ${id} applied: ${describe(fault.params)}${fault.expiresAt ? ` until ${fault.expiresAt}` : ''}`);
+		return fault;
+	}
+
+	/** Refusals that need the node but change nothing. May fill in derived params (pause-heartbeat). */
+	private async precheck(fault: ActiveFault): Promise<void> {
+		const params = fault.params;
 		for (const other of this.active.values()) {
 			if (params.verb === 'netem' && other.params.verb === 'netem' && other.params.device === params.device)
 				throw new FaultError(`a netem fault (${other.id}) is already active on ${params.device}`);
 			if ('unit' in params && 'unit' in other.params && other.params.unit === params.unit && other.verb === params.verb)
 				throw new FaultError(`a ${params.verb} fault (${other.id}) is already active on ${params.unit}`);
 		}
-		const revertible = await this.applyVerb(fault);
-		if (revertible) {
-			fault.expiresAt = new Date(this.now() + params.durationS * 1000).toISOString();
-			this.active.set(id, fault);
-			this.timers.set(
-				id,
-				this.setTimer(() => {
-					void this.revert(id).catch((error: unknown) => this.log('error', `fault ${id}: auto-revert failed: ${message(error)}`));
-				}, params.durationS * 1000),
-			);
-			await this.persist();
+		switch (params.verb) {
+			case 'netem': {
+				await this.assertDevice(params.device);
+				const existing = (await this.must(['tc', 'qdisc', 'show', 'dev', params.device])).stdout;
+				if (existing.includes(` ${TC_HANDLE} `)) throw new FaultError(`${params.device} already has a fault qdisc; revert it or clear-all first`);
+				break;
+			}
+			case 'clock-skew': {
+				const library = await firstExisting(this.faketimeLibraries);
+				if (!library) throw new FaultError('libfaketime is not installed (apt install faketime)');
+				fault.state.library = library;
+				break;
+			}
+			case 'fill-disk': {
+				const fills = [...this.active.values()].filter((other) => other.params.verb === 'fill-disk');
+				if (fills.length >= MAX_FILLS) throw new FaultError(`at most ${MAX_FILLS} fill-disk faults at once (${fills.map((other) => other.id).join(', ')} active)`);
+				const totalMb = fills.reduce((sum, other) => sum + (other.params.verb === 'fill-disk' ? other.params.sizeMb : 0), 0);
+				if (totalMb + params.sizeMb > MAX_FILL_TOTAL_MB)
+					throw new FaultError(`active fills would total ${totalMb + params.sizeMb} MiB; the limit is ${MAX_FILL_TOTAL_MB} MiB`);
+				if (params.path !== null) fault.state.mountPoint = await this.assertFillableMount(params.path, fault);
+				break;
+			}
+			case 'pause-heartbeat':
+				if (params.endpoints === null) fault.params = { ...params, endpoints: await this.agentControlEndpoints(fault) };
+				break;
+			default:
+				break;
 		}
-		this.log('warn', `fault ${id} applied: ${describe(params)}${fault.expiresAt ? ` until ${fault.expiresAt}` : ''}`);
-		return fault;
 	}
 
-	/** Apply one verb; returns whether it left state that must be reverted. */
+	/** Apply one verb; returns whether it left state that must be reverted. Records progress in `fault.state`. */
 	private async applyVerb(fault: ActiveFault): Promise<boolean> {
 		const params = fault.params;
 		switch (params.verb) {
@@ -436,29 +585,23 @@ export class FaultInjector {
 				return true;
 			}
 			case 'netem': {
-				await this.assertDevice(params.device);
-				const existing = (await this.must(['tc', 'qdisc', 'show', 'dev', params.device])).stdout;
-				if (existing.includes(` ${TC_HANDLE} `)) throw new FaultError(`${params.device} already has a fault qdisc; revert it or clear-all first`);
-				try {
-					for (const argv of renderNetemCommands(params)) await this.must(argv);
-				} catch (error) {
-					await this.runner.run(['tc', 'qdisc', 'del', 'dev', params.device, 'root', 'handle', TC_HANDLE]);
-					throw error;
-				}
+				for (const argv of renderNetemCommands(params)) await this.must(argv);
 				fault.evidence.push((await this.must(['tc', 'qdisc', 'show', 'dev', params.device])).stdout.trim());
 				return true;
 			}
 			case 'clock-skew': {
-				const library = await firstExisting(LIBFAKETIME);
-				if (!library) throw new FaultError('libfaketime is not installed (apt install faketime)');
+				const library = fault.state.library!;
 				await fs.mkdir(this.runDir, { recursive: true, mode: 0o755 });
 				const offsetFile = join(this.runDir, `clock-${params.unit}`);
+				fault.state.offsetFile = offsetFile;
+				await this.persist();
 				await fs.writeFile(offsetFile, `${faketimeOffset(params.offsetS)}\n`, { mode: 0o644 });
 				const dir = join(this.dropInRoot, `${params.unit}.d`);
 				await fs.mkdir(dir, { recursive: true, mode: 0o755 });
 				await fs.writeFile(join(dir, CLOCK_DROP_IN), renderClockDropIn(library, offsetFile), { mode: 0o644 });
-				fault.state.offsetFile = offsetFile;
 				await this.must([this.systemctl, 'daemon-reload']);
+				fault.state.restarted = '1';
+				await this.persist();
 				await this.must([this.systemctl, 'restart', params.unit]);
 				fault.evidence.push(`${params.unit} restarted under libfaketime, offset ${faketimeOffset(params.offsetS)}s`);
 				fault.evidence.push((await this.must([this.systemctl, 'show', params.unit, '-p', 'Environment', '-p', 'MainPID'])).stdout.trim());
@@ -485,33 +628,77 @@ export class FaultInjector {
 		}
 	}
 
-	private async revertNow(id: string): Promise<{ id: string; reverted: boolean; evidence: string[] }> {
+	private async revertNow(id: string): Promise<RevertResult> {
 		const fault = this.active.get(id);
 		if (!fault) return { id, reverted: false, evidence: [] };
 		const timer = this.timers.get(id);
 		if (timer !== undefined) this.clearTimer(timer);
 		this.timers.delete(id);
+		let evidence: string[];
+		try {
+			evidence = await this.undo(fault);
+		} catch (error) {
+			const retryInS = this.markRevertFailed(fault, error);
+			await this.persist();
+			return { id, reverted: false, evidence: [], error: message(error), retryInS };
+		}
+		this.active.delete(id);
+		await this.persist();
+		this.log('warn', `fault ${id} reverted (${fault.verb})${fault.revertAttempts ? ` after ${fault.revertAttempts} failed attempt(s)` : ''}`);
+		return { id, reverted: true, evidence };
+	}
+
+	/**
+	 * Undo a fault, whether fully applied, half applied (`state.rollback`) or adopted from an earlier
+	 * process. Idempotent, and it checks the result: it throws unless the fault's effect is gone.
+	 */
+	private async undo(fault: ActiveFault): Promise<string[]> {
 		const evidence: string[] = [];
 		const params = fault.params;
 		switch (params.verb) {
 			case 'partition':
 			case 'block-arbiter':
-			case 'pause-heartbeat':
-				await this.runner.run(['nft', 'delete', 'table', 'inet', nftTableName(id)]);
-				evidence.push(`nft tables: ${(await this.runner.run(['nft', 'list', 'tables'])).stdout.trim().replace(/\n/g, '; ') || '(none)'}`);
+			case 'pause-heartbeat': {
+				const table = nftTableName(fault.id);
+				const deleted = await this.runner.run(['nft', 'delete', 'table', 'inet', table]);
+				const tables = await this.must(['nft', 'list', 'tables']);
+				if (new RegExp(`\\btable inet ${table}\\b`).test(tables.stdout))
+					throw new FaultError(`nft table ${table} is still present after delete (exit ${deleted.code}: ${(deleted.stderr || deleted.stdout).trim().slice(0, 200)})`);
+				evidence.push(`nft tables: ${tables.stdout.trim().replace(/\n/g, '; ') || '(none)'}`);
 				break;
-			case 'netem':
-				await this.runner.run(['tc', 'qdisc', 'del', 'dev', params.device, 'root', 'handle', TC_HANDLE]);
-				evidence.push((await this.runner.run(['tc', 'qdisc', 'show', 'dev', params.device])).stdout.trim());
+			}
+			case 'netem': {
+				const deleted = await this.runner.run(['tc', 'qdisc', 'del', 'dev', params.device, 'root', 'handle', TC_HANDLE]);
+				const shown = await this.runner.run(['tc', 'qdisc', 'show', 'dev', params.device]);
+				const gone = shown.code !== 0 && /Cannot find device/i.test(shown.stderr);
+				if (!gone && shown.code !== 0) throw new FaultError(`tc qdisc show dev ${params.device} failed (${shown.code}): ${shown.stderr.trim().slice(0, 200)}`);
+				if (!gone && shown.stdout.includes(` ${TC_HANDLE} `))
+					throw new FaultError(`qdisc ${TC_HANDLE} is still on ${params.device} after delete (exit ${deleted.code}: ${(deleted.stderr || deleted.stdout).trim().slice(0, 200)})`);
+				evidence.push(gone ? `${params.device} is gone` : shown.stdout.trim());
 				break;
-			case 'clock-skew':
+			}
+			case 'clock-skew': {
 				// Offset back to zero at once (the running process re-reads it within a second), then
-				// drop the preload so the next start is clean. No restart: a revert is not a new fault.
-				await fs.writeFile(fault.state.offsetFile ?? join(this.runDir, `clock-${params.unit}`), '+0\n').catch(() => undefined);
-				await fs.rm(join(this.dropInRoot, `${params.unit}.d`, CLOCK_DROP_IN), { force: true });
-				await this.runner.run([this.systemctl, 'daemon-reload']);
+				// drop the preload so the next start is clean. No restart on a normal revert: a revert is
+				// not a new fault. A rolled-back apply that already restarted the unit restarts it again,
+				// so it runs without the preload.
+				const offsetFile = fault.state.offsetFile ?? join(this.runDir, `clock-${params.unit}`);
+				const dropIn = join(this.dropInRoot, `${params.unit}.d`, CLOCK_DROP_IN);
+				const offsetReset = await fs.writeFile(offsetFile, '+0\n').then(
+					() => null,
+					(error: unknown) => error,
+				);
+				await fs.rm(dropIn, { force: true });
+				if (offsetReset && (await exists(offsetFile))) throw new FaultError(`could not reset ${offsetFile}: ${message(offsetReset)}`);
+				await this.must([this.systemctl, 'daemon-reload']);
 				evidence.push(`${params.unit} offset reset to +0; drop-in removed`);
+				// `applying` here means an earlier process died mid-apply: that is a rollback too.
+				if ((fault.state.rollback === '1' || fault.status === 'applying') && fault.state.restarted === '1') {
+					await this.must([this.systemctl, 'restart', params.unit]);
+					evidence.push(`${params.unit} restarted without the preload (rollback)`);
+				}
 				break;
+			}
 			case 'freeze':
 				await this.must([this.systemctl, 'kill', '--kill-whom=all', '--signal=SIGCONT', params.unit]);
 				evidence.push(await this.unitEvidence(params.unit));
@@ -524,118 +711,194 @@ export class FaultInjector {
 				evidence.push(...(await this.unfillDisk(fault)));
 				break;
 		}
-		this.active.delete(id);
-		await this.persist();
-		this.log('warn', `fault ${id} reverted (${params.verb})`);
-		return { id, reverted: true, evidence };
+		return evidence;
 	}
 
-	/** Leftovers from a process that died with faults active: nft tables, qdiscs, drop-ins, scratch disks, persisted state. */
-	private async sweep(): Promise<string[]> {
-		const swept: string[] = [];
-		const persisted = await this.readPersisted();
-		for (const fault of persisted) {
-			if (this.active.has(fault.id)) continue;
-			const params = fault.params;
-			if (params.verb === 'freeze') await this.runner.run([this.systemctl, 'kill', '--kill-whom=all', '--signal=SIGCONT', params.unit]);
-			if (params.verb === 'kill-unit' && params.mode === 'stop') await this.runner.run([this.systemctl, 'start', params.unit]);
-			if (params.verb === 'fill-disk') await this.unfillDisk(fault).catch(() => undefined);
-			swept.push(`${fault.verb}:${fault.id}`);
-		}
+	/** Keep the fault listed and re-arm its revert: 1, 2, 4 … s, capped at MAX_RETRY_S. */
+	private markRevertFailed(fault: ActiveFault, error: unknown): number {
+		fault.status = 'revert-failed';
+		fault.revertAttempts = (fault.revertAttempts ?? 0) + 1;
+		fault.revertError = message(error);
+		const retryInS = Math.min(MAX_RETRY_S, 2 ** (fault.revertAttempts - 1));
+		fault.nextRetryAt = new Date(this.now() + retryInS * 1000).toISOString();
+		this.arm(fault, retryInS * 1000, 'revert retry');
+		this.log('error', `fault ${fault.id} (${fault.verb}): revert failed (attempt ${fault.revertAttempts}): ${fault.revertError}; retrying in ${retryInS}s`);
+		return retryInS;
+	}
+
+	private arm(fault: ActiveFault, ms: number, label: string): void {
+		const previous = this.timers.get(fault.id);
+		if (previous !== undefined) this.clearTimer(previous);
+		this.timers.set(
+			fault.id,
+			this.setTimer(() => {
+				void this.revert(fault.id).catch((error: unknown) => this.log('error', `fault ${fault.id}: ${label} threw: ${message(error)}`));
+			}, ms),
+		);
+	}
+
+	/** Leftovers no record names: nft tables, qdiscs, clock drop-ins, scratch disks and their loop devices. */
+	private async sweepByName(swept: string[], failed: { id: string; error: string }[]): Promise<void> {
+		const owned = (kind: string, name: string) => [...this.active.values()].some((fault) => kind === 'nft' && nftTableName(fault.id) === name);
 		const tables = (await this.runner.run(['nft', 'list', 'tables'])).stdout;
 		for (const match of tables.matchAll(new RegExp(`table inet (${NFT_TABLE_PREFIX}[0-9a-f]+)`, 'g'))) {
-			await this.runner.run(['nft', 'delete', 'table', 'inet', match[1]!]);
-			swept.push(`nft:${match[1]}`);
+			if (owned('nft', match[1]!)) continue;
+			const result = await this.runner.run(['nft', 'delete', 'table', 'inet', match[1]!]);
+			if (result.code === 0) swept.push(`nft:${match[1]}`);
+			else failed.push({ id: `nft:${match[1]}`, error: (result.stderr || result.stdout).trim().slice(0, 200) });
 		}
+		const netemDevices = new Set([...this.active.values()].flatMap((fault) => (fault.params.verb === 'netem' ? [fault.params.device] : [])));
 		for (const device of await fs.readdir(this.netDir).catch(() => [] as string[])) {
-			if (!/^[A-Za-z0-9_.-]{1,15}$/.test(device)) continue;
+			if (!/^[A-Za-z0-9_.-]{1,15}$/.test(device) || netemDevices.has(device)) continue;
 			const qdiscs = (await this.runner.run(['tc', 'qdisc', 'show', 'dev', device])).stdout;
-			if (qdiscs.includes(` ${TC_HANDLE} `)) {
-				await this.runner.run(['tc', 'qdisc', 'del', 'dev', device, 'root', 'handle', TC_HANDLE]);
-				swept.push(`tc:${device}`);
-			}
+			if (!qdiscs.includes(` ${TC_HANDLE} `)) continue;
+			const result = await this.runner.run(['tc', 'qdisc', 'del', 'dev', device, 'root', 'handle', TC_HANDLE]);
+			if (result.code === 0) swept.push(`tc:${device}`);
+			else failed.push({ id: `tc:${device}`, error: (result.stderr || result.stdout).trim().slice(0, 200) });
 		}
+		const clockUnits = new Set([...this.active.values()].flatMap((fault) => (fault.params.verb === 'clock-skew' ? [fault.params.unit] : [])));
 		let reload = false;
 		for (const dir of await fs.readdir(this.dropInRoot).catch(() => [] as string[])) {
 			if (!dir.endsWith('.service.d')) continue;
 			const path = join(this.dropInRoot, dir, CLOCK_DROP_IN);
-			if (!(await exists(path))) continue;
 			const unit = dir.slice(0, -2);
+			if (clockUnits.has(unit) || !(await exists(path))) continue;
 			await fs.writeFile(join(this.runDir, `clock-${unit}`), '+0\n').catch(() => undefined);
 			await fs.rm(path, { force: true });
 			reload = true;
 			swept.push(`clock:${unit}`);
 		}
-		if (reload) await this.runner.run([this.systemctl, 'daemon-reload']);
+		if (reload) await this.must([this.systemctl, 'daemon-reload']);
+		const scratches = new Set([...this.active.values()].flatMap((fault) => (fault.state.scratch ? [fault.state.scratch] : [])));
 		for (const entry of await fs.readdir(this.dataDir).catch(() => [] as string[])) {
-			if (!/^scratch-[0-9a-f]+$/.test(entry)) continue;
-			await this.unfillScratch(join(this.dataDir, entry)).catch(() => undefined);
-			swept.push(`disk:${entry}`);
+			const dir = join(this.dataDir, entry);
+			if (!/^scratch-[0-9a-f]+$/.test(entry) || scratches.has(dir)) continue;
+			try {
+				await this.unfillScratch(dir);
+				swept.push(`disk:${entry}`);
+			} catch (error) {
+				failed.push({ id: `disk:${entry}`, error: message(error) });
+			}
 		}
-		await this.persist();
-		return swept;
+		// A loop device still bound to a scratch image whose directory is already gone.
+		for (const { device, backing } of await this.loopDevices()) {
+			if (!backing.startsWith(`${this.dataDir}/scratch-`)) continue;
+			if ([...scratches].some((dir) => backing.startsWith(`${dir}/`))) continue;
+			const result = await this.runner.run(['losetup', '-d', device]);
+			if (result.code === 0) swept.push(`loop:${device}`);
+			else failed.push({ id: `loop:${device}`, error: (result.stderr || result.stdout).trim().slice(0, 200) });
+		}
 	}
 
 	// --- disk ----------------------------------------------------------------------------------
+
+	/**
+	 * Path mode may fill only a loop-backed filesystem whose backing file lives under the node's own
+	 * data roots, and is the file this namespace sees there (same inode): a loop device is shared by
+	 * every container on one kernel, so a mount in this namespace may be backed by anyone's file.
+	 */
+	private async assertFillableMount(path: string, fault: ActiveFault): Promise<string> {
+		const mount = await this.mountOf(path);
+		if (!mount || !/^\/dev\/loop\d+$/.test(mount.source)) throw new FaultError(`refusing to fill ${path}: its filesystem is not loopback-backed`);
+		const listed = await this.runner.run(['losetup', '--list', '--noheadings', '--raw', '--output', 'BACK-FILE,BACK-INO', mount.source]);
+		const [rawFile, rawIno] = listed.stdout.trim().split(/\s+/);
+		const backing = unescapeRaw(rawFile ?? '');
+		if (listed.code !== 0 || !backing.startsWith('/')) throw new FaultError(`refusing to fill ${path}: cannot read the backing file of ${mount.source}`);
+		if (backing.split('/').some((part) => part === '..' || part === '.') || !this.fillBackingRoots.some((root) => backing.startsWith(`${root}/`)))
+			throw new FaultError(`refusing to fill ${path}: ${mount.source} is backed by ${backing}, not a file under ${this.fillBackingRoots.join(' or ')}`);
+		const stat = await fs.stat(backing).catch(() => null);
+		if (!stat || String(stat.ino) !== rawIno)
+			throw new FaultError(`refusing to fill ${path}: ${backing} (inode ${rawIno}) is not this node's file (${stat ? `inode ${stat.ino}` : 'missing'})`);
+		fault.state.backingFile = backing;
+		fault.state.device = mount.source;
+		return mount.mountPoint;
+	}
 
 	private async fillDisk(fault: ActiveFault, params: Extract<FaultParams, { verb: 'fill-disk' }>): Promise<void> {
 		let mountPoint: string;
 		if (params.path === null) {
 			// A fresh loopback ext4, so a fill can never reach the host's (or the lab VM's) real disk.
+			// `mount -o loop` sets the loop device to autoclear: unmounting it (or the mount namespace
+			// going away with a removed container) detaches it, so it cannot leak onto the host.
 			const dir = join(this.dataDir, `scratch-${fault.id}`);
 			const image = join(dir, 'disk.img');
 			mountPoint = join(dir, 'mnt');
+			fault.state.scratch = dir;
+			await this.persist();
 			await fs.mkdir(mountPoint, { recursive: true, mode: 0o700 });
 			const handle = await fs.open(image, 'w', 0o600);
 			await handle.truncate(params.sizeMb * 1024 * 1024);
 			await handle.close();
-			const device = (await this.must(['losetup', '--find', '--show', image])).stdout.trim();
-			if (!/^\/dev\/loop\d+$/.test(device)) throw new FaultError(`losetup returned an unexpected device ${device}`);
-			fault.state.scratch = dir;
-			fault.state.device = device;
-			await this.must(['mkfs.ext4', '-q', '-F', '-m', '0', device]);
-			await this.must(['mount', device, mountPoint]);
+			await this.must(['mkfs.ext4', '-q', '-F', '-m', '0', image]);
+			await this.must(['mount', '-o', 'loop', image, mountPoint]);
+			const attached = (await this.runner.run(['losetup', '-j', image])).stdout;
+			const device = /^(\/dev\/loop\d+):/m.exec(attached)?.[1];
+			if (device) fault.state.device = device;
 		} else {
-			const mount = await this.mountOf(params.path);
-			if (!mount || !/^\/dev\/loop\d+$/.test(mount.source))
-				throw new FaultError(`refusing to fill ${params.path}: its filesystem is not loopback-backed`);
-			mountPoint = mount.mountPoint;
+			mountPoint = fault.state.mountPoint!;
 		}
 		const before = await availableKb(mountPoint);
 		const fillFile = join(mountPoint, `.yoal-fault-fill-${fault.id}`);
 		fault.state.fillFile = fillFile;
 		fault.state.mountPoint = mountPoint;
-		const bytes = Math.max(0, (before - params.leaveKb) * 1024);
-		if (bytes > 0) {
-			const result = await this.runner.run(['fallocate', '-l', String(bytes), fillFile]);
-			// Some filesystems refuse a single allocation of the last free extent: write what fits.
-			if (result.code !== 0) await this.runner.run(['dd', 'if=/dev/zero', `of=${fillFile}`, 'bs=1M', 'status=none']);
+		await this.persist();
+		// Scratch mode fills its whole (sizeMb) disk; path mode fills at most sizeMb of the target.
+		const capKb = params.path === null ? Number.POSITIVE_INFINITY : params.sizeMb * 1024;
+		const kb = Math.max(0, Math.min(before - params.leaveKb, capKb));
+		if (kb > 0) {
+			const result = await this.runner.run(['fallocate', '-l', String(kb * 1024), fillFile]);
+			// Some filesystems refuse a single allocation of the last free extent: write what fits
+			// (dd stops at ENOSPC, or at the cap).
+			if (result.code !== 0) await this.runner.run(['dd', 'if=/dev/zero', `of=${fillFile}`, 'bs=1K', `count=${kb}`, 'status=none']);
 		}
 		const after = await availableKb(mountPoint);
-		fault.evidence.push(`${mountPoint}: available ${before} KiB before, ${after} KiB after${fault.state.device ? ` (${fault.state.device}, ${params.sizeMb} MiB)` : ''}`);
+		fault.evidence.push(`${mountPoint}: available ${before} KiB before, ${after} KiB after${fault.state.device ? ` (${fault.state.device}${params.path === null ? `, ${params.sizeMb} MiB scratch` : `, cap ${params.sizeMb} MiB`})` : ''}`);
 	}
 
 	private async unfillDisk(fault: ActiveFault): Promise<string[]> {
 		const evidence: string[] = [];
 		if (fault.state.fillFile) await fs.rm(fault.state.fillFile, { force: true });
-		if (fault.state.mountPoint) evidence.push(`${fault.state.mountPoint}: available ${await availableKb(fault.state.mountPoint).catch(() => -1)} KiB after revert`);
 		if (fault.state.scratch) {
 			await this.unfillScratch(fault.state.scratch);
-			evidence.push(`scratch ${fault.state.scratch} unmounted and removed`);
+			evidence.push(`scratch ${fault.state.scratch} unmounted, its loop device detached, removed`);
+		} else if (fault.state.mountPoint) {
+			evidence.push(`${fault.state.mountPoint}: available ${await availableKb(fault.state.mountPoint).catch(() => -1)} KiB after revert`);
 		}
 		return evidence;
 	}
 
+	/** Unmount, detach and remove one scratch disk; throws unless nothing of it is left. */
 	private async unfillScratch(dir: string): Promise<void> {
 		const mountPoint = join(dir, 'mnt');
 		const image = join(dir, 'disk.img');
-		await this.runner.run(['umount', mountPoint]);
-		const attached = (await this.runner.run(['losetup', '-j', image])).stdout;
-		for (const line of attached.split('\n')) {
+		if (await this.isMounted(mountPoint)) {
+			const result = await this.runner.run(['umount', mountPoint]);
+			if (result.code !== 0 && (await this.isMounted(mountPoint))) throw new FaultError(`umount ${mountPoint} failed: ${(result.stderr || result.stdout).trim().slice(0, 200)}`);
+		}
+		const attached = await this.runner.run(['losetup', '-j', image]);
+		for (const line of attached.stdout.split('\n')) {
 			const device = /^(\/dev\/loop\d+):/.exec(line)?.[1];
 			if (device) await this.runner.run(['losetup', '-d', device]);
 		}
+		const still = (await this.runner.run(['losetup', '-j', image])).stdout.trim();
+		if (still) throw new FaultError(`loop device still attached to ${image}: ${still.slice(0, 200)}`);
 		await fs.rm(dir, { recursive: true, force: true });
+	}
+
+	/** Every loop device and its backing file, as this namespace sees it. */
+	private async loopDevices(): Promise<{ device: string; backing: string }[]> {
+		const listed = await this.runner.run(['losetup', '--list', '--noheadings', '--raw', '--output', 'NAME,BACK-FILE']);
+		if (listed.code !== 0) return [];
+		return listed.stdout
+			.split('\n')
+			.map((line) => line.trim().split(/\s+/))
+			.filter((fields): fields is [string, string] => /^\/dev\/loop\d+$/.test(fields[0] ?? '') && Boolean(fields[1]))
+			.map(([device, backing]) => ({ device, backing: unescapeRaw(backing) }));
+	}
+
+	private async isMounted(path: string): Promise<boolean> {
+		const mount = await this.mountOf(path).catch(() => null);
+		return mount?.mountPoint === path;
 	}
 
 	private async mountOf(path: string): Promise<{ mountPoint: string; source: string } | null> {
@@ -650,6 +913,24 @@ export class FaultInjector {
 			if (inside && (!best || mountPoint.length >= best.mountPoint.length)) best = { mountPoint, source };
 		}
 		return best;
+	}
+
+	// --- pause-heartbeat -------------------------------------------------------------------------
+
+	/** The agent's real control-plane address and port, from its own config. */
+	private async agentControlEndpoints(fault: ActiveFault): Promise<CidrEndpoint[]> {
+		const envText = await fs.readFile(this.agentEnvPath, 'utf8').catch(() => null);
+		if (envText === null) throw new FaultError(`cannot read the agent config ${this.agentEnvPath}; pass endpoints`);
+		const env = parseEnvFile(envText);
+		const nodeJson = env.YOAL_CONTROL_URL ? null : await fs.readFile(join(env.YOAL_DATA_DIR || AGENT_DATA_DIR, 'node.json'), 'utf8').catch(() => null);
+		const { url, source } = agentControlTarget(env, nodeJson);
+		const host = url.hostname.replace(/^\[|\]$/g, '');
+		const port = Number(url.port || (url.protocol === 'https:' ? 443 : 80));
+		const addresses = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ? [host] : await this.resolveIpv4(host);
+		if (addresses.length === 0) throw new FaultError(`${host} (the agent control-plane host) has no IPv4 address`);
+		const endpoints = addresses.slice(0, MAX_ENDPOINTS).map((address) => ({ cidr: parseCidr(address, 'control-plane address'), port }));
+		fault.evidence.push(`control plane from ${this.agentEnvPath} ${source}: ${url.origin} → ${endpoints.map((endpoint) => `${endpoint.cidr}:${endpoint.port}`).join(', ')}`);
+		return endpoints;
 	}
 
 	// --- helpers -------------------------------------------------------------------------------
@@ -677,7 +958,9 @@ export class FaultInjector {
 	private async persist(): Promise<void> {
 		try {
 			await fs.mkdir(this.runDir, { recursive: true, mode: 0o755 });
-			await fs.writeFile(join(this.runDir, 'active.json'), `${JSON.stringify([...this.active.values()])}\n`, { mode: 0o600 });
+			const path = join(this.runDir, 'active.json');
+			await fs.writeFile(`${path}.tmp`, `${JSON.stringify([...this.active.values()])}\n`, { mode: 0o600 });
+			await fs.rename(`${path}.tmp`, path);
 		} catch (error) {
 			this.log('warn', `could not record active faults: ${message(error)}`);
 		}
@@ -686,7 +969,9 @@ export class FaultInjector {
 	private async readPersisted(): Promise<ActiveFault[]> {
 		try {
 			const parsed = JSON.parse(await fs.readFile(join(this.runDir, 'active.json'), 'utf8')) as unknown;
-			return Array.isArray(parsed) ? (parsed as ActiveFault[]).filter((fault) => fault && typeof fault.id === 'string' && fault.params) : [];
+			return Array.isArray(parsed)
+				? (parsed as ActiveFault[]).filter((fault) => fault && typeof fault.id === 'string' && /^[0-9a-f]{8}$/.test(fault.id) && fault.params && (FAULT_VERBS as readonly string[]).includes(fault.params.verb))
+				: [];
 		} catch {
 			return [];
 		}
@@ -710,14 +995,15 @@ export class FaultInjector {
 		const name = path.slice('/v1/faults/'.length);
 		if (name === 'clear-all') {
 			await readBody(request, true);
-			return json({ ok: true, ...(await this.clearAll()) });
+			const result = await this.clearAll();
+			return json({ ok: result.failed.length === 0, ...result }, result.failed.length === 0 ? 200 : 409);
 		}
 		if (name === 'revert') {
 			const body = record(await readBody(request, false), 'request');
 			onlyKeys(body, ['id']);
 			if (typeof body.id !== 'string' || !/^[0-9a-f]{8}$/.test(body.id)) throw new ValidationError('id must be a fault id');
 			const result = await this.revert(body.id);
-			return json({ ok: true, ...result }, result.reverted ? 200 : 404);
+			return json({ ok: result.reverted, ...result }, result.reverted ? 200 : result.error ? 409 : 404);
 		}
 		const params = parseFaultRequest(name, await readBody(request, false));
 		try {
@@ -727,6 +1013,16 @@ export class FaultInjector {
 			throw error;
 		}
 	}
+}
+
+async function defaultResolveIpv4(host: string): Promise<string[]> {
+	const { lookup } = await import('node:dns/promises');
+	return (await lookup(host, { family: 4, all: true })).map((entry) => entry.address);
+}
+
+/** `losetup --raw` escapes whitespace and backslashes as `\xHH`. */
+function unescapeRaw(value: string): string {
+	return value.replace(/\\x([0-9a-fA-F]{2})/g, (_, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)));
 }
 
 function describe(params: FaultParams): string {

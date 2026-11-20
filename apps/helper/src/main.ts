@@ -19,14 +19,26 @@ import { dirname, join } from 'node:path';
  * never runs as root.
  */
 
-function log(level: 'info' | 'warn' | 'error', message: string): void {
+export function log(level: 'info' | 'warn' | 'error', message: string): void {
 	const line = `[yoal-helper ${new Date().toISOString()}] ${level.toUpperCase()} ${message}`;
 	if (level === 'error') console.error(line);
 	else if (level === 'warn') console.warn(line);
 	else console.log(line);
 }
 
-export async function runHelper(): Promise<void> {
+/**
+ * What a test-only entry point may add to the helper: routes in front of the fixed verbs, set up
+ * before the socket opens. The release entry (this file's `import.meta.main` branch) passes nothing.
+ */
+export interface HelperExtension {
+	routes?: (request: Request, url: URL) => Promise<Response | null>;
+}
+
+export interface RunHelperOptions {
+	extend?: (context: { systemctlPath: string; log: typeof log }) => Promise<HelperExtension>;
+}
+
+export async function runHelper(options: RunHelperOptions = {}): Promise<void> {
 	const config = loadHelperConfig();
 	const uid = typeof process.getuid === 'function' ? process.getuid() : -1;
 	if (uid !== 0) {
@@ -92,24 +104,10 @@ export async function runHelper(): Promise<void> {
 		runner: spawnRunner(),
 		log: (level, message) => log(level, `container console: ${message}`),
 	});
-	// HA lab fault verbs (docs/HA-PLAN.md W1): compiled only into `build:faults` helpers. In a
-	// release build YOAL_FAULT_INJECTION is defined false and this import is dropped by the bundler.
-	let faults: import('./faults.ts').FaultInjector | undefined;
-	if (typeof YOAL_FAULT_INJECTION !== 'undefined' && YOAL_FAULT_INJECTION) {
-		const { FaultInjector } = await import('./faults.ts');
-		faults = new FaultInjector({
-			runner: spawnRunner(),
-			systemctlPath: config.systemctlPath,
-			log: (level, message) => log(level, `faults: ${message}`),
-		});
-		log('warn', 'TEST BUILD: fault injection verbs are enabled on this helper');
-		// A helper that restarted with faults active reverts them: their timers died with it.
-		await faults.clearAll('startup sweep').catch((error: unknown) =>
-			log('error', `faults: startup sweep failed: ${error instanceof Error ? error.message : String(error)}`),
-		);
-	}
+	// Routes a test-only entry point adds (it passes `extend`); the release entry never does.
+	const extension = await options.extend?.({ systemctlPath: config.systemctlPath, log });
 	helper = await startHelperServer(config, driver, {
-		faults,
+		...(extension?.routes ? { extraRoutes: extension.routes } : {}),
 		nodeUpdate,
 		wireguard,
 		shares: new ShareMounter(),

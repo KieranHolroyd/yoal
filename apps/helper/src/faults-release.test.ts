@@ -3,13 +3,18 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { createHandler, type HelperRuntime } from './server.ts';
+import { FaultInjector } from './faults.ts';
 
 /**
- * HA-PLAN §10: "a release build has no fault endpoint to call". This builds the helper exactly as
- * the release does (`bun run --cwd apps/helper build`: the `build` script in package.json, which
- * publish.yml, the installer and the node bundle all use) and asserts that no fault route, verb or
- * fault-only string survives. A second build with the define on proves the markers are real, so
- * the first assertion cannot pass by searching for strings that never existed.
+ * HA-PLAN §10: "a release build has no fault endpoint to call". The fault verbs live in `faults.ts`,
+ * which only the test entry `main-faults.ts` imports; the release entry `main.ts` and the router
+ * `server.ts` never do, so no define, preload or global can switch them on in a release binary.
+ *
+ * This builds the release entry exactly as the `build` script does (what publish.yml, the
+ * installer and node updates use), and again with `--define YOAL_FAULT_INJECTION=true` (the old
+ * switch), and asserts that no fault route, verb or fault-only string survives either. A build of
+ * the test entry proves the markers are real, so the first assertions cannot pass by searching for
+ * strings that never existed.
  */
 
 const HELPER = resolve(import.meta.dir, '..');
@@ -49,22 +54,35 @@ function build(argv: string[]): Buffer {
 }
 
 describe('fault verbs are compiled only into test builds', () => {
-	test('the release build script defines YOAL_FAULT_INJECTION=false', () => {
-		expect(scriptArgs('build', 'x').join(' ')).toContain('--define YOAL_FAULT_INJECTION=false');
-		expect(scriptArgs('build:faults', 'x').join(' ')).toContain('--define YOAL_FAULT_INJECTION=true');
+	test('the release script builds main.ts; the test script builds main-faults.ts', () => {
+		expect(scriptArgs('build', 'x').at(-1)).toBe('src/main.ts');
+		expect(scriptArgs('build:faults', 'x').at(-1)).toBe('src/main-faults.ts');
+	});
+
+	test('main.ts and server.ts never import or mention faults', () => {
+		for (const file of ['main.ts', 'server.ts']) {
+			const source = readFileSync(join(import.meta.dir, file), 'utf8');
+			// `default` contains "fault"; anything else spelling it is a reference.
+			expect({ file, mentions: source.match(/(?<!de)fault/gi) ?? [] }).toEqual({ file, mentions: [] });
+			expect(source).not.toContain('main-faults');
+		}
 	});
 
 	test(
-		'a release helper contains no fault route, verb or string; a faults build does',
+		'a release helper, built with or without the old define, contains no fault route, verb or string',
 		() => {
 			const dir = mkdtempSync(join(tmpdir(), 'yoal-helper-release-'));
 			try {
-				const release = build(scriptArgs('build', join(dir, 'yoal-helper'))).toString('latin1');
-				const survivors = MARKERS.filter((marker) => release.includes(marker));
-				expect(survivors).toEqual([]);
+				const plain = scriptArgs('build', join(dir, 'yoal-helper'));
+				const defined = scriptArgs('build', join(dir, 'yoal-helper-defined'));
+				defined.splice(defined.indexOf('--outfile'), 0, '--define', 'YOAL_FAULT_INJECTION=true');
+				for (const argv of [plain, defined]) {
+					const binary = build(argv).toString('latin1');
+					expect({ argv: argv.join(' '), survivors: MARKERS.filter((marker) => binary.includes(marker)) }).toEqual({ argv: argv.join(' '), survivors: [] });
+				}
 
-				// Positive control: the same entry point with the define on carries every marker. A
-				// bundle (not --compile) keeps this fast; --compile embeds exactly this bundle.
+				// Positive control: the test entry carries every marker. A bundle (not --compile) keeps
+				// this fast; --compile embeds exactly this bundle.
 				const argv = scriptArgs('build:faults', join(dir, 'faults.js')).map((arg) => (arg === '--compile' ? '--target=bun' : arg));
 				const faults = build(argv).toString('utf8');
 				expect(MARKERS.filter((marker) => !faults.includes(marker))).toEqual([]);
@@ -72,34 +90,35 @@ describe('fault verbs are compiled only into test builds', () => {
 				rmSync(dir, { recursive: true, force: true });
 			}
 		},
-		120_000,
+		180_000,
 	);
 });
 
-describe('single-node gate: without the define the router has no fault route', () => {
-	test('a handler given a fault injector still answers 404 for /v1/faults when YOAL_FAULT_INJECTION is not defined', async () => {
-		// `bun test` runs the source unbundled, where the define is absent: the same condition as any
-		// build that does not set it to true. The injector must never be consulted.
-		expect(typeof YOAL_FAULT_INJECTION).toBe('undefined');
-		let consulted = 0;
-		const handler = createHandler({} as HelperRuntime, {
-			version: '0.0.0-test',
-			faults: {
-				async handle() {
-					consulted++;
-					return new Response('fault route reached', { status: 200 });
-				},
-			},
-		});
-		for (const [method, path] of [
-			['GET', '/v1/faults'],
-			['POST', '/v1/faults/partition'],
-			['POST', '/v1/faults/clear-all'],
-		] as const) {
-			const response = await handler(new Request(`http://helper${path}`, { method, ...(method === 'POST' ? { body: '{}' } : {}) }));
-			expect(response.status).toBe(404);
-		}
-		expect(consulted).toBe(0);
+describe('single-node gate: the router has no fault route unless the test entry adds one', () => {
+	const requests = [
+		['GET', '/v1/faults'],
+		['POST', '/v1/faults/partition'],
+		['POST', '/v1/faults/clear-all'],
+	] as const;
+	const send = (handler: (request: Request) => Promise<Response>, method: string, path: string) =>
+		handler(new Request(`http://helper${path}`, { method, ...(method === 'POST' ? { body: '{"peers":["10.47.0.9"],"durationS":5}' } : {}) }));
+
+	test('without extra routes (the release entry) /v1/faults* is a 404', async () => {
+		const handler = createHandler({} as HelperRuntime, { version: '0.0.0-test' });
+		for (const [method, path] of requests) expect((await send(handler, method, path)).status).toBe(404);
 		expect((await handler(new Request('http://helper/healthz'))).status).toBe(200);
+	});
+
+	test('with the injector wired the way main-faults.ts wires it, the routes answer', async () => {
+		const faults = new FaultInjector({
+			runner: { run: async () => ({ code: 0, stdout: '', stderr: '' }) },
+			runDir: mkdtempSync(join(tmpdir(), 'yoal-faults-gate-')),
+			setTimer: () => 0,
+			clearTimer: () => undefined,
+		});
+		const handler = createHandler({} as HelperRuntime, { version: '0.0.0-test', extraRoutes: (request, url) => faults.handle(request, url) });
+		expect((await send(handler, 'GET', '/v1/faults')).status).toBe(200);
+		expect((await send(handler, 'POST', '/v1/faults/partition')).status).toBe(200);
+		expect((await handler(new Request('http://helper/v1/slices'))).status).not.toBe(200);
 	});
 });
