@@ -3,7 +3,7 @@ import { BUILD_VERSION } from './build-version.ts';
 import { promises as fs } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ConfigError, loadConfig } from './config.ts';
+import { ConfigError, loadConfig, splitIngressListen } from './config.ts';
 
 const directories: string[] = [];
 
@@ -31,6 +31,7 @@ describe('loadConfig', () => {
 		expect(config.agentVersion).toBe(BUILD_VERSION);
 		expect(config.caddyAdminSocket).toBe('/var/lib/caddy/admin.sock');
 		expect(config.caddyListen).toEqual([':443', ':80']);
+		expect(config.ingressHealthDir).toBe('/run/yoal/health');
 		expect(config.agentSocket).toBe('/run/yoal-agent/agent.sock');
 		expect(config.cookieName).toBe('__yoal_s');
 		expect(config.accessCacheMs).toBe(15_000);
@@ -181,5 +182,24 @@ describe('loadConfig', () => {
 		expect(() => loadConfig({ ...base, YOAL_HELPER_SOCKET: 'run/helper.sock' })).toThrow(/absolute/);
 		expect(() => loadConfig({ ...base, YOAL_WORKLOAD_SLICE_MB: 'lots' })).toThrow(/integer/);
 		expect(() => loadConfig({ ...base, YOAL_WORKLOAD_HEALTH_TIMEOUT_MS: '10' })).toThrow(/integer/);
+	});
+});
+
+describe('splitIngressListen (HA-PLAN H19)', () => {
+	test('honours YOAL_CADDY_LISTEN with TLS: :80 is the redirect, everything else is secure', () => {
+		expect(splitIngressListen([':443', ':80'], true)).toEqual({ content: [':443'], http: [':80'] });
+		expect(splitIngressListen(['10.0.0.2:443', '10.0.0.2:80', '[::]:443'], true)).toEqual({
+			content: ['10.0.0.2:443', '[::]:443'],
+			http: ['10.0.0.2:80'],
+		});
+		expect(splitIngressListen(['10.0.0.2:8443'], true)).toEqual({ content: ['10.0.0.2:8443'], http: [] });
+	});
+
+	test('without TLS every entry is a content listener, exactly as before', () => {
+		expect(splitIngressListen([':443', ':80'], false)).toEqual({ content: [':443', ':80'], http: [] });
+	});
+
+	test('refuses a TLS install with nothing but :80', () => {
+		expect(() => splitIngressListen([':80'], true)).toThrow(/secure listener/);
 	});
 });

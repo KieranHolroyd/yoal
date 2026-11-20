@@ -1178,6 +1178,17 @@ export class NodeService {
 			storage: this.effectiveStorage(node),
 			releases: releaseSpecs,
 			routes,
+			// HA-PLAN H19/W8: the node that terminates ingress gets the settings its Caddy renders.
+			// Additive and ingress-only, so a worker's payload (and every pre-Wave-2 one) is unchanged.
+			// The fingerprint is lane B's; null means "do not verify", today's single-node path.
+			...(isIngress
+				? {
+						ingress: {
+							...this.ctx.cluster.get().ingress,
+							certificateFingerprint: null,
+						},
+					}
+				: {}),
 			// Kept until every session a revocation affects has expired (share sessions last up to
 			// 30 days), not for a fixed window.
 			revocations: this.ctx.access.revocations(),

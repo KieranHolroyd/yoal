@@ -1,9 +1,14 @@
 import { describe, expect, test } from 'bun:test';
 import {
+	INGRESS_DRIFT_WINDOW_MS,
+	INGRESS_HEALTH_PATH,
+	INGRESS_HEALTH_PORT,
 	INGRESS_SET_CAPABILITY,
 	acmeLeaseSchema,
 	ingressCertificateSchema,
+	ingressDesiredSchema,
 	ingressHealthSchema,
+	ingressHealthWords,
 	ingressSettingsSchema,
 	steeringDriverKinds,
 } from './ingress.ts';
@@ -23,6 +28,38 @@ describe('ingress settings (H19)', () => {
 	test('refuses an unknown proxy protocol and a drain longer than two minutes', () => {
 		expect(() => ingressSettingsSchema.parse({ proxyProtocol: 'v3' })).toThrow();
 		expect(() => ingressSettingsSchema.parse({ drainSeconds: 121 })).toThrow();
+		// Trusted proxies are CIDRs, so a malformed setting never reaches an ingress's Caddy.
+		expect(ingressSettingsSchema.parse({ trustedProxies: ['10.209.1.5/32', 'fd00::/8'] }).trustedProxies).toEqual([
+			'10.209.1.5/32',
+			'fd00::/8',
+		]);
+		expect(() => ingressSettingsSchema.parse({ trustedProxies: ['10.209.1.5'] })).toThrow(/CIDR/);
+		expect(() => ingressSettingsSchema.parse({ trustedProxies: ['10.0.0.0/33'] })).toThrow(/CIDR/);
+		expect(() => ingressSettingsSchema.parse({ trustedProxies: ['fd00::/129'] })).toThrow(/CIDR/);
+	});
+
+	test('desired state adds only the fleet fingerprint, so settings stay one contract', () => {
+		expect(ingressDesiredSchema.parse({})).toEqual({
+			drainSeconds: 20,
+			proxyProtocol: 'off',
+			trustedProxies: [],
+			healthPort: null,
+			certificateFingerprint: null,
+		});
+	});
+
+	test('the endpoint path, reserved port, drift window and words are fixed', () => {
+		expect(INGRESS_HEALTH_PATH).toBe('/.well-known/yoal/health');
+		expect(INGRESS_HEALTH_PORT).toBe(8099);
+		expect(INGRESS_DRIFT_WINDOW_MS).toBe(120_000);
+		expect(ingressHealthWords).toEqual({
+			ok: 'ok',
+			draining: 'draining',
+			caddy: 'caddy',
+			'desired-state': 'desired-state',
+			releases: 'releases',
+			certificates: 'certificates',
+		});
 	});
 });
 

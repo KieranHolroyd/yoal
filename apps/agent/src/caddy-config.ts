@@ -1,8 +1,10 @@
 import { join } from 'node:path';
-import type { DesiredState, IdentityDesired, RouteSpec } from '@yoal/contracts';
+import type { DesiredState, IdentityDesired, IngressDesired, RouteSpec } from '@yoal/contracts';
+import { INGRESS_HEALTH_PATH, INGRESS_HEALTH_PORT } from '@yoal/contracts';
 import {
 	compileAwaitingDeployRoute,
 	compileCaddyConfig,
+	compileIngressProtection,
 	compileUnavailableRoute,
 	type CaddyHandler,
 	type CaddyRoute,
@@ -20,6 +22,8 @@ import { normalizeHost } from './verify.ts';
 export interface CompileAgentConfigOptions {
 	state: DesiredState;
 	listen: string[];
+	/** Plain-HTTP listeners for the redirect server; defaults to `[':80']` while TLS is on. */
+	httpListen?: string[];
 	dataDir: string;
 	agentSocket: string;
 	caddyAdminSocket: string;
@@ -29,6 +33,10 @@ export interface CompileAgentConfigOptions {
 	platform?: { host: string; upstream: string };
 	/** Caddy JSON access log the agent tails for telemetry (DESIGN §8). */
 	accessLog?: string | null;
+	/** HA-PLAN H19: this node's ingress settings. Absent renders none of the edge additions. */
+	ingress?: IngressDesired;
+	/** Directory of state files the health routes stat (the agent writes them). */
+	ingressHealthDir?: string;
 }
 
 const ACCESS_LOGGER = 'yoal_access';
@@ -237,7 +245,9 @@ export function compileKubernetesRoute(route: DesiredState['kubernetesRoutes'][n
 	const subroutes: CaddyRoute[] = [];
 	if (route.allowCidrs.length > 0)
 		subroutes.push({
-			match: [{ not: [{ remote_ip: { ranges: route.allowCidrs } }] }],
+			// `client_ip` is the resolved client address: the peer unless a configured trusted proxy
+			// supplied it (H19). With no trusted proxies it equals `remote_ip`, today's behaviour.
+			match: [{ not: [{ client_ip: { ranges: route.allowCidrs } }] }],
 			handle: [
 				{
 					handler: 'static_response',
@@ -596,6 +606,7 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 
 	const config = compileCaddyConfig({
 		listen: options.listen,
+		...(options.httpListen ? { httpListen: options.httpListen } : {}),
 		sites,
 		catchAllStatus: 404,
 		tls: options.tls,
@@ -799,6 +810,21 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 				},
 			},
 		};
+	}
+
+	// HA-PLAN H19: only an ingress renders the health endpoint, lame duck, PROXY protocol and
+	// trusted proxies. Additive, so a worker's config (and every pre-Wave-2 one) is unchanged.
+	if (options.ingress && options.ingressHealthDir) {
+		compileIngressProtection(config, {
+			proxyProtocol: options.ingress.proxyProtocol,
+			trustedProxies: options.ingress.trustedProxies,
+			healthPort: options.ingress.healthPort ?? INGRESS_HEALTH_PORT,
+			healthDir: options.ingressHealthDir,
+			tls: Boolean(options.tls),
+			drainSeconds: options.ingress.drainSeconds,
+		});
+		// Probes are not requests to a site: keep them out of the 1-minute analytics buckets.
+		if (server.logs) (server.logs as Record<string, unknown>).skip_uris = [INGRESS_HEALTH_PATH];
 	}
 
 	// Preserve the unix-socket admin endpoint when replacing the config; a full /load without it

@@ -888,6 +888,13 @@
 					}
 				}
 			],
+			"ingress": {
+				"drainSeconds": 20,
+				"proxyProtocol": "off",
+				"trustedProxies": [],
+				"healthPort": null,
+				"certificateFingerprint": null
+			},
 			"revocations": [
 				{
 					"id": "shr_0c5723a0f4a34aaa8055c97a05cf93de",
@@ -1868,6 +1875,13 @@
 					}
 				}
 			],
+			"ingress": {
+				"drainSeconds": 20,
+				"proxyProtocol": "off",
+				"trustedProxies": [],
+				"healthPort": null,
+				"certificateFingerprint": null
+			},
 			"revocations": [],
 			"hostRedirects": [
 				{
@@ -3504,6 +3518,13 @@
 					}
 				}
 			],
+			"ingress": {
+				"drainSeconds": 20,
+				"proxyProtocol": "off",
+				"trustedProxies": [],
+				"healthPort": null,
+				"certificateFingerprint": null
+			},
 			"revocations": [],
 			"hostRedirects": [],
 			"placeholders": [
@@ -3670,6 +3691,13 @@
 					}
 				}
 			],
+			"ingress": {
+				"drainSeconds": 20,
+				"proxyProtocol": "off",
+				"trustedProxies": [],
+				"healthPort": null,
+				"certificateFingerprint": null
+			},
 			"revocations": [],
 			"hostRedirects": [],
 			"placeholders": [

@@ -1,5 +1,5 @@
 import { compilePattern, compileTarget, type HeaderRule, type Redirect, type SiteConfig } from './parse.ts';
-import type { AccessMode } from '@yoal/contracts';
+import { INGRESS_HEALTH_PATH, ingressHealthWords, type AccessMode } from '@yoal/contracts';
 import { errorPageHandler } from './error-pages.ts';
 
 /** Structural Caddy JSON — intentionally loose; the agent validates with Caddy itself. */
@@ -78,8 +78,8 @@ const IPV4_CIDR = /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d
 /**
  * An ingress's active health probe of a copy on a protected site (F7). The probe has no session,
  * so it is answered before the access check, but only when method, exact path (Caddy's
- * case-insensitive `path` and a case-sensitive anchored regexp) and the connection's own peer
- * address (`remote_ip`, never a forwarded header) all match.
+ * case-insensitive `path` and a case-sensitive anchored regexp) and the resolved client address
+ * (Caddy's `client_ip`: the peer unless a configured trusted proxy supplied it) all match.
  *
  * Matchers compare a cleaned path while `reverse_proxy` forwards the raw one, so `//healthz`,
  * `/admin/../healthz` or `/healthz?x=1` would match and still reach the app as sent. The upstream
@@ -97,7 +97,7 @@ function healthProbeRoute(
 	if (!LITERAL_HEALTH_PATH.test(healthPath) || !IPV4_CIDR.test(cidr)) return null;
 	const pattern = `^${healthPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`;
 	return {
-		match: [{ method: ['GET', 'HEAD'], path: [healthPath], path_regexp: { pattern }, remote_ip: { ranges: [cidr] } }],
+		match: [{ method: ['GET', 'HEAD'], path: [healthPath], path_regexp: { pattern }, client_ip: { ranges: [cidr] } }],
 		terminal: true,
 		handle: [
 			// A `?` with nothing after it empties the query as well as replacing the path.
@@ -475,6 +475,181 @@ export function compileFallbackErrorRoutes(): CaddyRoute[] {
 	];
 }
 
+export interface IngressProtectionOptions {
+	/** `ingress.proxyProtocol`: the listener wrapper a balancer in front speaks. */
+	proxyProtocol: 'off' | 'v1' | 'v2';
+	/** `ingress.trustedProxies`: CIDRs whose forwarded client address is believed. */
+	trustedProxies: string[];
+	/** The plain-HTTP listener an L4 balancer probes (H19). */
+	healthPort: number;
+	/** Agent-owned directory of state files the health routes stat (no reload to flip them). */
+	healthDir: string;
+	/** Whether the content server terminates TLS (Caddy's `tls` listener wrapper). */
+	tls: boolean;
+	/** `ingress.drainSeconds`, also the Caddy grace period floor. */
+	drainSeconds: number;
+}
+
+/** Path under `healthDir` holding the one state the endpoint reports. */
+export function ingressHealthStatePath(healthDir: string, word: string): string {
+	const dir = healthDir.trim().replace(/\/+$/, '');
+	if (!dir.startsWith('/') || /\s/.test(dir)) throw new Error(`healthDir must be an absolute path, got "${healthDir}"`);
+	return `${dir}/${word}`;
+}
+
+/** Every answer is 16 bytes: one word, space-padded, newline. Same size in every state (H19 §10). */
+export function ingressHealthBody(word: string): string {
+	return `${word.padEnd(15, ' ')}\n`;
+}
+
+function healthFileMatcher(path: string): Record<string, unknown> {
+	return { file: { root: '/', try_files: [path] } };
+}
+
+function healthAnswer(status: number, word: string): CaddyHandler {
+	return {
+		handler: 'static_response',
+		status_code: status,
+		headers: { 'Content-Type': ['text/plain'], 'Cache-Control': ['no-store'] },
+		body: ingressHealthBody(word),
+	};
+}
+
+/**
+ * `GET /.well-known/yoal/health` (HA-PLAN H19). Terminal and ahead of every host route, so it
+ * answers for any Host (a balancer probe sends the node address or nothing). Order: draining,
+ * then one file per reason the agent wrote, then `ready`; no file at all is `caddy` because the
+ * agent has not confirmed a Caddy config yet. The body is a single word, never a version, host or
+ * topology. `@id` is per server because Caddy refuses duplicates at load.
+ */
+export function compileIngressHealthRoute(server: string, healthDir: string): CaddyRoute {
+	const reason = (word: string) => ({
+		match: [healthFileMatcher(ingressHealthStatePath(healthDir, word))],
+		handle: [healthAnswer(503, word)],
+		terminal: true,
+	});
+	return {
+		'@id': `yoal-health:${server}`,
+		match: [{ path: [INGRESS_HEALTH_PATH] }],
+		terminal: true,
+		handle: [
+			{
+				handler: 'subroute',
+				routes: [
+					// Drop `Server: Caddy` so the answer names no software (H19 §10).
+					{ handle: [{ handler: 'headers', response: { delete: ['Server'] } }] },
+					reason(ingressHealthWords.draining),
+					reason(ingressHealthWords.caddy),
+					reason(ingressHealthWords['desired-state']),
+					reason(ingressHealthWords.releases),
+					reason(ingressHealthWords.certificates),
+					{
+						match: [{ not: [healthFileMatcher(ingressHealthStatePath(healthDir, ingressHealthWords.ok))] }],
+						handle: [healthAnswer(503, ingressHealthWords.caddy)],
+						terminal: true,
+					},
+					{ handle: [healthAnswer(200, ingressHealthWords.ok)] },
+				],
+			},
+		],
+	};
+}
+
+/**
+ * While draining, every response closes its connection (`Connection: close`; Go's HTTP/2 server
+ * turns it into GOAWAY), so keep-alive clients move to another ingress before Caddy stops instead
+ * of racing the final close. Non-terminal: it only adds a header.
+ */
+export function compileIngressDrainCloseRoute(server: string, healthDir: string): CaddyRoute {
+	return {
+		'@id': `yoal-drain-close:${server}`,
+		match: [healthFileMatcher(ingressHealthStatePath(healthDir, ingressHealthWords.draining))],
+		handle: [{ handler: 'headers', response: { set: { Connection: ['close'] } } }],
+	};
+}
+
+const IPV4_PROXY_CIDR = /^(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\/(?:3[0-2]|[12]?\d)$/;
+const IPV6_PROXY_CIDR = /^[0-9a-fA-F:]+\/(?:12[0-8]|1[01]\d|[1-9]?\d)$/;
+
+/** Fail at render time, not with a Caddy config that refuses to load for the whole node. */
+function assertTrustedProxies(values: readonly string[]): string[] {
+	for (const value of values)
+		if (!IPV4_PROXY_CIDR.test(value) && !IPV6_PROXY_CIDR.test(value))
+			throw new Error(`ingress.trustedProxies must be CIDR ranges, got "${value}"`);
+	return [...values];
+}
+
+function proxyWrappers(options: IngressProtectionOptions): Record<string, unknown>[] {
+	if (options.proxyProtocol === 'off' || options.trustedProxies.length === 0) return [];
+	return [
+		{
+			wrapper: 'proxy_protocol',
+			timeout: '5s',
+			// Read a header only from the balancer; from anyone else read it and discard it, so a
+			// direct probe (which carries no header) is still accepted (spike S9).
+			allow: assertTrustedProxies(options.trustedProxies),
+			fallback_policy: 'ignore',
+		},
+	];
+}
+
+function trustedProxyConfig(options: IngressProtectionOptions): Record<string, unknown> {
+	if (options.trustedProxies.length === 0) return {};
+	return {
+		trusted_proxies: { source: 'static', ranges: assertTrustedProxies(options.trustedProxies) },
+		client_ip_headers: ['X-Forwarded-For'],
+		trusted_proxies_strict: true,
+	};
+}
+
+/**
+ * Renders an ingress's health endpoint, lame-duck responses, PROXY protocol and trusted proxies
+ * into a config from `compileCaddyConfig` (HA-PLAN H19, spike S9). Additive: a node without
+ * `ingress` settings never calls it, so its config is byte-identical.
+ */
+export function compileIngressProtection(
+	config: Record<string, unknown>,
+	options: IngressProtectionOptions,
+): Record<string, unknown> {
+	if (!Number.isInteger(options.healthPort) || options.healthPort < 1 || options.healthPort > 65_535)
+		throw new Error(`ingress.healthPort must be a port number, got ${options.healthPort}`);
+	if (options.healthPort === 80 || options.healthPort === 443)
+		throw new Error(`ingress.healthPort must not take the public listener (80/443), got ${options.healthPort}`);
+	const apps = config.apps as { http?: { servers?: Record<string, Record<string, unknown>>; grace_period?: string } } | undefined;
+	const servers = apps?.http?.servers;
+	if (!servers) throw new Error('compileIngressProtection expects a config from compileCaddyConfig');
+	const wrappers = proxyWrappers(options);
+	const trusted = trustedProxyConfig(options);
+	for (const name of ['content', 'http_redirect'] as const) {
+		const server = servers[name];
+		if (!server) continue;
+		const listen = Array.isArray(server.listen) ? (server.listen as string[]) : [];
+		if (listen.some((address) => address.endsWith(`:${options.healthPort}`)))
+			throw new Error(`ingress.healthPort ${options.healthPort} is also a public listener; pick another port`);
+		const existing = Array.isArray(server.routes) ? (server.routes as CaddyRoute[]) : [];
+		server.routes = [
+			compileIngressHealthRoute(name, options.healthDir),
+			compileIngressDrainCloseRoute(name, options.healthDir),
+			...existing,
+		];
+		Object.assign(server, trusted);
+		if (wrappers.length > 0)
+			server.listener_wrappers = name === 'content' && options.tls ? [...wrappers, { wrapper: 'tls' }] : wrappers;
+	}
+	// The dedicated plain-HTTP listener for L4 balancers. It answers the health path only.
+	servers.ingress_health = {
+		listen: [`:${options.healthPort}`],
+		automatic_https: { disable: true },
+		...(wrappers.length > 0 ? { listener_wrappers: wrappers } : {}),
+		...trusted,
+		routes: [compileIngressHealthRoute('ingress_health', options.healthDir)],
+	};
+	// `grace_period` is app-wide: in-flight requests get this long when a server stops or is
+	// replaced. The lame duck already moved new traffic; this finishes what was in flight.
+	if (apps?.http) apps.http.grace_period = `${Math.max(30, options.drainSeconds)}s`;
+	return config;
+}
+
 export interface TlsOptions {
 	/** ACME account email. */
 	email: string;
@@ -510,6 +685,8 @@ function tlsApp(tls: TlsOptions): Record<string, unknown> {
 /** Full Caddy HTTP app config. The agent applies all routes in a single PUT per reconcile. */
 export function compileCaddyConfig(options: {
 	listen: string[];
+	/** Plain-HTTP listeners for the redirect server (default `[':80']` while TLS is on). */
+	httpListen?: string[];
 	sites: SiteCompileInput[];
 	catchAllStatus?: number;
 	tls?: TlsOptions;
@@ -583,21 +760,23 @@ export function compileCaddyConfig(options: {
 	};
 
 	if (options.tls && (options.tls.httpRedirect ?? true)) {
-		servers.http_redirect = {
-			listen: [':80'],
-			routes: [
-				{
-					'@id': 'https-redirect',
-					handle: [
-						{
-							handler: 'static_response',
-							status_code: 308,
-							headers: { Location: ['https://{http.request.host}{http.request.uri}'] },
-						},
-					],
-				},
-			],
-		};
+		const httpListen = options.httpListen ?? [':80'];
+		if (httpListen.length > 0)
+			servers.http_redirect = {
+				listen: httpListen,
+				routes: [
+					{
+						'@id': 'https-redirect',
+						handle: [
+							{
+								handler: 'static_response',
+								status_code: 308,
+								headers: { Location: ['https://{http.request.host}{http.request.uri}'] },
+							},
+						],
+					},
+				],
+			};
 	}
 
 	return {

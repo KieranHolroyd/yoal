@@ -34,6 +34,8 @@ export interface AgentConfig {
 	caddyAdminSocket: string;
 	/** Public listeners Caddy should bind. */
 	caddyListen: string[];
+	/** Agent-owned state files the ingress health routes stat (HA-PLAN H19). */
+	ingressHealthDir: string;
 	/** Unix socket the agent serves forward_auth / metrics on. */
 	agentSocket: string;
 	/** Optional Caddy JSON access log to aggregate into telemetry. */
@@ -142,6 +144,35 @@ function parseListen(value: string): string[] {
 			throw new ConfigError(`Invalid Caddy listen address "${address}"`);
 	}
 	return listen;
+}
+
+/** The port of a listener address, or null for a unix socket / malformed value. */
+function listenPort(address: string): number | null {
+	if (address.startsWith('unix/')) return null;
+	const index = address.lastIndexOf(':');
+	if (index < 0) return null;
+	const port = Number(address.slice(index + 1));
+	return Number.isInteger(port) && port > 0 && port <= 65_535 ? port : null;
+}
+
+/**
+ * With TLS on, Caddy owns the secure listeners and site-config adds a plain :80 redirect server
+ * (HA-PLAN H19 "Listen addresses"). `YOAL_CADDY_LISTEN` is honoured instead of being ignored: an
+ * ingress binding a balancer or floating address gets exactly the addresses it named. The default
+ * `:443,:80` splits into today's `:443` content and `:80` redirect.
+ */
+export function splitIngressListen(
+	listen: string[],
+	tls: boolean,
+): { content: string[]; http: string[] } {
+	if (!tls) return { content: listen, http: [] };
+	const content = listen.filter((address) => listenPort(address) !== 80);
+	if (content.length === 0)
+		throw new ConfigError('YOAL_CADDY_LISTEN must include a secure listener when YOAL_TLS is on');
+	return {
+		content,
+		http: listen.filter((address) => listenPort(address) === 80),
+	};
 }
 
 /** `YOAL_CERT_PROBE_ADDR` (`host:port`, or `off`), else loopback on the TLS listen port. */
@@ -311,6 +342,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
 		agentVersion: BUILD_VERSION,
 		caddyAdminSocket: optional(env, 'YOAL_CADDY_ADMIN_SOCKET', '/var/lib/caddy/admin.sock'),
 		caddyListen,
+		ingressHealthDir: parseAbsolutePath(env, 'YOAL_INGRESS_HEALTH_DIR', '/run/yoal/health'),
 		agentSocket: optional(env, 'YOAL_AGENT_SOCKET', '/run/yoal-agent/agent.sock'),
 		caddyAccessLog: caddyAccessLog ? caddyAccessLog : null,
 		cookieName,

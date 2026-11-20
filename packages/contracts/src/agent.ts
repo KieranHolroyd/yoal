@@ -1,4 +1,5 @@
 import { registryMirrorDesiredSchema } from './registry.ts';
+import { ingressDesiredSchema, ingressHealthSchema } from './ingress.ts';
 import * as z from 'zod';
 import { nodeContainerConsoleDesiredSchema } from './container-console.ts';
 import { nodeStudioDesiredSchema } from './database-studio.ts';
@@ -227,6 +228,11 @@ export const desiredStateSchema = z.object({
 	releases: z.array(releaseSpecSchema),
 	/** Every route on this node, production and preview. */
 	routes: z.array(routeSpecSchema),
+	/**
+	 * The ingress settings this node renders (HA-PLAN H19, W8). Present only on a node that
+	 * terminates ingress; absent means "not an ingress", exactly as before the field existed.
+	 */
+	ingress: ingressDesiredSchema.optional(),
 	/** Share links and sessions revoked since the last reconcile. */
 	revocations: z.array(z.object({
 		id: z.string(),
@@ -522,6 +528,11 @@ export const heartbeatSchema = z.object({
 	nodeCsr: nodeCsrSchema.optional(),
 	/** Progress and outcomes of `releaseCommands` since the last heartbeat (HA-PLAN H25). */
 	releaseCommandResults: z.array(releaseCommandResultSchema).max(20).optional(),
+	/**
+	 * What `GET /.well-known/yoal/health` currently answers (HA-PLAN H19). Sent by an ingress only;
+	 * the endpoint itself is served by Caddy from the agent's state file, so this is the fleet view.
+	 */
+	ingressHealth: ingressHealthSchema.optional(),
 	/**
 	 * Per-upstream request counters since the previous heartbeat (HA-PLAN H25 "Canary"), from this
 	 * node's own Caddy. Sent by an agent that declares `release-phase`.

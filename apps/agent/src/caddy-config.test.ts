@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { desiredStateSchema, type DesiredState } from '@yoal/contracts';
+import { desiredStateSchema, ingressDesiredSchema, type DesiredState } from '@yoal/contracts';
 import {
 	buildCaddyConfig,
 	customDomainIssuers,
@@ -442,7 +442,7 @@ describe('per-deployment roots, worker routes and logging', () => {
 			const auth = subroutes.find((sub) => JSON.stringify(sub.handle).includes('/_yoal/verify'))!;
 			// The access check itself has no exceptions: only a terminal probe route before it can answer.
 			expect(auth.match).toBeUndefined();
-			const probeRoute = subroutes.find((sub) => JSON.stringify(sub.match ?? '').includes('remote_ip'));
+			const probeRoute = subroutes.find((sub) => JSON.stringify(sub.match ?? '').includes('client_ip'));
 			if (!probeRoute) return true;
 			expect(subroutes.indexOf(probeRoute)).toBeLessThan(subroutes.indexOf(auth));
 			expect(probeRoute.terminal).toBe(true);
@@ -459,7 +459,8 @@ describe('per-deployment roots, worker routes and logging', () => {
 				inner!.method.includes(request.method) &&
 				inner!.path.some((path: string) => path.toLowerCase() === request.path.toLowerCase()) &&
 				new RegExp(inner!.path_regexp.pattern).test(request.path) &&
-				inner!.remote_ip.ranges.some((range: string) => inCidr(request.remoteIp, range));
+				// No trusted proxies in this state, so the resolved client address is the peer.
+				inner!.client_ip.ranges.some((range: string) => inCidr(request.remoteIp, range));
 			return !matched;
 		};
 		const compiled = config(value);
@@ -472,8 +473,10 @@ describe('per-deployment roots, worker routes and logging', () => {
 		expect(authRunsFor(compiled, { ...probe, path: '/HEALTHZ' })).toBe(true);
 		expect(authRunsFor(compiled, { ...probe, path: '/' })).toBe(true);
 		expect(authRunsFor(compiled, { ...probe, remoteIp: '203.0.113.9' })).toBe(true);
-		// A forwarded header claiming an overlay address is not consulted at all.
-		expect(JSON.stringify(compiled)).not.toMatch(/client_ip|X-Forwarded-For/i);
+		// A forwarded header is read only through Caddy's trusted-proxy resolver; this state has no
+		// trusted proxies, so the resolved client address is still the peer.
+		expect(JSON.stringify(compiled)).toContain('"client_ip":');
+		expect(JSON.stringify(compiled)).not.toMatch(/X-Forwarded-For|trusted_proxies/i);
 		// The public route is untouched, and a node without a managed overlay exempts nothing.
 		expect(authRunsFor(config({ ...value, wireguard: undefined }), probe)).toBe(true);
 		expect(authRunsFor(config({ ...value, wireguard: { ...value.wireguard!, mode: 'external', cidr: null } }), probe)).toBe(true);
@@ -878,5 +881,73 @@ describe('unavailable routes (D225)', () => {
 		expect(handlers.some((handler) => handler.status_code === 503)).toBe(true);
 		// The other site is untouched.
 		expect(compiled.some((route) => String(route['@id']).startsWith('site:prj_secret:'))).toBe(true);
+	});
+});
+
+describe('ingress health, lame duck, PROXY and trusted proxies (HA-PLAN H19)', () => {
+	function ingressConfig(
+		settings: Parameters<typeof ingressDesiredSchema.parse>[0] = {},
+		extra: { accessLog?: string; tls?: boolean } = {},
+	) {
+		const tls = extra.tls === false ? undefined : { email: 'ops@example.com', subjects: ['*.example.com', 'example.com'] };
+		return buildCaddyConfig({
+			state: state(),
+			listen: [':443'],
+			httpListen: [':80'],
+			dataDir: '/data',
+			agentSocket: '/run/yoal-agent/agent.sock',
+			caddyAdminSocket: '/var/lib/caddy/admin.sock',
+			...(tls ? { tls } : {}),
+			...(extra.accessLog ? { accessLog: extra.accessLog } : {}),
+			ingress: ingressDesiredSchema.parse(settings),
+			ingressHealthDir: '/run/yoal/health',
+		});
+	}
+
+	test('an ingress renders the health route on 443, 80 and the reserved port', () => {
+		const value = ingressConfig();
+		const apps = value.apps as Json;
+		const servers = (apps.http as Json).servers as Json;
+		const content = servers.content as Json;
+		const redirect = servers.http_redirect as Json;
+		const health = servers.ingress_health as Json;
+		expect((content.routes as Json[])[0]!['@id']).toBe('yoal-health:content');
+		expect((redirect.routes as Json[])[0]!['@id']).toBe('yoal-health:http_redirect');
+		expect(health.listen).toEqual([':8099']);
+	});
+	test('proxyProtocol and trustedProxies render the wrapper and resolver; defaults render neither', () => {
+		const proxied = ingressConfig({ proxyProtocol: 'v2', trustedProxies: ['10.209.1.5/32'] });
+		const proxiedServers = ((proxied.apps as Json).http as Json).servers as Json;
+		const proxiedContent = proxiedServers.content as Json;
+		expect(proxiedContent.listener_wrappers).toEqual([
+			{ wrapper: 'proxy_protocol', timeout: '5s', allow: ['10.209.1.5/32'], fallback_policy: 'ignore' },
+			{ wrapper: 'tls' },
+		]);
+		expect(proxiedContent.trusted_proxies).toEqual({ source: 'static', ranges: ['10.209.1.5/32'] });
+		const plain = ingressConfig();
+		const plainServers = ((plain.apps as Json).http as Json).servers as Json;
+		const plainContent = plainServers.content as Json;
+		expect(plainContent.listener_wrappers).toBeUndefined();
+		expect(plainContent.trusted_proxies).toBeUndefined();
+	});
+	test('health probes stay out of the analytics buckets, and healthDir is configurable', () => {
+		const value = ingressConfig({}, { accessLog: '/var/log/caddy/access.log' });
+		const content = (((value.apps as Json).http as Json).servers as Json).content as Json;
+		expect(content.logs).toMatchObject({ skip_uris: ['/.well-known/yoal/health'] });
+	});
+	test('a worker (no ingress settings) gets none of the edge config', () => {
+		const value = buildCaddyConfig({
+			state: state(),
+			listen: [':443'],
+			httpListen: [':80'],
+			dataDir: '/data',
+			agentSocket: '/run/yoal-agent/agent.sock',
+			caddyAdminSocket: '/var/lib/caddy/admin.sock',
+			tls: { email: 'ops@example.com', subjects: ['*.example.com', 'example.com'] },
+		});
+		const servers = ((value.apps as Json).http as Json).servers as Json;
+		expect(servers.ingress_health).toBeUndefined();
+		expect((servers.content as Json).listener_wrappers).toBeUndefined();
+		expect(JSON.stringify(value)).not.toContain('/.well-known/yoal/health');
 	});
 });

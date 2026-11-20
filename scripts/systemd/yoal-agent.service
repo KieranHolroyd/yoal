@@ -32,7 +32,7 @@ ExecStart=/opt/yoal/current/agent/yoal-agent
 
 Restart=on-failure
 RestartSec=2
-TimeoutStopSec=20
+TimeoutStopSec=150
 KillSignal=SIGTERM
 LimitNOFILE=65535
 TasksMax=128

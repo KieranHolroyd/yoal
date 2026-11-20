@@ -88,6 +88,7 @@ export class ClusterConfigService {
 			failover: { ...current.failover, ...sent('failover') },
 			scheduling: { ...current.scheduling, ...sent('scheduling') },
 			updates: { ...current.updates, ...sent('updates') },
+			ingress: { ...current.ingress, ...sent('ingress') },
 		});
 		if (!merged.success) throw new ValidationError('Invalid cluster configuration.', merged.error.issues);
 		if (merged.data.endpoints.portMin >= merged.data.endpoints.portMax)
@@ -107,7 +108,12 @@ export class ClusterConfigService {
 		);
 		this.#cache = merged.data;
 		// The edge's health-check interval is in every replicated route: re-render desired state.
-		if (merged.data.replicas.healthIntervalSeconds !== current.replicas.healthIntervalSeconds) this.ctx.projects.bump();
+		// Ingress settings are in the edge's desired state too (listeners, PROXY, health port).
+		if (
+			merged.data.replicas.healthIntervalSeconds !== current.replicas.healthIntervalSeconds ||
+			JSON.stringify(merged.data.ingress) !== JSON.stringify(current.ingress)
+		)
+			this.ctx.projects.bump();
 		this.ctx.audit.record({
 			principal,
 			action: 'platform.cluster_config',

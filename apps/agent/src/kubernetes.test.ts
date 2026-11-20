@@ -21,7 +21,7 @@ describe('kubernetes routes', () => {
 		expect(route.match).toEqual([{ host: ['lab-org1.k8s.sites.test'] }]);
 		const subroutes = (route.handle as Array<{ routes: Array<Record<string, unknown>> }>)[0]!.routes;
 		expect(subroutes).toHaveLength(3);
-		expect(JSON.stringify(subroutes[0])).toContain('"remote_ip":{"ranges":["203.0.113.0/24"]}');
+		expect(JSON.stringify(subroutes[0])).toContain('"client_ip":{"ranges":["203.0.113.0/24"]}');
 		expect(JSON.stringify(subroutes[1])).toContain('"Authorization":["Bearer *"]');
 		expect(JSON.stringify(subroutes[1])).toContain('/livez');
 		expect(json).toContain('"insecure_skip_verify":true');

@@ -86,6 +86,34 @@ export function tlsCertReader(address: { host: string; port: number }, timeoutMs
 }
 
 /**
+ * The SHA-256 fingerprint of the certificate this node's Caddy serves for `servername` (HA-PLAN
+ * H19 "loaded with the fleet's fingerprint"). Read with a TLS handshake against the local
+ * listener; null when nothing answered. Colons are stripped so it compares with lane B's value.
+ */
+export function tlsCertFingerprint(
+	address: { host: string; port: number },
+	servername: string,
+	timeoutMs = PROBE_TIMEOUT_MS,
+): Promise<string | null> {
+	return new Promise((resolve) => {
+		let settled = false;
+		const done = (value: string | null) => {
+			if (settled) return;
+			settled = true;
+			socket.destroy();
+			resolve(value);
+		};
+		const socket = connect({ host: address.host, port: address.port, servername, rejectUnauthorized: false }, () => {
+			const cert = socket.getPeerCertificate();
+			const fingerprint = typeof cert?.fingerprint256 === 'string' ? cert.fingerprint256 : null;
+			done(fingerprint ? fingerprint.replace(/:/g, '').toLowerCase() : null);
+		});
+		socket.setTimeout(timeoutMs, () => done(null));
+		socket.on('error', () => done(null));
+	});
+}
+
+/**
  * Cached certificate expiries for heartbeats. Probing runs in the background at most every
  * ~6 h, so a heartbeat never waits on a TLS handshake, and failures are non-fatal.
  */
