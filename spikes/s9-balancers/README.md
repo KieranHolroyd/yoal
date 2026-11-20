@@ -178,3 +178,51 @@ file. The same file is the VIP's lame duck: `drain` for a few seconds, then writ
 - The health port (8099) is free in `PLATFORM_HOST_PORTS` but not reserved; W8 reserves one.
 - Criterion 1 measures removal for `docker kill`, which the bridge reports as host-unreachable within
   seconds; a powered-off host is silent. DOWN times are unaffected (checks time out at 2 s either way).
+
+---
+
+## Cloud: Hetzner Load Balancer (question, criteria and fallback; written before any cloud code)
+
+The cloud half of S9 (HA-PLAN §4 W2 S9; §1.2 row 1). Azure LB and AWS NLB are **not run** (no
+credentials). Spend approved by the owner: **€2 total**; the rig reads live prices first and aborts
+if 1 LB11 + 3 of the cheapest Debian 13 server type in one location for 3 h would cost more.
+
+### Question
+
+Behind a real Hetzner Load Balancer (LB11, `tcp` service on 443 with TLS passthrough to the same
+pinned Caddy build and the same `applyIngressPrototype()` JSON as the local half; targets on a
+private network, `use_private_ip`), does a Yoal ingress set meet the S9 targets?
+
+### Pass criteria (from the plan and the local half; tightened where marked, never loosened)
+
+1. **Killed node out of rotation in ≤ 15 s.** The LB health check targets the plain health port
+   (`http`, `GET /.well-known/yoal/health`, expect `200`) with the **tightest interval, timeout and
+   retries the Hetzner API accepts**; the values are recorded. Load: 200 req/s from this Mac to the
+   LB's public IP, half on 20 keep-alive connections, half on a new connection each.
+   - *Tightened (as local):* measured as kill → the LB API reports the target `unhealthy`, **and**
+     kill → the last failed client request; both ≤ 15 s. Failed requests are counted and reported.
+   - *Tightened:* two kill shapes: Caddy SIGKILLed (the kernel answers with resets) and a **silent**
+     death (the server powered off through the API, or all inbound traffic dropped), which the local
+     half could not do.
+2. **Lame duck with zero failed requests.** `drain` file → `drainSeconds` (20 s) → admin
+   `POST /stop`, at 200 req/s through the LB: **zero** failed requests (same failure definition as
+   local: written and no `2xx`, 5 s timeout), and no request answered by the node after its Caddy
+   stopped.
+3. **Client address with Hetzner's `proxyprotocol`.** Through the LB, `{http.request.remote.host}`,
+   `{http.vars.client_ip}` and the access log's `client_ip` all show this Mac's public address, with
+   `trusted_proxies` and the wrapper's `allow` listing only the LB's private-network address. A
+   forged PROXY v2 header or `X-Forwarded-For` sent straight to a node's public address (outside the
+   list), or smuggled through the LB, is not believed.
+   - *Reported:* the source addresses Hetzner uses for health probes and for proxied traffic, whether
+     the probes carry a PROXY header, and what `trusted_proxies` must list.
+4. **Reload under 1,000 keep-alive connections.** A changed-config `POST /load` on every target,
+   with 1,000 idle TLS keep-alive connections held through the LB plus 50 slow (2 s) requests and
+   20 new requests/s: **≤ 0.1%** (≤ 1) connections dropped, and **no in-flight request fails**.
+   Same strict "dropped" reading as local (any server-side close seen by the client).
+   - *Added:* also measured through a Hetzner `http` (L7) service, since the local half found only
+     an L7 balancer hides Caddy's idle closes.
+
+### Fallback if it fails
+
+Per HA-PLAN §4 W2: the Hetzner LB is documented as unsupported for the failed property (for
+criterion 4, recorded against the plan's choice already raised by the local half).
