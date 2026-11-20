@@ -311,7 +311,7 @@ describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () =
 		expect(migrate(sqlite)).toEqual([
 			...wave1,
 			'0122_ingress_certificates.sql',
-			'0123_ingress_certificate_state.sql',
+			'0124_shared_certificates.sql',
 		]);
 
 		const rows = sqlite
