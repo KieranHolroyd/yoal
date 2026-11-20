@@ -4,8 +4,8 @@ Documentation=https://github.com/kieranholroyd/private-cloud-deploys/blob/main/d
 After=network-online.target
 Wants=network-online.target
 Before=yoal-control-plane.service yoal-agent.service
-StartLimitIntervalSec=60
-StartLimitBurst=5
+# Never give up restarting: a start limit would leave the node's proxy down until reset.
+StartLimitIntervalSec=0
 
 [Service]
 Type=simple

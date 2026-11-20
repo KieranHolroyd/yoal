@@ -172,3 +172,45 @@ export function ensureCaddy(options: EnsureCaddyOptions): boolean {
 	options.log?.(`installed Caddy from ${basename(options.release)} and restarted ${unit}`);
 	return true;
 }
+
+/** Drop-in that makes the distribution's `caddy.service` restart (HA-PLAN Wave 1 F10). */
+export const CADDY_RESTART_DROP_IN = 'yoal-restart.conf';
+
+/**
+ * The stock `caddy.service` has no `Restart=`, so a Caddy that crashed stayed down and took every
+ * site on the node with it. Restart on failure, and never stop trying: systemd's default start limit
+ * (5 starts in 10 s) would leave a crash-looping unit `failed` until someone resets it.
+ */
+export function caddyRestartDropIn(): string {
+	return [
+		'# Written by Yoal: Caddy serves every site on this node, so it comes back on its own.',
+		'[Unit]',
+		'StartLimitIntervalSec=0',
+		'',
+		'[Service]',
+		'Restart=on-failure',
+		'RestartSec=2',
+		'',
+	].join('\n');
+}
+
+/**
+ * Install or refresh the restart drop-in for the stock `caddy.service`. Restart settings apply to
+ * the running service after the daemon-reload, so Caddy is not restarted. True when it changed.
+ */
+export function ensureCaddyRestartPolicy(options: {
+	systemdDir: string;
+	run: (cmd: string[]) => void;
+	log?: (message: string) => void;
+}): boolean {
+	const dir = join(options.systemdDir, `${STOCK_CADDY_UNIT}.d`);
+	const path = join(dir, CADDY_RESTART_DROP_IN);
+	const body = caddyRestartDropIn();
+	if (existsSync(path) && readFileSync(path, 'utf8') === body) return false;
+	mkdirSync(dir, { recursive: true });
+	writeFileSync(`${path}.tmp`, body, { mode: 0o644 });
+	renameSync(`${path}.tmp`, path);
+	options.run(['systemctl', 'daemon-reload']);
+	options.log?.(`${STOCK_CADDY_UNIT} now restarts on failure (${path})`);
+	return true;
+}

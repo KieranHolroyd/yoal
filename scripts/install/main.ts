@@ -74,6 +74,7 @@ import { STUDIO_UNIT, studioUnit } from '../systemd/studio.ts';
 import { MAIL_UNIT, mailUnit } from '../systemd/mail.ts';
 import { IDENTITY_LITESTREAM_UNIT, IDENTITY_UNIT, identityLitestreamUnit, identityUnit } from '../systemd/identity.ts';
 import { agentUnit, CADDY_ACCESS_LOG, detectCaddyAdminSocket } from '../systemd/agent.ts';
+import { ensureCaddyRestartPolicy } from '../systemd/caddy.ts';
 import { CLI_COMMANDS, ensureHostCommands, RELEASE_COMMANDS } from './commands.ts';
 import { ensureMasterKey, finishMasterKeyMigration, revertMasterKeyMigration, type EnsureMasterKeyResult } from './master-key.ts';
 import { CLICKHOUSE_UNIT, clickhouseInstalled, ensureClickHouse, removeClickHouseUnit } from '../systemd/clickhouse.ts';
@@ -1274,9 +1275,11 @@ function writeUnits(release: string): void {
 function ensureCaddyAccess(): void {
 	const socket = detectCaddyAdminSocket();
 	if (options.dryRun) {
-		log(`would grant group caddy rw on ${socket} and add a Caddy drop-in`);
+		log(`would grant group caddy rw on ${socket} and add Caddy drop-ins (admin socket, restart on failure)`);
 		return;
 	}
+	// The stock unit has no Restart=: a crashed Caddy would stay down (HA-PLAN Wave 1 F10).
+	ensureCaddyRestartPolicy({ systemdDir: SYSTEMD_DIR, run: (cmd) => void run(cmd[0]!, cmd.slice(1), { allowFailure: true }), log });
 	const dropInDir = '/etc/systemd/system/caddy.service.d';
 	mkdirSync(dropInDir, { recursive: true });
 	writeFileSync(
