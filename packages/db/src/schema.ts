@@ -1881,8 +1881,8 @@ export const jobRuns = sqliteTable(
 );
 
 /**
- * Release-command attempts (0119, HA-PLAN H25). The partial unique indexes on `release_id` are the
- * I16 run lease: one live attempt and at most one success per release.
+ * Release-command attempts (0119, HA-PLAN H25). The partial unique index on `release_id` over
+ * `queued`, `running` and `succeeded` is the I16 run lease: one of those per release, ever.
  */
 export const releaseCommandRuns = sqliteTable(
 	'release_command_runs',

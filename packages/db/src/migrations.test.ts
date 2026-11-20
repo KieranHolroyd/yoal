@@ -303,8 +303,12 @@ describe('HA Wave 1 migrations 0118–0120 (docs/build-plan/HA-WAVE-1.md)', () =
 		insert('rc_2', 2, 'queued');
 		expect(() => insert('rc_dup', 2, 'failed')).toThrow();
 		sqlite.run("UPDATE release_command_runs SET status = 'succeeded' WHERE id = 'rc_2'");
+		// After a success no attempt may be queued or start again (reviewer's I16 hole).
+		expect(() => insert('rc_after_q', 3, 'queued')).toThrow();
+		expect(() => insert('rc_after_r', 3, 'running')).toThrow();
 		insert('rc_3', 3, 'failed');
 		expect(() => sqlite.run("UPDATE release_command_runs SET status = 'succeeded' WHERE id = 'rc_3'")).toThrow();
+		expect(() => sqlite.run("UPDATE release_command_runs SET status = 'queued' WHERE id = 'rc_3'")).toThrow();
 		expect(() => insert('rc_4', 4, 'pending')).toThrow();
 		sqlite.close();
 	});

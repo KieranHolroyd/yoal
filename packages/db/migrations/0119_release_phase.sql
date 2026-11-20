@@ -2,9 +2,11 @@
 -- YOAL_FEATURE_RELEASE_PHASE is on, so a single-node install has no rows.
 --
 -- One row per release-command attempt. `release_id` is the deployment the command prepares. The
--- partial unique index is the run lease of I16: at most one attempt per release is live (queued or
--- running) and at most one ever succeeds, so a release command runs at most once per release and a
--- rollout starts only after the succeeded row exists. A retry is a new row with attempt + 1.
+-- partial unique index is the run lease of I16: per release, at most one row is queued, running or
+-- succeeded, all together. So no attempt starts while another is live, none is queued or started
+-- after one succeeded, and at most one ever succeeds: a release command runs at most once per
+-- release, and a rollout starts only after the succeeded row exists. A retry after a failure is a
+-- new row with attempt + 1.
 CREATE TABLE IF NOT EXISTS release_command_runs (
   id TEXT PRIMARY KEY,
   release_id TEXT NOT NULL,
@@ -28,10 +30,8 @@ CREATE TABLE IF NOT EXISTS release_command_runs (
   updated_at INTEGER NOT NULL
 );
 CREATE UNIQUE INDEX IF NOT EXISTS release_command_runs_attempt_idx ON release_command_runs (release_id, attempt);
-CREATE UNIQUE INDEX IF NOT EXISTS release_command_runs_live_idx
-  ON release_command_runs (release_id) WHERE status IN ('queued','running');
-CREATE UNIQUE INDEX IF NOT EXISTS release_command_runs_succeeded_idx
-  ON release_command_runs (release_id) WHERE status = 'succeeded';
+CREATE UNIQUE INDEX IF NOT EXISTS release_command_runs_lease_idx
+  ON release_command_runs (release_id) WHERE status IN ('queued','running','succeeded');
 CREATE INDEX IF NOT EXISTS release_command_runs_node_idx ON release_command_runs (node_id, status);
 CREATE INDEX IF NOT EXISTS release_command_runs_project_idx ON release_command_runs (project_id, created_at);
 

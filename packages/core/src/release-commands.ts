@@ -4,7 +4,8 @@ import type { CoreContext } from './context.ts';
 /**
  * The release-command scheduler (HA-PLAN H25, I16). Owned by Wave 1 lane C; the agent side that
  * runs `releaseCommands` is lane D. Backed by `release_command_runs` (0119), whose partial unique
- * indexes are the run lease: one live attempt and at most one success per release id. Nothing
+ * index is the run lease: at most one queued, running or succeeded attempt per release id, ever
+ * (a failed attempt frees it for a retry; a success closes it). Nothing
  * calls it while `RELEASE_PHASE` is off, because a spec with `release` is refused then.
  */
 export interface ReleaseCommandRun {
