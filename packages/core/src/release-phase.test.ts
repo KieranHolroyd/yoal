@@ -238,13 +238,10 @@ describe('canary judged on the edge counters (H25)', () => {
 			.get(second)!;
 		expect(state.state).toBe('failed');
 		expect(state.reason).toContain('5xx');
-		// The automatic rollback brings the canary copy back too; once it is settled every copy is
-		// on the old release again.
-		f.core.workloads.rolloutTick(f.clock.now);
-		await f.settle('web');
-		f.core.workloads.rolloutTick(f.clock.now);
+		// The pointers move back at once: every copy renders the old release again, the canary included.
 		const rendered = [...(await f.desired('a', 'web')), ...(await f.desired('b', 'web'))];
 		expect(rendered.every((entry) => entry.deploymentId === first)).toBe(true);
+		expect(f.row('web').deploymentId).toBe(first);
 	});
 
 	test('a healthy canary passes after the soak and the rest roll', async () => {

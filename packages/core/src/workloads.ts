@@ -2143,7 +2143,10 @@ export class WorkloadService {
 					if (verdict.verdict === 'wait') continue;
 					if (verdict.verdict === 'fail') {
 						this.ctx.projects.bump(workload.orgId);
-						this.failRolloutBeforeOrDuring(workload, project, rows, waiting, slug, `The canary failed: ${verdict.reason}`, now, alerts);
+						// Only the canary copies are on the new release, and they are the ones the judge
+						// failed: move the pointers back. Every copy then renders the previous release at
+						// once, instead of a second tick still serving the bad canary.
+						this.failRolloutBeforeOrDuring(workload, project, rows, waiting, slug, `The canary failed: ${verdict.reason}`, now, alerts, false);
 						continue;
 					}
 					this.ctx.projects.bump(workload.orgId);
