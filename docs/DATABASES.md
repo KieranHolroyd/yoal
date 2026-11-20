@@ -702,5 +702,7 @@ Postgres only, `async` only (sync is refused: there is no downgrade path yet), a
   → completed when the database reports running there. The old primary's data dir is purged when
   its node returns. Lag budget 64 MB / 60 s, report ≤ 2 min old and the primary's node online, else
   `acceptDataLoss`. The failover controller's database handler (`failoverHandler()`) drives the
-  same steps and is registered only with `YOAL_FEATURE_DB_AUTO_PROMOTE`.
+  same steps and is registered only with `YOAL_FEATURE_DB_AUTO_PROMOTE` **and** active database
+  self-fencing (`installAutoPromotion()`, HA-PLAN F1); self-fencing is not built, so it is never
+  registered today.
 - Moves and Postgres major upgrades are refused while replicas exist.

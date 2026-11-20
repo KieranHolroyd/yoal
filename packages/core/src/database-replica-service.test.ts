@@ -5,7 +5,9 @@ import { join } from 'node:path';
 import { createDb } from '@yoal/db';
 import {
 	DATABASE_REPLICAS_CAPABILITY,
+	DEFAULT_FEATURES,
 	nodeCapabilities,
+	type FeatureFlags,
 	type DatabaseReplicationSlotStatus,
 	type Heartbeat,
 } from '@yoal/contracts';
@@ -354,5 +356,53 @@ describe('promotion', () => {
 		// A stale plan (wrong generation) never starts a second promotion.
 		expect(handler.run('fence', { ...plan, generation: 5 }, fence)).toMatchObject({ status: 'failed' });
 		opened.sqlite.run(`UPDATE nodes SET status = 'online' WHERE id = ?`, [third.nodeId]);
+	});
+});
+
+describe('automatic promotion guard (HA-PLAN F1)', () => {
+	const withAutoPromote = <T>(on: boolean, run: () => T): T => {
+		const config = core.ctx.config as { features?: FeatureFlags };
+		const previous = config.features;
+		config.features = { ...DEFAULT_FEATURES, DB_AUTO_PROMOTE: on };
+		try {
+			return run();
+		} finally {
+			config.features = previous;
+		}
+	};
+	const recorder = () => {
+		const registered: unknown[] = [];
+		return { registered, failover: { registerDatabaseHandler: (handler: unknown) => (registered.push(handler), () => {}) } };
+	};
+
+	test('is off by default and installs nothing', () => {
+		const { registered, failover } = recorder();
+		expect(DEFAULT_FEATURES.DB_AUTO_PROMOTE).toBe(false);
+		const result = core.databaseReplicas.installAutoPromotion(failover);
+		expect(result).toMatchObject({ installed: false, unregister: null });
+		expect(registered).toHaveLength(0);
+	});
+
+	test('the flag alone does not install the handler while self-fencing is inactive', () => {
+		const { registered, failover } = recorder();
+		expect(core.databaseReplicas.selfFencing().active).toBe(false);
+		const result = withAutoPromote(true, () => core.databaseReplicas.installAutoPromotion(failover));
+		expect(result.installed).toBe(false);
+		expect(result.reason).toContain('self-fencing');
+		expect(registered).toHaveLength(0);
+		// And the real controller reports no automatic path.
+		withAutoPromote(true, () => core.databaseReplicas.installAutoPromotion());
+		expect(core.failover.status(owner).databaseHandler).toBe(false);
+	});
+
+	test('installs only with both the flag and active self-fencing', () => {
+		const active = { active: true, reason: '' };
+		const off = recorder();
+		expect(withAutoPromote(false, () => core.databaseReplicas.installAutoPromotion(off.failover, active)).installed).toBe(false);
+		expect(off.registered).toHaveLength(0);
+		const on = recorder();
+		const result = withAutoPromote(true, () => core.databaseReplicas.installAutoPromotion(on.failover, active));
+		expect(result).toMatchObject({ installed: true, reason: null });
+		expect(on.registered).toHaveLength(1);
 	});
 });

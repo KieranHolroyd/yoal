@@ -205,7 +205,7 @@ the default below (on). Set `0` to turn a feature off, then restart
 | `YOAL_FEATURE_ORG_NETWORKS` | **on** | networking | Private per-org networks connecting workloads and databases. |
 | `YOAL_FEATURE_SERVICE_ENDPOINTS` | **on** | networking | Cross-node database attachments through consumer loopback endpoints (CLUSTERING.md C2). |
 | `YOAL_FEATURE_MULTI_NODE_REPLICAS` | **on** | workloads | Spread HTTP workload replicas across nodes behind a load-balanced route (CLUSTERING.md C4). |
-| `YOAL_FEATURE_DB_AUTO_PROMOTE` | off | databases | Let the failover controller (with `failover.enabled`) promote a Postgres read replica when its primary's node goes silent (CLUSTERING.md §9.3). Off until the object-store lease self-fences a partitioned primary. |
+| `YOAL_FEATURE_DB_AUTO_PROMOTE` | off | databases | Let the failover controller (with `failover.enabled`) promote a Postgres read replica when its primary's node goes silent (CLUSTERING.md §9.3). Opt-in, and ignored with a startup warning until database self-fencing (HA-PLAN H22) is active, which it is not yet: setting it today changes nothing. |
 | `YOAL_FEATURE_APP_VOLUMES` | **on** | workloads | Persistent application volumes attached to deployed workloads. |
 | `YOAL_FEATURE_JOBS` | **on** | automation | Scheduled one-off and cron jobs. |
 | `YOAL_FEATURE_PREVIEW_DATA` | **on** | automation | Clone database and bucket data into previews (can copy production data). |

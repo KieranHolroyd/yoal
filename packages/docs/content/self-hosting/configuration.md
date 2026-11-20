@@ -223,7 +223,7 @@ Each flag is set with `YOAL_FEATURE_<NAME>`. Accepted values are `1`, `true`, `o
 | `ORG_NETWORKS` | on | Private per-organisation networks across nodes. |
 | `MULTI_NODE_REPLICAS` | on | Spread HTTP workload replicas across nodes. |
 | `SERVICE_ENDPOINTS` | on | Cross-node database attachments through loopback service endpoints. |
-| `DB_AUTO_PROMOTE` | off | Let automatic failover promote a PostgreSQL read replica when its primary's node goes silent. Needs `failover.enabled`; see [clustering](/self-hosting/clustering#automatic-failover). |
+| `DB_AUTO_PROMOTE` | off | Let automatic failover promote a PostgreSQL read replica when its primary's node goes silent. Needs `failover.enabled`, and has no effect until primaries can fence themselves; see [clustering](/self-hosting/clustering#automatic-failover). |
 | `APP_VOLUMES` | on | Attach persistent volumes to deployed workloads. |
 | `JOBS` | on | Cron jobs and one-off commands on process and container apps. See [app jobs](/compute/scheduled-jobs#app-jobs). |
 | `PREVIEW_DATA` | on | Clone database and bucket data into preview environments. This can copy production data. |
