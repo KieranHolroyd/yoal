@@ -32,5 +32,5 @@ RUN bun /tmp/fetch.ts \
  && for v in 0.3.13 0.5.18; do mkdir -p /tmp/x$v && tar -xzf /tmp/ls-$v.tar.gz -C /tmp/x$v && install -m 0755 /tmp/x$v/litestream /usr/local/bin/litestream-$v; done \
  && rm -rf /tmp/x* /tmp/ls-* /tmp/fetch.ts \
  && litestream-0.3.13 version && litestream-0.5.18 version
-COPY writer.ts probe.ts promote.ts /rig/
+COPY writer.ts probe.ts promote.ts proxy.ts /rig/
 CMD ["sleep", "infinity"]

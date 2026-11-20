@@ -97,3 +97,28 @@ Results: `docs/SPIKES.md`, section "S2 — Litestream follow lag (2026-11-20)".
   cut and the request rates.
 - **Faults.** Cuts are `docker network disconnect`, not `tc`. `kill -9` of the primary kills the
   whole container; the page cache survives, so this is not a power loss.
+
+## R2 mode
+
+```sh
+(set -a; . <creds.env with R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY>; set +a;
+ S2_TARGET=r2 S2_SCENARIOS=unit,tuned,idle S2_SOAK_MIN=12 S2_TUNED_MIN=12 bun spikes/s2-litestream-follow/run.ts)
+```
+
+- Every object goes under `yoal-w0-spikes/s2-<S2_RUN_ID>/<scenario>/`. The rig refuses to list or
+  delete outside that prefix, deletes all of it at the end and lists it again to prove it is empty.
+- Litestream reaches R2 through `proxy.ts`. Containers resolve the R2 host to the proxy
+  (`--add-host`) and talk plain HTTP to it; the proxy forwards each signed request unchanged over
+  HTTPS and counts operations by type, status and latency. SigV4 covers the Host header, not the
+  scheme, so signatures stay valid.
+- Credentials reach containers only through a 0600 env file in the run's output directory, which is
+  deleted at the end. Logs, errors and `summary.json` are scrubbed of the key, secret, bucket and
+  account host.
+- `S2_BUDGET_USD` (default 0.8) stops the run when the counted operations at R2 list prices pass it.
+- In R2 mode `unit` runs one follower (1 s) and only the follower cut and follower `kill -9`.
+
+Deviations specific to R2:
+- The replica `path` is moved under the run prefix; nothing else in the unit config changes.
+- The proxy adds a local hop and buffers request bodies.
+- The run was from this Mac, not from the production region.
+- The watchdog was not run on R2, because the budget allowed one cut.

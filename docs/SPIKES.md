@@ -184,3 +184,62 @@ Local half of CLUSTERING §15.2 S2 (HA-PLAN §4 W2). Rig: `spikes/s2-litestream-
 If the pin stays at 0.3.13, the fallback applies. Its restore time grows through each snapshot day, so it also needs a snapshot interval far shorter than 24 h. The 24 h soak and the R2 half (WAN latency, R2 list behaviour, real cost) are still owed before C6's criteria can be called met.
 
 **Not tested:** 24 h duration; R2; amd64 and the unit's systemd sandboxing; real power loss (`docker kill` keeps the page cache); promotion from a follower that is behind; two primaries on one replica path; a standby offline beyond snapshot retention; the VFS read replica; the real control-plane process as writer or reader.
+
+### S2 (R2), 2026-11-20
+
+The same rig against Cloudflare R2 (`S2_TARGET=r2`), from this Mac over a residential uplink, so not from the production region.
+
+**Method.** Every object sat under one run prefix (`yoal-w0-spikes/s2-<run-id>/`). The unit's config was used with only the replica `path` moved under that prefix. Containers reached R2 through `proxy.ts`, a counting pass-through on the rig network. It forwards each signed request unchanged to `https://<r2-host>` and records operation, status and latency, never URLs or headers. Runs:
+- `unit`: sync 1 s, follow 1 s, 12 min steady, one 60 s follower cut, follower `kill -9`, promotion.
+- `tuned`: 250 ms intervals, 12 min steady, then primary `kill -9`.
+- `idle`: request rates in 60 s windows.
+- A 1-minute smoke run before these.
+
+At the end every object under the prefix was deleted: 2,113 + 320 objects, and a list of the prefix returned 0.
+
+| Measure | R2 | MinIO (above) |
+|---|---|---|
+| Steady lag, unit config, 12 min, n = 35,769 | p50 1.67 s, **p95 2.17 s**, p99 2.33 s, max 2.96 s; after warm-up 1.69 / 2.18 / 2.34 s; 0.02% of rows ≤ 1 s; every minute p95 2.0–2.24 s | p95 1.38 s |
+| Steady lag, 250 ms, 12 min, n = 35,765 | **Drifts upward**: per-minute p50 2.8 → 9.3 s; overall p95 9.56 s, p99 10.4 s | p95 0.73 s |
+| Why 250 ms fails on R2 | Each L0 file costs one PUT on the primary (p50 210 ms) and one sequential GET on the follower (p50 112 ms) plus a LIST per poll. At about 4.8 files/s both loops are saturated: the follower applied about 4.9 files/s against 4.8 produced | — |
+| Primary `kill -9` (250 ms) | 336 rows / **6.7 s** lost; the follower equals a fresh restore, so the replica itself was 6.7 s behind (upload backlog) | 5 rows / 100 ms |
+| Promotion (unit config) | Fingerprint **identical**, `integrity_check` ok (48,754 heartbeats). After the promoted node took over the path, a fresh restore was identical (50,260) | Same |
+| 60 s follower cut | First apply 47.4 s after reconnect (same TCP-backoff stall), then 32 s to work through the backlog one GET per file. Back under steady p95 (2.2 s) **80 s** after reconnect; max lag 109 s | 47.1 s / 9.95 s |
+| Follower `kill -9` and restart | Resumed from `-txid`; back to steady in 5.1–5.5 s | 1.1 s |
+| Initial snapshot (123 MB DB, 66 MB compressed) / initial follow restore / plain restore | 13.4 s / 3.3 s / 8.2 s | 4.1 / 3.0 / 1.85 s |
+| Latency per operation (proxy, n) | PutObject p50 210 / p95 273 ms (5,257); GetObject 112 / 198 ms (5,382); ListObjects 138 / 442 ms (4,020); UploadPart 874 / 3,273 ms (187) | — |
+| Throttling | **429 on ListObjects only: 70 of 4,020 (1.7%)**, plus 3 of 298 in the smoke run; none on PUT or GET. The SDK retries them silently; Litestream logged no warning or error | None |
+| Consistency | No missing or not-yet-visible LTX file in any follower log (0 WARN/ERROR lines in 10 Litestream logs); every fingerprint matched | Same |
+| Idle follower LIST rate | 9.1/s at 1 s (same as MinIO); **10.9/s at 250 ms** (MinIO 36/s): each poll lists 9 levels at R2 latency, so polls cannot run faster than about 1/s | 9.05 / 36 |
+| Rates while writing | Primary alone: 1.37 PUT + 0.22 LIST + multipart about 0.26/s. Adding a 1 s follower: +2.1 LIST/s and +1.35 GET/s | — |
+
+**Operations and cost of this spike (measured).** 10,320 Class A over both runs and 5,804 Class B (GET). The main run's Class A was 9,680: LIST 4,020 + 75 from the rig host, PUT 5,257, multipart 215, and DeleteObjects 113, priced as Class A to be safe. The smoke run added 638. At list prices ($4.50/M Class A, $0.36/M Class B) that is **about $0.049**. Single deletes are free (2,433), and storage was under 100 MB for under an hour.
+
+**Steady-state cost per month at these rates (30 days).**
+- Primary at sync 1 s, writing: about 1.85 Class A/s, about $22.
+- One 1 s follower while writes flow: about 2.1 LIST + 1.35 GET/s, about $26.
+- An idle 1 s follower: 9.1 LIST/s, about **$106 per standby**.
+- At 250 ms: the primary's PUTs about 3×, and the follower about 11 LIST/s when idle.
+
+### Per criterion on R2
+
+| Criterion | Result |
+|---|---|
+| p95 ≤ 1 s | **FAIL** (2.17 s at 1 s; 9.56 s and rising at 250 ms) |
+| p99 ≤ 5 s | **PASS** at 1 s (2.33 s); **FAIL** at 250 ms (10.4 s) |
+| Promotion fingerprint and integrity | **PASS** |
+| Recovery after a 60 s cut ≤ 30 s | **FAIL** (80 s, unguarded). The watchdog was not run on R2 (one cut in budget). Estimate with it: 10 s to detect plus about 15 s to fetch about 70 s of backlog at about 5 files/s; not measured |
+| A restart keeps the replay position | **PASS** |
+
+**What R2 changes in the verdict.**
+- Follow over R2 is continuous and correct: it applied every file in order, and promotion was byte-identical. But **it cannot meet p95 ≤ 1 s with Litestream 0.5.18 from here.**
+  - At the unit's 1 s it settles at p95 about 2.2 s and p99 about 2.3 s.
+  - Shorter intervals make it worse, because follow fetches one object per L0 file sequentially and the primary uploads one per sync.
+  - So condition 2 of the MinIO verdict (250 ms intervals) **does not transfer to R2**. Keep sync and follow at 1 s on R2.
+- C6's ≤ 1 s control-plane RPO and lag target needs one of:
+  - a human decision to set the R2 bound at about p95 2.5 s / p99 5 s (I have not loosened the criterion);
+  - an upstream change that batches or parallelises follow GETs;
+  - a different transport.
+- The restore-and-swap fallback is worse on every axis (RPO 60 s), so follow is still the branch to build.
+- The cut criterion needs the watchdog, and on R2 also a faster catch-up path; measure both before C6.
+- Not run: the 24 h soak; a run from the production region (Scaleway Paris); the watchdog on R2; intervals between 250 ms and 1 s (500 ms might sit between the two results).

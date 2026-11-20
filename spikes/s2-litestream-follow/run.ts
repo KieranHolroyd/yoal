@@ -18,10 +18,19 @@
  *                  steps: store freeze and request metrics.)
  *   S2_KEEP=1      leave containers running at the end
  *
+ * R2 mode (S2_TARGET=r2): reads R2_ENDPOINT, R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
+ * from the environment, keeps every object under yoal-w0-spikes/s2-<S2_RUN_ID>/<scenario>/,
+ * counts store operations through proxy.ts, stops when the projected cost passes S2_BUDGET_USD
+ * (default 0.8), and deletes the whole prefix at the end. Credentials reach containers only
+ * through a 0600 env file that is removed afterwards; logs and errors are scrubbed.
+ *   S2_FAULTS      comma list of unit faults (default all; R2 default follower-cut,follower-kill9)
+ *   S2_UNIT_FAST   0 to run `unit` with the 1 s follower only (R2 default 0)
+ *   S2_IDLE_WINDOW_S 60  length of each `idle` measurement window
+ *
  * Containers, network and volumes are all named yoal-w0-s2-*. Output goes to out/<stamp>/
  * (gitignored): logs, lag CSVs, events.jsonl, summary.json and summary.md.
  */
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { randomBytes } from 'node:crypto';
 
@@ -42,24 +51,41 @@ const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
 const OUT = resolve(env.S2_OUT_DIR ?? join(RIG, 'out', stamp));
 mkdirSync(OUT, { recursive: true });
 
-const external = Boolean(env.S2_S3_ENDPOINT);
+const R2 = env.S2_TARGET === 'r2';
+const external = R2 || Boolean(env.S2_S3_ENDPOINT);
+const R2_HOST = R2 ? new URL(env.R2_ENDPOINT!).host : '';
 const S3 = {
-	endpointInNet: env.S2_S3_ENDPOINT ?? `http://${P}-minio:9000`,
-	hostEndpoint: env.S2_S3_ENDPOINT ?? '', // filled in after MinIO starts
-	key: env.S2_S3_ACCESS_KEY ?? `s2${randomBytes(6).toString('hex')}`,
-	secret: env.S2_S3_SECRET_KEY ?? randomBytes(18).toString('hex'),
+	endpointInNet: R2 ? `http://${R2_HOST}` : (env.S2_S3_ENDPOINT ?? `http://${P}-minio:9000`),
+	hostEndpoint: R2 ? env.R2_ENDPOINT! : (env.S2_S3_ENDPOINT ?? ''), // MinIO: filled in after it starts
+	key: R2 ? env.R2_ACCESS_KEY_ID! : (env.S2_S3_ACCESS_KEY ?? `s2${randomBytes(6).toString('hex')}`),
+	secret: R2 ? env.R2_SECRET_ACCESS_KEY! : (env.S2_S3_SECRET_KEY ?? randomBytes(18).toString('hex')),
+	bucket: R2 ? env.R2_BUCKET! : (env.S2_S3_BUCKET ?? ''),
 };
+const RUN_ID = env.S2_RUN_ID ?? stamp.toLowerCase();
+const R2_PREFIX = `yoal-w0-spikes/s2-${RUN_ID}`;
+const BUDGET_USD = Number(env.S2_BUDGET_USD ?? 0.8);
+const FAULTS = (env.S2_FAULTS ?? (R2 ? 'follower-cut,follower-kill9' : 'follower-cut,primary-cut,store-freeze,follower-kill9,follower-container-restart')).split(',');
+const UNIT_FAST = (env.S2_UNIT_FAST ?? (R2 ? '0' : '1')) === '1';
+const IDLE_WINDOW_MS = Number(env.S2_IDLE_WINDOW_S ?? 60) * 1000;
+const PROXY_IP = '172.29.247.250';
+const ENV_FILE = join(OUT, '.store.env');
+const SECRETS = [S3.key, S3.secret, R2 ? R2_HOST : '', R2 ? R2_HOST.split('.')[0]! : '', R2 ? S3.bucket : ''].filter((x) => x && x.length >= 6);
+function scrub(text: string): string {
+	let t = text;
+	for (const x of SECRETS) t = t.split(x).join('***');
+	return t.replace(/X-Amz-[A-Za-z-]+=[^&\s"]+/g, 'X-Amz-***');
+}
 
 // ---------- small helpers ----------------------------------------------------------------------
 function log(msg: string) {
-	const line = `${new Date().toISOString()} ${msg}`;
+	const line = scrub(`${new Date().toISOString()} ${msg}`);
 	console.log(line);
 	appendFileSync(join(OUT, 'run.log'), line + '\n');
 }
 function run(cmd: string[], opts: { allowFail?: boolean; quiet?: boolean } = {}): string {
 	const r = Bun.spawnSync(cmd, { stdout: 'pipe', stderr: 'pipe' });
 	const out = r.stdout.toString().trim();
-	if (r.exitCode !== 0 && !opts.allowFail) throw new Error(`${cmd.join(' ')} -> ${r.exitCode}: ${r.stderr.toString().trim()} ${out}`);
+	if (r.exitCode !== 0 && !opts.allowFail) throw new Error(scrub(`${cmd.join(' ')} -> ${r.exitCode}: ${r.stderr.toString().trim()} ${out}`));
 	return out;
 }
 const docker = (...args: string[]) => run(['docker', ...args]);
@@ -96,18 +122,33 @@ const fileHas = (path: string, re: RegExp) => existsSync(path) && re.test(readFi
 function createBucket(bucket: string): string {
 	return run(['docker', 'exec', `${P}-minio`, 'sh', '-c', `mc alias set s2 http://127.0.0.1:9000 '${S3.key}' '${S3.secret}' >/dev/null && mc mb --ignore-existing s2/${bucket}`], { allowFail: true });
 }
+const hostOps = { ListObjects: 0, DeleteObject: 0 }; // R2 calls made from the host, outside the proxy
+const s3client = (bucket: string) => new Bun.S3Client({ endpoint: S3.hostEndpoint, accessKeyId: S3.key, secretAccessKey: S3.secret, bucket, region: 'auto' });
 async function listKeys(bucket: string, prefix: string): Promise<string[]> {
-	const client = new Bun.S3Client({ endpoint: S3.hostEndpoint, accessKeyId: S3.key, secretAccessKey: S3.secret, bucket, region: 'auto' });
+	if (R2 && !prefix.startsWith(R2_PREFIX + '/')) throw new Error('refusing to list outside the run prefix');
+	const client = s3client(bucket);
 	const keys: string[] = [];
 	let token: string | undefined;
 	for (;;) {
 		const page = await client.list({ prefix, continuationToken: token, maxKeys: 1000 });
+		hostOps.ListObjects++;
 		keys.push(...(page.contents ?? []).map((o) => o.key));
 		if (!page.isTruncated || !page.nextContinuationToken) return keys;
 		token = page.nextContinuationToken;
 	}
 }
 async function minioRequests(): Promise<Record<string, number>> {
+	if (R2) {
+		const port = docker('port', `${P}-proxy`, '9999/tcp').split('\n')[0]!.split(':').pop();
+		const j = (await (await fetch(`http://127.0.0.1:${port}/counts`)).json()) as Record<string, { n: number; status: Record<string, number> }>;
+		const totals: Record<string, number> = {};
+		for (const [k, v] of Object.entries(j)) {
+			totals[k] = v.n;
+			for (const [st, n] of Object.entries(v.status)) if (!/^2\d\d$/.test(st)) totals[`${k}:${st}`] = n;
+		}
+		for (const [k, v] of Object.entries(hostOps)) totals[`host:${k}`] = v;
+		return totals;
+	}
 	if (external) return {};
 	const r = Bun.spawnSync(['curl', '-s', `${S3.hostEndpoint}/minio/v2/metrics/cluster`]);
 	const totals: Record<string, number> = {};
@@ -116,10 +157,29 @@ async function minioRequests(): Promise<Record<string, number>> {
 }
 const diff = (a: Record<string, number>, b: Record<string, number>) =>
 	Object.fromEntries(Object.keys(b).map((k) => [k, b[k]! - (a[k] ?? 0)]).filter(([, v]) => (v as number) > 0));
+// R2 list prices: Class A $4.50/M, Class B $0.36/M. DeleteObject and AbortMultipartUpload are free;
+// DeleteObjects is priced as Class A here to be safe.
+const CLASS_A = new Set(['ListObjects', 'PutObject', 'UploadPart', 'CreateMultipartUpload', 'CompleteMultipartUpload', 'PutBucket', 'DeleteObjects', 'host:ListObjects']);
+const CLASS_B = new Set(['GetObject', 'HeadObject', 'HeadBucket', 'GetBucketLocation']);
+function cost(c: Record<string, number>) {
+	let a = 0;
+	let b = 0;
+	for (const [k, v] of Object.entries(c)) {
+		if (CLASS_A.has(k)) a += v;
+		else if (CLASS_B.has(k)) b += v;
+	}
+	return { classA: a, classB: b, usd: Math.round((a * 4.5e-6 + b * 0.36e-6) * 10000) / 10000 };
+}
+async function checkBudget(where: string) {
+	if (!R2) return;
+	const c = cost(await minioRequests());
+	log(`budget ${where}: ${JSON.stringify(c)}`);
+	if (c.usd > BUDGET_USD) throw new Error(`budget: $${c.usd} spent passes the $${BUDGET_USD} stop line`);
+}
 
 // ---------- environment -----------------------------------------------------------------------
 function cleanup() {
-	for (const c of ['primary', 'follower', 'follower-fast', 'minio']) dockerTry('rm', '-f', `${P}-${c}`);
+	for (const c of ['primary', 'follower', 'follower-fast', 'minio', 'proxy']) dockerTry('rm', '-f', `${P}-${c}`);
 	for (const v of ['primary-data', 'follower-data', 'follower-fast-data', 'minio-data']) dockerTry('volume', 'rm', '-f', `${P}-${v}`);
 	dockerTry('network', 'rm', NET);
 }
@@ -128,7 +188,13 @@ async function setup() {
 	cleanup();
 	log(`building ${IMAGE}`);
 	run(['docker', 'build', '-q', '-t', IMAGE, RIG]);
-	docker('network', 'create', NET);
+	if (R2) {
+		docker('network', 'create', '--subnet', '172.29.247.0/24', NET);
+		writeFileSync(ENV_FILE, `R2_ACCESS_KEY_ID=${S3.key}\nR2_SECRET_ACCESS_KEY=${S3.secret}\nR2_BUCKET=${S3.bucket}\nR2_ENDPOINT=${S3.endpointInNet}\n`, { mode: 0o600 });
+		docker('run', '-d', '--name', `${P}-proxy`, '--network', NET, '--ip', PROXY_IP, '-p', '127.0.0.1::9999', '-e', `S2_UPSTREAM_HOST=${R2_HOST}`, IMAGE, 'bun', '/rig/proxy.ts');
+		await waitFor('proxy', () => /proxy up/.test(dockerTry('logs', `${P}-proxy`)), 15_000);
+		log(`R2 via counting proxy; prefix ${R2_PREFIX}/`);
+	} else docker('network', 'create', NET);
 	if (!external) {
 		docker('run', '-d', '--name', `${P}-minio`, '--network', NET, '-p', '127.0.0.1::9000', '-v', `${P}-minio-data:/data`,
 			'-e', `MINIO_ROOT_USER=${S3.key}`, '-e', `MINIO_ROOT_PASSWORD=${S3.secret}`, '-e', 'MINIO_PROMETHEUS_AUTH_TYPE=public', MINIO_IMAGE, 'server', '/data');
@@ -159,17 +225,30 @@ interface Scenario {
 }
 
 function bucketFor(name: string) {
-	return external ? env.S2_S3_BUCKET! : `${P}-${name}`;
+	return external ? S3.bucket : `${P}-${name}`;
+}
+const replicaPrefix = (sc: Scenario) => (R2 ? `${R2_PREFIX}/${sc.name}/yoal/sqlite/` : 'yoal/sqlite/');
+/** R2: the scenario's config is the given one with only the replica path moved under the run prefix. */
+function configFor(sc: Scenario): string {
+	if (!R2) return sc.config;
+	const out = join(OUT, `litestream-${sc.name}-r2.yml`);
+	const body = readFileSync(sc.config, 'utf8');
+	if (!/^\s+path: yoal\/sqlite$/m.test(body)) throw new Error('unexpected replica path in config');
+	writeFileSync(out, body.replace(/^(\s+)path: yoal\/sqlite$/m, `$1path: ${R2_PREFIX}/${sc.name}/yoal/sqlite`));
+	return out;
 }
 
 function startNode(name: string, sc: Scenario) {
 	const bucket = bucketFor(sc.name);
 	docker('run', '-d', '--name', `${P}-${name}`, '--hostname', name, '--network', NET,
 		'-v', `${P}-${name}-data:/data`, '-v', `${OUT}:/out`,
-		'-v', `${sc.config}:/etc/yoal/litestream.yml:ro`,
+		'-v', `${configFor(sc)}:/etc/yoal/litestream.yml:ro`,
 		'-v', `${REPO}/scripts/yoal-db-fingerprint.ts:/rig/fingerprint.ts:ro`,
-		'-e', 'YOAL_DATA_DIR=/data', '-e', `R2_BUCKET=${bucket}`, '-e', `R2_ENDPOINT=${S3.endpointInNet}`,
-		'-e', `R2_ACCESS_KEY_ID=${S3.key}`, '-e', `R2_SECRET_ACCESS_KEY=${S3.secret}`, IMAGE);
+		'-e', 'YOAL_DATA_DIR=/data',
+		...(R2
+			? ['--env-file', ENV_FILE, '--add-host', `${R2_HOST}:${PROXY_IP}`]
+			: ['-e', `R2_BUCKET=${bucket}`, '-e', `R2_ENDPOINT=${S3.endpointInNet}`, '-e', `R2_ACCESS_KEY_ID=${S3.key}`, '-e', `R2_SECRET_ACCESS_KEY=${S3.secret}`]),
+		IMAGE);
 }
 
 const lsPrimary = (sc: Scenario) => `echo $$ > /run/ls.pid; exec litestream-${sc.primaryVersion} replicate -config /etc/yoal/litestream.yml >> /out/${sc.name}-primary-ls.log 2>&1`;
@@ -205,6 +284,7 @@ async function steady(sc: Scenario, minutes: number) {
 	while (Date.now() < end) {
 		await sleep(Math.min(60_000, end - Date.now()));
 		await sampleResources(sc, `steady-${++i}`);
+		await checkBudget(`${sc.name} steady-${i}`);
 		log(`${sc.name}: ${Math.round((end - Date.now()) / 1000)} s left; seen ${sc.followers.map((f) => `${f.name}=${lastSeen(sc, f.name)}`).join(' ')}`);
 	}
 }
@@ -228,7 +308,7 @@ async function scenario(sc: Scenario, results: Record<string, unknown>) {
 
 	event('primary-replicate-start', { version: sc.primaryVersion });
 	bg(`${P}-primary`, lsPrimary(sc));
-	const prefix = 'yoal/sqlite/';
+	const prefix = replicaPrefix(sc);
 	const t0 = Date.now();
 	for (;;) {
 		const keys = await listKeys(bucket, prefix);
@@ -263,23 +343,29 @@ async function scenario(sc: Scenario, results: Record<string, unknown>) {
 
 	const main = sc.followers[0]!;
 	const F = `${P}-${main.name}`;
+	const reconnect = (c: string) => docker('network', 'connect', NET, c);
 	if (sc.faults) {
 		// 1. follower cut off from the store
-		event('fault-start', { fault: 'follower-cut' });
-		docker('network', 'disconnect', NET, F);
-		await sleep(CUT_S * 1000);
-		docker('network', 'connect', NET, F);
-		event('fault-end', { fault: 'follower-cut' });
-		await sleep(OBSERVE_MS);
+		if (FAULTS.includes('follower-cut')) {
+			event('fault-start', { fault: 'follower-cut' });
+			docker('network', 'disconnect', NET, F);
+			await sleep(CUT_S * 1000);
+			reconnect(F);
+			event('fault-end', { fault: 'follower-cut' });
+			await sleep(OBSERVE_MS);
+			await checkBudget(`${sc.name} after follower-cut`);
+		}
 		// 2. primary cut off from the store (writes continue locally)
-		event('fault-start', { fault: 'primary-cut' });
-		docker('network', 'disconnect', NET, `${P}-primary`);
-		await sleep(CUT_S * 1000);
-		docker('network', 'connect', NET, `${P}-primary`);
-		event('fault-end', { fault: 'primary-cut' });
-		await sleep(OBSERVE_MS);
+		if (FAULTS.includes('primary-cut')) {
+			event('fault-start', { fault: 'primary-cut' });
+			docker('network', 'disconnect', NET, `${P}-primary`);
+			await sleep(CUT_S * 1000);
+			reconnect(`${P}-primary`);
+			event('fault-end', { fault: 'primary-cut' });
+			await sleep(OBSERVE_MS);
+		}
 		// 3. the store hangs silently (frozen, not refusing)
-		if (!external) {
+		if (!external && FAULTS.includes('store-freeze')) {
 			event('fault-start', { fault: 'store-freeze' });
 			docker('pause', `${P}-minio`);
 			await sleep(CUT_S * 1000);
@@ -288,6 +374,7 @@ async function scenario(sc: Scenario, results: Record<string, unknown>) {
 			await sleep(OBSERVE_MS + 30_000);
 		}
 		// 4. follower process killed -9 and restarted
+		if (FAULTS.includes('follower-kill9')) {
 		event('fault-start', { fault: 'follower-kill9' });
 		sh(F, 'kill -9 $(cat /run/ls.pid)');
 		await sleep(5000);
@@ -297,7 +384,9 @@ async function scenario(sc: Scenario, results: Record<string, unknown>) {
 		await sleep(OBSERVE_MS / 2);
 		const after = readFileSync(join(OUT, `${sc.name}-${main.name}-ls.log`), 'utf8').slice(before);
 		r.restartKill9 = { resumed: /resuming follow mode/.test(after), fullRestore: /restoring snapshot|snapshot restored|restore.*level=9/i.test(after), log: after.split('\n').slice(0, 6) };
+		}
 		// 5. whole follower container killed and started (probe restarts too, keeps its position)
+		if (FAULTS.includes('follower-container-restart')) {
 		event('fault-start', { fault: 'follower-container-restart' });
 		docker('kill', F);
 		await sleep(5000);
@@ -309,6 +398,7 @@ async function scenario(sc: Scenario, results: Record<string, unknown>) {
 		await sleep(OBSERVE_MS / 2);
 		const after2 = readFileSync(join(OUT, `${sc.name}-${main.name}-ls.log`), 'utf8').slice(before2);
 		r.restartContainer = { resumed: /resuming follow mode/.test(after2), log: after2.split('\n').slice(0, 6) };
+		}
 		await sampleResources(sc, 'after-faults');
 	}
 
@@ -492,9 +582,10 @@ async function idle(sc: Scenario, r: Record<string, unknown>) {
 	// Phases run one follower at a time so the deltas can be attributed.
 	const window = async (label: string) => {
 		const a = await minioRequests();
-		await sleep(60_000);
+		await sleep(IDLE_WINDOW_MS);
 		const d = diff(a, await minioRequests());
-		const perS = Object.fromEntries(Object.entries(d).map(([k, v]) => [k, Math.round(((v as number) / 60) * 100) / 100]));
+		await checkBudget(`idle ${label}`);
+		const perS = Object.fromEntries(Object.entries(d).map(([k, v]) => [k, Math.round(((v as number) / (IDLE_WINDOW_MS / 1000)) * 100) / 100]));
 		log(`idle ${label}: ${JSON.stringify(perS)}`);
 		return perS;
 	};
@@ -583,7 +674,7 @@ const tunedConfig = join(OUT, 'litestream-tuned.yml');
 	writeFileSync(tunedConfig, unit.replace(/^  - path: (.*)$/m, '  - path: $1\n    monitor-interval: 250ms').replace('sync-interval: 1s', 'sync-interval: 250ms'));
 }
 const all: Scenario[] = [
-	{ name: 'unit', primaryVersion: '0.5.18', config: join(REPO, 'scripts/litestream.yml'), followers: [{ name: 'follower', interval: '1s' }, { name: 'follower-fast', interval: '250ms' }], steadyMin: SOAK_MIN, faults: true, promote: true, kill9: false, fallback: false },
+	{ name: 'unit', primaryVersion: '0.5.18', config: join(REPO, 'scripts/litestream.yml'), followers: [{ name: 'follower', interval: '1s' }, ...(UNIT_FAST ? [{ name: 'follower-fast', interval: '250ms' }] : [])], steadyMin: SOAK_MIN, faults: true, promote: true, kill9: false, fallback: false },
 	{ name: 'tuned', primaryVersion: '0.5.18', config: tunedConfig, followers: [{ name: 'follower', interval: '250ms' }], steadyMin: TUNED_MIN, faults: false, promote: false, kill9: true, fallback: false },
 	{ name: 'fallback', primaryVersion: '0.3.13', config: join(REPO, 'scripts/litestream.yml'), followers: [{ name: 'follower', interval: '1s' }], steadyMin: 0, faults: false, promote: false, kill9: false, fallback: true },
 ];
@@ -601,14 +692,44 @@ try {
 			await scenario(sc, results);
 		} catch (err) {
 			failed = true;
-			(results[sc.name] as Record<string, unknown>).error = String((err as Error).stack ?? err);
+			(results[sc.name] as Record<string, unknown>).error = scrub(String((err as Error).stack ?? err));
 			log(`scenario ${sc.name} failed: ${(err as Error).message}`);
+			if (/^budget:/.test((err as Error).message)) break;
 		}
 		analyse(results);
 	}
 } finally {
+	if (R2) {
+		try {
+			results.r2Total = { ...cost(await minioRequests()), ops: await minioRequests() };
+			const proxyPort = docker('port', `${P}-proxy`, '9999/tcp').split('\n')[0]!.split(':').pop();
+			results.r2Latency = await (await fetch(`http://127.0.0.1:${proxyPort}/counts`)).json();
+		} catch (err) {
+			log(`could not read proxy counts: ${(err as Error).message}`);
+		}
+	}
 	analyse(results);
 	if (!env.S2_KEEP) cleanup();
+	if (R2) {
+		// Delete everything under the run prefix (only there), then prove it is empty.
+		try {
+			const client = s3client(S3.bucket);
+			const keys = await listKeys(S3.bucket, `${R2_PREFIX}/`);
+			for (const k of keys) {
+				if (!k.startsWith(`${R2_PREFIX}/`)) throw new Error('refusing to delete outside the run prefix');
+				await client.delete(k);
+				hostOps.DeleteObject++;
+			}
+			const left = await listKeys(S3.bucket, `${R2_PREFIX}/`);
+			results.r2Cleanup = { deleted: keys.length, remaining: left.length, hostOps };
+			log(`R2 cleanup: deleted ${keys.length} objects under ${R2_PREFIX}/, ${left.length} remain`);
+		} catch (err) {
+			log(`R2 cleanup FAILED: ${(err as Error).message}`);
+			results.r2Cleanup = { error: scrub((err as Error).message) };
+		}
+		if (existsSync(ENV_FILE)) unlinkSync(ENV_FILE);
+		writeFileSync(join(OUT, 'summary.json'), scrub(JSON.stringify(results, null, 2)));
+	}
 	log(`done; output in ${OUT}`);
 }
 process.exit(failed ? 1 : 0);
