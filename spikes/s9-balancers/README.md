@@ -178,3 +178,118 @@ file. The same file is the VIP's lame duck: `drain` for a few seconds, then writ
 - The health port (8099) is free in `PLATFORM_HOST_PORTS` but not reserved; W8 reserves one.
 - Criterion 1 measures removal for `docker kill`, which the bridge reports as host-unreachable within
   seconds; a powered-off host is silent. DOWN times are unaffected (checks time out at 2 s either way).
+
+---
+
+## Cloud: Hetzner Load Balancer (question, criteria and fallback; written before any cloud code)
+
+The cloud half of S9 (HA-PLAN §4 W2 S9; §1.2 row 1). Azure LB and AWS NLB are **not run** (no
+credentials). Spend approved by the owner: **€2 total**; the rig reads live prices first and aborts
+if 1 LB11 + 3 of the cheapest Debian 13 server type in one location for 3 h would cost more.
+
+### Question
+
+Behind a real Hetzner Load Balancer (LB11, `tcp` service on 443 with TLS passthrough to the same
+pinned Caddy build and the same `applyIngressPrototype()` JSON as the local half; targets on a
+private network, `use_private_ip`), does a Yoal ingress set meet the S9 targets?
+
+### Pass criteria (from the plan and the local half; tightened where marked, never loosened)
+
+1. **Killed node out of rotation in ≤ 15 s.** The LB health check targets the plain health port
+   (`http`, `GET /.well-known/yoal/health`, expect `200`) with the **tightest interval, timeout and
+   retries the Hetzner API accepts**; the values are recorded. Load: 200 req/s from this Mac to the
+   LB's public IP, half on 20 keep-alive connections, half on a new connection each.
+   - *Tightened (as local):* measured as kill → the LB API reports the target `unhealthy`, **and**
+     kill → the last failed client request; both ≤ 15 s. Failed requests are counted and reported.
+   - *Tightened:* two kill shapes: Caddy SIGKILLed (the kernel answers with resets) and a **silent**
+     death (the server powered off through the API, or all inbound traffic dropped), which the local
+     half could not do.
+2. **Lame duck with zero failed requests.** `drain` file → `drainSeconds` (20 s) → admin
+   `POST /stop`, at 200 req/s through the LB: **zero** failed requests (same failure definition as
+   local: written and no `2xx`, 5 s timeout), and no request answered by the node after its Caddy
+   stopped.
+3. **Client address with Hetzner's `proxyprotocol`.** Through the LB, `{http.request.remote.host}`,
+   `{http.vars.client_ip}` and the access log's `client_ip` all show this Mac's public address, with
+   `trusted_proxies` and the wrapper's `allow` listing only the LB's private-network address. A
+   forged PROXY v2 header or `X-Forwarded-For` sent straight to a node's public address (outside the
+   list), or smuggled through the LB, is not believed.
+   - *Reported:* the source addresses Hetzner uses for health probes and for proxied traffic, whether
+     the probes carry a PROXY header, and what `trusted_proxies` must list.
+4. **Reload under 1,000 keep-alive connections.** A changed-config `POST /load` on every target,
+   with 1,000 idle TLS keep-alive connections held through the LB plus 50 slow (2 s) requests and
+   20 new requests/s: **≤ 0.1%** (≤ 1) connections dropped, and **no in-flight request fails**.
+   Same strict "dropped" reading as local (any server-side close seen by the client).
+   - *Added:* also measured through a Hetzner `http` (L7) service, since the local half found only
+     an L7 balancer hides Caddy's idle closes.
+
+### Fallback if it fails
+
+Per HA-PLAN §4 W2: the Hetzner LB is documented as unsupported for the failed property (for
+criterion 4, recorded against the plan's choice already raised by the local half).
+
+### Cloud rig (2026-11-20)
+
+Results: docs/SPIKES.md, "S9 (cloud): Hetzner Load Balancer". One command, with a token for a dedicated
+Hetzner project that holds nothing else:
+
+```sh
+HCLOUD_TOKEN=... spikes/s9-balancers/cloud/run-cloud.sh          # or name steps: deploy lb address kill ...
+```
+
+- `cloud/hcloud.ts`: API client; `inventory` refuses any project holding a resource not named
+  `yoal-w0*` (or edge-b's address); writes only to resources labelled `yoal-w0=s9`; the token is
+  never printed and is scrubbed from errors.
+- `cloud/infra.ts`: `up` (inventory, live prices, abort over €2, fresh SSH key, network, 3 servers
+  of the cheapest Debian 13 type, LB11, a detached 2.5 h teardown watchdog), `down` (deletes only
+  labelled resources, then proves none remain), `cost` (ledger of lifetimes × live prices).
+- `cloud/scenarios-cloud.ts`: deploys the pinned Caddy (`cloud/build-caddy.sh`, linux/amd64, same pins
+  as the image) and the rig's `app.ts`, configures the LB, runs the criteria. `cloud/render-cloud.ts`
+  renders the same `applyIngressPrototype()` JSON with cloud addresses, plus `lab_l7`, a plain-HTTP copy
+  of the content server for Hetzner's `http` service. `cloud/probe-cloud.ts` is criterion 3 from this Mac.
+- `run-cloud.sh` traps EXIT/INT/TERM/HUP and runs `infra.ts down`; it leaves `tmp/cloud/out/` (results,
+  per-request logs, cost) and nothing in the project.
+
+### Recipe sketch: Hetzner Load Balancer (tested)
+
+The API calls the rig makes (`cloud/infra.ts`, `cloud/scenarios-cloud.ts`); same location and network
+zone as the ingress nodes, LB on the private network at a fixed address:
+
+```jsonc
+POST /load_balancers  { "load_balancer_type": "lb11", "location": "hel1", "algorithm": { "type": "least_connections" } }
+POST /load_balancers/{id}/actions/attach_to_network  { "network": <id>, "ip": "10.0.1.5" }
+POST /load_balancers/{id}/actions/add_service {
+  "protocol": "tcp", "listen_port": 443, "destination_port": 443, "proxyprotocol": true,
+  "health_check": { "protocol": "http", "port": 8099, "interval": 3, "timeout": 1, "retries": 1,   // API minimums
+                    "http": { "path": "/.well-known/yoal/health", "status_codes": ["200"], "tls": false } } }
+POST /load_balancers/{id}/actions/add_target  { "type": "server", "server": { "id": <ingress> }, "use_private_ip": true }
+```
+
+The API refuses `interval` < 3 ("Must be between 3 and 60") and `retries` < 1 ("between 1 and 5");
+`timeout` 1 is accepted.
+
+```yaml
+ingress: { proxyProtocol: v2, trustedProxies: [10.0.1.5/32] }   # the LB's private address, nothing else
+```
+
+- Probes and proxied connections both come from the LB's **private** address; probes carry **no**
+  PROXY header and send `Host: <LB public IPv4>`; that is why the health route answers any Host.
+- `--proxy-protocol` sends v2 (Caddy's wrapper reads it); a client cannot smuggle its own header
+  through a `tcp` service (the TLS handshake breaks).
+- An `http` service (L7) keeps client keep-alives across Caddy reloads but needs a plain-HTTP target
+  port (it cannot re-encrypt to 443) and puts the LB's address in `remote_ip`: allowlists must match
+  `client_ip`. Not recommended as the default (see SPIKES.md: one 502 per reload in some runs; a
+  burst of 1,000 concurrent requests overwhelms LB11 L7).
+- Untested: a Cloud Firewall that closes the nodes' public 443/8099 (recommended: only the private
+  network reaches them), targets on public addresses, IPv6, TLS termination on the LB.
+
+### Cloud deviations
+
+- Server type: `cpx02` (1 vCPU, 1 GB, hel1), the cheapest Debian 13 type by live price; Caddy built
+  with Go on the Mac (`GOOS=linux GOARCH=amd64`, same pins and `GOTOOLCHAIN=auto`), not on the server.
+- Each node runs its own upstream app on loopback (the local half used two separate app containers),
+  so a killed node takes its app with it.
+- `load.ts` gained `--verify-spread` (default 0 = unchanged): the cloud reload runs spread the final
+  1,000 verify requests over 5 s, because a burst of 1,000 through the L7 service times out with or
+  without a reload (measured; reported).
+- Two runs: an interactive run (run 1, steps one at a time, same infrastructure) and one end-to-end
+  `run-cloud.sh` run (run 2). Numbers are pooled and labelled.
