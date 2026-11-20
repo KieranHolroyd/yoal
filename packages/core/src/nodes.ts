@@ -52,6 +52,7 @@ import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, UnauthorizedError, ValidationError } from './errors.ts';
 import { allocateOverlayAddress, buildWireguardState, type OverlayNode } from './overlay.ts';
 import { newId, randomToken, sha256Hex, parseJson } from './util.ts';
+import { assertJoinKeyFree, assertJoinTokenUnused } from './node-join.ts';
 import { IDENTITY_NODE_SETTING, identityDesiredForNode } from './identity-desired.ts';
 import { DesiredStateContext } from './desired-state/context.ts';
 import { RouteState } from './desired-state/routes.ts';
@@ -401,6 +402,8 @@ export class NodeService {
 		mode: 'edge' | 'worker';
 		wireguard?: WireguardState;
 	} {
+		// A used token or a key another node holds is a 409 that says why, not a 500 (F11).
+		assertJoinTokenUnused(this.ctx, input);
 		const tokenHash = sha256Hex(input.token);
 		const join = this.ctx.sqlite
 			.query<{ id: string; expiresAt: number; usedAt: number | null }, [string]>(
@@ -419,6 +422,7 @@ export class NodeService {
 			const key = input.wireguardPublicKey;
 			if (!key || !wireguardPublicKeySchema.safeParse(key).success)
 				throw new ValidationError('A managed overlay join needs the node\'s WireGuard public key.');
+			assertJoinKeyFree(this.ctx, input);
 		}
 		const used = new Set(
 			this.ctx.sqlite
@@ -605,11 +609,11 @@ export class NodeService {
 		const stale = this.ctx.db
 			.select()
 			.from(nodes)
-			.where(and(eq(nodes.status, 'online'), sql`coalesce(${nodes.lastHeartbeatAt}, 0) < ${now - OFFLINE_AFTER_MS}`))
+			.where(and(eq(nodes.status, 'online'), sql`coalesce(${nodes.lastHeartbeatAt}, ${nodes.createdAt}) < ${now - OFFLINE_AFTER_MS}`))
 			.all();
 		for (const node of stale)
 			this.ctx.db.update(nodes).set({ status: 'offline', updatedAt: now }).where(eq(nodes.id, node.id)).run();
-		return stale.map((node) => ({ nodeId: node.id, offlineForMs: now - (node.lastHeartbeatAt ?? 0) }));
+		return stale.map((node) => ({ nodeId: node.id, offlineForMs: now - (node.lastHeartbeatAt ?? node.createdAt) }));
 	}
 
 	/**

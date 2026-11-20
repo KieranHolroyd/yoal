@@ -30,6 +30,7 @@ D107 (clustering and HA, [CLUSTERING.md](./CLUSTERING.md)), D25 (object store), 
 | `/opt/yoal/releases/<version>/caddy/caddy` | `root:root 0755` | Caddy 2.11.8 + `caddy-dns/cloudflare`, shipped in signed releases (source builds have none). The updater copies it over the binary the running Caddy unit executes (§4.1, *Caddy is part of the release*). |
 | `/usr/bin/caddy` (+ `.yoal-previous`) | `root:root 0755` | The binary the apt `caddy.service` runs. Installed by the official Caddy package; replaced by the release's Caddy on each signed update, with the previous copy kept beside it. |
 | `/etc/systemd/system/caddy.service.d/yoal-admin-socket.conf` | `root:root 0644` | Installer drop-in for the packaged unit: `SupplementaryGroups=yoal` (read release artifacts) and `chmod 0660` on the admin socket after start. |
+| `/etc/systemd/system/caddy.service.d/yoal-restart.conf` | `root:root 0644` | Drop-in for the packaged unit, written by the installer, release convergence and `yoal-helper` on start: restart on failure every 2 s, with no start limit. |
 | `/etc/yoal/yoal.env` | `root:yoal 0640` | Runtime environment and secrets (see §2). |
 | `/etc/yoal/master.key.cred` | `root:root 0400` | Master key sealed with `systemd-creds` (TPM2 + host key, or the host key alone), delivered via `LoadCredentialEncrypted=`. Opens only on this machine; the recovery kit (§6.2) is the copy that survives losing it. |
 | `/etc/yoal/master.key` | `root:root 0400` | Plaintext master key, delivered via `LoadCredential=`, never sourced by shell. Only on hosts without `systemd-creds` (systemd < 250), or briefly as `master.key.pre-seal` while an upgrade seals an existing key. |
@@ -364,14 +365,24 @@ mail node (the unit sets the paths). None of them is secret: DKIM keys and crede
 - Ports 80/443 free. Domains are optional (§3.7); when you use them, point their DNS at this machine.
 - **Caddy and Podman are installed for you** (skip with `--skip-deps` / `YOAL_SKIP_DEPS=1` if you
   manage packages yourself):
-  - **Caddy**, when `caddy` is not on `PATH`: from the official Caddy apt repository
+  - **Caddy**, when the host has none (no `caddy` on `PATH` and no Caddy unit; a host whose proxy
+    is the release-managed `yoal-caddy.service` counts as having one): from the official Caddy apt repository
     (`dl.cloudsmith.io/public/caddy/stable`, verified by apt), then `caddy add-package
     github.com/caddy-dns/cloudflare` (built by caddyserver.com) for the wildcard HTTPS certificate,
     and `apt-mark hold caddy` so upgrades keep the module. The package's Caddyfile is kept as
     `Caddyfile.dist` and replaced with a bootstrap that puts the admin API on
     `unix//var/lib/caddy/admin.sock|0660` (never TCP); the agent pushes the real config through it.
     If the module download fails the install continues (HTTP works); HTTPS needs it later. An
-    existing Caddy is used as is: HTTPS installs need it built with `caddy-dns/cloudflare`.
+    existing Caddy binary is used as is (HTTPS installs need it built with `caddy-dns/cloudflare`).
+    Its Caddyfile is replaced too when the admin API is not already on a unix socket (a commented-out
+    `admin unix//…` line does not count) and Caddy runs as the packaged `caddy.service`: on the
+    control plane's first install, when the file is still byte-for-byte the package's own (dpkg's
+    md5), or with `--replace-caddyfile`. The old file is hard-linked to `Caddyfile.dist` (or
+    `Caddyfile.dist.<ms>` when that exists), so the backup keeps its mode and owner; the installer
+    prints where it went, then enables and restarts `caddy.service`. Any other Caddyfile on an
+    existing install is left alone with a warning, and a host whose proxy is `yoal-caddy.service`
+    (a converted Skiff host) is never given a second Caddy: the installer enables or restarts
+    `caddy.service` only when it is the host's Caddy unit, on the control plane and on worker joins.
   - **Podman** (agent installs only): `podman uidmap passt netavark aardvark-dns`. Managed
     Postgres and RustFS run as rootful Quadlet containers (Podman 4.4+). Project and runner
     containers get a user namespace of their own, so the helper uses `uidmap` and adds a
@@ -1918,6 +1929,37 @@ cat /var/lib/yoal/drill/status.json
 journalctl -u yoal-litestream -n 100 --no-pager
 ```
 
+### 7.3 Health probes of copies on other nodes (security note)
+
+An app spread over several nodes with a `healthPath` is probed by every ingress every
+`replicas.healthIntervalSeconds`: a copy on another node is reached through that node's Caddy,
+with the route's own `Host` and no session cookie. On a protected route (`platform`, `password`,
+a policy; preview routes are `platform` by default) the node holding the copy answers such a probe
+before its access check when all of these hold: the method is `GET` or `HEAD`; the cleaned path is
+exactly the app's `healthPath` (case-sensitive, no wildcard); and the connection's own peer address
+(Caddy `remote_ip`; `X-Forwarded-For` and other headers are never consulted) is inside the managed
+overlay CIDR. Caddy's matchers compare a cleaned path, so `//healthz`, `/./healthz`,
+`/admin/../healthz`, `%2F` and `%2e%2e` spellings and `/healthz?x=1` all match. None of them
+reaches the app as sent: the request is rewritten to exactly `healthPath` with an empty query, and
+only the app's status code comes back, with an empty body and none of the app's headers.
+
+**What is exposed:** whether this app's health path is up or down (its status code), and only to
+fleet nodes: anything that can open a connection from an overlay address, which includes every
+process app and container on any node, since they send from the node's overlay address. No
+path, query, body or header of the app is readable this way; everything else on the route needs
+a session. The probe's request headers and method (`GET` or `HEAD`) do reach the app, so a health
+path should not change its status based on them.
+
+A health path that is not a plain literal (it contains `*`, `%`, `{`, `?` or a space) gets no
+exemption.
+
+**Known gap: bring-your-own networks.** A node with `network_mode: external` has no overlay CIDR,
+and its desired state does not list the ingress addresses that probe it (no peers, and only an
+ingress carries `upstreams`). Its protected copies are never exempt, so the ingress marks them
+unhealthy and sends them no traffic: a protected app spread over an external-network fleet serves
+only from a copy on the ingress itself, if it has one. Public apps are unaffected. Closing this needs the ingress
+addresses in desired state, which is not built.
+
 ---
 
 ## 8. Restore drill
@@ -2017,8 +2059,15 @@ control-plane standby and database replicas are planned in CLUSTERING.md §6–�
 | Setgid `/run/yoal` | The alternative to a root socket helper: socket ownership is controlled by directory group inheritance, and no service joins another's primary group. |
 
 **Caddy runs as the packaged `caddy.service`.** The installer installs Caddy from the official apt
-repository and keeps the package's unit and its sandboxing, adding only the
-`yoal-admin-socket.conf` drop-in (`SupplementaryGroups=yoal`, `chmod 0660` on the admin socket).
+repository and keeps the package's unit and its sandboxing, adding only two drop-ins:
+`yoal-admin-socket.conf` (`SupplementaryGroups=yoal`, `chmod 0660` on the admin socket) and
+`yoal-restart.conf` (`Restart=on-failure`, `RestartSec=2`, `StartLimitIntervalSec=0`, because the
+package's unit has no `Restart=` and a crashed Caddy would take every site on the node down).
+Existing hosts get `yoal-restart.conf` without a reinstall: a control-plane host from release
+convergence at its next `yoal-update-self`, and every node (workers included, which update through
+the helper's `node/update` and never run convergence) from `yoal-helper`, which writes it on each
+start when `caddy.service` is installed and runs `systemctl daemon-reload`. Neither restarts Caddy
+to apply it.
 Caddy's admin API is never on TCP `:2019` (D7): the bootstrap Caddyfile puts it at
 `/var/lib/caddy/admin.sock` (mode `0660`, group `caddy`) and the agent is the only consumer
 (`YOAL_CADDY_ADMIN_SOCKET`, detected by the installer and written into the agent unit).

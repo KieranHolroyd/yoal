@@ -384,12 +384,18 @@ stays `online` for heartbeat, reporting and everything else, and only stops rece
 |---|---|---|
 | `pending` | Token issued, no heartbeat yet | Token created; it expires after 1 h |
 | `online` | Heartbeat within 30 s, placement-eligible | First heartbeat plus a passing checklist |
-| `offline` | No heartbeat for 30 s (`OFFLINE_AFTER_MS`); alert at 2 min (`ALERT_AFTER_MS`) | Missed heartbeats |
+| `offline` | No heartbeat for 30 s (`OFFLINE_AFTER_MS`), marked on the failover controller's next tick (`controlPlane.renewSeconds`, 5 s); alert at 2 min (`ALERT_AFTER_MS`) | Missed heartbeats |
 | `draining` | Cordoned: no new placements; existing work moves or stays | Operator action, UPS event or decommission |
 
 **Join.** A single-use token (1 h) and one-line command (§4.1, plan 23) carry the node's WireGuard
 public key; the control plane allocates the id, overlay `/32` and token in one transaction, and the
-node stays `pending` until its first heartbeat. A re-run repairs a half-installed node.
+node stays `pending` until its first heartbeat. A re-run repairs a half-installed node's host setup,
+but not its join: a join token works once, and any second use is a 409 that names the node it
+created and says to create a new token (removing that node first if it never sent a heartbeat).
+There is no idempotent retry, because every field one could be matched on (the token, name and
+address on the command line, the public WireGuard key, the version) is visible or public, and a
+retry would make a used token a credential for its node; the node's own token never changes. A key
+another node holds is also a 409 naming that node, and that refused token is not consumed.
 
 **Verify.** First heartbeat within 60 s; overlay handshake within 20 s; Caddy answers on its overlay
 health host; helper reports its version; clock skew under 120 s; the volume inventory parses; the
@@ -730,7 +736,9 @@ clamping rule is needed.
 passively unhealthy (health checks every 5 s) and dropped for `fail_duration` (30 s), so later
 requests go to another replica. With no healthy upstream the branded 503 is served, and
 `handle_errors` maps 502 and 504 on app routes to it; a single-replica app on a lost node shows it
-within the passive window, not instantly (§11).
+within the passive window, not instantly (§11). The active check sends the route's own Host, as
+a proxied request does, because a copy on another node is reached through that node's Caddy, which
+routes by Host.
 
 ### 4.5 Trust boundaries on the overlay
 

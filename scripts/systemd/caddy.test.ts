@@ -6,8 +6,11 @@ import {
 	CADDY_DNS_MODULE,
 	CADDY_UNIT,
 	STOCK_CADDY_UNIT,
+	CADDY_RESTART_DROP_IN,
+	caddyRestartDropIn,
 	caddyUnit,
 	ensureCaddy,
+	ensureCaddyRestartPolicy,
 	installCaddyBinary,
 	parseExecStartPath,
 	restoreCaddyBinary,
@@ -162,5 +165,41 @@ describe('ensureCaddy', () => {
 		expect(ensureCaddy({ release, optDir, run })).toBe(true);
 		expect(readFileSync(target, 'utf8')).toBe('old');
 		expect(existsSync(join(optDir, 'caddy.sha256'))).toBe(false);
+	});
+});
+
+describe('caddy restart policy (F10)', () => {
+	test('the drop-in restarts a failed Caddy and never gives up', () => {
+		const body = caddyRestartDropIn();
+		// The stock unit has no Restart=, so a crashed Caddy stayed down on every node.
+		expect(body).toMatch(/\[Service\][^[]*\nRestart=on-failure\n/);
+		expect(body).toMatch(/\nRestartSec=2\n/);
+		// systemd's default start limit (5 starts in 10 s) leaves a crash-looping unit `failed` for
+		// good; with no interval it keeps retrying every RestartSec instead.
+		expect(body).toMatch(/\[Unit\][^[]*\nStartLimitIntervalSec=0\n/);
+	});
+
+	test('writes the drop-in for the stock unit once and reloads systemd', () => {
+		const systemdDir = join(temp(), 'systemd');
+		const calls: string[][] = [];
+		const run = (cmd: string[]) => void calls.push(cmd);
+		expect(ensureCaddyRestartPolicy({ systemdDir, run })).toBe(true);
+		const path = join(systemdDir, `${STOCK_CADDY_UNIT}.d`, CADDY_RESTART_DROP_IN);
+		expect(readFileSync(path, 'utf8')).toBe(caddyRestartDropIn());
+		expect(calls).toEqual([['systemctl', 'daemon-reload']]);
+		// Idempotent: an upgrade that finds it current changes nothing and reloads nothing.
+		expect(ensureCaddyRestartPolicy({ systemdDir, run })).toBe(false);
+		expect(calls).toHaveLength(1);
+		// An edited or older copy is put back.
+		writeFileSync(path, '[Service]\nRestart=no\n');
+		expect(ensureCaddyRestartPolicy({ systemdDir, run })).toBe(true);
+		expect(readFileSync(path, 'utf8')).toBe(caddyRestartDropIn());
+	});
+
+	test('the release-managed unit does not wedge after repeated failures either', () => {
+		const unit = readFileSync(join(import.meta.dir, 'yoal-caddy.service'), 'utf8');
+		expect(unit).toContain('\nRestart=on-failure\n');
+		expect(unit).toContain('\nStartLimitIntervalSec=0\n');
+		expect(unit).not.toContain('StartLimitBurst=');
 	});
 });

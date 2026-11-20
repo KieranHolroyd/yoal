@@ -21,6 +21,7 @@ import { readEnvFile, writeEnvFile } from '../install/env-file.ts';
 import { ensurePlatformConfigUnits } from '../platform-config/units.ts';
 import { ensureAgentUnit } from '../systemd/agent.ts';
 import { ensureBuilder, linkAgentCommands } from '../systemd/builder.ts';
+import { ensureCaddyRestartPolicy, STOCK_CADDY_UNIT } from '../systemd/caddy.ts';
 import { clickhouseInstalled, ensureClickHouse } from '../systemd/clickhouse.ts';
 import { DEFAULT_CONTROL_PLANE_PATHS, ensureControlPlaneUnits } from '../systemd/control-plane.ts';
 import { ensureHelper } from '../systemd/helper.ts';
@@ -203,6 +204,15 @@ export async function convergeHost(input: ConvergeInput): Promise<ConvergeReport
 			tolerant(['systemctl', 'enable', '--now', TRIGGER_PATH_UNIT]);
 		}
 		return changed;
+	});
+
+	// Installer-built hosts run the distribution's caddy.service, which has no Restart= (HA-PLAN
+	// Wave 1 F10). This covers control-plane hosts, the only ones that run convergence; workers update
+	// through the helper's `node/update`, and the helper writes the same drop-in on every start. A
+	// host without that unit (release-managed `yoal-caddy.service`) is left alone.
+	await step(report, 'caddy-restart-policy', () => {
+		if (runner.capture(['systemctl', 'show', '-p', 'LoadState', '--value', STOCK_CADDY_UNIT])?.trim() !== 'loaded') return false;
+		return ensureCaddyRestartPolicy({ systemdDir: paths.systemdDir, run: tolerant, log });
 	});
 
 	await step(report, 'platform-config', () =>

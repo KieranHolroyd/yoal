@@ -16,6 +16,8 @@ Options:
   --public-address <ipv4>     This server's IPv4 for IP-only installs (default: detected).
   --skip-deps                 Don't install Caddy, Podman or the storage tools (fio, nfs-common, cifs-utils).
                               Also YOAL_SKIP_DEPS=1.
+  --replace-caddyfile         On an existing install, back up /etc/caddy/Caddyfile and replace it
+                              with Yoal's bootstrap file even when it is not the package's own.
   --admin-email <email>       Prefills the owner email in the setup wizard (optional).
   --cloudflare-token-file <path>
                               Caddy DNS-01 token file (default /etc/caddy/cloudflare.token).

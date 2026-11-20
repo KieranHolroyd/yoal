@@ -1303,6 +1303,9 @@ export class WorkloadService {
 				.set({ nodeId, status: 'pending', updatedAt: now })
 				.where(eq(workloads.id, workload.id))
 				.run();
+		// The copy's new node needs the loopback endpoints a deploy would have given it, or its
+		// attachment env is empty (no DATABASE_URL) and it crash-loops; the old node's are freed.
+		this.reconcileEndpoints(workload.projectId, [row.nodeId]);
 		this.ctx.projects.bump(this.requireProject(workload.projectId).orgId);
 	}
 

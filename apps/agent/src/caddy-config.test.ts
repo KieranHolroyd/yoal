@@ -401,10 +401,103 @@ describe('per-deployment roots, worker routes and logging', () => {
 			healthIntervalSeconds: 12,
 		};
 		const json = JSON.stringify(config(value));
-		expect(json).toContain('"active":{"uri":"/healthz","interval":"12s"}');
+		expect(json).toContain('"active":{"uri":"/healthz","interval":"12s",');
 		// An older control plane sends no interval: the agent keeps the 5 s default.
 		delete value.routes[0]!.healthIntervalSeconds;
-		expect(JSON.stringify(config(value))).toContain('"active":{"uri":"/healthz","interval":"5s"}');
+		expect(JSON.stringify(config(value))).toContain('"active":{"uri":"/healthz","interval":"5s",');
+	});
+
+	test('a protected copy lets only an overlay health probe past the access check (F7 review)', () => {
+		// The node holding a copy of a spread app: its route has the app's health path but no
+		// upstreams, and its desired state carries the overlay it is on.
+		const value = state();
+		value.routes[1] = { ...value.routes[1]!, upstream: '127.0.0.1:19002', healthPath: '/healthz' };
+		value.wireguard = {
+			mode: 'yoal',
+			address: '10.47.1.3',
+			cidr: '10.47.0.0/16',
+			mtu: 1380,
+			listenPort: 51820,
+			peers: [],
+			routes: [],
+			machineSubnet: null,
+		};
+		const authRunsFor = (compiled: Json, request: { method: string; path: string; remoteIp: string; headers?: Record<string, string> }) => {
+			const route = routes(compiled).find((entry) => JSON.stringify(entry.match).includes('secret.example.com'))!;
+			const subroutes = ((route.handle as Json[])[0]!.routes as Json[]);
+			const auth = subroutes.find((sub) => JSON.stringify(sub.handle).includes('/_yoal/verify'))!;
+			// The access check itself has no exceptions: only a terminal probe route before it can answer.
+			expect(auth.match).toBeUndefined();
+			const probeRoute = subroutes.find((sub) => JSON.stringify(sub.match ?? '').includes('remote_ip'));
+			if (!probeRoute) return true;
+			expect(subroutes.indexOf(probeRoute)).toBeLessThan(subroutes.indexOf(auth));
+			expect(probeRoute.terminal).toBe(true);
+			// Whatever matched, the app is asked for exactly the health path and only its status returns.
+			expect((probeRoute.handle as Json[])[0]).toEqual({ handler: 'rewrite', uri: '/healthz?' });
+			const [inner] = probeRoute.match as Array<Record<string, any>>;
+			const inCidr = (ip: string, cidr: string) => {
+				const [base, bits] = cidr.split('/');
+				const toInt = (value: string) => value.split('.').reduce((acc, part) => (acc << 8) + Number(part), 0) >>> 0;
+				const mask = Number(bits) === 0 ? 0 : (~0 << (32 - Number(bits))) >>> 0;
+				return (toInt(ip) & mask) === (toInt(base!) & mask);
+			};
+			const matched =
+				inner!.method.includes(request.method) &&
+				inner!.path.some((path: string) => path.toLowerCase() === request.path.toLowerCase()) &&
+				new RegExp(inner!.path_regexp.pattern).test(request.path) &&
+				inner!.remote_ip.ranges.some((range: string) => inCidr(request.remoteIp, range));
+			return !matched;
+		};
+		const compiled = config(value);
+		const probe = { method: 'GET', path: '/healthz', remoteIp: '10.47.1.2' };
+		expect(authRunsFor(compiled, probe)).toBe(false);
+		expect(authRunsFor(compiled, { ...probe, method: 'HEAD' })).toBe(false);
+		// Anything else still needs a session.
+		expect(authRunsFor(compiled, { ...probe, method: 'POST' })).toBe(true);
+		expect(authRunsFor(compiled, { ...probe, path: '/healthz/x' })).toBe(true);
+		expect(authRunsFor(compiled, { ...probe, path: '/HEALTHZ' })).toBe(true);
+		expect(authRunsFor(compiled, { ...probe, path: '/' })).toBe(true);
+		expect(authRunsFor(compiled, { ...probe, remoteIp: '203.0.113.9' })).toBe(true);
+		// A forwarded header claiming an overlay address is not consulted at all.
+		expect(JSON.stringify(compiled)).not.toMatch(/client_ip|X-Forwarded-For/i);
+		// The public route is untouched, and a node without a managed overlay exempts nothing.
+		expect(authRunsFor(config({ ...value, wireguard: undefined }), probe)).toBe(true);
+		expect(authRunsFor(config({ ...value, wireguard: { ...value.wireguard!, mode: 'external', cidr: null } }), probe)).toBe(true);
+	});
+
+	test('a copy on another node passes the active health check through that node\'s Caddy (F7)', async () => {
+		// Stands in for the remote node's Caddy: it routes by Host and has no route for anything else.
+		const remoteNode = Bun.serve({
+			hostname: '127.0.0.1',
+			port: 0,
+			fetch: (request) => {
+				const host = request.headers.get('host');
+				return host === 'public.example.com' && new URL(request.url).pathname === '/healthz'
+					? new Response('ok')
+					: new Response('no route', { status: 404 });
+			},
+		});
+		try {
+			const value = state();
+			value.routes[0] = {
+				...value.routes[0]!,
+				upstreams: ['127.0.0.1:19001', `http://127.0.0.1:${remoteNode.port}`],
+				healthPath: '/healthz',
+			};
+			const route = routes(config(value)).find((entry) => JSON.stringify(entry.match).includes('public.example.com'))!;
+			const proxy = collectHandlers(route).find((handler) => handler.handler === 'reverse_proxy' && handler.health_checks)!;
+			const active = (proxy.health_checks as Json).active as Json;
+			// Probe the remote upstream the way Caddy's active checker does: GET <dial><uri>, with the
+			// configured Host header or, when there is none, the dial address as the Host.
+			const remote = (proxy.upstreams as Json[]).map((upstream) => upstream.dial as string).find((dial) => dial.endsWith(`:${remoteNode.port}`))!;
+			const headers = (active.headers as Record<string, string[]> | undefined) ?? {};
+			const response = await fetch(`http://${remote}${active.uri as string}`, {
+				headers: { host: headers.Host?.[0] ?? remote },
+			});
+			expect(response.status).toBe(200);
+		} finally {
+			remoteNode.stop(true);
+		}
 	});
 
 	test('domain helpers tolerate missing origins and production routes', () => {

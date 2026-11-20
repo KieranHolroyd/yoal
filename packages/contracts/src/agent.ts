@@ -157,7 +157,11 @@ export const routeSpecSchema = z.object({
 	 * an agent that predates this field fails closed too, and never serves the release as files.
 	 */
 	unavailable: z.string().max(500).optional(),
-	/** Health path used by Caddy's active checks across replicas. */
+	/**
+	 * Health path used by Caddy's active checks across replicas. On a node holding one copy of a spread
+	 * app (no `upstreams`), the path its Caddy answers for an overlay probe on a protected route, with
+	 * that path's status only (F7).
+	 */
 	healthPath: z.string().max(512).optional(),
 	/** Seconds between those active checks (`replicas.healthIntervalSeconds`); agents default to 5. */
 	healthIntervalSeconds: z.number().int().min(1).max(300).optional(),
