@@ -73,14 +73,25 @@ export class IngressSetService {
 	}
 }
 
+/** Drivers a lane installs behind the one seam; a missing kind keeps the "not implemented" refusal. */
+export interface SteeringServiceOptions {
+	drivers?: Partial<Record<SteeringDriverKind, SteeringDriver>>;
+}
+
 /**
  * Steering (HA-PLAN H18, Wave 2). The contract is in `@yoal/contracts`; the drivers are lane D/E.
- * `direct` is the only one that exists today: it does nothing, which is exactly today's behaviour.
+ * `direct` does nothing, which is exactly today's behaviour. `dns-failover` is installed by lane E
+ * when `STEERING` is on; an `external-lb` driver registers under the same option key.
  */
 export class SteeringService {
-	constructor(private readonly ctx: CoreContext) {}
+	constructor(
+		private readonly ctx: CoreContext,
+		private readonly options: SteeringServiceOptions = {},
+	) {}
 
 	driver(kind: SteeringDriverKind): SteeringDriver {
+		const registered = this.options.drivers?.[kind];
+		if (registered) return registered;
 		if (kind === 'direct')
 			return {
 				kind: 'direct',
