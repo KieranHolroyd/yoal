@@ -11,7 +11,7 @@ import { createDb } from '@yoal/db';
 
 const dir = mkdtempSync(join(tmpdir(), 'yoal-w1-mcp-release-'));
 const opened = createDb({ path: ':memory:' });
-const features: FeatureFlags = { ...DEFAULT_FEATURES };
+const features: Record<keyof FeatureFlags, boolean> = { ...DEFAULT_FEATURES };
 const realCore: Core = createCore({
 	db: opened.db,
 	sqlite: opened.sqlite,

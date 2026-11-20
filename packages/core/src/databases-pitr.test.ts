@@ -104,7 +104,7 @@ describe('database PITR (flag on)', () => {
 		expect(JSON.stringify(state)).not.toContain(repo.secretAccessKey);
 
 		const activation = core.databases.pitrActivation(nodeId, task.id);
-		expect(activation.repo.secretAccessKey).toBe(repo.secretAccessKey);
+		expect('repo' in activation && activation.repo.secretAccessKey).toBe(repo.secretAccessKey);
 		expect(() => core.databases.pitrActivation('nod_other', task.id)).toThrow();
 
 		core.databases.applyPitrResults(nodeId, [

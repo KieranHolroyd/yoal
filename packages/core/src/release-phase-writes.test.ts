@@ -112,7 +112,7 @@ describe('RELEASE_PHASE off: every write is refused', () => {
 		const { core, close } = makeCore({ RELEASE_PHASE: true });
 		const row = await project(core, 'app-e');
 		core.workloads.setSpec(principal, row, { ...base, drainSeconds: 20 });
-		(core.ctx.config.features as FeatureFlags).RELEASE_PHASE = false;
+		(core.ctx.config.features as Record<keyof FeatureFlags, boolean>).RELEASE_PHASE = false;
 		const stored = core.workloads.projectSpec(core.projects.requireRow(principal, 'app-e'))!;
 		expect(() => core.workloads.setSpec(principal, core.projects.requireRow(principal, 'app-e'), { ...stored, port: 3001 })).not.toThrow();
 		// Changing it is still refused.

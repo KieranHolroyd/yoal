@@ -24,8 +24,9 @@ export type ObjectStoreTargetKind = (typeof objectStoreKinds)[number];
 
 /**
  * The agent capability that says a build's helper renders `azure` and `gcs` repositories
- * (pgBackRest `repo1-type`, Litestream). A non-`s3` target is never handed to a node without it:
- * an older helper would read the legacy S3 fields and write a wrong repository config.
+ * (pgBackRest `repo1-type`, Litestream). A non-`s3` target is never handed to a node without it,
+ * and is sent in a shape an older agent cannot parse (`databasePitrStoreActivationSchema`): an
+ * older agent drops unknown keys and would otherwise write an S3 config.
  */
 export const OBJECT_STORE_KINDS_CAPABILITY = 'object-store-kinds';
 

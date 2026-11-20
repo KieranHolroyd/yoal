@@ -2382,9 +2382,9 @@ function buildServer(
 			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
 			scopeChallenge: requires('project:update'),
 		},
-		async ({ project, ...input }) =>
+		async ({ project, ...input }: { project: string } & Record<string, unknown>) =>
 			run(() =>
-				core.workloads.setSpec(principal, core.projects.requireRow(principal, project as string), input as WorkloadSpecInput)
+				core.workloads.setSpec(principal, core.projects.requireRow(principal, project), input as WorkloadSpecInput)
 			),
 	);
 

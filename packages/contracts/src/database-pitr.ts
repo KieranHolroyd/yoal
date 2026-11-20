@@ -1,7 +1,7 @@
 import * as z from 'zod';
 import { databaseEngines } from './database.ts';
 import { databaseRestoreSchema } from './database-backup.ts';
-import { objectStoreCredentialsSchema, objectStoreTargetSchema } from './object-store-target.ts';
+import { objectStoreCredentialsSchema, objectStoreTargetSchema, type ObjectStoreTargetKind } from './object-store-target.ts';
 
 /**
  * Point-in-time recovery for managed databases (docs/PITR.md).
@@ -61,25 +61,69 @@ export const databasePitrRepoViewSchema = z.object({
 	forcePathStyle: z.boolean(),
 	/**
 	 * HA-PLAN W3: the repository as an object-store target. Absent means the S3 fields above (every
-	 * repository before W3). For an `azure` or `gcs` target the S3 fields above still carry the
-	 * nearest values (container or bucket, endpoint, prefix) so an older reader parses the view,
-	 * but a node is sent such a repository only when it declares `object-store-kinds`.
+	 * repository before W3). For an `azure` or `gcs` target the S3 fields above carry the nearest
+	 * values (`pitrRepositoryView`). Views only: a node never receives this schema.
 	 */
 	store: objectStoreTargetSchema.optional(),
 });
 export type DatabasePitrRepoView = z.infer<typeof databasePitrRepoViewSchema>;
 
-/** Repository configuration with credentials. Returned only by the node activation endpoint. */
-export const databasePitrRepoConfigSchema = databasePitrRepoViewSchema.extend({
+/**
+ * An S3 repository with credentials, as every agent has read it since PITR shipped. Returned only
+ * by the node activation endpoint. Never carries an Azure or GCS store: those travel as
+ * `databasePitrStoreRepoSchema`, outside `repo` (below).
+ */
+export const databasePitrRepoConfigSchema = databasePitrRepoViewSchema.omit({ store: true }).extend({
 	accessKeyId: z.string().min(3).max(128),
 	secretAccessKey: z.string().min(8).max(512),
-	/**
-	 * HA-PLAN W3: the credentials for a `store` that is not `s3` (an Azure key or SAS token, a GCS
-	 * service-account file). Absent for S3, whose keys are the two fields above.
-	 */
-	storeCredentials: objectStoreCredentialsSchema.optional(),
 });
 export type DatabasePitrRepoConfig = z.infer<typeof databasePitrRepoConfigSchema>;
+
+/**
+ * HA-PLAN W3: a repository on Azure Blob or GCS, with its credentials. No `accessKeyId` or
+ * `secretAccessKey`: the credentials are the store's own (`storeCredentials`). An `s3` store is
+ * always a `databasePitrRepoConfigSchema` instead.
+ */
+export const databasePitrStoreRepoSchema = z
+	.object({
+		store: objectStoreTargetSchema.refine((store) => store.kind !== 's3', 'An S3 repository uses the S3 fields, not a store.'),
+		storeCredentials: objectStoreCredentialsSchema,
+	})
+	.refine((repo) => repo.store.kind === repo.storeCredentials.kind, 'The credentials are for another kind of store.');
+export type DatabasePitrStoreRepo = z.infer<typeof databasePitrStoreRepoSchema>;
+
+/** The control plane's configured PITR repository: S3 (today) or an Azure/GCS store (W3). */
+export type DatabasePitrRepository = DatabasePitrRepoConfig | DatabasePitrStoreRepo;
+
+export function isPitrStoreRepo(repo: DatabasePitrRepository): repo is DatabasePitrStoreRepo {
+	return 'store' in repo && repo.store !== undefined;
+}
+
+export function pitrRepositoryKind(repo: DatabasePitrRepository): ObjectStoreTargetKind {
+	return isPitrStoreRepo(repo) ? repo.store.kind : 's3';
+}
+
+/**
+ * The credential-free view of a repository. For an Azure or GCS store the S3 fields hold the
+ * nearest values (container or bucket, prefix) and `store` names the real target; the view is
+ * shown and stored (`database_pitr.repo_json`), never sent to a node.
+ */
+export function pitrRepositoryView(repo: DatabasePitrRepository): DatabasePitrRepoView {
+	if (!isPitrStoreRepo(repo)) {
+		const { accessKeyId: _key, secretAccessKey: _secret, ...view } = repo;
+		return view;
+	}
+	const store = repo.store;
+	return {
+		kind: 's3',
+		endpoint: store.endpoint,
+		bucket: store.kind === 'azure' ? store.container : store.bucket,
+		region: 'auto',
+		pathPrefix: store.pathPrefix,
+		forcePathStyle: true,
+		store,
+	};
+}
 
 export const databasePitrStatusSchema = z.object({
 	databaseId: z.string(),
@@ -136,6 +180,23 @@ export const databasePitrActivationSchema = z.object({
 	archiveTimeoutSeconds: z.number().int().min(1).max(3600).default(PITR_ARCHIVE_TIMEOUT_SECONDS),
 });
 export type DatabasePitrActivation = z.infer<typeof databasePitrActivationSchema>;
+
+/**
+ * HA-PLAN W3: the activation for an Azure or GCS repository. It has no `repo`, on purpose: every
+ * agent built before W3 parses activations with `databasePitrActivationSchema`, which requires
+ * `repo`, so its parse fails and it never writes an S3 config for a store it cannot reach (it
+ * would read a null endpoint as AWS S3). The control plane also sends it only to a node that
+ * declares `object-store-kinds`.
+ */
+export const databasePitrStoreActivationSchema = databasePitrActivationSchema.omit({ repo: true }).extend({
+	store: databasePitrStoreRepoSchema.shape.store,
+	storeCredentials: objectStoreCredentialsSchema,
+});
+export type DatabasePitrStoreActivation = z.infer<typeof databasePitrStoreActivationSchema>;
+
+/** What a W3 agent (one that declares `object-store-kinds`) parses an activation with. */
+export const databasePitrAnyActivationSchema = z.union([databasePitrActivationSchema, databasePitrStoreActivationSchema]);
+export type DatabasePitrAnyActivation = z.infer<typeof databasePitrAnyActivationSchema>;
 
 export const databasePitrResultSchema = z.object({
 	taskId: z.string().min(1).max(120),

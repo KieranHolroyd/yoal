@@ -419,9 +419,14 @@ export const RUN_LEASES_CAPABILITY = 'run-leases';
  *   `workloads[].addHosts`, and sends `nodeCsr`.
  * - `release-phase` (lane D): `releaseCommands`, `workloads[].readinessPath|drainSeconds|
  *   stopTimeoutSeconds`, `routes[].readinessPath`, and sends `releaseCommandResults`.
- * - `object-store-kinds` (lane E): renders `azure` and `gcs` PITR repositories and Litestream
- *   replicas from `store` fields.
- * `packages/core/src/capability-gate.ts` strips each group from desired state for a node without it.
+ * - `object-store-kinds` (lane E): parses PITR activations with `databasePitrAnyActivationSchema`
+ *   and renders `azure`/`gcs` repositories from their top-level `store` and `storeCredentials`.
+ *   This group is not in desired state: a PITR repository reaches the node only through the
+ *   activation endpoint, which refuses a non-`s3` repository to a node without the capability
+ *   (`packages/core/src/pitr-store-gate.ts`) and leaves `repo` out of it, so an older agent's
+ *   parse fails closed instead of writing an S3 config.
+ * `packages/core/src/capability-gate.ts` strips the first two groups from desired state for a node
+ * without the capability, or for every node while the feature's flag is off.
  */
 export const haWave1Capabilities = [ENDPOINTS_GATEWAY_CAPABILITY, RELEASE_PHASE_CAPABILITY, OBJECT_STORE_KINDS_CAPABILITY] as const;
 export type HaWave1Capability = (typeof haWave1Capabilities)[number];
