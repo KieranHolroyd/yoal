@@ -105,7 +105,8 @@ export type IngressDesired = z.infer<typeof ingressDesiredSchema>;
  * its data directory so a restart does not need a control-plane round trip before serving.
  */
 export const ingressActivationSchema = z.object({
-	accessJwtSecret: z.string().min(1).max(512),
+	/** Null until the control plane has YOAL_ACCESS_JWT_SECRET (the installer writes it). */
+	accessJwtSecret: z.string().min(1).max(512).nullable(),
 	siteCookieSecret: z.string().min(1).max(512),
 	/** The ACME DNS-01 token, when the install uses DNS-01. Null for HTTP-01 or no TLS. */
 	cloudflareApiToken: z.string().min(1).max(512).nullable(),

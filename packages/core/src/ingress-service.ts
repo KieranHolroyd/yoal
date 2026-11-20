@@ -70,8 +70,17 @@ export class IngressSetService {
 			.where(eq(nodes.id, nodeId))
 			.get();
 		if (!node || node.actualStateVersion === null) return false;
-		if (node.actualStateVersion >= this.ctx.nodes.stateVersion()) return false;
-		return (node.actualStateAt ?? now) <= now - INGRESS_DRIFT_AFTER_MS;
+		const desired = this.ctx.nodes.stateVersion();
+		if (node.actualStateVersion >= desired) return false;
+		// The window starts when the node first fell behind: the later of its last applied change
+		// and the watermark's last advance. Using only `actualStateAt` marks every converged node
+		// drifted the instant any project is published.
+		const advancedAt =
+			this.ctx.sqlite
+				.query<{ updated_at: number }, []>("SELECT updated_at FROM settings WHERE key = 'state_version'")
+				.get()?.updated_at ?? 0;
+		const since = Math.max(node.actualStateAt ?? 0, advancedAt);
+		return since <= now - INGRESS_DRIFT_AFTER_MS;
 	}
 
 	/** The drift of every ingress, for steering drivers and the dashboard (H17, §7.1). */
@@ -103,11 +112,10 @@ export class IngressSetService {
 		if (!this.isIngress(nodeId)) throw new ForbiddenError('This node is not in the ingress set.');
 		if (!this.capable(nodeId))
 			throw new ConflictError('This node’s agent does not declare the ingress-set capability; update it first.');
-		const accessJwtSecret = this.ctx.config.accessJwtSecret;
-		if (!accessJwtSecret)
-			throw new ConflictError('YOAL_ACCESS_JWT_SECRET is not configured on the control plane, so ingress secrets cannot be delivered.');
+		// A missing access secret is a configuration gap to fix, not a reason to withhold every
+		// secret: return what exists and let the installer/env report the gap.
 		return {
-			accessJwtSecret,
+			accessJwtSecret: this.ctx.config.accessJwtSecret ?? null,
 			siteCookieSecret: this.ctx.config.siteCookieSecret,
 			cloudflareApiToken: this.ctx.config.cloudflareApiToken ?? null,
 		};

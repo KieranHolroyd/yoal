@@ -97,12 +97,15 @@ export class IngressState extends DesiredStatePart {
 		// A control node dials its own socket. Any other ingress relays to the compatibility first
 		// ingress over HTTPS with the platform host as SNI; W9 replaces this with the control-node
 		// upstream list rendered to every ingress.
-		const control = node.mode === 'edge' || nodeRoles(node).includes('control');
+		const control = node.id === ingressId || node.mode === 'edge' || nodeRoles(node).includes('control');
 		const first = ingressId ? nodeById.get(ingressId) : undefined;
+		const selfFirst = first?.id === node.id;
 		const relay = first ? addressHost(first.privateAddress ?? first.publicAddress) : null;
+		// A control node dials its own socket. Any other ingress relays to the first ingress, but
+		// never to itself: a worker pinned as the first ingress with no local platform would loop.
 		const upstream = control
 			? (this.ctx.config.platformUpstream ?? 'unix//run/yoal/control.sock')
-			: relay && tls
+			: relay && tls && !selfFirst
 				? `https://${relay}`
 				: null;
 		return {

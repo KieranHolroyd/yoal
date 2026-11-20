@@ -4,6 +4,7 @@ import type { CoreContext } from '../context.ts';
 import { featureEnabled } from '../config.ts';
 import { effectiveRuntime } from '../runtime-tier.ts';
 import { firstIngress, ingressNodeIds, isIngressNode } from '../ingress.ts';
+import { nodeHasCapability } from '../capability-gate.ts';
 
 export type NodeRow = typeof nodesTable.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
@@ -113,10 +114,15 @@ export class DesiredStateContext {
 		const holdsCopy = (projectId: string): boolean => replicaNodesByProject.get(projectId)?.includes(node.id) ?? false;
 
 		const ingressSet = featureEnabled(this.ctx.config, 'INGRESS_SET');
+		const firstId = firstIngress(allNodes, this.ctx.config.edgeNodeId ?? null);
+		const firstNode = firstId ? nodeById.get(firstId) : undefined;
+		// The old edge binds only :443; a peer may dial <overlay>:8080 only once every compatibility
+		// ingress (the first one) has the payload-capable agent. Otherwise keep today's address.
+		const overlayProxy = ingressSet && Boolean(firstNode && nodeHasCapability(firstNode, 'ingress-set'));
 		const proxyAddress = (nodeId: string): string | null => {
 			const target = nodeById.get(nodeId);
 			if (!target) return null;
-			if (ingressSet && target.privateAddress) return `${target.privateAddress}:8080`;
+			if (overlayProxy && target.privateAddress) return `${target.privateAddress}:8080`;
 			return target.publicAddress;
 		};
 
