@@ -167,21 +167,43 @@ function staleLeader(seed: number): Scenario {
 }
 
 /**
- * `sync-change`: the sync standby is lost and the primary switches the recorded set to a lagging
- * async replica; the primary is killed in the window between the two steps. This is the schedule
- * the counterexample lives in (W9-SPEC §5.1, §5.5).
+ * `sync-change`: the sync standby is lost and the primary runs the Revision 1 three-step
+ * transition to the async replica. The primary is killed in one of five phases: before the open,
+ * inside the open (before the switch), after the switch before the barrier, after the barrier
+ * before the close, or after the close. Revision 1 forbids an automatic promotion in the first
+ * four; only the last is a normal failover.
  */
 function syncChange(seed: number): Scenario {
 	const { rng, finish } = base(seed, 'sync-change');
 	const faults: Fault[] = [];
 	let id = 0;
 	const t = rng.int(5_000, 10_000);
-	const lagUntil = t + rng.int(2_000, 5_000);
-	const crashAt = t + rng.int(150, 1_900);
-	faults.push(fault(id++, 0, 'lag', { target: 'a', durationMs: lagUntil }));
-	faults.push(edge(id++, t, 'p', 'b', rng.int(40_000, 80_000)));
-	faults.push(fault(id++, t + rng.int(10, 120), 'sync-change', { target: 'a' }));
-	if (rng.chance(0.8)) faults.push(fault(id++, crashAt, 'kill-primary', { durationMs: 0 }));
+	const phase = rng.int(0, 6);
+	const openAt = t + 50;
+	if (phase !== 5) faults.push(edge(id++, t, 'p', 'b', 60_000));
+	if (phase === 0) {
+		faults.push(fault(id++, t + 10, 'kill-primary', { durationMs: 0 }));
+	} else if (phase === 1 || phase === 2) {
+		faults.push(fault(id++, 0, 'lag', { target: 'a', durationMs: openAt + 20_000 }));
+		faults.push(fault(id++, openAt - 10, 'kill-after-open', { value: phase === 1 ? 100 : 600 }));
+		faults.push(fault(id++, openAt, 'sync-change', { target: 'a' }));
+	} else if (phase === 3) {
+		faults.push(fault(id++, openAt - 10, 'kill-after-barrier'));
+		faults.push(fault(id++, openAt, 'sync-change', { target: 'a' }));
+	} else if (phase === 4) {
+		faults.push(fault(id++, openAt, 'sync-change', { target: 'a' }));
+		faults.push(fault(id++, openAt + 4_000, 'kill-primary', { durationMs: 0 }));
+	} else if (phase === 5) {
+		// The new member cannot acknowledge the barrier; the old sync standby is healthy. After
+		// SYNC_CHANGE_TIMEOUT the primary must fall back to the old member, steady.
+		faults.push(fault(id++, 0, 'lag', { target: 'a', durationMs: openAt + 40_000 }));
+		faults.push(fault(id++, openAt, 'sync-change', { target: 'a' }));
+	} else {
+		// The new member cannot acknowledge the barrier and the old member is not healthy: the
+		// on_sync_loss downgrade closes the transition steady with durability_effective async.
+		faults.push(fault(id++, 0, 'lag', { target: 'a', durationMs: openAt + 40_000 }));
+		faults.push(fault(id++, openAt, 'sync-change', { target: 'a' }));
+	}
 	return finish({ faults, durability: 'sync', sync: ['b'], durationMs: 45_000 });
 }
 
@@ -266,10 +288,16 @@ function mixed(seed: number): Scenario {
 				);
 				break;
 			case 'sync': {
-				faults.push(fault(id++, 0, 'lag', { target: 'a', durationMs: t + 3_000 }));
 				faults.push(edge(id++, t, 'p', 'b', 40_000));
-				faults.push(fault(id++, t + 30, 'sync-change', { target: 'a' }));
-				if (rng.chance(0.6)) faults.push(fault(id++, t + rng.int(150, 1_200), 'kill-primary', { durationMs: 0 }));
+				const mode = rng.int(0, 3);
+				if (mode === 0) {
+					faults.push(fault(id++, 0, 'lag', { target: 'a', durationMs: t + 20_000 }));
+					faults.push(fault(id++, t + 40, 'kill-after-open', { value: 100 }));
+				} else if (mode === 1) {
+					faults.push(fault(id++, t + 40, 'kill-after-barrier'));
+				}
+				faults.push(fault(id++, t + 50, 'sync-change', { target: 'a' }));
+				if (mode === 2) faults.push(fault(id++, t + 4_000, 'kill-primary', { durationMs: 0 }));
 				break;
 			}
 			case 'control':
@@ -298,20 +326,120 @@ export function generateScenario(seed: number, family: Family): Scenario {
 }
 
 /**
- * The fixed minimal schedule for the counterexample. Short enough to read: four faults, one
- * promotion, one missing acknowledged commit.
+ * The old counterexample, as a Revision 1 regression: the primary dies after open and before the
+ * barrier, with the target lagging. `syncState: 'changing'` must make the fleet non-promotable.
  */
 export function minimalSyncChange(): Scenario {
 	const faults: Fault[] = [
-		fault(0, 0, 'lag', { target: 'a', durationMs: 3_000 }),
+		fault(0, 0, 'lag', { target: 'a', durationMs: 10_000 }),
 		edge(1, 1_500, 'p', 'b', 60_000),
-		fault(2, 1_550, 'sync-change', { target: 'a' }),
-		fault(3, 1_800, 'kill-primary', { durationMs: 0 }),
+		fault(2, 1_540, 'kill-after-open', { value: 100 }),
+		fault(3, 1_550, 'sync-change', { target: 'a' }),
 	];
 	return {
 		name: 'sync-change-minimal',
 		family: 'sync-change',
-		durationMs: 25_000,
+		durationMs: 30_000,
+		faults,
+		expect: {},
+		durability: 'sync',
+		sync: ['b'],
+		syncLoss: 'downgrade',
+		writes: true,
+	};
+}
+
+/** The primary dies after the barrier was acknowledged, before the close. Still `changing`. */
+export function syncChangeAfterBarrier(): Scenario {
+	const faults: Fault[] = [
+		edge(0, 1_500, 'p', 'b', 60_000),
+		fault(1, 1_540, 'kill-after-barrier'),
+		fault(2, 1_550, 'sync-change', { target: 'a' }),
+	];
+	return {
+		name: 'sync-change-after-barrier',
+		family: 'sync-change',
+		durationMs: 30_000,
+		faults,
+		expect: {},
+		durability: 'sync',
+		sync: ['b'],
+		syncLoss: 'downgrade',
+		writes: true,
+	};
+}
+
+/** The transition closed `steady {a}` and the primary died afterwards: a normal, safe failover. */
+export function syncChangeAfterClose(): Scenario {
+	const faults: Fault[] = [
+		edge(0, 1_500, 'p', 'b', 60_000),
+		fault(1, 1_550, 'sync-change', { target: 'a' }),
+		fault(2, 5_500, 'kill-primary', { durationMs: 0 }),
+	];
+	return {
+		name: 'sync-change-after-close',
+		family: 'sync-change',
+		durationMs: 30_000,
+		faults,
+		expect: {},
+		durability: 'sync',
+		sync: ['b'],
+		syncLoss: 'downgrade',
+		writes: true,
+	};
+}
+
+/** The barrier times out; the old standby is healthy, so step 3 falls back to it, steady. */
+export function syncChangeFallback(): Scenario {
+	const faults: Fault[] = [
+		fault(0, 0, 'lag', { target: 'a', durationMs: 40_000 }),
+		fault(1, 1_550, 'sync-change', { target: 'a' }),
+	];
+	return {
+		name: 'sync-change-fallback',
+		family: 'sync-change',
+		durationMs: 45_000,
+		faults,
+		expect: {},
+		durability: 'sync',
+		sync: ['b'],
+		syncLoss: 'downgrade',
+		writes: true,
+	};
+}
+
+/** The barrier times out, the old standby is not healthy: on_sync_loss downgrade, steady. */
+export function syncChangeDowngrade(): Scenario {
+	const faults: Fault[] = [
+		edge(0, 1_500, 'p', 'b', 60_000),
+		fault(1, 0, 'lag', { target: 'a', durationMs: 40_000 }),
+		fault(2, 1_550, 'sync-change', { target: 'a' }),
+	];
+	return {
+		name: 'sync-change-downgrade',
+		family: 'sync-change',
+		durationMs: 45_000,
+		faults,
+		expect: {},
+		durability: 'sync',
+		sync: ['b'],
+		syncLoss: 'downgrade',
+		writes: true,
+	};
+}
+
+/** The close CAS applies but its response is lost: the primary must adopt the steady lease. */
+export function syncChangeCloseRace(): Scenario {
+	const faults: Fault[] = [
+		edge(0, 1_500, 'p', 'b', 60_000),
+		fault(1, 1_550, 'sync-change', { target: 'a' }),
+		edge(2, 2_100, 'arb', 'p', 600, { symmetric: false }),
+		fault(3, 6_000, 'kill-primary', { durationMs: 0 }),
+	];
+	return {
+		name: 'sync-change-close-race',
+		family: 'sync-change',
+		durationMs: 35_000,
 		faults,
 		expect: {},
 		durability: 'sync',
@@ -369,6 +497,11 @@ export function wallClockFenceScenario(): Scenario {
 /** Name → scenario for the CLI's `--scenario`. */
 export const FIXED_SCENARIOS: Record<string, () => Scenario> = {
 	'sync-change-minimal': minimalSyncChange,
+	'sync-change-after-barrier': syncChangeAfterBarrier,
+	'sync-change-after-close': syncChangeAfterClose,
+	'sync-change-fallback': syncChangeFallback,
+	'sync-change-downgrade': syncChangeDowngrade,
+	'sync-change-close-race': syncChangeCloseRace,
 	'control-outage-minimal': minimalControlOutage,
 	'wall-clock-fence': wallClockFenceScenario,
 };

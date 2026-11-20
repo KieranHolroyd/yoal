@@ -1,33 +1,72 @@
 import { describe, expect, test } from 'bun:test';
 import { W9World } from './model.ts';
-import { generateScenario, minimalControlOutage, minimalSyncChange, wallClockFenceScenario } from './schedules.ts';
-import { FAMILIES, type Family, isKnownCounterexample } from './spec.ts';
+import {
+	generateScenario,
+	minimalControlOutage,
+	minimalSyncChange,
+	syncChangeAfterBarrier,
+	syncChangeAfterClose,
+	syncChangeCloseRace,
+	syncChangeDowngrade,
+	syncChangeFallback,
+	wallClockFenceScenario,
+} from './schedules.ts';
+import { FAMILIES, type Family } from './spec.ts';
 
 function scenarioFor(seed: number, family?: Family) {
 	return generateScenario(seed, family ?? (FAMILIES[seed % FAMILIES.length] as Family));
 }
 
-describe('W9 model (W9-SPEC §7)', () => {
-	test('the two-step sync-set ordering is a counterexample (I13)', () => {
-		const result = new W9World({ seed: 1, scenario: minimalSyncChange() }).run();
-		const missing = result.violations.filter((v) => v.kind === 'missing-ack-at-promotion');
-		expect(missing.length).toBeGreaterThan(0);
-		expect(result.violations.every(isKnownCounterexample)).toBe(true);
-		expect(result.stats.promotions).toBe(1);
-		// The lagging async replica promotes only because step 1 named it before step 2 changed
-		// synchronous_standby_names.
+describe('W9 model, Revision 1 (W9-SPEC §5.5, §7)', () => {
+	test('the old counterexample is now safe: dying before the barrier does not promote', () => {
+		const result = new W9World({ seed: 1, scenario: minimalSyncChange(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.promotions).toBe(0);
 		const trace = result.trace.map((e) => e.text).join('\n');
-		expect(trace).toContain('step 1: lease records sync {a}; synchronous_standby_names still b');
-		expect(trace).toContain('primary killed');
-		expect(trace).toContain('PRIMARY at generation 2');
+		expect(trace).toContain('open: sync [], syncState changing');
+		expect(trace).toContain('kills the primary inside the open transition');
 	});
 
-	test('changing the setting before recording the set loses no acknowledged commit', () => {
-		const result = new W9World({ seed: 1, scenario: minimalSyncChange(), mutant: 'sync-setting-first', trace: true }).run();
+	test('dying after the barrier but before the close does not promote either', () => {
+		const result = new W9World({ seed: 1, scenario: syncChangeAfterBarrier(), trace: true }).run();
 		expect(result.violations).toEqual([]);
-		// The replica that actually held the acknowledged commits (b) promotes, not the lagging a.
-		expect(result.trace.some((e) => e.actor === 'b' && e.text.includes('PRIMARY'))).toBe(true);
+		expect(result.stats.promotions).toBe(0);
+		const trace = result.trace.map((e) => e.text).join('\n');
+		expect(trace).toContain('barrier #');
+		expect(trace).toContain('barrier acknowledged; schedule kills the primary before the close');
+	});
+
+	test('after the close, the new sync standby promotes with every acknowledged commit', () => {
+		const result = new W9World({ seed: 1, scenario: syncChangeAfterClose(), trace: true }).run();
+		expect(result.violations).toEqual([]);
 		expect(result.stats.promotions).toBe(1);
+		expect(result.trace.some((e) => e.actor === 'a' && e.text.includes('PRIMARY'))).toBe(true);
+		expect(result.trace.map((e) => e.text).join('\n')).toContain('close: sync {a}, syncState steady');
+	});
+
+	test('the barrier timeout falls back to the healthy old standby, steady', () => {
+		const result = new W9World({ seed: 1, scenario: syncChangeFallback(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.promotions).toBe(0);
+		expect(result.trace.map((e) => e.text).join('\n')).toContain('fallback: sync {b}, syncState steady');
+	});
+
+	test('the barrier timeout with no healthy old member downgrades, steady', () => {
+		const result = new W9World({ seed: 1, scenario: syncChangeDowngrade(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.promotions).toBe(0);
+		expect(result.trace.map((e) => e.text).join('\n')).toContain(
+			'downgraded: durability_effective = async recorded in the lease',
+		);
+	});
+
+	test('a close whose response is lost is adopted; the new standby promotes safely', () => {
+		const result = new W9World({ seed: 1, scenario: syncChangeCloseRace(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.promotions).toBe(1);
+		expect(result.trace.map((e) => e.text).join('\n')).toContain(
+			're-read shows the transition closed; adopting steady',
+		);
 	});
 
 	test('I11: a control-plane outage keeps traffic and completes the database failover', () => {
@@ -38,26 +77,28 @@ describe('W9 model (W9-SPEC §7)', () => {
 		expect(result.stats.controlOutageAcks).toBeGreaterThan(0);
 	});
 
-	test('5,000-schedule default run has no violation other than the known counterexample', () => {
-		// Bounded here so the unit suite stays quick; `bun tests/ha/sim/w9/run.ts --runs 5000` is
-		// the CI command and covers the same code.
+	test('the 300-schedule normal run has no violations', () => {
 		for (let seed = 1; seed <= 300; seed++) {
 			const result = new W9World({ seed, scenario: scenarioFor(seed) }).run();
-			for (const violation of result.violations) expect(isKnownCounterexample(violation)).toBe(true);
+			expect(result.violations.map((v) => `${v.property}/${v.kind}`)).toEqual([]);
 		}
 	});
 
-	test('the counterexample is not hiding a same-generation split (I3)', () => {
-		const result = new W9World({ seed: 1, scenario: minimalSyncChange() }).run();
+	test('checker: a promotion while syncState is changing is caught as I12', () => {
+		const result = new W9World({
+			seed: 1,
+			scenario: minimalSyncChange(),
+			mutant: 'promote-while-changing',
+		}).run();
+		expect(result.violations.some((v) => v.kind === 'promotion-during-sync-change')).toBe(true);
 		expect(result.violations.some((v) => v.property === 'I3')).toBe(false);
-		expect(result.violations.some((v) => v.property === 'I12')).toBe(false);
 	});
 
 	test('checker: an ineligible promotion is caught as I12', () => {
 		let caught = false;
 		for (let seed = 1; seed <= 50 && !caught; seed++) {
 			const result = new W9World({ seed, scenario: scenarioFor(seed, 'sync-change'), mutant: 'ignore-eligibility' }).run();
-			caught = result.violations.some((v) => v.property === 'I12');
+			caught = result.violations.some((v) => v.kind === 'promotion-not-in-sync-set');
 		}
 		expect(caught).toBe(true);
 	});
@@ -77,7 +118,7 @@ describe('W9 model (W9-SPEC §7)', () => {
 
 	test('checker: a CAS at the same generation is caught as I3', () => {
 		let caught = false;
-		for (let seed = 1; seed <= 60 && !caught; seed++) {
+		for (let seed = 1; seed <= 80 && !caught; seed++) {
 			const result = new W9World({
 				seed,
 				scenario: scenarioFor(seed, 'keepalive-acquire'),
@@ -105,8 +146,6 @@ describe('W9 model (W9-SPEC §7)', () => {
 	});
 
 	test('a legitimate control takeover by the same holder is not a monotonicity failure', () => {
-		// The control plane is away long enough that c0 fences and later takes over its own lease at
-		// epoch+1. That is a takeover, not a renew, and must not trip the epoch check.
 		let sawSameHolderTakeover = false;
 		for (let seed = 100; seed < 200 && !sawSameHolderTakeover; seed += 10) {
 			const result = new W9World({ seed, scenario: scenarioFor(seed, 'control-outage') }).run();

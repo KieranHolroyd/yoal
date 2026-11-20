@@ -41,7 +41,6 @@ import {
 	type Violation,
 	type ViolationKind,
 	SPEC,
-	isKnownCounterexample,
 } from './spec.ts';
 
 export type DbState = 'streaming' | 'candidate' | 'promoting' | 'primary' | 'fencing' | 'fenced' | 'rewind';
@@ -70,8 +69,17 @@ interface DbMember {
 	peerLastAnswer: Map<MemberId, number>;
 	lastAnsweredToPrimary: number;
 	effectiveSync: MemberId | null;
-	pendingSetting: MemberId | null;
-	settingAt: number;
+	changePhase: 'opening' | 'switching' | null;
+	changeTarget: MemberId | null;
+	changeOld: MemberId | null;
+	changeOpenedAt: number;
+	changeTimeoutAt: number;
+	barrierId: number;
+	barrierSnapshot: Set<number>;
+	killAfterOpen: number | null;
+	killAfterBarrier: boolean;
+	streamEpoch: number;
+	replAt: Map<MemberId, number>;
 	syncLostSince: number;
 	syncDowngradeAt: number;
 	nextSyncChangeAt: number;
@@ -227,6 +235,11 @@ export class W9World {
 		controlOutageAcks: 0,
 		failoverLatencyMs: null,
 		controlPromotions: 0,
+		syncChangesOpened: 0,
+		syncChangesClosed: 0,
+		syncChangesFellBack: 0,
+		syncChangesDowngraded: 0,
+		primaryKilledChanging: 0,
 	};
 
 	#queue = new EventQueue();
@@ -244,7 +257,6 @@ export class W9World {
 	#edges = new Map<string, { mode: 'refuse' | 'drop' }[]>();
 	#lagged = new Map<MemberId, number>();
 
-	#settingGap: number;
 	#syncLoss: 'downgrade' | 'block';
 
 	#commits = new Map<number, Commit>();
@@ -267,7 +279,6 @@ export class W9World {
 		this.#rng = new Rng(options.seed, 11);
 		this.#trace = options.trace ? [] : null;
 		this.#verbose = options.verbose ?? false;
-		this.#settingGap = this.#rng.int(800, 1800);
 		this.#syncLoss = options.scenario.syncLoss ?? 'downgrade';
 
 		const sync = options.scenario.sync ?? ['b'];
@@ -277,6 +288,7 @@ export class W9World {
 			holderNodeId: 'p',
 			expiresAt: SPEC.db.ttlMs,
 			sync,
+			syncState: 'steady',
 			durability,
 			durabilityEffective: durability,
 			syncSetAt: 0,
@@ -311,8 +323,17 @@ export class W9World {
 				]),
 				lastAnsweredToPrimary: 0,
 				effectiveSync: id === 'p' ? (sync[0] ?? null) : null,
-				pendingSetting: null,
-				settingAt: 0,
+				changePhase: null,
+				changeTarget: null,
+				changeOld: null,
+				changeOpenedAt: 0,
+				changeTimeoutAt: 0,
+				barrierId: 0,
+				barrierSnapshot: new Set<number>(),
+				killAfterOpen: null,
+				killAfterBarrier: false,
+				streamEpoch: 0,
+				replAt: new Map<MemberId, number>(),
 				syncLostSince: 0,
 				syncDowngradeAt: 0,
 				nextSyncChangeAt: 0,
@@ -613,7 +634,6 @@ export class W9World {
 		this.T = Math.min(this.T, this.scenario.durationMs);
 		this.#finalize();
 
-		const knownOnly = this.violations.length > 0 && this.violations.every(isKnownCounterexample);
 		return {
 			seed: this.seed,
 			family: this.scenario.family,
@@ -623,7 +643,6 @@ export class W9World {
 			trace: this.#trace ?? [],
 			events: this.events,
 			durationMs: this.T,
-			knownOnly,
 		};
 	}
 
@@ -796,7 +815,17 @@ export class W9World {
 			}
 			case 'sync-change': {
 				const primary = this.#highestPrimary();
-				if (primary && primary.id === 'p') this.#changeSyncSet(primary, fault.target as MemberId);
+				if (primary) this.#openSyncChange(primary, fault.target as MemberId);
+				break;
+			}
+			case 'kill-after-open': {
+				const primary = this.#highestPrimary();
+				if (primary) primary.killAfterOpen = fault.value ?? 0;
+				break;
+			}
+			case 'kill-after-barrier': {
+				const primary = this.#highestPrimary();
+				if (primary) primary.killAfterBarrier = true;
 				break;
 			}
 			case 'lag':
@@ -828,11 +857,17 @@ export class W9World {
 	#crash(id: string, durationMs: number): void {
 		const member = this.db.find((m) => m.id === id);
 		if (member) {
+			if (member.state === 'primary' && member.changePhase !== null) this.stats.primaryKilledChanging++;
 			member.alive = false;
 			member.state = member.state === 'primary' ? 'fencing' : member.state;
 			member.streamFrom = null;
-			member.pendingSetting = null;
 			member.effectiveSync = null;
+			member.changePhase = null;
+			member.changeTarget = null;
+			member.changeOld = null;
+			member.barrierSnapshot.clear();
+			member.killAfterOpen = null;
+			member.killAfterBarrier = false;
 			member.acquire = null;
 			this.#cancel(member.fenceTimer);
 			if (durationMs > 0)
@@ -1166,35 +1201,51 @@ export class W9World {
 			this.#fence(member, 'cannot prove the lease');
 			return;
 		}
-		// A new primary with sync durability and no effective standby picks one the same way.
-		if (member.durability === 'sync' && member.effectiveSync === null && member.pendingSetting === null) {
-			const target = this.#pickSyncTarget(member);
-			if (target) {
-				member.syncDowngradeAt = 0;
-				this.#changeSyncSet(member, target.id);
-			} else if (member.syncDowngradeAt === 0) {
-				member.syncDowngradeAt = this.T + SPEC.syncDowngradeAfterMs;
-			}
-		}
-		// Sync loss: pick another replica the same two-step way, or start the downgrade clock.
-		if (member.pendingSetting === null && member.effectiveSync !== null && this.#streamDown(member, member.effectiveSync)) {
-			if (member.syncLostSince === 0) member.syncLostSince = this.T;
-			else if (this.T - member.syncLostSince >= 2000) {
-				const target = this.#pickSyncTarget(member);
-				if (target) {
-					member.syncDowngradeAt = 0;
-					this.#changeSyncSet(member, target.id);
-				} else if (member.syncDowngradeAt === 0 && this.#syncLoss === 'downgrade') {
-					member.syncDowngradeAt = this.T + SPEC.syncDowngradeAfterMs;
-					this.#log(member.id, `no replica left for sync; downgrade in ${(SPEC.syncDowngradeAfterMs / 1000).toFixed(0)} s`);
+		if (member.changePhase === null) {
+			this.#maybeStartSyncChange(member);
+		} else if (member.changePhase === 'switching') {
+			if (this.#barrierHolds(member)) {
+				if (member.killAfterBarrier) {
+					member.killAfterBarrier = false;
+					this.#log(member.id, 'barrier acknowledged; schedule kills the primary before the close');
+					this.#crash(member.id, 0);
+					return;
 				}
+				this.#closeSyncChange(member, member.changeTarget);
+			} else if (this.T >= member.changeTimeoutAt) {
+				this.#timeoutSyncChange(member);
 			}
-		} else if (member.effectiveSync !== null && !this.#streamDown(member, member.effectiveSync)) {
-			member.syncLostSince = 0;
 		}
-		if (member.pendingSetting !== null && this.T >= member.settingAt) this.#applySetting(member);
-		if (member.syncDowngradeAt !== 0 && this.T >= member.syncDowngradeAt) this.#downgrade(member);
+		if (member.changePhase === null && member.syncDowngradeAt !== 0 && this.T >= member.syncDowngradeAt)
+			this.#downgrade(member);
 		if (this.T - member.lastRenewSent >= SPEC.db.renewMs) this.#renewDb(member);
+	}
+
+	/**
+	 * W9-SPEC §5.5. A change is only started from a steady lease, and while it is open the lease is
+	 * `changing` with an empty sync set, so no member may acquire automatically.
+	 */
+	#maybeStartSyncChange(member: DbMember): void {
+		if (member.durability !== 'sync') return;
+		if ((member.lease?.syncState ?? 'steady') !== 'steady') return;
+		const lost = member.effectiveSync !== null && this.#streamDown(member, member.effectiveSync);
+		if (lost) {
+			if (member.syncLostSince === 0) {
+				member.syncLostSince = this.T;
+				if (member.syncDowngradeAt === 0 && this.#syncLoss === 'downgrade')
+					member.syncDowngradeAt = this.T + SPEC.syncDowngradeAfterMs;
+			}
+			if (this.T - member.syncLostSince < 2000) return;
+		} else if (member.effectiveSync !== null) {
+			member.syncLostSince = 0;
+			return;
+		}
+		if (member.effectiveSync === null && member.syncDowngradeAt === 0 && this.#syncLoss === 'downgrade')
+			member.syncDowngradeAt = this.T + SPEC.syncDowngradeAfterMs;
+		const target = this.#pickSyncTarget(member);
+		if (target) {
+			this.#openSyncChange(member, target.id);
+		}
 	}
 
 	#streamDown(primary: DbMember, peerId: MemberId): boolean {
@@ -1216,85 +1267,217 @@ export class W9World {
 		return null;
 	}
 
-	#changeSyncSet(member: DbMember, target: MemberId): void {
+	/** Step 1 of §5.5: open the transition (sync [], changing) before touching the setting. */
+	#openSyncChange(member: DbMember, target: MemberId): void {
 		if (member.state !== 'primary' || !member.leaseEtag) return;
-		if (member.pendingSetting !== null) return;
-		if (this.T < member.nextSyncChangeAt) return;
-		if (this.mutant === 'sync-setting-first') {
-			// Diagnostic variant: set the PG name first, then record it. A crash in between leaves the
-			// lease naming the old, dead replica, so nobody can promote without accept_data_loss.
-			member.pendingSetting = target;
-			member.nextSyncChangeAt = 0;
-			member.settingAt = this.T + this.#settingGap;
-			this.#log(member.id, `diagnostic: synchronous_standby_names = ${target} first`);
-			return;
-		}
+		if (member.changePhase !== null) return;
+		if ((member.lease?.syncState ?? 'steady') !== 'steady') return;
+		const old = member.effectiveSync;
 		const body: DbLease = {
 			generation: member.generation,
 			holderNodeId: member.id,
 			expiresAt: this.#serverNow(member.id) + SPEC.db.ttlMs,
-			sync: [target],
+			sync: [],
+			syncState: 'changing',
 			durability: member.lease?.durability ?? 'sync',
 			durabilityEffective: member.lease?.durabilityEffective ?? 'sync',
 			syncSetAt: this.T,
 		};
 		this.#arbWriteDb(member.id, { ifMatch: member.leaseEtag }, body, (err, result) => {
 			if (!member.alive || member.state !== 'primary') return;
-			if (err || !result) {
-				member.nextSyncChangeAt = this.T + 3000;
-				this.#log(member.id, `sync set change failed: ${err ?? 'no answer'}`);
-				return;
-			}
-			if (result.status !== 200) {
-				member.nextSyncChangeAt = this.T + 1000;
-				this.#log(member.id, `sync set change lost the CAS (${result.status}); re-reading`);
-				this.#rereadDb(member, 'sync set change');
+			if (err || !result || result.status !== 200) {
+				this.#log(member.id, `open sync change failed (${err ?? result?.status ?? 'no answer'}); re-reading`);
+				this.#rereadDb(member, 'open sync change');
 				return;
 			}
 			member.lease = body;
 			member.leaseEtag = result.etag;
 			member.lastServerDate = result.date;
 			member.serverAt = this.T;
-			member.pendingSetting = target;
-			member.nextSyncChangeAt = 0;
-			member.settingAt = this.T + this.#settingGap;
-			this.#log(
-				member.id,
-				`step 1: lease records sync {${target}}; synchronous_standby_names still ${member.effectiveSync ?? 'none'}`,
-			);
+			member.changePhase = 'opening';
+			member.changeTarget = target;
+			member.changeOld = old;
+			member.changeOpenedAt = this.T;
+			member.changeTimeoutAt = this.T + 30_000;
+			member.barrierId = 0;
+			member.barrierSnapshot = new Set<number>();
+			member.syncDowngradeAt = 0;
+			member.syncLostSince = 0;
+			this.stats.syncChangesOpened++;
+			this.#log(member.id, `open: sync [], syncState changing (target ${target})`);
+			if (member.killAfterOpen !== null) {
+				const delay = Math.max(1, member.killAfterOpen);
+				member.killAfterOpen = null;
+				this.#timer(this.T + delay, () => {
+					if (!member.alive || member.state !== 'primary') return;
+					this.#log(member.id, 'schedule kills the primary inside the open transition');
+					this.#crash(member.id, 0);
+				});
+			}
+			this.#startSwitching(member);
 		});
 	}
 
-	#applySetting(member: DbMember): void {
-		const target = member.pendingSetting;
-		if (!target) return;
-		member.pendingSetting = null;
-		member.settingAt = 0;
+	/** Step 2 of §5.5: switch the setting, then issue the barrier the primary watches. */
+	#startSwitching(member: DbMember): void {
+		if (member.state !== 'primary' || member.changePhase !== 'opening') return;
+		const target = member.changeTarget;
+		if (!target) {
+			this.#timeoutSyncChange(member);
+			return;
+		}
+		member.changePhase = 'switching';
 		member.effectiveSync = target;
-		member.syncLostSince = 0;
-		this.#log(member.id, `step 2: synchronous_standby_names = ${target}`);
-		this.#checkPendingAcks();
-		if (this.mutant !== 'sync-setting-first') return;
-		// Diagnostic variant's second step: only now is the set recorded. The target has been the
-		// effective synchronous standby since step 2, so every acknowledged commit is on it.
-		if (member.state !== 'primary' || !member.leaseEtag) return;
+		const id = ++this.#nextCommit;
+		const barrier: Commit = {
+			id,
+			gen: member.generation,
+			acceptedBy: member.id,
+			durability: 'sync',
+			acked: true,
+			ackAt: this.T,
+			waitFor: null,
+			timedOut: false,
+		};
+		member.history.add(id);
+		this.#commits.set(id, barrier);
+		member.barrierId = id;
+		member.barrierSnapshot = new Set(member.history);
+		this.#replicate(member, barrier);
+		this.#log(member.id, `switch: synchronous_standby_names = ${target}; barrier #${id}`);
+	}
+
+	#barrierHolds(member: DbMember): boolean {
+		const target = member.changeTarget;
+		if (!target) return false;
+		const peer = this.#dbMember(target);
+		if (!peer.alive || this.T < peer.frozenUntil) return false;
+		for (const id of member.barrierSnapshot) if (!peer.history.has(id)) return false;
+		return true;
+	}
+
+	/** Step 3 of §5.5: only now is the new member eligible. */
+	#closeSyncChange(member: DbMember, target: MemberId | null): void {
+		if (member.state !== 'primary' || !member.leaseEtag || !target) return;
 		const body: DbLease = {
 			generation: member.generation,
 			holderNodeId: member.id,
 			expiresAt: this.#serverNow(member.id) + SPEC.db.ttlMs,
 			sync: [target],
+			syncState: 'steady',
 			durability: member.durability,
 			durabilityEffective: member.durabilityEffective,
 			syncSetAt: this.T,
 		};
 		this.#arbWriteDb(member.id, { ifMatch: member.leaseEtag }, body, (err, result) => {
 			if (!member.alive || member.state !== 'primary') return;
-			if (err || !result || result.status !== 200) return;
+			if (err || !result || result.status !== 200) {
+				this.#log(member.id, `close sync change failed (${err ?? result?.status ?? 'no answer'}); re-reading`);
+				this.#rereadDb(member, 'close sync change');
+				return;
+			}
 			member.lease = body;
 			member.leaseEtag = result.etag;
 			member.lastServerDate = result.date;
 			member.serverAt = this.T;
-			this.#log(member.id, `diagnostic: lease now records sync {${target}}`);
+			member.changePhase = null;
+			member.changeTarget = null;
+			member.changeOld = null;
+			member.barrierSnapshot.clear();
+			member.syncDowngradeAt = 0;
+			this.stats.syncChangesClosed++;
+			this.#log(member.id, `close: sync {${target}}, syncState steady`);
+			this.#checkPendingAcks();
+		});
+	}
+
+	#timeoutSyncChange(member: DbMember): void {
+		if (member.changePhase !== 'switching') return;
+		const target = member.changeTarget;
+		if (target && this.#barrierHolds(member)) {
+			this.#closeSyncChange(member, target);
+			return;
+		}
+		const old = member.changeOld;
+		if (old && old !== member.id) {
+			const peer = this.#dbMember(old);
+			const healthy =
+				peer.alive && this.T >= peer.frozenUntil && peer.streamFrom === member.id && this.#edge(member.id, old) === 'up';
+			if (healthy) {
+				this.#fallbackSyncChange(member, old);
+				return;
+			}
+		}
+		if (this.#syncLoss === 'downgrade') this.#downgrade(member);
+		else this.#blockSyncChange(member);
+	}
+
+	#fallbackSyncChange(member: DbMember, old: MemberId): void {
+		if (member.state !== 'primary' || !member.leaseEtag) return;
+		const body: DbLease = {
+			generation: member.generation,
+			holderNodeId: member.id,
+			expiresAt: this.#serverNow(member.id) + SPEC.db.ttlMs,
+			sync: [old],
+			syncState: 'steady',
+			durability: member.durability,
+			durabilityEffective: member.durabilityEffective,
+			syncSetAt: this.T,
+		};
+		this.#arbWriteDb(member.id, { ifMatch: member.leaseEtag }, body, (err, result) => {
+			if (!member.alive || member.state !== 'primary') return;
+			if (err || !result || result.status !== 200) {
+				this.#log(member.id, `fallback failed (${err ?? result?.status ?? 'no answer'}); re-reading`);
+				this.#rereadDb(member, 'fallback sync change');
+				return;
+			}
+			member.lease = body;
+			member.leaseEtag = result.etag;
+			member.lastServerDate = result.date;
+			member.serverAt = this.T;
+			member.effectiveSync = old;
+			member.changePhase = null;
+			member.changeTarget = null;
+			member.changeOld = null;
+			member.barrierSnapshot.clear();
+			member.syncDowngradeAt = 0;
+			this.stats.syncChangesFellBack++;
+			this.#log(member.id, `fallback: sync {${old}}, syncState steady`);
+			this.#checkPendingAcks();
+		});
+	}
+
+	/** `on_sync_loss: block`: close the transition steady with no eligible member and no downgrade. */
+	#blockSyncChange(member: DbMember): void {
+		if (member.state !== 'primary' || !member.leaseEtag) return;
+		const body: DbLease = {
+			generation: member.generation,
+			holderNodeId: member.id,
+			expiresAt: this.#serverNow(member.id) + SPEC.db.ttlMs,
+			sync: [],
+			syncState: 'steady',
+			durability: 'sync',
+			durabilityEffective: 'sync',
+			syncSetAt: this.T,
+		};
+		this.#arbWriteDb(member.id, { ifMatch: member.leaseEtag }, body, (err, result) => {
+			if (!member.alive || member.state !== 'primary') return;
+			if (err || !result || result.status !== 200) {
+				this.#log(member.id, `block close failed (${err ?? result?.status ?? 'no answer'}); re-reading`);
+				this.#rereadDb(member, 'block sync change');
+				return;
+			}
+			member.lease = body;
+			member.leaseEtag = result.etag;
+			member.lastServerDate = result.date;
+			member.serverAt = this.T;
+			member.effectiveSync = null;
+			member.changePhase = null;
+			member.changeTarget = null;
+			member.changeOld = null;
+			member.barrierSnapshot.clear();
+			member.syncDowngradeAt = 0;
+			this.#log(member.id, 'block: sync [], syncState steady; no eligible member');
 		});
 	}
 
@@ -1304,15 +1487,17 @@ export class W9World {
 			generation: member.generation,
 			holderNodeId: member.id,
 			expiresAt: this.#serverNow(member.id) + SPEC.db.ttlMs,
-			sync: member.lease?.sync ?? [],
+			sync: [],
+			syncState: 'steady',
 			durability: 'async',
 			durabilityEffective: 'async',
-			syncSetAt: member.lease?.syncSetAt ?? this.T,
+			syncSetAt: this.T,
 		};
 		this.#arbWriteDb(member.id, { ifMatch: member.leaseEtag }, body, (err, result) => {
 			if (!member.alive || member.state !== 'primary') return;
 			if (err || !result || result.status !== 200) {
-				this.#log(member.id, `downgrade failed (${err ?? result?.status ?? 'no answer'}); retrying`);
+				this.#log(member.id, `downgrade failed (${err ?? result?.status ?? 'no answer'}); re-reading`);
+				this.#rereadDb(member, 'downgrade');
 				return;
 			}
 			member.lease = body;
@@ -1322,7 +1507,12 @@ export class W9World {
 			member.durability = 'async';
 			member.durabilityEffective = 'async';
 			member.effectiveSync = null;
+			member.changePhase = null;
+			member.changeTarget = null;
+			member.changeOld = null;
+			member.barrierSnapshot.clear();
 			member.syncDowngradeAt = 0;
+			this.stats.syncChangesDowngraded++;
 			this.#log(member.id, 'downgraded: durability_effective = async recorded in the lease');
 			this.#checkPendingAcks();
 		});
@@ -1338,6 +1528,7 @@ export class W9World {
 			holderNodeId: member.id,
 			expiresAt: this.#serverNow(member.id) + SPEC.db.ttlMs,
 			sync: member.lease?.sync ?? [],
+			syncState: member.lease?.syncState ?? 'steady',
 			durability: member.lease?.durability ?? 'sync',
 			durabilityEffective: member.lease?.durabilityEffective ?? 'sync',
 			syncSetAt: member.lease?.syncSetAt ?? this.T,
@@ -1377,13 +1568,46 @@ export class W9World {
 				member.lease = lease;
 				member.leaseEtag = etag;
 				member.lastServerDate = date ?? this.T;
-			member.serverAt = this.T;
+				member.serverAt = this.T;
 				member.lastRenewOk = true;
+				this.#adoptStoredLease(member, lease);
 				this.#log(member.id, `${why}: still the holder at generation ${member.generation}; retrying`);
 				return;
 			}
 			this.#fence(member, `${why}: generation ${lease.generation} is held by ${lease.holderNodeId}`);
 		});
+	}
+
+	/**
+	 * After a lost CAS response the store may already be in a different transition state than the
+	 * primary's local view. Adopt it: a `changing` lease with no local transition resumes one (the
+	 * target is not recorded, so pick again); a `steady` lease ends a local transition whose close
+	 * was applied but whose answer was lost.
+	 */
+	#adoptStoredLease(member: DbMember, lease: DbLease): void {
+		member.durability = lease.durability;
+		member.durabilityEffective = lease.durabilityEffective;
+		if (lease.syncState === 'steady') {
+			if (member.changePhase !== null) {
+				this.#log(member.id, 're-read shows the transition closed; adopting steady');
+				member.effectiveSync = lease.sync[0] ?? null;
+				member.changePhase = null;
+				member.changeTarget = null;
+				member.changeOld = null;
+				member.barrierSnapshot.clear();
+				member.syncDowngradeAt = 0;
+			}
+			return;
+		}
+		if (member.changePhase !== null) return;
+		this.#log(member.id, 're-read shows a changing lease with no local transition; resuming');
+		member.changePhase = 'opening';
+		member.changeOld = null;
+		member.changeTarget = this.#pickSyncTarget(member)?.id ?? null;
+		member.changeTimeoutAt = this.T + 30_000;
+		if (member.changeTarget) this.#startSwitching(member);
+		else if (this.#syncLoss === 'downgrade') this.#downgrade(member);
+		else this.#blockSyncChange(member);
 	}
 
 	#scheduleDbFence(member: DbMember): void {
@@ -1429,18 +1653,22 @@ export class W9World {
 			return;
 		}
 		const serving = primary !== null && primary.alive && this.T >= primary.frozenUntil;
+		const lagged = this.T < (this.#lagged.get(member.id) ?? 0);
 		if (member.streamFrom !== null) {
 			member.streamFrom = null;
+			member.streamEpoch++;
 			this.#log(member.id, 'WAL receiver down');
-			if (serving && primary && this.#edge(primary.id, member.id) === 'up') {
+			if (!lagged && serving && primary && this.#edge(primary.id, member.id) === 'up') {
 				member.streamFrom = primary.id;
+				member.streamEpoch++;
 				member.generation = primary.generation;
 				member.history = new Set(primary.history);
 				this.#log(member.id, `re-attached to ${primary.id} at generation ${primary.generation}`);
 				return;
 			}
-		} else if (serving && primary && this.#edge(primary.id, member.id) === 'up') {
+		} else if (!lagged && serving && primary && this.#edge(primary.id, member.id) === 'up') {
 			member.streamFrom = primary.id;
+			member.streamEpoch++;
 			member.generation = primary.generation;
 			member.history = new Set(primary.history);
 			this.#log(member.id, `attached to ${primary.id} at generation ${primary.generation}`);
@@ -1454,8 +1682,11 @@ export class W9World {
 			member.lastServerDate = date ?? this.T;
 			member.serverAt = this.T;
 			if (lease.generation < member.generation) return;
+			if (this.mutant !== 'promote-while-changing' && lease.syncState !== 'steady') return;
 			if ((date ?? this.T) < lease.expiresAt) return;
-			if (this.mutant !== 'ignore-eligibility') {
+			if (this.mutant === 'promote-while-changing' && lease.syncState === 'changing') {
+				// The buggy member ignores §5.5's non-promotable window.
+			} else if (this.mutant !== 'ignore-eligibility') {
 				const eligible = lease.durabilityEffective === 'async' || lease.sync.includes(member.id);
 				if (!eligible) return;
 			}
@@ -1471,6 +1702,7 @@ export class W9World {
 				holderNodeId: member.id,
 				expiresAt: this.#serverNow(member.id) + SPEC.db.ttlMs,
 				sync: lease.sync.filter((id) => id !== member.id),
+				syncState: 'steady',
 				durability: lease.durability,
 				durabilityEffective: lease.durabilityEffective,
 				syncSetAt: this.T,
@@ -1515,10 +1747,14 @@ export class W9World {
 		member.durabilityEffective = acquired.body.durabilityEffective;
 		const inherited = acquired.body.sync;
 		member.effectiveSync = inherited[0] ?? null;
-		member.syncDowngradeAt =
-			member.effectiveSync === null && member.durability === 'sync' ? this.T + SPEC.syncDowngradeAfterMs : 0;
+		member.syncDowngradeAt = 0;
 		member.syncLostSince = 0;
-		member.pendingSetting = null;
+		member.changePhase = null;
+		member.changeTarget = null;
+		member.changeOld = null;
+		member.barrierSnapshot.clear();
+		member.killAfterOpen = null;
+		member.killAfterBarrier = false;
 		this.stats.promotions++;
 		this.#promotions.push(this.T);
 		this.#log(
@@ -1532,12 +1768,19 @@ export class W9World {
 			if (peer.state !== 'streaming') continue;
 			if (this.#edge(member.id, peer.id) !== 'up') continue;
 			peer.streamFrom = member.id;
+			peer.streamEpoch++;
 			peer.generation = member.generation;
 			for (const id of member.history) peer.history.add(id);
 			this.#log(peer.id, `now streaming from ${member.id} at generation ${member.generation}`);
 		}
 
-		if (acquired.lease.durability === 'sync' && !acquired.lease.sync.includes(member.id))
+		if (acquired.lease.syncState !== 'steady')
+			this.#violate(
+				'I12',
+				'promotion-during-sync-change',
+				`${member.id} promoted at generation ${acquired.gen} while the lease was syncState ${acquired.lease.syncState}`,
+			);
+		else if (acquired.lease.durability === 'sync' && !acquired.lease.sync.includes(member.id))
 			this.#violate(
 				'I12',
 				'promotion-not-in-sync-set',
@@ -1570,6 +1813,7 @@ export class W9World {
 		member.history = new Set(primary.history);
 		member.generation = primary.generation;
 		member.streamFrom = primary.id;
+		member.streamEpoch++;
 		member.rewindAt = 0;
 		member.state = 'streaming';
 		this.#log(member.id, `rewound to ${primary.id} at generation ${primary.generation}; streaming`);
@@ -1584,24 +1828,7 @@ export class W9World {
 		commit.acceptedBy = member.id;
 		commit.durability = member.durabilityEffective;
 		member.history.add(commit.id);
-		for (const peer of this.db) {
-			if (peer.id === member.id) continue;
-			if (!peer.alive || this.T < peer.frozenUntil) continue;
-			if (peer.streamFrom !== member.id) continue;
-			if (this.#edge(member.id, peer.id) !== 'up') continue;
-			if (this.T < (this.#lagged.get(peer.id) ?? 0)) {
-				if (this.#verbose) this.#log('wal', `WAL for commit #${commit.id} to ${peer.id} dropped`);
-				continue;
-			}
-			const delay = this.#rng.int(10, 180);
-			this.#timer(this.T + delay, () => {
-				if (!peer.alive || this.T < peer.frozenUntil) return;
-				if (this.#edge(member.id, peer.id) !== 'up') return;
-				if (peer.history.has(commit.id)) return;
-				peer.history.add(commit.id);
-				this.#checkPendingAcks();
-			});
-		}
+		this.#replicate(member, commit);
 		if (member.durabilityEffective === 'async') {
 			this.#ack(commit);
 		} else {
@@ -1609,6 +1836,46 @@ export class W9World {
 			if (commit.waitFor && this.#dbMember(commit.waitFor).history.has(commit.id)) this.#ack(commit);
 		}
 		return true;
+	}
+
+	/**
+	 * WAL is an ordered stream. A delivery that cannot be made detaches the receiver (`streamEpoch`
+	 * invalidates everything already in flight); it re-attaches only after copying the primary's
+	 * whole history. This is what makes "the barrier is in the receiver's history" imply "every
+	 * earlier acknowledged commit is too".
+	 */
+	#replicate(member: DbMember, commit: Commit): void {
+		for (const peer of this.db) {
+			if (peer.id === member.id) continue;
+			if (!peer.alive || this.T < peer.frozenUntil) continue;
+			if (peer.streamFrom !== member.id) continue;
+			if (this.#edge(member.id, peer.id) !== 'up' || this.T < (this.#lagged.get(peer.id) ?? 0)) {
+				this.#detachStream(member, peer, `commit #${commit.id} could not be shipped`);
+				continue;
+			}
+			const at = Math.max(this.T + this.#rng.int(10, 180), member.replAt.get(peer.id) ?? 0);
+			member.replAt.set(peer.id, at);
+			const epoch = peer.streamEpoch;
+			this.#timer(at, () => {
+				if (!peer.alive || this.T < peer.frozenUntil) return;
+				if (peer.streamEpoch !== epoch || peer.streamFrom !== member.id) return;
+				if (this.#edge(member.id, peer.id) !== 'up' || this.T < (this.#lagged.get(peer.id) ?? 0)) {
+					this.#detachStream(member, peer, `commit #${commit.id} lost in flight`);
+					return;
+				}
+				if (peer.history.has(commit.id)) return;
+				peer.history.add(commit.id);
+				this.#checkPendingAcks();
+			});
+		}
+	}
+
+	#detachStream(sender: DbMember, peer: DbMember, why: string): void {
+		if (peer.streamFrom === null) return;
+		peer.streamFrom = null;
+		peer.streamEpoch++;
+		sender.replAt.delete(peer.id);
+		this.#log(peer.id, `WAL stream gap (${why}); re-attach and catch up`);
 	}
 
 	#checkPendingAcks(): void {
@@ -1655,11 +1922,14 @@ export class W9World {
 		commit.ackAt = this.T;
 		const member = commit.acceptedBy;
 		if (!member) return;
-		this.#acked.set(commit.id, { gen: commit.gen, member, t: this.T, durability: commit.durability });
+		// The obligation is the durability in force when the client is told it committed: a commit
+		// accepted under sync but first acknowledged after the recorded downgrade is async.
+		const durability = this.#dbMember(member).durabilityEffective;
+		this.#acked.set(commit.id, { gen: commit.gen, member, t: this.T, durability });
 		this.stats.acks++;
 		if (this.#verbose) this.#log(commit.waitFor ? commit.waitFor : member, `commit #${commit.id} acknowledged (generation ${commit.gen})`);
 		const higher = this.#highestPrimary();
-		if (commit.durability === 'sync' && higher && higher.generation > commit.gen && !higher.history.has(commit.id))
+		if (durability === 'sync' && higher && higher.generation > commit.gen && !higher.history.has(commit.id))
 			this.#violate(
 				'I13',
 				'ack-lost-to-higher-primary',

@@ -29,6 +29,7 @@ export const SPEC = {
 export type MemberId = 'p' | 'a' | 'b';
 export type ControlId = 'c0' | 'c1' | 'c2';
 export type Durability = 'sync' | 'async';
+export type SyncState = 'steady' | 'changing';
 export type SyncLossPolicy = 'downgrade' | 'block';
 
 /** Pieces of W9-SPEC that are deliberately varied to show the checker has teeth. */
@@ -44,14 +45,15 @@ export type Mutant =
 	| 'ignore-keepalive'
 	/** The candidate CASes at the same generation (breaks I3 by construction). */
 	| 'cas-same-generation'
-	/** Diagnostic only: change `synchronous_standby_names` before recording the set (H23 reversed). */
-	| 'sync-setting-first';
+	/** A buggy member that promotes while `syncState: 'changing'` (Revision 1's forbidden case). */
+	| 'promote-while-changing';
 
 export interface DbLease {
 	generation: number;
 	holderNodeId: MemberId;
 	expiresAt: number;
 	sync: MemberId[];
+	syncState: SyncState;
 	durability: Durability;
 	/** Effective durability actually in force (the spec's `durability_effective`). */
 	durabilityEffective: Durability;
@@ -72,6 +74,8 @@ export type FaultKind =
 	| 'sync-change'
 	| 'lag'
 	| 'kill-primary'
+	| 'kill-after-open'
+	| 'kill-after-barrier'
 	| 'control-crash'
 	| 'master-key';
 
@@ -140,6 +144,7 @@ export type ViolationKind =
 	| 'two-primary-same-generation'
 	| 'two-control-primary-same-epoch'
 	| 'promotion-not-in-sync-set'
+	| 'promotion-during-sync-change'
 	| 'missing-ack-at-promotion'
 	| 'ack-lost-to-higher-primary'
 	| 'end-primary-missing-ack'
@@ -178,6 +183,11 @@ export interface RunStats {
 	controlOutageAcks: number;
 	failoverLatencyMs: number | null;
 	controlPromotions: number;
+	syncChangesOpened: number;
+	syncChangesClosed: number;
+	syncChangesFellBack: number;
+	syncChangesDowngraded: number;
+	primaryKilledChanging: number;
 }
 
 export interface RunResult {
@@ -189,11 +199,4 @@ export interface RunResult {
 	trace: TraceEvent[];
 	events: number;
 	durationMs: number;
-	/** True when the only violations are the known sync-set-ordering counterexample. */
-	knownOnly: boolean;
-}
-
-/** The counterexample this model found: the two-step sync set is recorded before the setting. */
-export function isKnownCounterexample(v: Violation): boolean {
-	return v.property === 'I13' && v.kind === 'missing-ack-at-promotion';
 }

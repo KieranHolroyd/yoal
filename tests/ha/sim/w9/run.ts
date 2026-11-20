@@ -6,14 +6,11 @@
  *   bun tests/ha/sim/w9/run.ts --runs 500 --family sync-change
  *   bun tests/ha/sim/w9/run.ts --scenario sync-change-minimal --trace
  *   bun tests/ha/sim/w9/run.ts --mutant fence-wall-clock --scenario wall-clock-fence --trace
- *   bun tests/ha/sim/w9/run.ts --runs 200 --allow-known    # exit 0 while the known defect stands
  *
  * Seeds run from --seed to --seed + --runs − 1; the family is seed % FAMILIES.length unless
  * --family is given, so the default run covers every schedule family evenly.
  *
- * A violation exits 1. `--allow-known` exits 0 only when every violation is the counterexample
- * this model was written to find (the two-step sync-set ordering, W9-SPEC §5.1/§5.5). Fixing the
- * spec should make `--allow-known` unnecessary, not make it keep passing.
+ * A violation exits 1. Revision 1 (the three-step non-promotable sync change) must produce none.
  */
 import { parseArgs } from 'node:util';
 import { W9World } from './model.ts';
@@ -23,7 +20,6 @@ import {
 	type Family,
 	type Mutant,
 	type RunResult,
-	isKnownCounterexample,
 } from './spec.ts';
 
 const { values: flags } = parseArgs({
@@ -34,7 +30,6 @@ const { values: flags } = parseArgs({
 		mutant: { type: 'string', default: 'none' },
 		scenario: { type: 'string' },
 		trace: { type: 'boolean', default: false },
-		'allow-known': { type: 'boolean', default: false },
 		'max-report': { type: 'string', default: '3' },
 		'max-lines': { type: 'string', default: '260' },
 	},
@@ -86,8 +81,7 @@ if (flags.scenario) {
 	}
 	if (result.violations.length === 0) console.log('no violation');
 	else printViolations(result);
-	const failed = result.violations.length > 0 && !(flags['allow-known'] && result.knownOnly);
-	process.exit(failed ? 1 : 0);
+	process.exit(result.violations.length > 0 ? 1 : 0);
 }
 
 const runs = Number(flags.runs);
@@ -105,8 +99,12 @@ interface FamilyStats {
 	acks: number;
 	strictOverlapMs: number;
 	maxStrictOverlapMs: number;
+	opened: number;
+	closed: number;
+	fellBack: number;
+	downgraded: number;
+	killedChanging: number;
 	violations: number;
-	known: number;
 	seeds: number[];
 }
 
@@ -125,8 +123,12 @@ for (let seed = firstSeed; seed < firstSeed + runs; seed++) {
 		acks: 0,
 		strictOverlapMs: 0,
 		maxStrictOverlapMs: 0,
+		opened: 0,
+		closed: 0,
+		fellBack: 0,
+		downgraded: 0,
+		killedChanging: 0,
 		violations: 0,
-		known: 0,
 		seeds: [],
 	};
 	stats.runs++;
@@ -135,14 +137,17 @@ for (let seed = firstSeed; seed < firstSeed + runs; seed++) {
 	stats.acks += result.stats.acks;
 	stats.strictOverlapMs += result.stats.strictOverlapMs;
 	stats.maxStrictOverlapMs = Math.max(stats.maxStrictOverlapMs, result.stats.strictOverlapMs);
+	stats.opened += result.stats.syncChangesOpened;
+	stats.closed += result.stats.syncChangesClosed;
+	stats.fellBack += result.stats.syncChangesFellBack;
+	stats.downgraded += result.stats.syncChangesDowngraded;
+	stats.killedChanging += result.stats.primaryKilledChanging;
 	stats.violations += result.violations.length;
-	stats.known += result.knownOnly ? 1 : 0;
 	perFamily.set(family, stats);
-	if (result.violations.length > 0 && !result.knownOnly) {
+	if (result.violations.length > 0) {
 		failures.push(result);
 		stats.seeds.push(seed);
 	}
-	if (result.knownOnly && flags['allow-known'] === false) failures.push(result);
 }
 
 const elapsed = performance.now() - started;
@@ -157,21 +162,24 @@ for (const family of FAMILIES) {
 		`${family.padEnd(22)} ${String(stats.runs).padStart(5)} ${String(stats.promotions).padStart(11)} ${String(
 			stats.controlTakeovers,
 		).padStart(8)} ${String(stats.acks).padStart(6)} ${String(Math.round(stats.strictOverlapMs)).padStart(10)} ${String(Math.round(stats.maxStrictOverlapMs)).padStart(11)}  ${
-			stats.violations === 0 ? 'none' : `${stats.violations} violation(s)${stats.known ? `, ${stats.known} known-counterexample run(s)` : ''}`
+			stats.violations === 0 ? 'none' : `${stats.violations} violation(s)`
 		}`,
 	);
 }
 
-const knownRuns = [...perFamily.values()].reduce((sum, s) => sum + s.known, 0);
-const otherFailures = failures.filter((f) => !f.knownOnly);
-console.log(`\nknown counterexample (sync-set ordering, I13): ${knownRuns} run(s)`);
-console.log(`other violations: ${otherFailures.length} run(s)`);
+for (const family of FAMILIES) {
+	const stats = perFamily.get(family);
+	if (!stats || stats.opened === 0) continue;
+	console.log(
+		`sync changes in ${family}: opened ${stats.opened}, closed ${stats.closed}, fell back ${stats.fellBack}, downgraded ${stats.downgraded}, primary killed while changing ${stats.killedChanging}`,
+	);
+}
+console.log(`\nviolating runs: ${failures.length}`);
 
-if (otherFailures.length > 0) {
+if (failures.length > 0) {
 	const byKind = new Map<string, { property: string; count: number; seeds: number[] }>();
-	for (const result of otherFailures) {
+	for (const result of failures) {
 		for (const violation of result.violations) {
-			if (isKnownCounterexample(violation)) continue;
 			const entry = byKind.get(violation.kind) ?? { property: violation.property, count: 0, seeds: [] };
 			entry.count++;
 			if (entry.seeds.length < 30) entry.seeds.push(result.seed);
@@ -180,7 +188,7 @@ if (otherFailures.length > 0) {
 	}
 	for (const [kind, entry] of byKind)
 		console.log(`  ${entry.property}/${kind}: ${entry.count} occurrence(s), seeds ${entry.seeds.join(' ')}`);
-	for (const result of otherFailures.slice(0, maxReport)) {
+	for (const result of failures.slice(0, maxReport)) {
 		console.log('');
 		console.log(`── seed ${result.seed} ${result.family}: ${result.violations[0]?.property}/${result.violations[0]?.kind}`);
 		printViolations(result);
@@ -193,13 +201,4 @@ if (otherFailures.length > 0) {
 	}
 }
 
-if (knownRuns > 0 && otherFailures.length === 0) {
-	console.log('');
-	console.log('The only violations are the counterexample documented in docs/build-plan/W9-MODEL.md:');
-	console.log('  W9-SPEC §5.1/§5.5 record the new sync set in the lease BEFORE changing');
-	console.log('  synchronous_standby_names, so the recorded set names a replica that is not yet caught up.');
-	console.log('  A crash between the two steps lets it promote and lose an acknowledged commit (I13).');
-}
-
-const failed = otherFailures.length > 0 || (knownRuns > 0 && !flags['allow-known']);
-process.exit(failed ? 1 : 0);
+process.exit(failures.length > 0 ? 1 : 0);
