@@ -7,8 +7,9 @@ live fleet.
 ```sh
 bun tests/lab/lab.ts up                     # ~10 min from clean, ~10 s when already up
 bun tests/lab/verify-faults.ts              # every fault verb applied, checked and auto-reverted
-bun tests/ha/scenarios/kill-node-b.ts       # the W1 exit scenario with the checker
-bun tests/lab/lab.ts down                   # removes every yoal-w0-* object
+bun tests/ha/scenarios/kill-node-b.ts       # the W1 exit scenario with the checker (through the edge)
+bun tests/ha/scenarios/kill-node-b.ts --target direct   # the same, edge bypassed (see Scenarios)
+bun tests/lab/lab.ts down                   # clears faults, removes every yoal-w0-* object, checks loop devices
 ```
 
 ## What it is
@@ -26,7 +27,8 @@ One definition, [`lab.config.ts`](./lab.config.ts), and two forms of it.
 Every node runs the real control plane, agent and helper built from this checkout by the real
 installer (`scripts/install/main.ts`), and the four join one fleet over the managed WireGuard
 overlay (10.47.0.0/22). The helper on every node is then replaced by its fault-injection test build
-(`bun run --cwd apps/helper build:faults`) through a lab-only systemd drop-in.
+(`bun run --cwd apps/helper build:faults`, entry `apps/helper/src/main-faults.ts`) through a lab-only
+systemd drop-in.
 
 **The container form** (this directory; what CI runs). Each node is a Debian 13 container with
 systemd as PID 1, privileged, with a private cgroup v2 namespace, on the `yoal-w0-net` bridge. Lab
@@ -72,23 +74,34 @@ bun tests/lab/lab.ts api <METHOD> <path> [json]
 bun tests/lab/lab.ts down [--keep-image]
 ```
 
+`down` first runs `clear-all` on every running node (so the helper, not a container teardown, undoes
+each fault), then removes the lab's objects, then lists the Docker host's loop devices from a
+throwaway privileged container of the lab image and fails if any is still backed by a lab fault disk.
+
 `--upgrade` re-runs the installer on lab-a from the current checkout. Workers keep the agent and
 helper they joined with; rebuild them with `down` and `up`.
 
 ## Fault verbs
 
 Fixed helper verbs in [`apps/helper/src/faults.ts`](../../apps/helper/src/faults.ts), reached on the
-helper's root-only socket at `/v1/faults/*`. They exist only in a helper built with
-`--define YOAL_FAULT_INJECTION=true` (`build:faults`). The release build (`build`, which the
-installer, `publish.yml` and node updates use) defines it `false`, and the bundler removes the module
-and its route; [`faults-release.test.ts`](../../apps/helper/src/faults-release.test.ts) builds the
-release helper and fails if any fault string survives.
+helper's root-only socket at `/v1/faults/*`. Only the test entry point
+[`main-faults.ts`](../../apps/helper/src/main-faults.ts) imports them (`build:faults`); the release
+entry `main.ts` (`build`, which the installer, `publish.yml` and node updates use) and the router
+`server.ts` never mention them, so no define, preload or global can switch them on in a release
+binary. [`faults-release.test.ts`](../../apps/helper/src/faults-release.test.ts) builds the release
+entry with and without `--define YOAL_FAULT_INJECTION=true` and fails if any fault string survives.
 
 Every verb takes structured fields only (CIDRs, an interface that exists, a unit from an allowlist,
 bounded numbers), never a shell string; every verb that changes state has a required `durationS`
 (1–3600) after which it reverts itself; `clear-all` reverts everything; a helper that starts sweeps
 whatever an earlier process left (nft tables `yoal_fault_*`, qdisc handle `fa17:`, clock drop-ins,
 scratch loop disks, and the faults recorded in `/run/yoal-faults/active.json`).
+
+A fault is recorded (`status: applying`) before its first change, so a crash part-way is still found.
+An apply that fails part-way is rolled back (clock-skew: drop-in removed, offset `+0`, unit restarted
+clean). A revert checks its result (the nft table or qdisc is really gone, the loop device detached);
+one that fails leaves the fault listed as `revert-failed` and retries it after 1, 2, 4 … 60 s, and
+`revert`/`clear-all` answer 409 naming it.
 
 | Verb | `lab fault` flags | What it does | Revert |
 |---|---|---|---|
@@ -97,9 +110,9 @@ scratch loop disks, and the faults recorded in `/run/yoal-faults/active.json`).
 | `clock-skew` | `--unit yoal-agent.service --offset 60` | libfaketime on one unit: a runtime drop-in sets `LD_PRELOAD` and an offset file (re-read every second), then the unit restarts | Offset `+0` at once, drop-in removed, no restart |
 | `freeze` | `--unit yoal-agent.service` | `SIGSTOP` to every process of the unit | `SIGCONT` |
 | `kill-unit` | `--unit caddy.service [--signal KILL\|TERM] [--mode stop]` | `SIGKILL` to the unit (systemd's `Restart=` decides what happens), or `stop` | `stop` mode: start again |
-| `fill-disk` | `[--size 64] [--path <loop-backed dir>] [--leave-kb 0]` | A fresh loopback ext4 (≤1 GiB), filled with `fallocate`; or an existing loop-backed filesystem under the Yoal data roots | Remove the fill; unmount and detach the scratch disk |
+| `fill-disk` | `[--size 64] [--path <loop-backed dir>] [--leave-kb 0]` | A fresh loopback ext4 of `--size` MiB (≤1 GiB, `mount -o loop`, so the loop device autoclears), filled with `fallocate`; or, with `--path`, at most `--size` MiB on an existing loop mount whose backing file is under the node's data roots (same inode as this node sees). At most 4 fills and 2 GiB in total | Remove the fill; unmount the scratch disk and check its loop device is gone |
 | `block-arbiter` | `[--action drop\|reject]` | Drop or reset TCP to s3lab | Delete the table |
-| `pause-heartbeat` | — | Drop the agent user's (`meta skuid yoal`) TCP to the control plane; Caddy, workloads and the forwarder keep serving | Delete the table |
+| `pause-heartbeat` | `[--endpoint <ip>:<port>]` | Drop the agent user's (`meta skuid yoal`) TCP to the control plane: by default the address and port of the agent's own `YOAL_CONTROL_URL` (`/etc/yoal/yoal.env` then `agent.env`, or `node.json`); Caddy, workloads and the forwarder keep serving | Delete the table |
 
 Units are `yoal-agent`, `yoal-control-plane`, `yoal-control-plane-standby`, `yoal-builder`,
 `yoal-caddy`, `caddy` and `yoal-workload-<id>`; never `yoal-helper` (a frozen helper could not
@@ -135,11 +148,24 @@ A stale read serves the object's previous version with its old ETag. "Unreachabl
 
 [`tests/ha/scenarios/kill-node-b.ts`](../ha/scenarios/kill-node-b.ts) deploys the checker app
 (`tests/ha/checker/app`, Lane B) as a process app with a Postgres database on lab-a, scales it to two
-copies on lab-a and lab-b (it drains the other nodes while placing, then resumes them), runs
-`tests/ha/checker/cli.ts` through lab-a's public route, powers lab-b off (or `--method partition`),
-and records when lab-b goes offline, when its copy is re-placed and running, and when the new copy
-answers. Output: `report.json` (the checker's), `observations.jsonl` (the lab's, which the checker
-reads), `timings.json` and `summary.md`.
+copies on lab-a and lab-b (it drains the other nodes while placing, then resumes them), measures each
+copy's share of traffic, runs `tests/ha/checker/cli.ts`, powers lab-b off (or `--method partition`:
+everything on 172.30.147.0/24 and the overlay except lab-b's own addresses, s3lab and the host
+gateway included, checked from lab-b), and records when lab-b goes offline, when its copy is re-placed
+and running, when the new copy answers, and each copy's share again at the end. Output in
+`tests/lab/.out/kill-node-b-*`: `report.json` (the checker's), `observations.jsonl` (the lab's, which
+the checker reads), `timings.json` and `summary.md`, each with a verdict.
+
+- `--target edge` (default): through lab-a's public route. If lab-b's copy takes no traffic before
+  the fault, the run is **invalid** (exit 2) and stops there: losing lab-b would lose nothing the
+  checker can see. On the current tree this is the outcome: the edge's active health check reaches a
+  remote copy without the app's Host (`packages/site-config/src/compile.ts`), so remote copies are
+  marked unhealthy.
+- `--target direct`: **the edge is bypassed.** The scenario runs its own client-side balancer (round
+  robin, 5 s passive mark-down, half-open probes) and sends each request straight to a copy at the
+  address the edge would dial (lab-a's local copy port from its Caddy config; a worker's node Caddy on
+  `<overlay>:8080`), through a stdio relay on lab-a ([`node/relay.ts`](./node/relay.ts)), because the
+  host cannot route to the overlay. It measures copy failover and re-placement, not the edge.
 
 ## The VM form
 
@@ -156,4 +182,4 @@ lane on the reference shape (HA-PLAN §7.1) is not built.
 - `docker kill` is a power cut of the processes, but the page cache and disks are the host's, so
   it is not a disk failure. A hypervisor stop is not a provider partition either (CLUSTERING §19.3).
 - Node memory and CPU are cgroup limits, not hardware; the numbers are the lab's, not production's.
-- `pause-heartbeat` on lab-a does nothing: its agent reaches the control plane on a unix socket.
+- `pause-heartbeat` on lab-a is refused: its agent reaches the control plane on a unix socket.

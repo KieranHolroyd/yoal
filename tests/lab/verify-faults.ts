@@ -29,7 +29,6 @@ if (node.name === CONTROL.name) throw new Error('pick a worker node: pause-heart
 const box = containerName(node.name);
 const fleet = fleetNodes();
 const peerOverlay = fleet.find((row) => row.name === peer.name)?.privateAddress ?? null;
-const controlOverlay = fleet.find((row) => row.name === CONTROL.name)?.privateAddress ?? null;
 
 interface Check {
 	verb: string;
@@ -56,10 +55,13 @@ function active(): string[] {
 	return (helperCall(node.name, 'GET', '/v1/faults').body?.faults ?? []).map((fault: { id: string }) => fault.id);
 }
 
+type Outcome = { ok: boolean; detail: string };
+
 /** Apply, check during, wait past the expiry, check after; the auto-revert does the cleanup. */
-async function verify(label: string, body: Record<string, unknown>, during: () => { ok: boolean; detail: string } | Promise<{ ok: boolean; detail: string }>, after: () => { ok: boolean; detail: string }, notes: string[] = []): Promise<void> {
+async function verify(label: string, body: Record<string, unknown>, during: () => Outcome | Promise<Outcome>, after: () => Outcome | Promise<Outcome>, notes: string[] = []): Promise<void> {
 	const verb = label.split(' ')[0]!;
 	say(`${label} on ${node.name}`);
+	const appliedAt = Date.now();
 	const applied = apply(verb, body);
 	if (applied.status !== 200) {
 		results.push({ verb: label, pass: false, applied: applied.body, during: 'not applied', after: '', notes });
@@ -69,9 +71,9 @@ async function verify(label: string, body: Record<string, unknown>, during: () =
 	const duringCheck = await during();
 	console.log(`    during: ${duringCheck.ok ? 'ok' : 'FAIL'} — ${duringCheck.detail}`);
 	const durationS = Number(body.durationS ?? 1);
-	await Bun.sleep(durationS * 1000 + 2500);
+	await Bun.sleep(Math.max(0, appliedAt + durationS * 1000 + 2500 - Date.now()));
 	const stillActive = applied.id ? active().includes(applied.id) : false;
-	const afterCheck = after();
+	const afterCheck = await after();
 	console.log(`    after auto-revert: ${afterCheck.ok && !stillActive ? 'ok' : 'FAIL'} — ${afterCheck.detail}${stillActive ? ' (still listed as active)' : ''}`);
 	results.push({
 		verb: label,
@@ -214,8 +216,47 @@ await verify(
 		const gone = sh(`test -e ${scratch} && echo present || echo gone; losetup -a | grep -c yoal-faults || true`).out.replace(/\n/g, ' ');
 		return { ok: gone.startsWith('gone') && gone.endsWith('0'), detail: `scratch ${gone.split(' ')[0]}; loop devices for yoal-faults: ${gone.split(' ')[1]}` };
 	},
-	['Refuses any filesystem that is not loopback-backed, so a fill never reaches the host disk.'],
+	['Scratch mode: mount -o loop (autoclear), so the loop device goes with the mount.'],
 );
+
+// 6b. fill-disk path mode: capped at sizeMb, and only on a loop mount backed by the node's own file.
+say(`fill-disk (path mode) on ${node.name}`);
+{
+	const host = apply('fill-disk', { sizeMb: 64, leaveKb: 60 * 1024, durationS: 60 });
+	const mount: string = host.body?.fault?.state?.mountPoint ?? '';
+	const availKb = () => Number(sh(`df -k --output=avail ${mount} | tail -1`).out.trim());
+	const beforeKb = availKb();
+	const capped = apply('fill-disk', { path: mount, sizeMb: 16, durationS: 8 });
+	const fillFile: string = capped.body?.fault?.state?.fillFile ?? '';
+	const fileKb = Number(sh(`du -k --apparent-size ${fillFile} | cut -f1`).out.trim());
+	const duringKb = availKb();
+	const refused = apply('fill-disk', { path: '/var/lib/containers', sizeMb: 16, durationS: 5 });
+	await Bun.sleep(8000 + 2500);
+	const afterKb = availKb();
+	const reverted = helperCall(node.name, 'POST', '/v1/faults/revert', { id: host.id });
+	const loops = sh('losetup -a | grep -c yoal-faults || true').out;
+	const pass =
+		host.status === 200 &&
+		capped.status === 200 &&
+		fileKb >= 15 * 1024 &&
+		fileKb <= 16 * 1024 &&
+		beforeKb - duringKb >= 15 * 1024 &&
+		beforeKb - duringKb <= 17 * 1024 &&
+		refused.status === 409 &&
+		/not loopback-backed/.test(refused.body?.error ?? '') &&
+		Math.abs(afterKb - beforeKb) < 1024 &&
+		reverted.status === 200 &&
+		loops === '0';
+	results.push({
+		verb: 'fill-disk (path mode)',
+		pass,
+		applied: { scratch: host.body?.fault?.evidence, capped: capped.body?.fault?.evidence ?? capped.body, refused: refused.body },
+		during: `${mount}: ${beforeKb} KiB free, ${duringKb} KiB with a ${fileKb} KiB fill (cap 16 MiB); /var/lib/containers refused ${refused.status}`,
+		after: `${afterKb} KiB free after the capped fill reverted; scratch revert ${reverted.status}; loop devices for yoal-faults: ${loops}`,
+		notes: ['Path mode fills at most sizeMb, and only a loop mount whose backing file is under the node data roots with the same inode.'],
+	});
+	console.log(`    ${pass ? 'ok' : 'FAIL'} — ${results.at(-1)!.during}; ${results.at(-1)!.after}`);
+}
 
 // 7. block-arbiter: s3lab unreachable from this node only.
 const s3 = `http://${LAB.s3lab.proxyIp}:${LAB.s3lab.s3Port}/minio/health/live`;
@@ -232,20 +273,45 @@ await verify(
 	},
 );
 
-// 8. pause-heartbeat: the agent's user cannot reach the control plane; root (and Caddy) still can.
-const control = `http://${CONTROL.ip}/api/setup/status`;
+// 8. pause-heartbeat: no endpoints given, so the helper derives the agent's own control-plane URL
+// from its config. The agent's user cannot reach it (root and Caddy still can), and the control
+// plane stops seeing heartbeats (the node's lastHeartbeatAt, through the lab API), then sees them again.
+const agentControlUrl = sh(`. /etc/yoal/yoal.env 2>/dev/null; . /etc/yoal/agent.env; echo "$YOAL_CONTROL_URL"`).out.trim();
+const control = `${agentControlUrl.replace(/\/+$/, '')}/api/setup/status`;
+const lastHeartbeat = () => Date.parse(fleetNodes().find((row) => row.name === node.name)?.lastHeartbeatAt ?? '') || 0;
+const HEARTBEAT_PAUSE_S = 30;
+let pausedAt = 0;
 await verify(
 	'pause-heartbeat',
-	{ endpoints: [{ cidr: CONTROL.ip, port: 80 }, ...(controlOverlay ? [{ cidr: controlOverlay, port: 80 }] : [])], durationS: 6 },
-	() => {
+	{ durationS: HEARTBEAT_PAUSE_S },
+	async () => {
+		pausedAt = Date.now();
+		const fault = helperCall(node.name, 'GET', '/v1/faults').body?.faults?.find((entry: any) => entry.verb === 'pause-heartbeat');
+		const derived: string[] = (fault?.params?.endpoints ?? []).map((endpoint: { cidr: string; port: number }) => `${endpoint.cidr}:${endpoint.port}`);
+		const url = new URL(agentControlUrl);
+		const expected = `${url.hostname}/32:${url.port || (url.protocol === 'https:' ? 443 : 80)}`;
 		const asAgent = sh(`runuser -u yoal -- curl -s -o /dev/null --max-time 3 ${control}`).code;
 		const asRoot = sh(`curl -s -o /dev/null --max-time 3 ${control}`).code;
-		return { ok: asAgent !== 0 && asRoot === 0, detail: `as yoal (agent) exit ${asAgent}; as root exit ${asRoot}` };
+		// Two heartbeat intervals (10 s each) into the pause: none may have landed.
+		await Bun.sleep(22_000);
+		const seen = lastHeartbeat();
+		const stopped = seen > 0 && seen < pausedAt + 2000;
+		return {
+			ok: derived.includes(expected) && asAgent !== 0 && asRoot === 0 && stopped,
+			detail: `derived ${derived.join(', ') || 'nothing'} from the agent config (YOAL_CONTROL_URL=${agentControlUrl}); as yoal exit ${asAgent}; as root exit ${asRoot}; last heartbeat ${((pausedAt - seen) / 1000).toFixed(1)} s before the pause, none in the ${((Date.now() - pausedAt) / 1000).toFixed(0)} s since: ${stopped}`,
+		};
 	},
-	() => {
+	async () => {
 		const asAgent = sh(`runuser -u yoal -- curl -s -o /dev/null --max-time 3 ${control}`).code;
-		return { ok: asAgent === 0, detail: `as yoal exit ${asAgent}` };
+		const resumedAfter = pausedAt + HEARTBEAT_PAUSE_S * 1000;
+		let seen = lastHeartbeat();
+		for (let attempt = 0; attempt < 15 && seen <= resumedAfter; attempt++) {
+			await Bun.sleep(2000);
+			seen = lastHeartbeat();
+		}
+		return { ok: asAgent === 0 && seen > resumedAfter, detail: `as yoal exit ${asAgent}; heartbeat ${seen > resumedAfter ? `seen again ${((seen - resumedAfter) / 1000).toFixed(1)} s after the revert` : 'not seen again within 30 s'}` };
 	},
+	['The agent blocks up to 20 s on one heartbeat request (2 × its 10 s interval), so the first one after the revert can lag.'],
 );
 
 // 9. clear-all: two long faults reverted at once.
@@ -266,6 +332,11 @@ results.push({
 	notes: [],
 });
 console.log(`    ${results.at(-1)!.pass ? 'ok' : 'FAIL'} — ${results.at(-1)!.during} → ${results.at(-1)!.after}`);
+
+// Nothing of any fault may be left on the node: no loop device for a fault disk, no fault nft table.
+const leftovers = sh(`losetup -a | grep yoal-faults; nft list tables | grep yoal_fault_; tc qdisc show | grep fa17:; true`).out;
+results.push({ verb: 'leftovers', pass: leftovers === '', applied: null, during: '', after: leftovers || 'none (loop devices, nft tables, qdiscs)', notes: [] });
+console.log(`    leftovers: ${leftovers || 'none'}`);
 
 mkdirSync(dirname(flags.out!), { recursive: true });
 writeFileSync(flags.out!, `${JSON.stringify({ node: node.name, peer: peer.name, at: new Date().toISOString(), results }, null, 2)}\n`);

@@ -207,7 +207,7 @@ function bootstrap(args: string[]): { origin: string; joinTokens: Record<string,
 
 /** Build the fault-injection helper once on the control node and install it everywhere. */
 function installFaultHelper(nodes: LabNode[]): void {
-	say('installing the fault-injection test build of the helper (YOAL_FAULT_INJECTION=true)');
+	say('installing the fault-injection test build of the helper (apps/helper/src/main-faults.ts)');
 	const control = containerName(CONTROL.name);
 	// The installed release's repo has node_modules; the shipped checkout does not.
 	const helperDir = '/opt/yoal/current/repo/apps/helper';
@@ -308,8 +308,53 @@ async function up(flags: Set<string>): Promise<void> {
 
 // --- down ------------------------------------------------------------------------------------
 
+/**
+ * Revert every fault on every running node before its container goes: a fault the helper still
+ * holds (a scratch loop disk above all) must be undone by the helper, not torn down with the node.
+ */
+function clearAllFaults(): string[] {
+	const problems: string[] = [];
+	for (const node of LAB.nodes) {
+		if (containerState(containerName(node.name)) !== 'running') continue;
+		let result: { status: number; body: any };
+		try {
+			result = helperCall(node.name, 'POST', '/v1/faults/clear-all', {});
+		} catch (error) {
+			problems.push(`${node.name}: clear-all did not run (${(error as Error).message.split('\n')[0]})`);
+			continue;
+		}
+		if (result.status === 404) continue; // a --no-faults helper: nothing to clear
+		if (result.status !== 200) {
+			problems.push(`${node.name}: clear-all ${result.status}: ${JSON.stringify(result.body?.failed ?? result.body)}`);
+			continue;
+		}
+		const done = [...(result.body?.reverted ?? []), ...(result.body?.swept ?? [])];
+		note(`${node.name}: faults cleared${done.length ? ` (${done.join(', ')})` : ''}`);
+	}
+	return problems;
+}
+
+/**
+ * Loop devices on the Docker host (the VM every lab node shares a kernel with) whose backing file is
+ * a lab fault disk. Read from a throwaway privileged container of the lab image, which sees the
+ * host's loop devices; null when there is no image to run it from.
+ */
+export function leakedLoopDevices(image: string | null): string[] | null {
+	if (!image || !imageExists(image)) return null;
+	const result = docker(
+		['run', '--rm', '--privileged', '--network', 'none', '--label', LAB.label, '--name', `${LAB.prefix}-loopcheck`, '--entrypoint', 'losetup', image, '--list', '--noheadings', '--raw', '--output', 'NAME,BACK-FILE'],
+		{ allowFailure: true },
+	);
+	if (result.code !== 0) return null;
+	return result.stdout
+		.split('\n')
+		.map((line) => line.trim())
+		.filter((line) => /^\/dev\/loop\d+\s/.test(line) && /yoal-fault/.test(line));
+}
+
 function down(flags: Set<string>): void {
 	const state = readState();
+	const problems = clearAllFaults();
 	const containers = labContainers();
 	if (containers.length) {
 		say(`removing ${containers.join(', ')}`);
@@ -327,6 +372,11 @@ function down(flags: Set<string>): void {
 		say(`removing network ${LAB.network.name}`);
 		docker(['network', 'rm', LAB.network.name]);
 	}
+	// Before the image goes: the check runs from it.
+	const leaked = leakedLoopDevices(state?.image || imageTag());
+	if (leaked === null) problems.push('could not check the Docker host for leaked loop devices (no lab image to run losetup from)');
+	else if (leaked.length) problems.push(`loop devices backed by lab fault disks are still attached on the Docker host: ${leaked.join('; ')} (detach with \`losetup -d\` on the host)`);
+	else note('no loop devices backed by lab files on the Docker host');
 	if (!flags.has('--keep-image')) {
 		const images = docker(['images', LAB.image.node, '--format', '{{.Repository}}:{{.Tag}}']).stdout.split('\n').filter((ref) => ref.startsWith(`${LAB.image.node}:`));
 		if (images.length) {
@@ -337,7 +387,8 @@ function down(flags: Set<string>): void {
 	}
 	rmSync(STATE_DIR, { recursive: true, force: true });
 	const left = [...labContainers(), ...labVolumes()];
-	if (left.length) throw new Error(`left behind: ${left.join(', ')}`);
+	if (left.length) problems.push(`left behind: ${left.join(', ')}`);
+	if (problems.length) throw new Error(`lab down finished with problems:\n  ${problems.join('\n  ')}`);
 	say('lab down: nothing left');
 }
 
@@ -437,12 +488,16 @@ export function faultBody(verb: string, args: string[], fleet: () => FleetNode[]
 			body.endpoints = [{ cidr: LAB.s3lab.proxyIp, port: LAB.s3lab.s3Port }];
 			if (flagValue(args, '--action')) body.action = flagValue(args, '--action');
 			break;
-		case 'pause-heartbeat':
-			body.endpoints = [
-				{ cidr: CONTROL.ip, port: 80 },
-				...(fleet().find((node) => node.name === CONTROL.name)?.privateAddress ? [{ cidr: fleet().find((node) => node.name === CONTROL.name)!.privateAddress!, port: 80 }] : []),
-			];
+		case 'pause-heartbeat': {
+			// By default the helper derives the agent's real control-plane address and port from the
+			// agent's own config; `--endpoint <ip>:<port>` overrides it.
+			const endpoint = flagValue(args, '--endpoint');
+			if (endpoint) {
+				const [cidr, port] = endpoint.split(':');
+				body.endpoints = [{ cidr, port: Number(port) }];
+			}
 			break;
+		}
 		default:
 			throw new Error(`unknown fault verb ${verb}`);
 	}

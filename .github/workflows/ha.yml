@@ -3,8 +3,10 @@ name: HA
 # High-availability test lanes (docs/HA-PLAN.md W1 and §7, docs/CLUSTERING.md §19.5).
 #
 #   ha-sim          every PR and main push: the deterministic lease/failover simulation
-#   ha-integration  PRs touching HA paths, and main: the four-node nested-container lab
-#                   (tests/lab) and the kill-node-b scenario with the checker
+#   ha-integration  PRs and main pushes touching HA paths: the four-node nested-container lab
+#                   (tests/lab), the fault verbs and the kill-node-b scenario with the checker
+#
+# Actions are pinned by commit SHA (the tag is in the comment beside each).
 #   ha-chaos        nightly on the self-hosted `yoal-lab` runner (VM lane); placeholder
 #   ha-soak         weekly 24 h soak on `yoal-lab`; placeholder
 #
@@ -43,18 +45,27 @@ jobs:
     outputs:
       ha: ${{ steps.filter.outputs.ha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
       - id: filter
         shell: bash
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "ha=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          base="$(git merge-base HEAD "${{ github.event.pull_request.base.sha }}")"
+          case "${{ github.event_name }}" in
+            pull_request)
+              base="$(git merge-base HEAD "${{ github.event.pull_request.base.sha }}")" ;;
+            push)
+              # The push's own range; a new branch or a force push has no usable `before`: run.
+              base="${{ github.event.before }}"
+              if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+                echo "ha=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi ;;
+            *)
+              echo "ha=true" >> "$GITHUB_OUTPUT"
+              exit 0 ;;
+          esac
           git diff --name-only "$base" HEAD > /tmp/changed-files
           if grep -Eq '^(apps/agent/|apps/helper/|apps/control-plane/src/lib/server/|packages/core/|packages/contracts/|packages/site-config/|scripts/install/|scripts/systemd/|tests/lab/|tests/ha/|\.github/workflows/ha\.yml)' /tmp/changed-files; then
             echo "ha=true" >> "$GITHUB_OUTPUT"
@@ -68,11 +79,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: ${{ env.BUN_VERSION }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -85,17 +96,16 @@ jobs:
     name: ha-integration (nested-container lab)
     needs: changes
     if: >-
-      (github.event_name == 'pull_request' && needs.changes.outputs.ha == 'true') ||
-      github.event_name == 'push' ||
+      ((github.event_name == 'pull_request' || github.event_name == 'push') && needs.changes.outputs.ha == 'true') ||
       (github.event_name == 'workflow_dispatch' && inputs.lane == 'integration')
     runs-on: ubuntu-24.04
     timeout-minutes: 75
     steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
         with:
           bun-version: ${{ env.BUN_VERSION }}
-      - uses: actions/cache@v4
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
         with:
           path: ~/.bun/install/cache
           key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
@@ -118,7 +128,14 @@ jobs:
       - name: Fault verbs against a lab node (apply and auto-revert each)
         run: bun tests/lab/verify-faults.ts --out "$RUNNER_TEMP/ha/faults.json"
 
-      - name: Scenario kill-node-b with the checker
+      # Edge bypassed: the scenario's own balancer to each copy, so the copy failover path is
+      # measured even while the edge run below is invalid.
+      - name: Scenario kill-node-b, direct to each copy (edge bypassed)
+        run: bun tests/ha/scenarios/kill-node-b.ts --target direct --duration-s 240 --kill-after-s 30 --out "$RUNNER_TEMP/ha/kill-node-b-direct"
+
+      # Through the edge. Exit 2 (invalid) while lab-b's copy takes no traffic through the edge: the
+      # edge health check sends no app Host (packages/site-config/src/compile.ts).
+      - name: Scenario kill-node-b through the edge
         run: bun tests/ha/scenarios/kill-node-b.ts --duration-s 240 --kill-after-s 30 --out "$RUNNER_TEMP/ha/kill-node-b"
 
       - name: Lab diagnostics
@@ -131,7 +148,7 @@ jobs:
           done
           cp -r tests/lab/.out "$RUNNER_TEMP/ha/lab-out" 2>/dev/null || true
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         if: always()
         with:
           name: ha-integration
@@ -155,7 +172,7 @@ jobs:
     runs-on: [self-hosted, yoal-lab]
     timeout-minutes: 240
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Placeholder
         run: |
           echo "ha-chaos: the fault catalogue (HA-PLAN §7.2) x20 on the VM lab lands with W2+."
@@ -170,6 +187,7 @@ jobs:
     runs-on: [self-hosted, yoal-lab]
     timeout-minutes: 1500
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Placeholder
-        run: echo "ha-soak: 24 h of random faults with the checker (HA-PLAN §7.1) lands with W18."
+        run: |
+          echo "ha-soak: 24 h of random faults with the checker (HA-PLAN §7.1) lands with W18."
