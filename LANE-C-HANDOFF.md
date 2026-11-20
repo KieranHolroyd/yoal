@@ -2,8 +2,8 @@
 
 Branch: `ha/w3-c-pitr-rewind`, base `main` at `0b187500`.
 Feature commit: `c2703040` (`feat(ha): W10 PITR with replicas, pg_rewind re-attach and restore drill`).
-Review-fix commit: the tip of this branch after the commit that updates this file; the final lane SHA
-is that tip (see `git log -1`).
+Review-fix code commit: `510a27f4` (`fix(ha): correct W10 replica stanza routing and rewind recovery`).
+This hand-off file is a docs-only commit on top; the final lane SHA is the tip after it.
 
 ## 1. What was built
 
@@ -171,4 +171,5 @@ Focused coverage added or extended:
 ## 6. Final commits
 
 - Feature: `c2703040`
-- Review fixes (code + this hand-off): the tip of `ha/w3-c-pitr-rewind` after `c2703040`.
+- Review fixes (code): `510a27f4`
+- Hand-off commit (this file): the tip of `ha/w3-c-pitr-rewind` after `510a27f4`.
