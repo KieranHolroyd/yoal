@@ -79,7 +79,7 @@ backend be_ingress
   balance leastconn
   option httpchk GET /.well-known/yoal/health
   http-check expect status 200
-  default-server check inter 5s fall 2 rise 2 send-proxy-v2 ssl verify none sni req.hdr(host)
+  default-server check port 8099 inter 5s fall 2 rise 2 send-proxy-v2 ssl verify none sni req.hdr(host)
   timeout check 2s
   retries 2
   option redispatch

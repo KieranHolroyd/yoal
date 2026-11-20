@@ -21,7 +21,7 @@ describe('external-lb driver (H18)', () => {
 	});
 
 	test('preflight names the node that cannot answer the health endpoint', () => {
-		const driver = createExternalLbDriver(steeringContext(fleet([{}, { capable: false }, { status: 'pending' }])));
+		const driver = createExternalLbDriver(steeringContext(fleet([{}, { capable: false }, { lastHeartbeatAt: null }])));
 		const findings = driver.preflight();
 		expect(findings).toEqual([
 			{ nodeId: 'node-2', reason: expect.stringContaining('does not advertise ingress-set') },

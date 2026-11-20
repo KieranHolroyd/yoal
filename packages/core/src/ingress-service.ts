@@ -165,10 +165,17 @@ export class SteeringService {
 		} catch (error) {
 			return { ...idle, active: true, error: (error as Error).message };
 		}
-		const findings = driver.preflight();
-		if (findings.length > 0) return { ...idle, active: true, writes: driver.capabilities.writes, findings };
-
-		const writes = driver.capabilities.writes;
+		let findings: Array<{ nodeId: string | null; reason: string }>;
+		let writes: boolean;
+		try {
+			findings = driver.preflight();
+			writes = driver.capabilities.writes;
+		} catch (error) {
+			// A provider-backed preflight can throw; the caller runs the database tick after this,
+			// and a driver failure must not stop database failover.
+			return { ...idle, active: true, error: (error as Error).message };
+		}
+		if (findings.length > 0) return { ...idle, active: true, writes, findings };
 		if (writes && !(fence?.holds() ?? false)) {
 			return {
 				...idle,
@@ -192,7 +199,9 @@ export class SteeringService {
 		return {
 			now: () => this.ctx.now(),
 			nodes: () => this.snapshot(),
-			settings: (): IngressSettings => this.ctx.cluster.get().ingress,
+			// The cache is live: a driver must not be able to mutate the running config (and then make
+			// `view()` serve the change) by pushing into this object.
+			settings: (): IngressSettings => structuredClone(this.ctx.cluster.get().ingress),
 		};
 	}
 

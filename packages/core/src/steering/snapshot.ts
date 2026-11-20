@@ -1,7 +1,8 @@
+import { OFFLINE_AFTER_MS } from '../nodes.ts';
 import type { SteeringDriverContext, SteeringNode } from './types.ts';
 
-/** Matches `nodes.OFFLINE_AFTER_MS`, kept local so a driver has no dependency on the node service. */
-export const SILENT_AFTER_MS = 30_000;
+/** The same liveness bound the controller uses to mark a silent node offline. */
+export const SILENT_AFTER_MS = OFFLINE_AFTER_MS;
 
 export function ingressNodes(context: SteeringDriverContext): SteeringNode[] {
 	return context.nodes().filter((node) => node.ingress);

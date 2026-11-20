@@ -65,12 +65,23 @@ export function describeSteeringConformance(label: string, options: SteeringConf
 			expect(['native', 'proxy-protocol', 'header']).toContain(driver.capabilities.preservesClientIp);
 		});
 
-		test('preflight is deterministic and every finding names a reason and a real node', () => {
+		test('a healthy fleet preflights clean', () => {
+			expect(options.create(steeringContext(fleet())).preflight()).toEqual([]);
+		});
+
+		test('preflight is deterministic, names a reason and the real incapable node', () => {
 			const nodes = fleet([{}, { capable: false }, {}]);
 			const driver = options.create(steeringContext(nodes));
 			const first = driver.preflight();
 			const second = driver.preflight();
 			expect(second).toEqual(first);
+			if (requiresIngress) {
+				const incapable = nodes.find((node) => !node.capable)!;
+				expect(first.map((finding) => finding.nodeId)).toContain(incapable.id);
+			}
+			// At most one reason per node, even when several things are wrong with it.
+			const perNode = first.flatMap((finding) => (finding.nodeId === null ? [] : [finding.nodeId]));
+			expect(new Set(perNode).size).toBe(perNode.length);
 			for (const finding of first) {
 				expect(finding.reason.trim().length).toBeGreaterThan(0);
 				if (finding.nodeId !== null) expect(nodes.map((node) => node.id)).toContain(finding.nodeId);

@@ -49,12 +49,14 @@ class ExternalLbDriver implements SteeringDriver {
 					'external-lb needs at least one ingress node: give a node the ingress role and an agent with the ingress-set capability first.',
 			});
 		for (const node of nodes) {
-			if (!node.capable)
+			if (!node.capable) {
 				findings.push({
 					nodeId: node.id,
 					reason: `${node.name} cannot serve /.well-known/yoal/health: its agent does not advertise ingress-set, so a balancer would probe a route it does not have.`,
 				});
-			if (node.status === 'pending')
+				continue;
+			}
+			if (node.lastHeartbeatAt === null)
 				findings.push({
 					nodeId: node.id,
 					reason: `${node.name} has never sent a heartbeat, so there is nothing for a balancer to probe yet.`,

@@ -45,6 +45,7 @@ export const PLATFORM_HOST_PORTS: readonly ReservedPortRange[] = [
 	{ min: CONTAINER_CONSOLE_DEFAULT_PORT, max: CONTAINER_CONSOLE_DEFAULT_PORT, owner: 'the container console' },
 	{ min: FUNCTION_ANALYTICS_PORT, max: FUNCTION_ANALYTICS_PORT, owner: "the agent's analytics sink" },
 	{ min: WORKLOAD_IDENTITY_PORT, max: WORKLOAD_IDENTITY_PORT, owner: 'the workload identity endpoint' },
+	{ min: 8099, max: 8099, owner: 'the ingress health endpoint (HA-PLAN H19)' },
 	{ min: IDENTITY_DEFAULT_PORT, max: IDENTITY_DEFAULT_PORT, owner: 'the identity service' },
 	{ min: BROKER_PORT_MIN, max: BROKER_PORT_MAX, owner: 'managed brokers' },
 	{ min: REGISTRY_DEFAULT_PORT, max: REGISTRY_DEFAULT_PORT, owner: 'the container registry' },
