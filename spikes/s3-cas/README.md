@@ -53,6 +53,8 @@ the answer and are recorded as untested.
 bun spikes/s3-cas/run-local.ts          # MinIO, Garage, RustFS in yoal-w0-s3-* containers, then removed
 # or one target you already have:
 S3_ENDPOINT=… S3_BUCKET=… S3_ACCESS_KEY_ID=… S3_SECRET_ACCESS_KEY=… [S3_REGION=auto] bun spikes/s3-cas/spike.ts
+# R2 and GCS (credentials from the environment only; output is scrubbed; the run prefix is emptied and re-listed):
+set -a; . creds.env; set +a; bun spikes/s3-cas/run-cloud.ts > results.json   # STORES=r2,r2-identity,gcs ONLY=lease
 ```
 
 ## Result (2026-11-20)
@@ -61,3 +63,62 @@ All three local stores fail by the criteria as written. Numbers, per-condition c
 in the plan are in [docs/SPIKES.md § S3](../../docs/SPIKES.md). In short: Garage ignores the conditions;
 MinIO and RustFS are correct CAS stores but have MD5 ETags and miss p99 at 200 writers. `ControlLease`
 can overlap two holders when a write's answer arrives late (`client-late-confirm`).
+
+## S7 — GCS generation preconditions as the only lease arbiter
+
+Plan: HA-PLAN §4 W2 S7; CLUSTERING §6.3. Written before any S7 code (2026-11-20).
+
+### Question
+
+Can **Google Cloud Storage** be the only arbiter of one primary through its generation
+preconditions on the JSON API (`ifGenerationMatch=<generation>` to replace,
+`ifGenerationMatch=0` to create only)? The CAS token is the object's generation, not an ETag.
+
+### Pass criteria (HA-PLAN W2 S7, as given)
+
+- **S7.1** Exactly one winner per generation under 200 contending writers.
+- **S7.2** A stale precondition is refused with 412.
+- **S7.3** The generation changes on every write, including identical bodies, so there is no ABA.
+- **S7.4** Store clock from the response `Date` header, within 5 s of true time.
+- **S7.5** Behaviour under throttling (429/503) is recorded.
+- **S7.6** p99 is reported both at 200 writers and sequentially.
+
+Tightened for this spike (never loosened; recorded as deviations in docs/SPIKES.md):
+
+- S7.1 is run with the S3 method unchanged: 10,000 attempts by 200 writers in lock-step rounds over
+  60 s, plus a capped free-running flood. Every 200 must extend the one chain of generations from
+  the created object, and the final object must be the last win. A throttled or failed answer
+  (429/503/transport error) whose write in fact applied would break the chain, so it fails S7.1.
+- S7.2 also covers `ifGenerationMatch=0` on an existing object, `ifGenerationMatch=<n>` on an absent
+  object, and the ABA form (X→Y→X, then the generation read at the first X): all must be 412.
+- The S3 tightenings apply unchanged: T2 (an unconditional write breaks the holder's precondition),
+  T3 (read-after-write: a read after a 200 returns that generation), T4 (a held request or response
+  never yields a second 200 or a lost winner).
+- A malformed precondition (`ifGenerationMatch=abc`) must be refused, never silently ignored.
+  S3-dialect `If-Match`/`If-None-Match` headers sent to the JSON API are recorded, not gated: the GCS
+  adapter never sends them.
+- S7.6 is a report, as the plan words it; the S3 bound (p99 ≤ 300 ms) is shown beside it for
+  comparison only.
+
+### Fallback (HA-PLAN W2 table)
+
+**Not offered as an arbiter.** If GCS fails any criterion, the lease setup refuses a GCS bucket and
+installs on GCS get no automatic promotion (fail closed; manual promotion with a confirmed-dead
+isolation step).
+
+### How it runs
+
+A `gcs` adapter behind the existing `CasTarget` interface (JSON API, service-account OAuth via a
+signed JWT, credentials from the environment only). The checks in `spike.ts` stay store-agnostic.
+R2 runs the S3 criteria unchanged through the production `S3ObjectStore`, including `ControlLease`.
+All objects live under `yoal-w0-spikes/<run-id>/` and are deleted at the end; the run proves the
+prefix empty. Not run: AWS S3 and Azure Blob (no credentials).
+
+### Result on R2 and GCS (2026-11-20)
+
+**GCS passes S7.** **R2 fails S3** as the production client stands. R2 is a correct CAS store, but its ETag is
+the body's MD5 (ABA → 200). Its edge also gzips JSON bodies of about 50 bytes or more and then serves a
+*weak* ETag on GET/HEAD. That weak ETag can never satisfy `If-Match`, so the unchanged `ControlLease`
+fenced on its first renewal and no standby could ever take over. The rig's `r2-identity` target
+(`Accept-Encoding: identity` on reads) is the prototype fix: with it, T5 passes. Numbers:
+[docs/SPIKES.md § S3 (R2) and S7 (GCS)](../../docs/SPIKES.md).

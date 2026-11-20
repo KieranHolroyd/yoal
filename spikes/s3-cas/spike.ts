@@ -4,10 +4,12 @@
  *
  *   S3_ENDPOINT=… S3_BUCKET=… S3_ACCESS_KEY_ID=… S3_SECRET_ACCESS_KEY=… [S3_REGION=auto] \
  *   [S3_NAME=r2] [WRITERS=200] [ATTEMPTS=10000] [SECONDS=60] [FLOOD_SECONDS=15] \
- *   [LEASE_SECONDS=240] bun spikes/s3-cas/spike.ts
+ *   [LEASE_SECONDS=240] [FLOOD_MAX_ATTEMPTS=∞] [RUN_PREFIX=yoal-w0-spikes/<run>] bun spikes/s3-cas/spike.ts
  *
- * Writes only under `yoal/spikes/s3-cas/<run>/` and deletes what it wrote. Prints one JSON result.
+ * Writes only under `RUN_PREFIX` (default `yoal-w0-spikes/<run>/`) and deletes what it wrote.
+ * Prints one JSON result. Cloud stores: run-cloud.ts (R2 through S3, GCS through gcs.ts).
  */
+import { createHash } from 'node:crypto';
 import { runLease } from './lease-run.ts';
 import { DelayProxy, delayingFetch, withTimeout } from './proxy.ts';
 import { openTarget, targetFromEnv, type CasTarget, type TargetConfig } from './targets.ts';
@@ -18,7 +20,7 @@ export interface Check {
 	detail: string;
 }
 export interface SpikeResult {
-	spike: 'S3';
+	spike: 'S3' | 'S7';
 	target: string;
 	version?: string;
 	at: string;
@@ -34,6 +36,8 @@ const pct = (sorted: number[], q: number) =>
 	sorted.length ? Math.round(sorted[Math.min(sorted.length - 1, Math.floor(q * sorted.length))]! * 10) / 10 : NaN;
 const refused = (status: number) => status === 409 || status === 412;
 const code = (r: { status: number; code?: string | null }) => `${r.status}${r.code ? ` ${r.code}` : ''}`;
+/** Throttling answers: recorded, waited out, and checked for a write that applied anyway. */
+const throttled = (status: number) => status === 429 || status === 503;
 
 /** NTP offset of this host (true − local, ms) from `sntp`; 0 with a note if unavailable. */
 async function ntpOffset(): Promise<{ offsetMs: number; source: string }> {
@@ -51,8 +55,9 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 	const seconds = Number(env.SECONDS ?? 60);
 	const floodSeconds = Number(env.FLOOD_SECONDS ?? 15);
 	const leaseSeconds = Number(env.LEASE_SECONDS ?? 240);
+	const floodMax = Number(env.FLOOD_MAX_ATTEMPTS ?? Infinity);
 	const target = openTarget(config);
-	const run = `yoal/spikes/s3-cas/${new Date().toISOString().replace(/[:.]/g, '-')}`;
+	const run = (env.RUN_PREFIX ?? `yoal-w0-spikes/${new Date().toISOString().replace(/[:.]/g, '-')}`).replace(/\/+$/, '');
 	const checks: Record<string, Check> = {};
 	const codes: Record<string, string> = {};
 	const numbers: Record<string, unknown> = {};
@@ -66,6 +71,42 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 		const k = `${run}/${name}`;
 		written.add(k);
 		return k;
+	};
+	// Throttling per phase: status → count, plus writes that applied although the answer was 429/503.
+	const throttle: Record<string, Record<string, number>> = {};
+	const bump = (phase: string, what: string) => {
+		throttle[phase] ??= {};
+		throttle[phase][what] = (throttle[phase][what] ?? 0) + 1;
+	};
+	numbers.throttle = throttle;
+	/** A probe retried while throttled (it is a refusal probe or followed by a re-read). */
+	const probe = async <T extends { status: number }>(phase: string, send: () => Promise<T>): Promise<T> => {
+		for (let i = 0; ; i++) {
+			const result = await send();
+			if (!throttled(result.status) || i >= 15) return result;
+			bump(phase, String(result.status));
+			await sleep(1_000 * Math.min(2 ** i, 8));
+		}
+	};
+	/**
+	 * One sequential CAS on `k` from `token`. A 429/503 is waited out; a re-read then tells whether
+	 * that throttled write applied after all (counted, and taken as the write).
+	 */
+	const casStep = async (phase: string, k: string, body: string, token: string, latencies?: number[]) => {
+		for (let i = 0; i < 15; i++) {
+			const started = performance.now();
+			const write = await target.writeConditional(k, body, { ifMatch: token });
+			latencies?.push(performance.now() - started);
+			if (!throttled(write.status)) return write;
+			bump(phase, String(write.status));
+			await sleep(1_000 * Math.min(2 ** i, 8));
+			const read = await target.readVersioned(k);
+			if (read.etag && read.etag !== token) {
+				bump(phase, `applied despite ${write.status}`);
+				return { status: read.body === body ? 200 : 412, etag: read.body === body ? read.etag : null, serverDate: read.serverDate };
+			}
+		}
+		throw new Error(`${phase}: throttled 15 times in a row`);
 	};
 
 	// ── Clock: the lease trusts only the store's Date header (1 s resolution, truncated). ──
@@ -85,15 +126,16 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 		check('store-clock', 'store time within 5 s of true time', skews.length === 20 && worst <= 5_000, skews.length ? `store − true ∈ [${Math.round(skews[0]!)}, ${Math.round(skews.at(-1)!)}] ms over ${skews.length} reads (${ntp.source}; Date truncates to 1 s)` : 'no Date header');
 	}
 
+	const only = env.ONLY;
 	// ── Conditions on one key, and what the store answers to each. ──
-	{
+	if (!only) {
 		const k = key('single');
-		const absentIfMatch = await target.putRaw(k, '{"epoch":0}', { 'if-match': '"00000000000000000000000000000000"' });
+		const absentIfMatch = await probe('conditions', () => target.putRaw(k, '{"epoch":0}', { 'if-match': target.unknownToken }));
 		codes['If-Match on absent key'] = code(absentIfMatch);
-		const created = await target.writeConditional(k, '{"epoch":1}', { ifNoneMatch: '*' });
+		const created = await probe('conditions', () => target.writeConditional(k, '{"epoch":1}', { ifNoneMatch: '*' }));
 		codes['If-None-Match: * on absent key'] = String(created.status);
 		check('create-if-none-match', 'If-None-Match: * creates', created.status === 200 && Boolean(created.etag), `status ${created.status}, etag ${created.etag}`);
-		const again = await target.putRaw(k, '{"epoch":1}', { 'if-none-match': '*' });
+		const again = await probe('conditions', () => target.putRaw(k, '{"epoch":1}', { 'if-none-match': '*' }));
 		codes['If-None-Match: * on existing key'] = code(again);
 		check('create-refused-when-present', 'T1: 409/412 for If-None-Match: * on an existing key', refused(again.status), code(again));
 
@@ -101,7 +143,7 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 		let current = created.etag!;
 		let repeated = 0;
 		for (let i = 0; i < 50; i++) {
-			const same = await target.writeConditional(k, '{"epoch":1}', { ifMatch: current });
+			const same = await casStep('identical-body', k, '{"epoch":1}', current);
 			if (same.status !== 200 || !same.etag) break;
 			repeated++;
 			etags.add(same.etag);
@@ -109,52 +151,57 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 		}
 		codes['If-Match current ETag'] = repeated ? '200' : 'failed';
 		check('etag-changes-on-identical-body', 'the ETag changes on every write', repeated === 50 && etags.size === 51, `${repeated}/50 identical-body writes, ${etags.size} distinct ETags`);
+		// Is the token the body's MD5 (what makes ABA possible)?
+		const md5 = `"${createHash('md5').update('{"epoch":1}').digest('hex')}"`;
+		numbers.etagSample = { token: current, bodyMd5: md5 };
+		check('etag-is-not-body-md5', 'record: the token is not the body’s MD5', current !== md5 && created.etag !== md5, `token ${current}, MD5 of the body ${md5}`);
 
 		// Stale: the ETag of an earlier, different body.
 		const before = current;
-		const moved = await target.writeConditional(k, '{"epoch":2}', { ifMatch: current });
+		const moved = await casStep('conditions', k, '{"epoch":2}', current);
 		if (moved.status !== 200 || !moved.etag) throw new Error(`write epoch 2: ${moved.status}`);
 		current = moved.etag;
-		const stale = await target.putRaw(k, '{"epoch":"stale"}', { 'if-match': before });
+		const stale = await probe('conditions', () => target.putRaw(k, '{"epoch":"stale"}', { 'if-match': before }));
 		codes['If-Match stale ETag'] = code(stale);
-		const bogus = await target.putRaw(k, '{"epoch":"bogus"}', { 'if-match': '"00000000000000000000000000000000"' });
+		const bogus = await probe('conditions', () => target.putRaw(k, '{"epoch":"bogus"}', { 'if-match': target.unknownToken }));
 		codes['If-Match unknown ETag'] = code(bogus);
 		check('stale-if-match-refused', '409/412, never 200, for a stale If-Match', refused(stale.status) && refused(bogus.status) && absentIfMatch.status !== 200, `stale ${code(stale)}, unknown ${code(bogus)}, absent key ${code(absentIfMatch)}`);
 		// ABA: the object went X → Y → X. An If-Match taken at the first X is stale (the object was
 		// written twice since); a content-hash ETag makes it match again.
-		const back = await target.writeConditional(k, '{"epoch":1}', { ifMatch: current });
+		const back = await casStep('conditions', k, '{"epoch":1}', current);
 		if (back.status !== 200 || !back.etag) throw new Error(`write back: ${back.status}`);
 		current = back.etag;
-		const aba = await target.putRaw(k, '{"epoch":"aba"}', { 'if-match': before });
+		const aba = await probe('conditions', () => target.putRaw(k, '{"epoch":"aba"}', { 'if-match': before }));
 		codes['If-Match stale ETag, body since restored (ABA)'] = code(aba);
 		if (aba.status === 200) current = (await target.readVersioned(k)).etag ?? current;
 		check('stale-if-match-aba', '409/412, never 200, for a stale If-Match (object rewritten with an earlier body)', refused(aba.status), `${code(aba)}; ETag before ${before}, after X→Y→X ${back.etag}`);
 
 		// Conditions the lease does not use: a store must not silently ignore them.
-		const unsupported = await target.putUnsupportedCondition(k, '{"epoch":"unsupported"}', current);
+		const unsupported = await probe('conditions', () => target.putUnsupportedCondition(k, '{"epoch":"unsupported"}', current));
 		codes['If-None-Match: <current ETag> (unsupported on PUT)'] = code(unsupported);
 		const afterUnsupported = await target.readVersioned(k);
 		const silent = unsupported.status >= 200 && unsupported.status < 300;
 		check('unsupported-condition-refused', '501 for an unsupported condition, never silent success', !silent && afterUnsupported.etag === current, `${code(unsupported)}; object ${afterUnsupported.etag === current ? 'unchanged' : 'REPLACED'}`);
 		if (silent && afterUnsupported.etag) current = afterUnsupported.etag;
-		const mismatch = await target.putUnsupportedConditionMismatch(k, '{"epoch":"mismatch"}');
+		const mismatch = await probe('conditions', () => target.putUnsupportedConditionMismatch(k, '{"epoch":"mismatch"}'));
 		codes['If-None-Match: <other ETag> (unsupported on PUT)'] = code(mismatch);
 		if (mismatch.status === 200) current = (await target.readVersioned(k)).etag ?? current;
-		const weak = await target.putRaw(k, '{"epoch":3}', { 'if-match': `W/${current}` });
+		const weak = await probe('conditions', () => target.putRaw(k, '{"epoch":3}', { 'if-match': `W/${current}` }));
 		codes['If-Match: W/<current ETag>'] = code(weak);
+		check('malformed-condition-refused', 'a malformed condition is refused, never silently ignored', weak.status < 200 || weak.status >= 300, code(weak));
 		if (weak.status === 200) current = (await target.readVersioned(k)).etag ?? current;
-		const star = await target.putRaw(k, '{"epoch":3}', { 'if-match': '*' });
+		const star = await probe('conditions', () => target.putRaw(k, '{"epoch":3}', { 'if-match': '*' }));
 		codes['If-Match: * on existing key'] = code(star);
 		if (star.status === 200) current = (await target.readVersioned(k)).etag ?? current;
-		const both = await target.putRaw(k, '{"epoch":3}', { 'if-match': current, 'if-none-match': '*' });
+		const both = await probe('conditions', () => target.putRaw(k, '{"epoch":3}', { 'if-match': current, 'if-none-match': '*' }));
 		codes['If-Match current + If-None-Match: *'] = code(both);
 		if (both.status === 200) current = (await target.readVersioned(k)).etag ?? current;
 
 		// T2: an unconditional PUT lands while a holder keeps an If-Match view.
 		const held = (await target.readVersioned(k)).etag!;
-		const plain = await target.putUnconditional(k, '{"epoch":"unconditional"}');
+		const plain = await probe('conditions', () => target.putUnconditional(k, '{"epoch":"unconditional"}'));
 		codes['PUT without condition on existing key'] = code(plain);
-		const holder = await target.putRaw(k, '{"epoch":4}', { 'if-match': held });
+		const holder = await probe('conditions', () => target.putRaw(k, '{"epoch":4}', { 'if-match': held }));
 		codes['If-Match after an unconditional PUT replaced it'] = code(holder);
 		check('unconditional-put-breaks-held-if-match', 'T2: the holder’s If-Match fails after an unconditional PUT', plain.status === 200 ? refused(holder.status) : true, `unconditional ${code(plain)}, holder’s CAS ${code(holder)}`);
 
@@ -164,9 +211,7 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 		let staleHead = 0;
 		const latencies: number[] = [];
 		for (let i = 0; i < 200; i++) {
-			const started = performance.now();
-			const write = await target.writeConditional(k, JSON.stringify({ epoch: 10 + i }), { ifMatch: etag });
-			latencies.push(performance.now() - started);
+			const write = await casStep('sequential', k, JSON.stringify({ epoch: 10 + i }), etag, latencies);
 			if (write.status !== 200 || !write.etag) throw new Error(`sequential write ${i}: ${write.status}`);
 			etag = write.etag;
 			const get = await target.readVersioned(k);
@@ -175,7 +220,7 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 			if (head.etag !== etag) staleHead++;
 		}
 		latencies.sort((a, b) => a - b);
-		numbers.sequentialPut = { n: 200, p50: pct(latencies, 0.5), p99: pct(latencies, 0.99) };
+		numbers.sequentialPut = { n: latencies.length, p50: pct(latencies, 0.5), p99: pct(latencies, 0.99), max: Math.round(latencies.at(-1) ?? NaN) };
 		check('read-after-write-sequential', 'T3: GET and HEAD return the ETag just written', staleGet === 0 && staleHead === 0, `200 writes: ${staleGet} stale GET, ${staleHead} stale HEAD`);
 	}
 
@@ -229,9 +274,10 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 			while (tries + errors < rounds * writers && Date.now() < settle) await sleep(100);
 		} else {
 			const deadline = started + durationS * 1000;
+			let issued = 0;
 			await Promise.all(
 				Array.from({ length: writers }, async (_, i) => {
-					while (Date.now() < deadline) await attempt(`w${i}`);
+					while (Date.now() < deadline && issued++ < floodMax) await attempt(`w${i}`);
 				}),
 			);
 		}
@@ -259,6 +305,7 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 		latencies.sort((a, b) => a - b);
 		const result = {
 			mode,
+			...(mode === 'flood' && Number.isFinite(floodMax) ? { cap: floodMax } : {}),
 			writers,
 			seconds: Math.round(elapsed * 10) / 10,
 			attempts: tries,
@@ -282,11 +329,24 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 			check('put-p99-under-300ms', 'p99 PUT ≤ 300 ms', result.putP99 <= 300, `p50 ${result.putP50} ms, p99 ${result.putP99} ms, max ${result.putMax} ms`);
 		}
 	};
-	await race('rounds', 'rounds', seconds);
-	if (floodSeconds > 0) await race('flood', 'flood', floodSeconds);
+	if (!only) {
+		// A lease-sized body (the §6.3 record is ~110 bytes): is the token a read returns usable as a
+		// condition? R2 gzips compressible bodies ≥ ~50 bytes and then sends a weak ETag on GET/HEAD.
+		const k = key('lease-sized');
+		const body = JSON.stringify({ epoch: 7, holderNodeId: 'nod_01JB8Q3K9XABCDEFGHJKMNPQRS', holderVersion: '1.4.0', expiresAt: 1795164600000 });
+		const created = await probe('conditions', () => target.writeConditional(k, body, { ifNoneMatch: '*' }));
+		const read = await target.readVersioned(k);
+		const head = await target.head(k);
+		const cas = read.etag ? await probe('conditions', () => target.writeConditional(k, body.replace('"epoch":7', '"epoch":8'), { ifMatch: read.etag! })) : null;
+		numbers.leaseSizedBody = { bytes: body.length, putToken: created.etag, getToken: read.etag, headToken: head.etag, casWithGetToken: cas?.status ?? 'no token' };
+		codes['If-Match with the GET token of a lease-sized body'] = cas ? String(cas.status) : 'no token';
+		check('read-token-usable', 'T6: a lease-sized object’s GET token satisfies If-Match (the lease reads, then writes)', cas?.status === 200, `${body.length}-byte body: PUT token ${created.etag}, GET ${read.etag}, HEAD ${head.etag}; If-Match with the GET token → ${cas?.status ?? 'no token'}`);
+		await race('rounds', 'rounds', seconds);
+		if (floodSeconds > 0) await race('flood', 'flood', floodSeconds);
+	}
 
 	// ── T4: one request or response held 5 s; the client gives up after 2 s and retries. ──
-	{
+	if (!only) {
 		const endpoint = new URL(config.endpoint);
 		const plainHttp = endpoint.protocol === 'http:';
 		let proxy: DelayProxy | null = null;
@@ -379,9 +439,12 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 	}
 
 	for (const k of written) await target.delete(k).catch(() => undefined);
-	const storeChecks = Object.entries(checks).filter(([name]) => !name.startsWith('client-'));
+	if (Object.keys(target.dialect).length) numbers.dialect = target.dialect;
+	const ungated = new Set<string>(target.ungated);
+	for (const name of Object.keys(checks)) if (ungated.has(name)) checks[name]!.criterion += ' (recorded, not gating for this store)';
+	const storeChecks = Object.entries(checks).filter(([name]) => !name.startsWith('client-') && !ungated.has(name));
 	return {
-		spike: 'S3',
+		spike: config.protocol === 'gcs' ? 'S7' : 'S3',
 		target: config.name,
 		...(config.version ? { version: config.version } : {}),
 		at: new Date().toISOString(),

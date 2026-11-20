@@ -4,34 +4,51 @@
  *
  * - `s3` (here): R2, AWS S3, MinIO, Garage, RustFS. The lease path (`readVersioned`,
  *   `writeConditional`) is the production `S3ObjectStore`, unchanged.
- * - `azure-blob` / `gcs` (S7, not written): implement `CasTarget` with ETag conditions
- *   (`If-Match` / `If-None-Match: *` on Put Blob) or generation preconditions
- *   (`ifGenerationMatch`, `ifGenerationMatch=0` for create). The token a CAS compares is the
- *   adapter's business: an ETag for S3 and Azure, the generation number for GCS.
+ * - `gcs` (gcs.ts, S7): the JSON API with generation preconditions (`ifGenerationMatch`,
+ *   `ifGenerationMatch=0` for create). Its token is the generation number, carried in the
+ *   `etag` fields of the lease interface; the S3-dialect conditions spike.ts sends are translated.
+ * - `azure-blob` (not written; no credentials): ETag conditions on Put Blob.
+ *
+ * The token a CAS compares is the adapter's business: an ETag for S3 and Azure, the generation for GCS.
  */
 import { AwsClient } from 'aws4fetch';
 import { S3ObjectStore } from '../../packages/core/src/object-store.ts';
 import type { ConditionalStore } from '../../packages/core/src/object-store.ts';
+import { GcsCasTarget } from './gcs.ts';
 
-export interface TargetConfig {
+interface BaseTargetConfig {
 	/** Label in results, e.g. `minio`, `r2`. */
 	name: string;
-	protocol: 's3';
 	endpoint: string;
 	bucket: string;
+	/** Image, version and digest, recorded in the result as given. */
+	version?: string;
+}
+export interface S3TargetConfig extends BaseTargetConfig {
+	protocol: 's3';
 	region: string;
 	accessKeyId: string;
 	secretAccessKey: string;
 	forcePathStyle?: boolean;
-	/** Image, version and digest, recorded in the result as given. */
-	version?: string;
+	/**
+	 * Prototype fix (not in production code): send `Accept-Encoding: identity` on GET/HEAD. R2's
+	 * edge gzips compressible bodies (≥ ~50 bytes of JSON/text) and then serves a weak `W/` ETag,
+	 * which no `If-Match` can satisfy.
+	 */
+	identityReads?: boolean;
 }
+export interface GcsTargetConfig extends BaseTargetConfig {
+	protocol: 'gcs';
+	/** Path to a service-account JSON key; read at run time, never logged. */
+	keyFile: string;
+}
+export type TargetConfig = S3TargetConfig | GcsTargetConfig;
 
 export interface RawResult {
 	status: number;
 	etag: string | null;
 	serverDate: number | null;
-	/** S3 error code from the body, when the store sent one. */
+	/** S3 error code (or GCS error reason) from the body, when the store sent one. */
 	code: string | null;
 }
 
@@ -54,6 +71,14 @@ export interface CasTarget extends ConditionalStore {
 	delete(key: string): Promise<void>;
 	/** Create the bucket if missing (local stores only). */
 	ensureBucket(): Promise<void>;
+	/** Every key under `prefix` (used only for the run's own prefix, to prove it empty). */
+	list(prefix: string): Promise<string[]>;
+	/** A well-formed token that matches no version of any object. */
+	readonly unknownToken: string;
+	/** Checks recorded but not gating for this protocol (its criteria differ; see README). */
+	readonly ungated: readonly string[];
+	/** How the S3-dialect conditions in spike.ts map onto this protocol, for the result. */
+	readonly dialect: Record<string, string>;
 	/** A second view of the same target with its own fetch (a proxy, a timeout). */
 	withFetch(fetchImpl: typeof fetch, endpoint?: string): CasTarget;
 }
@@ -79,6 +104,7 @@ export function targetFromEnv(env: Record<string, string | undefined> = process.
 
 export function openTarget(config: TargetConfig, fetchImpl: typeof fetch = fetch): CasTarget {
 	if (config.protocol === 's3') return new S3CasTarget(config, fetchImpl);
+	if (config.protocol === 'gcs') return new GcsCasTarget(config, fetchImpl);
 	throw new Error(`no adapter for protocol ${(config as { protocol: string }).protocol}`);
 }
 
@@ -87,15 +113,30 @@ const parseDate = (value: string | null): number | null => {
 	return Number.isFinite(parsed) ? parsed : null;
 };
 
+/** Added after SigV4 signing: an unsigned header, which S3 ignores for the signature. */
+function identityReads(fetchImpl: typeof fetch): typeof fetch {
+	return ((input: string | URL | Request, init?: RequestInit) => {
+		const request = new Request(input as string, init);
+		if (request.method !== 'GET' && request.method !== 'HEAD') return fetchImpl(request);
+		const headers = new Headers(request.headers);
+		headers.set('accept-encoding', 'identity');
+		return fetchImpl(new Request(request, { headers }));
+	}) as typeof fetch;
+}
+
 class S3CasTarget implements CasTarget {
+	readonly unknownToken = '"00000000000000000000000000000000"';
+	readonly ungated = ['malformed-condition-refused', 'etag-is-not-body-md5'] as const;
+	readonly dialect = {};
 	readonly #store: S3ObjectStore;
 	readonly #client: AwsClient;
 	readonly #fetch: typeof fetch;
 
 	constructor(
-		readonly config: TargetConfig,
+		readonly config: S3TargetConfig,
 		fetchImpl: typeof fetch,
 	) {
+		if (config.identityReads) fetchImpl = identityReads(fetchImpl);
 		this.#fetch = fetchImpl;
 		this.#store = new S3ObjectStore({
 			endpoint: config.endpoint,
@@ -159,6 +200,12 @@ class S3CasTarget implements CasTarget {
 		this.#raw('PUT', this.#url(key), body, { 'if-none-match': etag });
 	putUnsupportedConditionMismatch = (key: string, body: string) =>
 		this.#raw('PUT', this.#url(key), body, { 'if-none-match': '"00000000000000000000000000000000"' });
+
+	async list(prefix: string): Promise<string[]> {
+		const keys: string[] = [];
+		for await (const object of this.#store.list(prefix)) keys.push(object.key);
+		return keys;
+	}
 
 	async ensureBucket(): Promise<void> {
 		const head = await this.#raw('HEAD', this.#url());
