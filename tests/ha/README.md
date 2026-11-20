@@ -120,12 +120,12 @@ checker's logs.
 
 | Scenario | For | What it does | Today on `ha/integration` |
 |---|---|---|---|
-| `single-node-gate.ts` | Every lane (§7.3) | One node, every HA flag off: deploy, scale 1→2→1, redeploy, under the checker | see below |
-| `kill-node.ts` | M1, §1.2 node loss | Two copies (keeper + `--node`); power off (`--method kill`), stop, or partition the node; time offline, re-placement, answering, rejoin | **fail** (direct), **invalid** (edge) |
+| `single-node-gate.ts` | Every lane (§7.3) | One node, every HA flag off: deploy, scale 1→2→1, redeploy, under the checker | **pass** |
+| `kill-node.ts` | M1, §1.2 node loss | Two copies (keeper + `--node`); power off (`--method kill`), stop, or partition the node; time offline (≤ 40 s), re-placement, answering (≤ grace + 120 s), rejoin | **pass** direct, **fail** edge |
 | `kill-node-b.ts` | W1 exit | `kill-node.ts --node lab-b` | as kill-node |
-| `freeze-agent.ts` | §7.2 Process | `SIGSTOP` the agent on a copy's node for 60 s; the copy must keep serving, nothing restarts or moves | see below |
-| `attachments-three-nodes.ts` | W4 exit, M1 | Container app, three copies on lab-a/b/c, Postgres on lab-ctl; manual promotion must change no env and restart nothing; port scan from the lab bridge | **skip** (container: the D56 pin); `--runtime process` measures the rest |
-| `rolling-deploy-under-load.ts` | W5 exit, M1 | 10,000 requests a minute through a rolling deploy; a failing release command; a release command under a partition (I16) | B measured; C, D **skip** (no `RELEASE_PHASE`) |
+| `freeze-agent.ts` | §7.2 Process | `SIGSTOP` the agent on a copy's node for 60 s; the copy must keep serving with its database, nothing restarts or moves | **fail** |
+| `attachments-three-nodes.ts` | W4 exit, M1 | Container app, three copies on lab-a/b/c, Postgres on lab-ctl; manual promotion must change no env and restart nothing; port scan from the lab bridge | **skip** (container); `--runtime process` **fail** |
+| `rolling-deploy-under-load.ts` | W5 exit, M1 | 10,000 requests a minute through a rolling deploy; a failing release command; a release command under a partition (I16) | B **fail** (3 non-2xx); C, D **skip** |
 
 ### Verdicts
 
@@ -147,9 +147,9 @@ invalid or skipped on this tree (each such step in `.github/workflows/ha.yml` sa
 `--target direct` bypasses the edge: the scenario's own balancer sends each request straight to a
 copy (relayed through lab-a). A direct run judges re-placement, restarts and the checker's
 invariants, and records request failures without judging them (they describe the harness balancer
-as much as the platform); its report says "Edge bypassed" at the top. Until `ha/w1-fixes` lands,
-every edge run with a remote copy is `invalid`: the edge's active health check sends no app Host
-(`packages/site-config/src/compile.ts:259-264`), so remote copies take no traffic.
+as much as the platform); its report says "Edge bypassed" at the top. On a tree without F7
+(`ha/w1-fixes`), every edge run with a remote copy is `invalid`: the edge's active health check
+sends no app Host (`packages/site-config/src/compile.ts`), so remote copies take no traffic.
 
 ### The library (`scenarios/lib/`)
 
@@ -168,7 +168,28 @@ records `release:<marker>` through the app's `/singleton`, and can fail or sleep
 
 ### What the scenarios found on `ha/integration` (2026-11-20)
 
-RESULTS_PLACEHOLDER
+On `ha/w1-lab` = `ha/integration` + `ha/w1-fixes` (F7–F12), container lab on OrbStack (arm64).
+Every run's `scenario.json` has the full numbers.
+
+| Scenario | Verdict | Numbers | Why |
+|---|---|---|---|
+| `single-node-gate` | **pass** | 3,001 requests: 0 failed outside the redeploy, 2×503 during the single copy's in-place restart; 0 lost writes; scale to 2 refused (422), first copy untouched; redeploy running in 10 s | — |
+| `kill-node --node lab-b --target direct` | **pass** | offline 33 s; re-placed on lab-c, answering at 124 s (bound 240 s); 0 lost of 3,200 writes; 9 of 4,801 failed (harness balancer, not judged) | — |
+| `kill-node --node lab-b` (edge) | **fail** | offline 29 s; re-placed and `running` at 126–182 s, never in the edge's upstreams; 0–2 of 4,801 failed; 0 lost writes | a copy re-placed by failover reaches the edge only on the next unrelated desired-state change: its move to `running` bumps no version, and the edge's list is built from copies `running` at build time (`packages/core/src/nodes.ts:1249-1268`). Proved by bumping the project by hand: the next version listed it |
+| `kill-node --node lab-b --method partition` (edge) | **fail** | offline 28 s; re-placed `running` at 135 s, never in the edge; 2 of 4,801 failed (1×503, 1 timeout) | as above |
+| `freeze-agent --node lab-b` (edge) | **fail** | 0 of 17 `/healthz?db=1` probes answered during the 60 s freeze; 6 of 3,601 requests timed out; offline at 30 s, online 0.4 s after the thaw; no restart, no re-placement | the cross-node database endpoint lives in the agent process (`apps/agent/src/endpoints.ts`), so a frozen agent cuts every remote copy on its node off from Postgres. With `/whoami` probes (no database) the direct run passed |
+| `attachments-three-nodes` (container) | **skip** | port scan: 8,000 ports on 4 nodes, 0 open | the platform's own refusal: "an HTTP app runs one copy per node, and this one must stay on its node because it runs next to its attached database (D56)" (G9, `crossNodeAllowed()`, `packages/core/src/databases.ts:3636`); W4 |
+| `attachments-three-nodes --runtime process` (edge) | **fail** | 3 copies on a/b/c, Postgres on lab-ctl; manual promotion to lab-a completed in 58 s; **all three** copies' env changed and all three restarted (the remote ones too, not only the same-node one); 916 of 4,801 requests failed around it; 0 lost writes; port scan 0 open | G10 (`packages/core/src/databases.ts:2943-2963`), wider than HA-PLAN states: every consumer restarts, not only those on the old or new primary's node |
+| `rolling-deploy-under-load` (edge) | **fail** (B), **skip** (C, D) | 10,020 requests a minute; rollout of 3 copies done in 39.5 s; 3 of 30,061 not 2xx (1×503, 2 connection) | G22: no drain (a copy leaves the upstreams in the version that restarts it). C and D: the workload API accepts and drops `release` and `readinessPath` (`RELEASE_PHASE`, W5) |
+
+Not seen: the "protected site health check passes on the login redirect" problem; no scenario uses a
+protected route.
+
+**Checker caveat (I15).** Yoal injects no copy id into a workload, so the app's `x-checker-copy`
+(`host:port:pid`) never matches the platform's copy id in a `route` observation, and I15's
+late-request half cannot match. The scenarios therefore emit no `route stopped` events for
+unplanned losses (a crash stops a copy while it is in the upstreams by definition). W5's drain
+scenarios need a per-copy id in the workload environment (e.g. `YOAL_COPY_ID`) to judge I15.
 
 ## The simulator
 

@@ -225,7 +225,8 @@ export async function placeCopies(
 ): Promise<Copy[]> {
 	const timeoutMs = options.timeoutMs ?? 300_000;
 	const log = options.log ?? (() => {});
-	const all = LAB.nodes.map((node) => node.name);
+	// Only nodes in the fleet: a one-node lab has no lab-b to drain.
+	const all = fleetNodes().map((node) => node.name);
 	const want = nodes.slice();
 	// A re-run: copies elsewhere, or more than wanted. Back to one copy first.
 	const existing = await copies(project).catch(() => [] as Copy[]);
@@ -378,7 +379,7 @@ export async function deployChecker(
 	},
 ): Promise<DeployedChecker> {
 	scenario.note(`project ${options.project}: ${await ensureProject(options.project, options.runtime)}`);
-	const image = options.runtime === 'container' ? loadCheckerImage([...new Set([...options.nodes, ...LAB.nodes.map((node) => node.name)])]) : null;
+	const image = options.runtime === 'container' ? loadCheckerImage([...new Set([...options.nodes, ...fleetNodes().map((node) => node.name)])]) : null;
 	if (image) scenario.note(`checker image ${image} loaded into every node's Podman`);
 	await setWorkload(options.project, { runtime: options.runtime, image: image ?? undefined, env: { ...(options.dbNode ? {} : { CHECKER_STORE: 'memory' }), ...(options.env ?? {}) }, extra: options.extra });
 	let database: DatabaseInfo | null = null;

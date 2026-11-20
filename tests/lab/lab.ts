@@ -58,7 +58,7 @@ function writeState(state: LabState): void {
 
 function imageTag(): string {
 	const hash = createHash('sha256');
-	for (const file of ['node.Dockerfile', 'node/bootstrap.Caddyfile']) hash.update(readFileSync(join(HERE, file)));
+	hash.update(readFileSync(join(HERE, 'node.Dockerfile')));
 	hash.update(`${LAB.image.debianTag} ${LAB.image.bunVersion}`);
 	return `${LAB.image.node}:${hash.digest('hex').slice(0, 12)}`;
 }
@@ -413,11 +413,17 @@ function down(flags: Set<string>): void {
 	}
 	// Before the image goes: the check runs from it.
 	const leaked = leakedLoopDevices(state?.image || imageTag());
-	if (leaked === null) problems.push('could not check the Docker host for leaked loop devices (no lab image to run losetup from)');
+	// No image and nothing removed: an earlier `down` already ran the check, and nothing ran since.
+	if (leaked === null && containers.length === 0) note('nothing was running: loop-device check skipped (no lab image to run losetup from)');
+	else if (leaked === null) problems.push('could not check the Docker host for leaked loop devices (no lab image to run losetup from)');
 	else if (leaked.length) problems.push(`loop devices backed by lab fault disks are still attached on the Docker host: ${leaked.join('; ')} (detach with \`losetup -d\` on the host)`);
 	else note('no loop devices backed by lab files on the Docker host');
 	if (!flags.has('--keep-image')) {
-		const images = docker(['images', LAB.image.node, '--format', '{{.Repository}}:{{.Tag}}']).stdout.split('\n').filter((ref) => ref.startsWith(`${LAB.image.node}:`));
+		// The node image and every other image the lab built (the checker app's, for container
+		// scenarios): labelled and named yoal-w0-*.
+		const images = docker(['images', '--filter', `label=${LAB.label}`, '--format', '{{.Repository}}:{{.Tag}}'])
+			.stdout.split('\n')
+			.filter((ref) => ref.startsWith(`${LAB.prefix}-`));
 		if (images.length) {
 			say(`removing images ${images.join(', ')}`);
 			docker(['rmi', '-f', ...images]);
@@ -425,7 +431,12 @@ function down(flags: Set<string>): void {
 		if (state?.pulledMinio && imageExists(LAB.s3lab.minioImage)) docker(['rmi', LAB.s3lab.minioImage], { allowFailure: true });
 	}
 	rmSync(STATE_DIR, { recursive: true, force: true });
-	const left = [...labContainers(), ...labVolumes()];
+	const left = [
+		...labContainers(),
+		...labVolumes(),
+		...(flags.has('--keep-image') ? [] : docker(['images', '--filter', `label=${LAB.label}`, '--format', '{{.Repository}}:{{.Tag}}']).stdout.split('\n').filter((ref) => ref.startsWith(`${LAB.prefix}-`))),
+		...(docker(['network', 'inspect', LAB.network.name], { allowFailure: true }).code === 0 ? [LAB.network.name] : []),
+	];
 	if (left.length) problems.push(`left behind: ${left.join(', ')}`);
 	if (problems.length) throw new Error(`lab down finished with problems:\n  ${problems.join('\n  ')}`);
 	say('lab down: nothing left');

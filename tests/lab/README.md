@@ -38,15 +38,18 @@ images, containers, volumes and the network are all named `yoal-w0-*` and labell
 
 Built and verified on OrbStack (Docker 29, arm64, kernel 7.2) on macOS; `ha-integration` runs the
 same on `ubuntu-24.04`. OrbStack did not need the Lima fallback: systemd, nftables, `tc netem`,
-WireGuard, loop devices and nested Podman all work in a privileged container. Two adjustments are
+WireGuard, loop devices and nested Podman all work in a privileged container. One adjustment is
 baked into [`node.Dockerfile`](./node.Dockerfile):
 
 - `/` is made `rshared` before `sysinit.target`. Docker starts containers with private mount
   propagation, and systemd 257 mounts each unit's credentials in a child namespace; without this the
-  control plane cannot read its sealed master key (`LoadCredentialEncrypted=`).
-- The installer's own bootstrap Caddyfile is pre-written. The installer writes it only when it
-  installs Caddy itself; with Caddy preinstalled it keeps the package's stock file, whose admin API
-  is on TCP, and the agent cannot drive Caddy.
+  control plane cannot read its sealed master key (`LoadCredentialEncrypted=`). Still needed: it is a
+  property of running systemd in a Docker container, not of the installer.
+
+Wave 0 also pre-wrote the installer's bootstrap Caddyfile into the image, because the installer
+kept the package's stock file (admin API on TCP) when Caddy was preinstalled. Since F12
+(`ha/w1-fixes`, `scripts/install/caddyfile.ts`) the installer writes its own file in that case too,
+so the image no longer carries one; a lab built without F12 cannot drive Caddy.
 
 **Joining.** `install --join` refuses a control URL that is not `https`, and the lab has no domain or
 ACME. `lab up` runs [`node/tls-front.ts`](./node/tls-front.ts) on lab-a for the duration of the
@@ -183,11 +186,31 @@ bun tests/lab/vm/lab-vm.ts down                              # deletes every yoa
 The scenarios run on the container form only (they drive nodes with `docker exec`); the VM form is
 for the node-loss and kernel-level faults the container form cannot fake. Timings: "Speed" below.
 
-VM_PLACEHOLDER
+Verified 2026-11-20 on this Mac (Lima 2.3.0, VZ, arm64), two nodes (`--only lab-a,lab-b`, to stay
+within a machine shared with other lanes): `up` 176 s (VM create and boot 98, ship 2, control
+install 52, worker join 20, fault helper 4); a partition of lab-b from lab-a applied in 2 s, checked
+from inside (ping to lab-a fails) and cleared; a power-off (`kill lab-b`) marked offline by the
+control plane after 31 s, back online 10 s after `start`; `down` 1.4 s, no `yoal-w1-lab-*` VM left.
+The Debian cloud image stays in Lima's own download cache (`~/Library/Caches/lima`).
 
 ## Speed
 
-SPEED_PLACEHOLDER
+Measured 2026-11-20 on this Mac (OrbStack, 11 CPUs shared with other lanes; every `up` writes
+`.out/up-timings.json`):
+
+| Path | Time | Phases |
+|---|---|---|
+| Node image, `docker build --no-cache` (apt, Caddy, Bun) | 32 s | — |
+| `up`, four nodes, from nothing (image cached, fresh volumes and Bun cache) | 62–88 s | control install 31, worker joins 23 (parallel) |
+| `up --only lab-a`, from nothing | 51 s | control install 39 |
+| `up` growing that one-node lab to four | 33 s | worker joins 25 |
+| `up` when already up (re-ships the checkout) | 6 s | ship 2, fault helper 3 |
+| `up --upgrade` (lab-a rebuilt from the tree) | 59 s | control 54 |
+| `down` | 6 s | — |
+
+`--upgrade` is far under the five minutes that would call for a faster path, so there is none. It
+rebuilds lab-a only; a branch that changes the agent or helper is loaded onto every node with
+`down && up` (under two minutes).
 
 ## Limits of the container form
 

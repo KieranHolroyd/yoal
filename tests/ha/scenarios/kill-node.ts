@@ -23,6 +23,7 @@
  *
  * Judged (lib/report.ts verdicts):
  *   traffic-before   both copies served before the fault (else invalid)
+ *   offline-detected the victim reported offline within 40 s (F9: 30–35 s, plus polling)
  *   replaced         the victim's copy re-placed, running and answering within the failover grace
  *                    + 120 s (HA-PLAN §1.2); skip when failover is off
  *   checker          no invariant failed (I6 lost writes, I4 duplicate singletons, …)
@@ -37,6 +38,7 @@ import { copies, deployChecker, describeCopies, type Copy } from './lib/app.ts';
 import { startChecker } from './lib/checker.ts';
 import { Faults, FAULT_MAX_S, type FaultKind } from './lib/faults.ts';
 import { EDGE_BYPASSED_NOTE, formatShare, openTarget, parseTarget, shareUntil, share, type Target } from './lib/ingress.ts';
+import { LabRelay } from '../../lab/lib/relay.ts';
 import { readCheckerReport } from './lib/report.ts';
 import { COMMON_OPTIONS, Scenario, positiveInt, waitFor } from './lib/scenario.ts';
 
@@ -56,6 +58,18 @@ const { values: flags } = parseArgs({
 		'keep-down': { type: 'boolean', default: false },
 	},
 });
+
+/** The upstream addresses lab-a's edge Caddy has for `host` (from its live config). */
+async function edgeDials(host: string): Promise<string[] | string> {
+	const relay = new LabRelay(CONTROL.name);
+	try {
+		return await Promise.race([relay.dials(host), Bun.sleep(10_000).then(() => 'timed out')]);
+	} catch (error) {
+		return `unavailable: ${(error as Error).message}`;
+	} finally {
+		await relay.close();
+	}
+}
 
 const victim = labNode(flags.node!).name;
 const keeper = labNode(flags.keeper ?? (victim === CONTROL.name ? 'lab-b' : CONTROL.name)).name;
@@ -113,7 +127,7 @@ await scenario.run(async (s) => {
 		s.stop(
 			'invalid',
 			target === 'edge'
-				? `${victim}'s copy took no traffic through the edge: the edge's active health check reaches a remote copy without the app's Host and marks it unhealthy (packages/site-config/src/compile.ts:259-264; ha/w1-fixes). Run --target direct to measure copy failover without the edge.`
+				? `${victim}'s copy took no traffic through the edge: on a tree without F7 from ha/w1-fixes the edge's active health check reaches a remote copy without the app's Host and marks it unhealthy (packages/site-config/src/compile.ts). Run --target direct to measure copy failover without the edge.`
 				: `${victim}'s copy did not answer any direct request (${route.describe()})`,
 		);
 	}
@@ -135,6 +149,7 @@ await scenario.run(async (s) => {
 
 	let replacement: Copy | null = null;
 	let lastFleet = 0;
+	let edgeDialsAt = 0;
 	while (checker.running()) {
 		const now = Date.now();
 		if (s.report.timings.victimOffline == null && now - lastFleet > 3000) {
@@ -166,10 +181,16 @@ await scenario.run(async (s) => {
 					s.timing('replacementRunning');
 					s.observer.note('route', moved.nodeName, { copy: moved.id, event: 'added' });
 					s.note(`+${(s.rel() / 1000).toFixed(1)} s copy running on ${moved.nodeName}`);
+					edgeDialsAt = Date.now() + 15_000;
 				}
 			}
 		} catch {
 			// the control plane is slow, or down
+		}
+		if (edgeDialsAt && Date.now() >= edgeDialsAt) {
+			// What lab-a's edge dials for the app 15 s after the re-placed copy runs (diagnostics).
+			edgeDialsAt = 0;
+			s.measure('edgeDialsAfterReplacement', await edgeDials(host));
 		}
 		if (replacement && s.report.timings.replacementAnswering == null && (await route.answers(replacement.nodeName))) {
 			s.timing('replacementAnswering');
@@ -184,8 +205,24 @@ await scenario.run(async (s) => {
 	const checkerExit = await checker.exited;
 	const after = await copies(project).catch(() => [] as Copy[]);
 	s.measure('copiesAfter', describeCopies(after));
+	s.measure('edgeDialsAtEnd', await edgeDials(host));
 
 	// --- judge -----------------------------------------------------------------------------------
+	const edgeMissing = (node: string): boolean => {
+		const dials = s.report.measures.edgeDialsAtEnd;
+		const address = fleet.find((row) => row.name === node)?.privateAddress;
+		return target === 'edge' && Array.isArray(dials) && Boolean(address) && !dials.some((dial: string) => dial.includes(`${address}:`));
+	};
+	// F9: offline marking runs on the 5 s failover tick, so a silent node is offline within 30–35 s
+	// (HA-PLAN §2.1 "offline at 30 s"); +5 s for this scenario's 3 s fleet polling.
+	const offline = s.report.timings.victimOffline;
+	const offlineBoundMs = 40_000;
+	s.check(
+		'offline-detected',
+		typeof offline === 'number' && offline <= offlineBoundMs ? 'pass' : 'fail',
+		typeof offline !== 'number' ? `${victim} was never reported offline` : offline > offlineBoundMs ? `${victim} was reported offline after ${(offline / 1000).toFixed(1)} s (bound ${offlineBoundMs / 1000} s: 30–35 s detection + polling)` : null,
+		{ offlineAfterMs: offline, boundMs: offlineBoundMs },
+	);
 	const answering = s.report.timings.replacementAnswering;
 	if (!failover.enabled) s.check('replaced', 'skip', 'failover.enabled is off on this lab: nothing re-places a copy', {});
 	else if (typeof answering === 'number' && answering <= boundMs)
@@ -194,8 +231,8 @@ await scenario.run(async (s) => {
 		const why = !replacement
 			? `no copy was re-placed within the ${durationS - killAfterS} s watched`
 			: replacement.status !== 'running'
-				? `the copy re-placed on ${replacement.nodeName} is ${replacement.status}${replacement.status === 'failed' || replacement.status === 'pending' ? ' (a re-placed copy gets no endpoint, so no DATABASE_URL: packages/core/src/workloads.ts:1280 moveReplica does not reconcile service endpoints; ha/w1-fixes)' : ''}`
-				: `the re-placed copy on ${replacement.nodeName} answered after ${typeof answering === 'number' ? `${(answering / 1000).toFixed(1)} s` : 'never'}`;
+				? `the copy re-placed on ${replacement.nodeName} is ${replacement.status}${replacement.status === 'failed' || replacement.status === 'pending' ? ' (on a tree without F8 from ha/w1-fixes a re-placed copy gets no endpoint and so no DATABASE_URL: packages/core/src/workloads.ts moveReplica)' : ''}`
+				: `the re-placed copy on ${replacement.nodeName} answered after ${typeof answering === 'number' ? `${(answering / 1000).toFixed(1)} s` : 'never'}${edgeMissing(replacement.nodeName) ? ` (lab-a's edge never listed it: dials ${JSON.stringify(s.report.measures.edgeDialsAtEnd)}; the copy's move to running does not bump the desired-state version, so the edge keeps the upstreams built while it was pending, packages/core/src/nodes.ts:1249-1268, until an unrelated change)` : ''}`;
 		s.check('replaced', 'fail', `${why}; bound ${boundMs / 1000} s (failover grace ${graceS} s + 120 s)`, { answeringAfterMs: answering, boundMs, replacement: replacement ? `${replacement.id}@${replacement.nodeName}:${replacement.status}` : null });
 	}
 	const report = readCheckerReport(s.checkerReportPath);

@@ -2,7 +2,8 @@
  * Run the checker (tests/ha/checker/cli.ts) through a target for a scenario: its report goes to the
  * scenario's `report.json`, its log to `checker.log`, and it reads the scenario's observations.
  */
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
+import type { CheckerLog } from '../../checker/log.ts';
 import { join, resolve } from 'node:path';
 import { REPO, type Scenario } from './scenario.ts';
 import type { Target } from './ingress.ts';
@@ -37,6 +38,7 @@ export function startChecker(scenario: Scenario, target: Target, options: Checke
 		'--seed', String(options.seed),
 		'--observe', scenario.observations,
 		'--out', scenario.checkerReportPath,
+		'--log', join(scenario.out, 'requests.json'),
 		...(options.timeoutMs ? ['--timeout-ms', String(options.timeoutMs)] : []),
 		...(options.extra ?? []),
 	];
@@ -66,4 +68,27 @@ export function startChecker(scenario: Scenario, target: Target, options: Checke
 export async function sleepWhileRunning(run: CheckerRun, ms: number): Promise<boolean> {
 	await Promise.race([Bun.sleep(ms), run.exited]);
 	return run.running();
+}
+
+/**
+ * Failed run requests (not the final verification) inside each named window [from, to] (epoch ms,
+ * by start time) and outside all of them, from the checker's request log (`requests.json`).
+ */
+export function failuresByWindow(scenario: Scenario, windows: Array<{ name: string; from: number; to: number }>): Record<string, { requests: number; failed: number; byStatus: Record<string, number> }> {
+	const path = join(scenario.out, 'requests.json');
+	const out: Record<string, { requests: number; failed: number; byStatus: Record<string, number> }> = {};
+	for (const name of [...windows.map((window) => window.name), 'outside']) out[name] = { requests: 0, failed: 0, byStatus: {} };
+	if (!existsSync(path)) return out;
+	const log = JSON.parse(readFileSync(path, 'utf8')) as CheckerLog;
+	for (const request of log.requests) {
+		if (request.kind === 'verify') continue;
+		const bucket = out[windows.find((window) => request.startedAt >= window.from && request.startedAt <= window.to)?.name ?? 'outside']!;
+		bucket.requests++;
+		if (request.status !== 200) {
+			bucket.failed++;
+			const key = request.status ? String(request.status) : (request.error ?? 'network');
+			bucket.byStatus[key] = (bucket.byStatus[key] ?? 0) + 1;
+		}
+	}
+	return out;
 }

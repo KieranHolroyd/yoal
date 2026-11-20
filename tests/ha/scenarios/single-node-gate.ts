@@ -16,10 +16,11 @@
  *                          copy unplaced, without touching the first), then back to 1
  *        +--redeploy-after-s  deploy a new release; wait for it to run
  *   3. judge: every step did what a one-node install does; the checker is clean (no invariant
- *      failed); failed requests at most --max-failed (default 0)
+ *      failed); no request failed outside the redeploy, and at most --max-redeploy-failed (5) during
+ *      it (one copy on one node restarts in place: §1.2's no-failure deploy needs 2+ copies)
  *
  *   bun tests/ha/scenarios/single-node-gate.ts [--duration-s 150] [--rate 20] [--seed 1]
- *       [--scale-after-s 20] [--redeploy-after-s 60] [--max-failed 0] [--project ha-single]
+ *       [--scale-after-s 20] [--redeploy-after-s 60] [--max-redeploy-failed 5] [--project ha-single]
  *       [--allow-multi-node] [--out <dir>] [--accept …]
  *
  * `--allow-multi-node` runs the same steps on a bigger lab with every other node drained (for a
@@ -31,7 +32,7 @@ import { CONTROL, containerName } from '../../lab/lab.config.ts';
 import { exec } from '../../lab/lib/docker.ts';
 import { api, fleetNodes, ownerAction } from '../../lab/lib/api.ts';
 import { CHECKER_APP_DIR, copies, deployChecker, deployDirectory, describeCopies, scaling } from './lib/app.ts';
-import { startChecker } from './lib/checker.ts';
+import { failuresByWindow, startChecker } from './lib/checker.ts';
 import { openTarget, share, formatShare } from './lib/ingress.ts';
 import { readCheckerReport } from './lib/report.ts';
 import { COMMON_OPTIONS, Scenario, positiveInt, waitFor } from './lib/scenario.ts';
@@ -43,7 +44,7 @@ const { values: flags } = parseArgs({
 		rate: { type: 'string', default: '20' },
 		'scale-after-s': { type: 'string', default: '20' },
 		'redeploy-after-s': { type: 'string', default: '60' },
-		'max-failed': { type: 'string', default: '0' },
+		'max-redeploy-failed': { type: 'string', default: '5' },
 		'allow-multi-node': { type: 'boolean', default: false },
 	},
 });
@@ -69,7 +70,7 @@ await scenario.run(async (s) => {
 	const durationS = positiveInt('--duration-s', flags['duration-s']);
 	const scaleAfterS = positiveInt('--scale-after-s', flags['scale-after-s']);
 	const redeployAfterS = positiveInt('--redeploy-after-s', flags['redeploy-after-s']);
-	const maxFailed = Number(flags['max-failed']);
+	const maxRedeployFailed = Number(flags['max-redeploy-failed']);
 	if (redeployAfterS + 60 > durationS) s.stop('error', '--duration-s must leave 60 s after the redeploy');
 
 	// --- 0. one node, flags off -------------------------------------------------------------------
@@ -156,6 +157,7 @@ await scenario.run(async (s) => {
 		return !view.rollout && view.copies.length === 1 && view.copies[0]!.status === 'running' && view.copies[0]!.release !== 'previous' ? view : null;
 	}).catch(() => null);
 	s.timing('redeployRunning');
+	const redeployDoneAt = Date.now();
 	s.check('redeploy', redeployed ? 'pass' : 'fail', redeployed ? null : 'the new release was not running within 180 s', { deployment: deploymentsBefore?.id ?? null, afterMs: Date.now() - redeployAt });
 
 	const checkerExit = await checker.exited;
@@ -163,7 +165,13 @@ await scenario.run(async (s) => {
 	if (!report) s.check('checker', 'error', `no checker report (exit ${checkerExit})`);
 	else {
 		s.check('checker', report.failedInvariants.length ? 'fail' : 'pass', report.failedInvariants.length ? `invariants failed: ${report.failedInvariants.join(', ')}` : null, { exit: checkerExit, lostAcknowledgedWrites: report.lostAcknowledgedWrites });
-		s.check('failed-requests', (report.failedRequests ?? 0) <= maxFailed ? 'pass' : 'fail', (report.failedRequests ?? 0) <= maxFailed ? null : `${report.failedRequests} of ${report.requests} requests failed (allowed ${maxFailed}): ${JSON.stringify(report.failedByStatus)}`, { failed: report.failedRequests, byStatus: report.failedByStatus, longestWriteGapMs: report.longestWriteGapMs });
+		// One copy on one node has nowhere to surge to: its redeploy restarts it, and a request in
+		// that moment may fail (HA-PLAN §1.2 promises no failed request on a deploy only with 2+
+		// copies). Outside the redeploy window nothing may fail; inside it, at most a few.
+		const windows = failuresByWindow(s, [{ name: 'redeploy', from: redeployAt - 1000, to: redeployDoneAt + 5000 }]);
+		s.measure('failuresByWindow', windows);
+		s.check('no-failures-outside-redeploy', windows.outside!.failed === 0 ? 'pass' : 'fail', windows.outside!.failed ? `${windows.outside!.failed} of ${windows.outside!.requests} requests outside the redeploy failed: ${JSON.stringify(windows.outside!.byStatus)}` : null, windows.outside!);
+		s.check('redeploy-failures-bounded', windows.redeploy!.failed <= maxRedeployFailed ? 'pass' : 'fail', windows.redeploy!.failed <= maxRedeployFailed ? null : `${windows.redeploy!.failed} requests failed during the single copy's redeploy (allowed ${maxRedeployFailed})`, { ...windows.redeploy!, allowed: maxRedeployFailed, longestWriteGapMs: report.longestWriteGapMs });
 	}
 	if (!singleNode) s.stop('invalid', 'ran with --allow-multi-node: not the gate');
 });

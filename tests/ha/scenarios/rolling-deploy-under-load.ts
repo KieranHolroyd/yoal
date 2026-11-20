@@ -26,7 +26,7 @@ import { join } from 'node:path';
 import { CONTROL, LAB, containerName } from '../../lab/lab.config.ts';
 import { exec } from '../../lab/lib/docker.ts';
 import { api, fleetNodes } from '../../lab/lib/api.ts';
-import { CHECKER_APP_DIR, appPort, copies, deployChecker, deployDirectory, describeCopies, scaling, setWorkload, unitInfo, workload, workloadSpec, type Copy, type UnitInfo } from './lib/app.ts';
+import { CHECKER_APP_DIR, appHost, appPort, copies, deployChecker, deployDirectory, describeCopies, ensureProject, scaling, unitInfo, workload, workloadSpec, type Copy, type UnitInfo } from './lib/app.ts';
 import { startChecker } from './lib/checker.ts';
 import { Faults } from './lib/faults.ts';
 import { EDGE_BYPASSED_NOTE, formatShare, openTarget, parseTarget, shareUntil, type Target } from './lib/ingress.ts';
@@ -100,13 +100,12 @@ await scenario.run(async (s) => {
 		return LAB.nodes.every((node) => rows.find((row) => row.name === node.name)?.status === 'online') ? rows : null;
 	}).catch((error: Error) => s.stop('error', `${error.message}: run \`bun tests/lab/lab.ts up\` first`));
 
-	s.say(`deploying ${project}: copies on ${COPY_NODES.join(', ')}, Postgres on ${DB_NODE}`);
-	const deployed = await deployChecker(s, { project, runtime: 'process', nodes: COPY_NODES, dbNode: DB_NODE, message: 'rolling-deploy-under-load' });
-	const host = deployed.host;
-	const appEnv = { CHECKER_URL: `http://${CONTROL.ip}`, CHECKER_HOST: host };
-
-	// --- A. does the platform keep the H25 fields? ------------------------------------------------
+	// --- A. does the platform keep the H25 fields? (before placing: a workload PUT replaces the
+	// whole spec, `replicas` included, so after placement it would scale the app back to one copy)
 	s.say('A. probing the workload API for release.command and readinessPath (H25, RELEASE_PHASE)');
+	s.note(`project ${project}: ${await ensureProject(project, 'process')}`);
+	const host = await appHost(project);
+	const appEnv = { CHECKER_URL: `http://${CONTROL.ip}`, CHECKER_HOST: host };
 	const extra = { release: { command: RELEASE_COMMAND, timeoutSeconds: 120 }, readinessPath: '/healthz?db=1' };
 	const probe = await api('PUT', `/api/v1/projects/${project}/workload`, { ...workloadSpec({ runtime: 'process', port: appPort(project), env: appEnv }), ...extra }, { allowStatus: [400, 422] }).catch((error: Error) => ({ status: 0, body: error.message }));
 	const readBack = await workload(project);
@@ -117,8 +116,9 @@ await scenario.run(async (s) => {
 	s.measure('releasePhaseContract', { putStatus: probe.status, keepsRelease, keepsReadiness, refusal: probe.status === 200 ? null : JSON.stringify(probe.body).slice(0, 300) });
 	const missing = `RELEASE_PHASE (W5, HA-PLAN H25) is not built: the workload API ${probe.status === 200 ? `accepted the spec but did not keep ${[keepsRelease ? null : '`release`', keepsReadiness ? null : '`readinessPath`'].filter(Boolean).join(' or ')}` : `refused it (${probe.status})`}`;
 	s.note(releasePhase ? 'release phase present' : missing);
-	// Without the release phase, B runs on the plain spec (env kept; the H25 fields are not).
-	if (!releasePhase) await setWorkload(project, { runtime: 'process', env: appEnv });
+
+	s.say(`deploying ${project}: copies on ${COPY_NODES.join(', ')}, Postgres on ${DB_NODE}`);
+	const deployed = await deployChecker(s, { project, runtime: 'process', nodes: COPY_NODES, dbNode: DB_NODE, message: 'rolling-deploy-under-load', env: appEnv, extra: releasePhase ? extra : undefined });
 
 	const route = await openTarget(target, host, fleet, deployed.copies.map((copy) => copy.nodeName));
 	s.onCleanup('close target', () => route.stop());
@@ -131,7 +131,7 @@ await scenario.run(async (s) => {
 		s.stop(
 			'invalid',
 			target === 'edge'
-				? `copies on ${silent.join(', ')} took no traffic through the edge (edge health check without the app Host: packages/site-config/src/compile.ts:259-264; ha/w1-fixes), so a rolling deploy cannot be judged. Run --target direct.`
+				? `copies on ${silent.join(', ')} took no traffic through the edge (on a tree without F7 from ha/w1-fixes the edge's active health check sends no app Host, packages/site-config/src/compile.ts, and marks remote copies unhealthy), so a rolling deploy cannot be judged. Run --target direct.`
 				: `copies on ${silent.join(', ')} did not answer direct requests`,
 		);
 	}

@@ -135,7 +135,7 @@ await scenario.run(async (s) => {
 		s.stop(
 			'invalid',
 			target === 'edge'
-				? `copies on ${silent.join(', ')} took no traffic through the edge (edge health check without the app Host: packages/site-config/src/compile.ts:259-264; ha/w1-fixes). Run --target direct.`
+				? `copies on ${silent.join(', ')} took no traffic through the edge (on a tree without F7 from ha/w1-fixes the edge's active health check sends no app Host, packages/site-config/src/compile.ts, and marks remote copies unhealthy). Run --target direct.`
 				: `copies on ${silent.join(', ')} did not answer direct requests`,
 		);
 	}

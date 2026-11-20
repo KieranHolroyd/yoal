@@ -144,15 +144,16 @@ jobs:
         run: bun tests/lab/verify-faults.ts --out "$RUNNER_TEMP/ha/faults.json"
 
       # Edge bypassed: the scenario's own balancer to each copy, so copy failover and re-placement are
-      # judged even while the edge run below is invalid. Judged strictly (no --accept).
+      # judged on their own. Judged strictly (no --accept).
       - name: Scenario kill-node (lab-b powered off), direct to each copy
         run: bun tests/ha/scenarios/kill-node.ts --node lab-b --method kill --target direct --duration-s 240 --kill-after-s 30 --out "$RUNNER_TEMP/ha/kill-node-direct"
 
-      # Through the edge. `--accept invalid` while lab-b's copy takes no edge traffic: the edge health
-      # check sends no app Host (packages/site-config/src/compile.ts:259-264). Remove the --accept
-      # when ha/w1-fixes is merged.
+      # Through the edge (valid since F7 in ha/w1-fixes). Judged strictly: M1's "the lab kills a node
+      # and the checker is clean" is this step. On 2026-11-20 it fails on `replaced`: a copy re-placed
+      # by failover reaches the edge's upstreams only on the next unrelated desired-state change
+      # (tests/ha/README.md, "What the scenarios found").
       - name: Scenario kill-node (lab-b powered off) through the edge
-        run: bun tests/ha/scenarios/kill-node.ts --node lab-b --method kill --duration-s 240 --kill-after-s 30 --accept invalid --out "$RUNNER_TEMP/ha/kill-node-edge"
+        run: bun tests/ha/scenarios/kill-node.ts --node lab-b --method kill --duration-s 240 --kill-after-s 30 --out "$RUNNER_TEMP/ha/kill-node-edge"
 
       - name: Lab diagnostics
         if: always()
@@ -195,11 +196,11 @@ jobs:
         repetitions: [20]
         # HA-PLAN §7.2 families with a scenario today. Each line is "<family>|<scenario> <flags>".
         family:
-          - 'node-power-off|kill-node.ts --node lab-b --method kill --target direct --duration-s 300'
-          - 'node-stop|kill-node.ts --node lab-c --method stop --target direct --duration-s 300'
-          - 'network-partition|kill-node.ts --node lab-b --method partition --target direct --duration-s 300'
-          - 'process-freeze-agent|freeze-agent.ts --node lab-b --target direct'
-          - 'change-rolling-deploy|rolling-deploy-under-load.ts --target direct'
+          - 'node-power-off|kill-node.ts --node lab-b --method kill --duration-s 300'
+          - 'node-stop|kill-node.ts --node lab-c --method stop --duration-s 300'
+          - 'network-partition|kill-node.ts --node lab-b --method partition --duration-s 300'
+          - 'process-freeze-agent|freeze-agent.ts --node lab-b'
+          - 'change-rolling-deploy|rolling-deploy-under-load.ts'
           - 'attachments|attachments-three-nodes.ts --runtime container'
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
