@@ -14,6 +14,7 @@ import {
 import { nodeHasCapability } from './capability-gate.ts';
 import type { CoreContext } from './context.ts';
 import { NotFoundError } from './errors.ts';
+import { buildSystemPrincipal } from './iam/system.ts';
 import { OFFLINE_AFTER_MS } from './nodes.ts';
 import type { ProjectRow } from './projects.ts';
 import { newId, parseJson } from './util.ts';
@@ -49,6 +50,14 @@ export interface ReleaseCommandRun {
 
 /** Where a release stands before its rollout may start. */
 export type ReleaseGate = { state: 'none' } | { state: 'pending'; run: ReleaseCommandRun } | { state: 'succeeded'; run: ReleaseCommandRun } | { state: 'failed'; run: ReleaseCommandRun };
+
+/** A heartbeat's report for one run; the contract defaults are optional here so callers need not repeat them. */
+export type ReleaseCommandReport = Omit<ReleaseCommandResult, 'exitCode' | 'startedAt' | 'finishedAt' | 'error'> & {
+	exitCode?: number | null;
+	startedAt?: number | null;
+	finishedAt?: number | null;
+	error?: string | null;
+};
 
 /** A release command run as the REST, CLI, MCP and dashboard surfaces show it. */
 export interface ReleaseCommandRunView {
@@ -238,11 +247,13 @@ export class ReleaseCommandScheduler {
 	}
 
 	/** Apply a heartbeat's `releaseCommandResults` from `nodeId`; results for runs it does not hold are ignored. */
-	recordResults(nodeId: string, results: readonly ReleaseCommandResult[]): void {
+	recordResults(nodeId: string, results: readonly ReleaseCommandReport[]): void {
 		const now = this.ctx.now();
 		for (const result of results) {
 			const row = this.ctx.db.select().from(releaseCommandRuns).where(eq(releaseCommandRuns.id, result.runId)).get();
 			if (!row || row.nodeId !== nodeId || row.releaseId !== result.releaseId) continue;
+			const exitCode = result.exitCode ?? null;
+			const error = result.error ?? null;
 			if (!LIVE.includes(row.status)) {
 				// Too late: the lease already ran out and the deployment was failed. Keep what the node says
 				// for the record, but never revive the run: a retry may already hold the lease.
@@ -250,8 +261,8 @@ export class ReleaseCommandScheduler {
 					this.ctx.db
 						.update(releaseCommandRuns)
 						.set({
-							exitCode: result.exitCode,
-							error: `${row.error ?? ''} The node later reported "${result.status}"${result.exitCode !== null ? ` (exit ${result.exitCode})` : ''}.`.trim().slice(0, 2_000),
+							exitCode,
+							error: `${row.error ?? ''} The node later reported "${result.status}"${exitCode !== null ? ` (exit ${exitCode})` : ''}.`.trim().slice(0, 2_000),
 							updatedAt: now,
 						})
 						.where(eq(releaseCommandRuns.id, row.id))
@@ -267,7 +278,7 @@ export class ReleaseCommandScheduler {
 						.run();
 				continue;
 			}
-			this.finish(row, result.status, result.finishedAt ?? now, result.exitCode, result.error, result.startedAt);
+			this.finish(row, result.status, result.finishedAt ?? now, exitCode, error, result.startedAt);
 		}
 	}
 
@@ -432,7 +443,7 @@ export class ReleaseCommandScheduler {
 
 	private finish(row: RunRow, status: ReleaseCommandRunStatus, finishedAt: number, exitCode: number | null, error: string | null, startedAt?: number | null): void {
 		const now = this.ctx.now();
-		this.ctx.db
+		const changed = this.ctx.db
 			.update(releaseCommandRuns)
 			.set({
 				status,
@@ -443,12 +454,15 @@ export class ReleaseCommandScheduler {
 				updatedAt: now,
 			})
 			.where(and(eq(releaseCommandRuns.id, row.id), inArray(releaseCommandRuns.status, LIVE)))
-			.run();
+			.returning({ id: releaseCommandRuns.id })
+			.all();
+		// Another reporter (or an earlier expiry) closed this run first: it keeps its outcome.
+		if (changed.length === 0) return;
 		// The node drops the task from its desired state now, and the rollout reads the gate next tick.
 		if (row.nodeId) this.ctx.projects.bump(row.orgId);
 		const project = this.ctx.db.select({ slug: projects.slug }).from(projects).where(eq(projects.id, row.projectId)).get();
 		this.ctx.audit.record({
-			principal: { kind: 'system', userId: 'system:release', orgId: row.orgId, role: 'owner', permissions: new Set() } as unknown as Principal,
+			principal: buildSystemPrincipal('system:release', row.orgId),
 			action: 'deployment.release_command',
 			resource: 'deployment',
 			resourceId: row.releaseId,

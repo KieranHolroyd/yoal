@@ -13,10 +13,7 @@ import {
 	objectStoreKindAllowed,
 } from './capability-gate.ts';
 import { assertReleasePhaseSpec } from './release-phase-gate.ts';
-import { computeHaLevel } from './ha-level.ts';
-import { judgeCanary } from './canary-judge.ts';
 import { createAzureObjectStore, createGcsObjectStore, createObjectStore } from './object-store-factory.ts';
-import { ReleaseCommandScheduler } from './release-commands.ts';
 import { NodeCaService } from './node-ca.ts';
 import { S3ObjectStore, LocalObjectStore, storageKindForDb } from './object-store.ts';
 import { buildPrincipal } from './orgs.ts';
@@ -244,15 +241,6 @@ describe('release phase refusals (H25)', () => {
 
 describe('stubs are in place and fail loudly', () => {
 	test('each names its owning lane', () => {
-		expect(() => computeHaLevel({ kind: 'workload', copies: 1, nodes: 1, zones: 1, verifiedBackup: false, http: true, pinned: false })).toThrow('lane C');
-		expect(() =>
-			judgeCanary({
-				rollout: { canary: 1, soakSeconds: 60, maxUnavailable: 0 },
-				elapsedSeconds: 0,
-				canary: { requests: 0, status5xx: 0, durationP95Ms: 0 },
-				baseline: null,
-			}),
-		).toThrow('lane C');
 		expect(() =>
 			createAzureObjectStore(
 				{ kind: 'azure', account: 'acct1', container: 'yoal', endpoint: null, pathPrefix: '', immutability: null },
@@ -266,7 +254,6 @@ describe('stubs are in place and fail loudly', () => {
 			),
 		).toThrow('lane E');
 		const ctx = {} as never;
-		expect(() => new ReleaseCommandScheduler(ctx).gate('dep_1')).toThrow('lane C');
 		expect(() => new NodeCaService(ctx).bundle()).toThrow('lane B');
 	});
 

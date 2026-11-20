@@ -1,5 +1,5 @@
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
-import { featureFlagsForGate, gateDesiredState } from './capability-gate';
+import { featureFlagsForGate, gateDesiredState, nodeHasCapability } from './capability-gate';
 import {
 	appVolumes,
 	databaseStudioSessions,
@@ -45,6 +45,7 @@ import {
 	IDENTITY_CAPABILITY,
 	selectIdentityNode,
 	KUBERNETES_CAPABILITY,
+	RELEASE_PHASE_CAPABILITY,
 	WG_SUBNETS_CAPABILITY,
 	machineSubnetFor,
 } from '@yoal/contracts';
@@ -536,6 +537,12 @@ export class NodeService {
 			this.ctx.registry.applyHeartbeat(node.id, input.workloads);
 			this.ctx.databaseReplicas.applyWorkloadReports(node.id, input.workloads);
 		}
+		// Release-phase reports (H25): an outcome closes a run's lease; the edge's own counters are
+		// what the canary judge reads, never ClickHouse (H28).
+		if (input.releaseCommandResults?.length)
+			this.ctx.releaseCommands.recordResults(node.id, input.releaseCommandResults);
+		if (input.upstreamCounters?.length)
+			this.ctx.workloads.recordUpstreamCounters(node.id, input.upstreamCounters);
 		if (input.databaseReplication?.length)
 			this.ctx.databaseReplicas.applyReplicationReports(node.id, input.databaseReplication);
 		if (input.databaseReplicaPromotionResults?.length)
@@ -1112,6 +1119,10 @@ export class NodeService {
 		const { routes } = deploymentRoutes;
 		const environmentRoutes = new EnvironmentRouteState(state).environmentRoutes(deploymentRoutes);
 		const placeholders = ingress.placeholders(deploymentRoutes, environmentRoutes);
+		// A node leased a release command needs that release (process apps) before it can run it.
+		const releasePhase = nodeHasCapability(node, RELEASE_PHASE_CAPABILITY);
+		if (releasePhase)
+			for (const sha of this.ctx.releaseCommands.releaseShasForNode(node.id)) deploymentRoutes.releaseShas.add(sha);
 		const releaseSpecs = await releaseState.releaseSpecs(deploymentRoutes.releaseShas);
 		const hostRedirects = routeState.hostRedirects();
 		const workloadRows = releaseState.workloads();
@@ -1183,6 +1194,15 @@ export class NodeService {
 			domains: this.ctx.domains.desiredForProjects(servedProjectIds),
 			serviceEndpoints: endpoints.serviceEndpointsForNode(node.id),
 			serviceProviders: endpoints.serviceProvidersForNode(node.id),
+			// Release phase (H25), only to an agent that declares it: the commands it must run once
+			// and the images to pull before a rollout reaches it. The capability gate strips them
+			// from older agents anyway; not computing them keeps their payload byte-identical.
+			...(releasePhase
+				? {
+						releaseCommands: this.ctx.releaseCommands.tasksForNode(node.id),
+						imagePrePulls: this.ctx.workloads.imagePrePullsForNode(node.id),
+					}
+				: {}),
 			...(node.networkMode === 'external'
 				? {}
 				: { wireguard: buildWireguardState(node.id, this.overlayNodes(), this.ctx.cluster.get().overlay.cidr, this.ctx.cluster.get().overlay) }),

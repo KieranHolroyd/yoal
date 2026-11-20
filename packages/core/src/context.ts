@@ -62,6 +62,7 @@ import type { SchedulingService } from './scheduling-service.ts';
 import type { NodeRolloutService } from './node-rollouts.ts';
 import type { NodeLinkService } from './link-service.ts';
 import type { ScalingService } from './scaling-service.ts';
+import type { ReleaseCommandScheduler } from './release-commands.ts';
 import type { RelocationService } from './relocation-service.ts';
 import type { ClusterConfigService } from './cluster-config-service.ts';
 import type { IamService } from './iam/service.ts';
@@ -187,6 +188,8 @@ export interface CoreContext {
 	links: NodeLinkService;
 	/** Horizontal scaling per app: copies, autoscaling policy, usage and history (SCALING.md). */
 	scaling: ScalingService;
+	/** Release commands: the run lease on a release id (HA-PLAN H25, I16). */
+	releaseCommands: ReleaseCommandScheduler;
 	/** Moving an app together with its app volumes (SCALING §7). */
 	relocations: RelocationService;
 	/** Identity and access management: bindings, roles, groups and the decision cache (IAM.md I1). */

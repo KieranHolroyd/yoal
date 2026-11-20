@@ -165,6 +165,15 @@ const handler: RequestHandler = async (event) => {
 			return core.jobs.complete(node.id, input);
 		}
 
+		// Release commands (HA-PLAN H25): the leased node fetches the new release's environment and
+		// secrets for one run, as a copy of that release would get them. Never in desired state.
+		const releaseCommand = /^release-commands\/([^/]+)$/.exec(action);
+		if (releaseCommand) {
+			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+			const node = core.nodes.authenticate(token);
+			return json(core.releaseCommands.activation(node.id, releaseCommand[1]!), 200, { 'cache-control': 'no-store' });
+		}
+
 		// Email (docs/EMAIL.md §3.5, D117): only the mail node's agent may call these. The state
 		// carries opened DKIM keys, so like an activation it is fetched, never put in desired state.
 		if (action === 'email/state') {

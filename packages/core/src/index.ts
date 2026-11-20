@@ -37,6 +37,7 @@ import { SchedulingService } from './scheduling-service.ts';
 import { NodeRolloutService } from './node-rollouts.ts';
 import { NodeLinkService } from './link-service.ts';
 import { ScalingService } from './scaling-service.ts';
+import { ReleaseCommandScheduler } from './release-commands.ts';
 import { RelocationService } from './relocation-service.ts';
 import { ClusterConfigService } from './cluster-config-service.ts';
 import { WorkloadService } from './workloads.ts';
@@ -312,6 +313,8 @@ export interface Core {
 	links: NodeLinkService;
 	/** Horizontal scaling per app (SCALING.md). */
 	scaling: ScalingService;
+	/** Release commands: the run lease on a release id (HA-PLAN H25, I16). */
+	releaseCommands: ReleaseCommandScheduler;
 	/** Moving an app together with its app volumes (SCALING §7). */
 	relocations: RelocationService;
 	/** Cluster tunables (CLUSTERING). */
@@ -466,6 +469,7 @@ export function createCore(options: CoreOptions): Core {
 	ctx.nodeRollouts = new NodeRolloutService(ctx);
 	ctx.links = new NodeLinkService(ctx);
 	ctx.scaling = new ScalingService(ctx);
+	ctx.releaseCommands = new ReleaseCommandScheduler(ctx);
 	ctx.relocations = new RelocationService(ctx);
 	ctx.cluster = new ClusterConfigService(ctx);
 	// Flow definitions register once every service exists, so their steps can call any of them.
@@ -548,6 +552,7 @@ export function createCore(options: CoreOptions): Core {
 		nodeRollouts: ctx.nodeRollouts,
 		links: ctx.links,
 		scaling: ctx.scaling,
+		releaseCommands: ctx.releaseCommands,
 		relocations: ctx.relocations,
 		cluster: ctx.cluster,
 		iam: ctx.iam,
