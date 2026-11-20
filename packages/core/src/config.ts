@@ -1,4 +1,4 @@
-import type { DatabasePitrRepoConfig, DatabasePitrRepository, FeatureFlags, FeatureName } from '@yoal/contracts';
+import type { DatabasePitrRepoConfig, DatabasePitrRepository, FeatureFlags, FeatureName, PlatformObjectStoreKind } from '@yoal/contracts';
 import { CONTAINER_CONSOLE_DEFAULT_PORT, FEATURE_FLAGS, parseFeatureFlags, STUDIO_DEFAULT_PORT } from '@yoal/contracts';
 import { readFileSync } from 'node:fs';
 import type { ObjectStore } from './object-store.ts';
@@ -40,6 +40,24 @@ export interface Notifier {
 	notify(alert: AlertMessage): Promise<void>;
 }
 
+/** This install's platform object store and, when it is S3-compatible, how to reach it. */
+export interface PlatformStoreInfo {
+	/** `YOAL_OBJECT_STORE`: `local` on a single-node install, otherwise the external store. */
+	kind: PlatformObjectStoreKind;
+	/**
+	 * Present only for an S3-compatible store (`r2`, or an S3 target). The registry renders zot's
+	 * S3 driver from it (HA-PLAN H28/W12); Azure and GCS are refused there with a named fix.
+	 */
+	s3?: {
+		endpoint: string;
+		bucket: string;
+		region: string;
+		accessKeyId: string;
+		secretAccessKey: string;
+		pathStyle: boolean;
+	};
+}
+
 export interface CoreConfig {
 	dataDir: string;
 	/** Platform origin, e.g. `https://control.example.com`. */
@@ -47,6 +65,11 @@ export interface CoreConfig {
 	/** Content domain, e.g. `examplecloud.com`. */
 	contentDomain: string;
 	objectStore: ObjectStore;
+	/**
+	 * The platform store's kind and S3 coordinates (HA-PLAN H28/W12). Optional so storage-only
+	 * tests and embedders keep working: absent means a `local` store.
+	 */
+	platformStore?: PlatformStoreInfo;
 	/** 32-byte master key for envelope encryption (systemd-creds in production). */
 	masterKey: Uint8Array;
 	/** HMAC secret for host-only site cookies; agents receive per-project derived keys. */

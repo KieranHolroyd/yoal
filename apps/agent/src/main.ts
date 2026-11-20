@@ -557,6 +557,11 @@ class AgentRuntime {
 				nodeToken: this.config.nodeToken,
 				nodeId: this.config.nodeId,
 				accessLogPath: this.config.caddyAccessLog,
+				// HA-PLAN H28: pending buckets survive a control-plane outage on disk, bounded so a
+				// long outage cannot fill the node. The gap list rides the next telemetry POST.
+				spoolDir: join(this.config.dataDir, 'telemetry-spool'),
+				spoolMaxBuckets: this.config.telemetrySpoolBuckets,
+				spoolMaxBytes: this.config.telemetrySpoolBytes,
 				// Access-log aggregation is the request signal scale-to-zero measures (FN4). Resolve
 				// first, then record activity, so telemetry behaviour itself is unchanged.
 				resolveProject: (host) => {
@@ -2051,6 +2056,24 @@ class AgentRuntime {
 				'Telemetry buckets dropped to keep memory bounded.',
 				'counter',
 				telemetry?.dropped ?? 0,
+			],
+			[
+				'yoal_agent_telemetry_spool_queued',
+				'Buckets waiting in the bounded on-disk telemetry spool.',
+				'gauge',
+				telemetry?.spoolQueued ?? 0,
+			],
+			[
+				'yoal_agent_telemetry_spool_bytes',
+				'Bytes used by the bounded on-disk telemetry spool.',
+				'gauge',
+				telemetry?.spoolBytes ?? 0,
+			],
+			[
+				'yoal_agent_telemetry_spool_dropped_total',
+				'Buckets dropped when the telemetry spool reached its bound.',
+				'counter',
+				telemetry?.spoolDropped ?? 0,
 			],
 			[
 				'yoal_agent_database_samples_dropped_total',

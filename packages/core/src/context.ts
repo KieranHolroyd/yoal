@@ -66,6 +66,8 @@ import type { ScalingService } from './scaling-service.ts';
 import type { ReleaseCommandScheduler } from './release-commands.ts';
 import type { RelocationService } from './relocation-service.ts';
 import type { ClusterConfigService } from './cluster-config-service.ts';
+import type { HaService } from './ha-service.ts';
+import type { TelemetrySpoolGapService } from './telemetry-spool-gaps.ts';
 import type { CertificateService, IngressSetService, SteeringService } from './ingress-service.ts';
 import type { ControlPlaneService } from './control-plane-service.ts';
 import type { DatabaseMemberService } from './database-member-service.ts';
@@ -186,6 +188,10 @@ export interface CoreContext {
 	failover: FailoverService;
 	/** Cluster tunables (CLUSTERING). */
 	cluster: ClusterConfigService;
+	/** The HA profile and movable platform dependencies (HA-PLAN H27/H28, W12). */
+	ha: HaService;
+	/** Bounded telemetry spool gaps reported by agents (HA-PLAN H28, W12). */
+	telemetrySpool: TelemetrySpoolGapService;
 	/** The nodes that serve the edge payload (HA-PLAN H17). */
 	ingressSet: IngressSetService;
 	/** Steering drivers (HA-PLAN H18). */

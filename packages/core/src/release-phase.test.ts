@@ -316,6 +316,10 @@ describe('per-app spread and image pre-pull (H25)', () => {
 		);
 		const withCapability = await f.core.nodes.desiredState(f.node.a!.token);
 		expect(withCapability.imagePrePulls).toEqual([{ workloadId: 'wl_img', image: 'docker.io/library/nginx:1.27' }]);
+		// The failover reserve: a single-copy app has no second copy, so a node that could take it
+		// pre-pulls the image before the app's only node is lost (HA-PLAN H28).
+		const reserve = await f.core.nodes.desiredState(f.node.b!.token);
+		expect(reserve.imagePrePulls).toEqual([{ workloadId: 'wl_img', image: 'docker.io/library/nginx:1.27' }]);
 		// An agent that does not declare the capability never sees the field, even with the flag on.
 		f.sqlite.run("UPDATE nodes SET capabilities_json = '[]' WHERE id = ?", [f.node.b!.id]);
 		expect('imagePrePulls' in (await f.core.nodes.desiredState(f.node.b!.token))).toBe(false);

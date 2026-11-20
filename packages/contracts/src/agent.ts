@@ -711,6 +711,33 @@ export const functionTailEventSchema = z.object({
 });
 export type FunctionTailEvent = z.infer<typeof functionTailEventSchema>;
 
+/** One uncovered range from an agent's bounded telemetry spool (HA-PLAN H28/W12). */
+export const telemetrySpoolGapSchema = z.object({
+	/** The host whose buckets were lost, or `*` when the spool could not attribute them. */
+	host: z.string().min(1).max(253),
+	/** Epoch ms, inclusive. */
+	from: z.number().int().nonnegative(),
+	/** Epoch ms, exclusive. */
+	to: z.number().int().nonnegative(),
+	/** Buckets dropped in the range. */
+	buckets: z.number().int().nonnegative().default(0),
+});
+export type TelemetrySpoolGap = z.infer<typeof telemetrySpoolGapSchema>;
+
+/**
+ * The agent's disk spool (HA-PLAN H28): pending access-log buckets survive a control-plane outage
+ * on disk, bounded by count and bytes. `gaps` names what the bound dropped, so the dashboard can
+ * shade minutes it knows are missing rather than drawing them as zero traffic.
+ */
+export const telemetrySpoolSchema = z.object({
+	queued: z.number().int().nonnegative().default(0),
+	bytes: z.number().int().nonnegative().default(0),
+	/** Buckets dropped since this spool was created (its bound was reached). */
+	dropped: z.number().int().nonnegative().default(0),
+	gaps: z.array(telemetrySpoolGapSchema).max(200).default([]),
+});
+export type TelemetrySpoolReport = z.infer<typeof telemetrySpoolSchema>;
+
 export const telemetryBatchSchema = z.object({
 	nodeId: z.string(),
 	buckets: z.array(metricBucketSchema).max(5000).default([]),
@@ -730,6 +757,8 @@ export const telemetryBatchSchema = z.object({
 	analytics: z.array(analyticsEventSchema).max(5000).default([]),
 	/** Structured tail-worker items from function invocations (phase 3). */
 	tails: z.array(functionTailEventSchema).max(2000).default([]),
+	/** The agent's telemetry spool state; absent from older agents. */
+	spool: telemetrySpoolSchema.optional(),
 });
 export type TelemetryBatch = z.infer<typeof telemetryBatchSchema>;
 

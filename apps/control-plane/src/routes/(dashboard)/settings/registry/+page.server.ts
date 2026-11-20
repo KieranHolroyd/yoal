@@ -58,23 +58,25 @@ function registryUpdate(data: FormData): RegistrySettingsUpdate {
 	const s3: RegistrySettingsUpdate['s3'] =
 		mode === 'disk' || data.get('s3Disk') === 'on'
 			? null
-			: mode === 'managed'
-				? {
-						mode: 'managed',
-						...(string(data, 's3Storage') ? { storage: string(data, 's3Storage') } : {}),
-						bucket
-					}
-				: endpoint
+			: mode === 'platform'
+				? { mode: 'platform' }
+				: mode === 'managed'
 					? {
-							mode: 'external',
-							endpoint,
-							bucket,
-							...(string(data, 's3Region') ? { region: string(data, 's3Region') } : {}),
-							accessKeyId: string(data, 's3AccessKeyId'),
-							secretAccessKey: String(data.get('s3SecretAccessKey') ?? ''),
-							...(string(data, 's3CacheUrl') ? { cacheUrl: string(data, 's3CacheUrl') } : {})
+							mode: 'managed',
+							...(string(data, 's3Storage') ? { storage: string(data, 's3Storage') } : {}),
+							bucket
 						}
-					: undefined;
+					: endpoint
+						? {
+								mode: 'external',
+								endpoint,
+								bucket,
+								...(string(data, 's3Region') ? { region: string(data, 's3Region') } : {}),
+								accessKeyId: string(data, 's3AccessKeyId'),
+								secretAccessKey: String(data.get('s3SecretAccessKey') ?? ''),
+								...(string(data, 's3CacheUrl') ? { cacheUrl: string(data, 's3CacheUrl') } : {})
+							}
+						: undefined;
 	return {
 		enabled: data.get('enabled') === 'on',
 		...(string(data, 'node') ? { node: string(data, 'node') } : {}),

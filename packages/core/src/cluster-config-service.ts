@@ -10,6 +10,7 @@ import {
 } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { CoreError, ValidationError } from './errors.ts';
+import { haBlockers } from './ha-preflight.ts';
 
 /**
  * Cluster configuration (Settings → Clustering). One settings row, cached and re-read on save.
@@ -45,6 +46,7 @@ export class ClusterConfigService {
 			updates: {},
 			ingress: {},
 			steering: {},
+			ha: {},
 			...(raw && typeof raw === 'object' ? raw : {}),
 		});
 		return this.#cache;
@@ -91,8 +93,21 @@ export class ClusterConfigService {
 			updates: { ...current.updates, ...sent('updates') },
 			ingress: { ...current.ingress, ...sent('ingress') },
 			steering: { ...current.steering, ...sent('steering') },
+			ha: { ...current.ha, ...sent('ha') },
 		});
 		if (!merged.success) throw new ValidationError('Invalid cluster configuration.', merged.error.issues);
+		// The HA profile is refusal-first (HA-PLAN H27/H28): it cannot be asserted while a
+		// platform dependency still lives on one node. Existing `ha` installs may keep saving
+		// unrelated settings even if a dependency later regresses; the preflight reports that.
+		if (merged.data.ha.profile !== 'single' && merged.data.ha.profile !== current.ha.profile) {
+			const blockers = haBlockers(this.ctx, merged.data.ha.profile);
+			if (blockers.length > 0)
+				throw new ValidationError(
+					`The ${merged.data.ha.profile} profile is refused: ${blockers
+						.map((blocker) => `${blocker.title}. ${blocker.fix ?? ''}`.trim())
+						.join(' ')}`,
+				);
+		}
 		if (merged.data.endpoints.portMin >= merged.data.endpoints.portMax)
 			throw new ValidationError('The endpoint port range must have min < max.');
 		const { driver, stacked } = merged.data.steering;

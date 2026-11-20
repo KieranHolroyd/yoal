@@ -39,6 +39,7 @@
 			permitted: boolean;
 			available: boolean;
 			report: TrafficReport;
+			gaps?: Array<{ host: string; from: number; to: number; buckets: number }>;
 			reason?: string;
 			installed?: boolean;
 		};
@@ -217,7 +218,7 @@
 				: 'hour'} · {numberFormat.format(totals.requests)} total · up to {lastReported}"
 			icon={ChartNoAxesCombinedIcon}
 		>
-			<TrafficChart series={report.series} interval={range.interval} />
+			<TrafficChart series={report.series} interval={range.interval} gaps={traffic.gaps ?? []} />
 		</Panel>
 
 		<div class="grid items-start gap-5 xl:grid-cols-2">

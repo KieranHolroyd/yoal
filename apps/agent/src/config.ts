@@ -87,6 +87,9 @@ export interface AgentConfig {
 	logDrain: boolean;
 	/** How often the agent asks the helper for new journal lines. */
 	logDrainIntervalMs: number;
+	/** Bounded on-disk telemetry spool (HA-PLAN H28): bucket count and bytes. */
+	telemetrySpoolBuckets: number;
+	telemetrySpoolBytes: number;
 }
 
 export class ConfigError extends Error {
@@ -380,6 +383,9 @@ export function loadConfig(env: Env = process.env): AgentConfig {
 		functionAnalyticsPort: FUNCTION_ANALYTICS_PORT,
 		logDrain: parseBooleanValue(env.YOAL_LOG_DRAIN) ?? true,
 		logDrainIntervalMs: parseIntegerEnv(env, 'YOAL_LOG_DRAIN_INTERVAL_MS', 2_000, 500, 60_000),
+		// HA-PLAN H28: the disk spool replaces the in-memory 5,000-bucket cap. Both bounds apply.
+		telemetrySpoolBuckets: parseIntegerEnv(env, 'YOAL_TELEMETRY_SPOOL_BUCKETS', 5_000, 100, 1_000_000),
+		telemetrySpoolBytes: parseIntegerEnv(env, 'YOAL_TELEMETRY_SPOOL_BYTES', 32 * 1024 * 1024, 1_048_576, 4 * 1024 * 1024 * 1024),
 	};
 }
 

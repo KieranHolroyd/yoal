@@ -42,6 +42,8 @@ import { ScalingService } from './scaling-service.ts';
 import { ReleaseCommandScheduler } from './release-commands.ts';
 import { RelocationService } from './relocation-service.ts';
 import { ClusterConfigService } from './cluster-config-service.ts';
+import { HaService } from './ha-service.ts';
+import { TelemetrySpoolGapService } from './telemetry-spool-gaps.ts';
 import { CertificateService, IngressSetService, SteeringService } from './ingress-service.ts';
 import { ControlPlaneService } from './control-plane-service.ts';
 import { DatabaseMemberService } from './database-member-service.ts';
@@ -146,6 +148,9 @@ export * from './node-rollout-plan.ts';
 export * from './link-service.ts';
 export * from './scaling-service.ts';
 export * from './relocation-service.ts';
+export * from './ha-service.ts';
+export * from './ha-preflight.ts';
+export * from './telemetry-spool-gaps.ts';
 export * from './rebalance.ts';
 export * from './secrets.ts';
 export * from './metrics.ts';
@@ -331,6 +336,10 @@ export interface Core {
 	relocations: RelocationService;
 	/** Cluster tunables (CLUSTERING). */
 	cluster: ClusterConfigService;
+	/** The HA profile and movable platform dependencies (HA-PLAN H27/H28, W12). */
+	ha: HaService;
+	/** Telemetry spool gaps agents report (HA-PLAN H28, W12). */
+	telemetrySpool: TelemetrySpoolGapService;
 	ingressSet: IngressSetService;
 	steering: SteeringService;
 	certificates: CertificateService;
@@ -490,6 +499,8 @@ export function createCore(options: CoreOptions): Core {
 	ctx.releaseCommands = new ReleaseCommandScheduler(ctx);
 	ctx.relocations = new RelocationService(ctx);
 	ctx.cluster = new ClusterConfigService(ctx);
+	ctx.telemetrySpool = new TelemetrySpoolGapService(ctx);
+	ctx.ha = new HaService(ctx);
 	ctx.ingressSet = new IngressSetService(ctx);
 	// Lane E's driver needs the core context (provider, probes, persisted streaks), so it is
 	// registered here rather than in the context-free registry.
@@ -584,6 +595,8 @@ export function createCore(options: CoreOptions): Core {
 		releaseCommands: ctx.releaseCommands,
 		relocations: ctx.relocations,
 		cluster: ctx.cluster,
+		ha: ctx.ha,
+		telemetrySpool: ctx.telemetrySpool,
 		ingressSet: ctx.ingressSet,
 		steering: ctx.steering,
 		certificates: ctx.certificates,

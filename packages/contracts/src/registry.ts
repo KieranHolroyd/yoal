@@ -210,8 +210,9 @@ export const registrySettingsUpdateSchema = z
 		/**
 		 * G6: store blobs in S3, so the registry can move to another node without copying data.
 		 * `managed` provisions a bucket on a Yoal storage instance (docs/OBJECT-STORAGE.md) and a
-		 * scoped access key; `external` is any S3-compatible endpoint. `null` returns to the node's
-		 * disk (data is not migrated).
+		 * scoped access key; `external` is any S3-compatible endpoint; `platform` puts the blobs in
+		 * the platform object store (HA-PLAN H28/W12), so losing the registry node loses no data.
+		 * `null` returns to the node's disk (data is not migrated).
 		 */
 		s3: z
 			.union([
@@ -224,6 +225,7 @@ export const registrySettingsUpdateSchema = z
 						bucket: bucketNameSchema.default('registry'),
 					})
 					.strict(),
+				z.object({ mode: z.literal('platform') }).strict(),
 				z
 					.object({
 						/** Absent on payloads older dashboards send; `external` is the default then. */
@@ -248,9 +250,9 @@ export const registrySettingsUpdateSchema = z
 	});
 export type RegistrySettingsUpdate = z.input<typeof registrySettingsUpdateSchema>;
 
-/** Where the registry keeps its blobs: a Yoal-provisioned bucket or any S3-compatible endpoint. */
+/** Where the registry keeps its blobs: the platform store, a Yoal-provisioned bucket or any S3 endpoint. */
 export interface RegistryS3View {
-	mode: 'managed' | 'external';
+	mode: 'managed' | 'external' | 'platform';
 	endpoint: string;
 	bucket: string;
 	region: string;

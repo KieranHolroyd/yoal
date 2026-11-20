@@ -253,15 +253,21 @@ insecure = true                  # plain HTTP on loopback only
 - **Storage kind `registry`** (not built) joins STORAGE.md §2.1, with no default (the system disk)
   and a suggested `bulk`. On this fleet that means the homelab's HDD. **The prod VPS root disk
   (about 4.5 GB free) cannot hold it.**
-- **Managed S3 (D210).** Settings offers three choices: the node's disk, **Yoal object storage**,
-  or another S3 endpoint. Yoal object storage needs only a storage instance (or creates a dedicated
-  `registry-storage` RustFS, owned by the platform org, on the registry node); the control plane
-  creates/reuses the bucket (`registry` by default), mints a `registry` key whose grant is
-  read-write on that bucket only, seals it with the platform key and points zot at
-  `http://s3-<instance hex>:9000`. The instance must be on the registry's node, because a private
-  RustFS API is loopback/network-local (D56); the registry joins the storage's org network when
-  `ORG_NETWORKS` is on. A single replica uses zot's local BoltDB dedupe cache, so no Redis/Valkey is
-  needed; an external S3 endpoint may still supply a `redis://` cache URL.
+- **Managed S3 (D210).** Settings offers four choices: the node's disk, **Yoal object storage**,
+  another S3 endpoint, or the **platform object store** (HA-PLAN H28/W12). Yoal object storage
+  needs only a storage instance (or creates a dedicated `registry-storage` RustFS, owned by the
+  platform org, on the registry node); the control plane creates/reuses the bucket (`registry` by
+  default), mints a `registry` key whose grant is read-write on that bucket only, seals it with the
+  platform key and points zot at `http://s3-<instance hex>:9000`. The instance must be on the
+  registry's node, because a private RustFS API is loopback/network-local (D56); the registry joins
+  the storage's org network when `ORG_NETWORKS` is on. A single replica uses zot's local BoltDB
+  dedupe cache, so no Redis/Valkey is needed; an external S3 endpoint may still supply a `redis://`
+  cache URL.
+- **Platform object store.** The HA choice: zot writes blobs under `/zot` in the bucket named by
+  `YOAL_OBJECT_STORE`'s S3 configuration (`R2_BUCKET` for `r2`), using the platform credential from
+  `yoal.env` through activation. No key is copied into the settings row, and the registry may move
+  to another node without copying data. Azure and GCS platform stores cannot back zot directly and
+  are refused with the fix.
 - **Dedupe:** zot's filesystem dedupe stores each blob once across every repo *(confirm the
   mechanism and its cache in S1)*. Since v2.1.21 a blob is readable in a repo only after it was
   pushed or mounted there, which closes the cross-org "does this layer exist" probe. Pin ≥ 2.1.23.
@@ -382,7 +388,7 @@ L1, after CLUSTERING C9:
 | **G3** | **Done (D158):** images build in Pipelines (`yoal/build-image`, docs/PIPELINES.md; BuildKit/buildah/podman/docker backends) and push with the job's own login (`job.<jobId>`); `registry/<name>` tags; GitHub Actions OIDC trusts (`/registry/trusts`, `yoal registry trust`); GitLab CI `id_tokens` trusts since D178 ([FORGES.md](./FORGES.md) §8). |
 | **G4** | **Done (D159):** zot `sync` on demand for docker.io/ghcr.io/quay.io under `<upstream>/…`; nodes get `registryMirror` in desired state and the helper writes `registries.conf.d/50-yoal-mirror.conf` plus a `node.<id>` login in `/run/containers/0/auth.json`; workload logins cover the mirrors. |
 | **G5** | **Done (D159):** zot trust extension; cosign keys uploaded as the htpasswd admin; `signatures: off|warn|enforce` checked at deploy through zot's search API; CVE scanning toggle with `GET /registry/scan` and `yoal registry scan`. Not built: Podman `policy.json` verification on nodes. |
-| **G6** | **Done (D159, D210), single replica:** S3 storage with a Redis/Valkey cache, so moving the registry to another node needs no data copy. `managed` setup creates the bucket and a bucket-scoped key on a Yoal RustFS instance (or a dedicated `registry-storage` on the registry node), with zot's local BoltDB cache when no cache URL is given. Not built: zot `cluster` mode (several active replicas). |
+| **G6** | **Done (D159, D210), single replica:** S3 storage with a Redis/Valkey cache, so moving the registry to another node needs no data copy. `managed` setup creates the bucket and a bucket-scoped key on a Yoal RustFS instance (or a dedicated `registry-storage` on the registry node), with zot's local BoltDB cache when no cache URL is given. The **platform object store** mode (HA-PLAN H28/W12) puts the blobs in the external platform bucket under `/zot` and keeps the platform credential in `yoal.env`; the HA preflight refuses disk and managed-RustFS storage. Not built: zot `cluster` mode (several active replicas). |
 
 ---
 

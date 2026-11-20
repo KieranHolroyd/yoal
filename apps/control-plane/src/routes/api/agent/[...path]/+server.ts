@@ -412,6 +412,15 @@ const handler: RequestHandler = async (event) => {
 				batch.brokers,
 				batch.brokerQueues
 			);
+			// The spool is disk state on the node; record its gaps even without ClickHouse so the
+			// traffic chart and the HA page can show what an outage cost (HA-PLAN H28/W12).
+			if (batch.spool) {
+				try {
+					core.telemetrySpool.record(node.id, batch.spool);
+				} catch {
+					// Observability metadata must never fail the node's telemetry POST.
+				}
+			}
 			if (!core.ctx.telemetry || !(await core.ctx.telemetry.ready()))
 				return json({
 					ok: true,

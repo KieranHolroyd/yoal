@@ -144,6 +144,18 @@ const steering = z.object({
 	stacked: z.array(z.enum(steeringDriverKinds)).max(4).default([]),
 });
 
+/**
+ * The install's HA profile (HA-PLAN H27/W12). `single` is today's install and the default. `ha`
+ * and `ha-dr` are assertions, not a switch: they turn nothing on by themselves, and the preflight
+ * refuses the profile until every blocker it names is fixed. W14's `yoal ha init` is the guided
+ * surface on top; this row is the durable setting it writes.
+ */
+export const haProfiles = ['single', 'ha', 'ha-dr'] as const;
+export type HaProfile = (typeof haProfiles)[number];
+const ha = z.object({
+	profile: z.enum(haProfiles).default('single'),
+});
+
 export const clusterConfigSchema = z.object({
 	overlay,
 	endpoints,
@@ -156,6 +168,7 @@ export const clusterConfigSchema = z.object({
 	updates,
 	ingress: ingressSettingsSchema,
 	steering,
+	ha,
 });
 export type ClusterConfig = z.infer<typeof clusterConfigSchema>;
 
@@ -196,6 +209,7 @@ const sectionUpdates = {
 	updates: updates.partial().optional(),
 	ingress: ingressSettingsSchema.partial().optional(),
 	steering: steering.partial().optional(),
+	ha: ha.partial().optional(),
 	/** Only ever held `mountRoot`; kept so an older saved document still parses. */
 	shares: z.object(unwired('shares')).optional(),
 };

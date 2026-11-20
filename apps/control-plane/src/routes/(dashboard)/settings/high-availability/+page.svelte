@@ -4,6 +4,7 @@
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import ServerIcon from '@lucide/svelte/icons/server';
 	import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
+	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 	import type { FailoverEventView, FailoverStatusView } from '@yoal/contracts';
 	import { createQuery } from '@tanstack/svelte-query';
 	import { resolve } from '$app/paths';
@@ -69,6 +70,144 @@
 />
 
 <div class="space-y-6">
+	{#if form?.success}
+		<div class="rounded-md border border-success/40 bg-success/10 px-3 py-2 text-sm">
+			{form.success}
+		</div>
+	{/if}
+	{#if form?.message}
+		<div class="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm">
+			{form.message}
+		</div>
+	{/if}
+
+	<Panel
+		title="HA profile and platform dependencies"
+		icon={ShieldCheckIcon}
+		description="The dependencies the request path and a failover need. Turning on the HA profile is refused while any of them still lives on one node."
+	>
+		<div class="flex flex-wrap items-start justify-between gap-4">
+			<div>
+				<p class="text-xs text-muted-foreground">Profile</p>
+				<p class="mt-1 flex items-center gap-2">
+					<Badge variant={data.ha.profile === 'single' ? 'neutral' : 'success'}>{data.ha.profile}</Badge>
+					<span class="text-xs text-muted-foreground">
+						{#if data.ha.ok}
+							Every platform dependency can survive a node loss.
+						{:else}
+							{data.ha.blockers} blocker{data.ha.blockers === 1 ? '' : 's'} must be fixed first.
+						{/if}
+					</span>
+				</p>
+			</div>
+			{#if data.canEditPolicies}
+				<div class="flex flex-wrap gap-2">
+					{#if data.ha.profile !== 'ha'}
+						<form method="POST" action="?/saveProfile">
+							<input type="hidden" name="profile" value="ha" />
+							<Button type="submit" size="sm" disabled={!data.ha.ok}>Turn on the HA profile</Button>
+						</form>
+					{/if}
+					{#if data.ha.profile !== 'single'}
+						<form method="POST" action="?/saveProfile">
+							<input type="hidden" name="profile" value="single" />
+							<Button type="submit" size="sm" variant="outline">Return to single</Button>
+						</form>
+					{/if}
+				</div>
+			{/if}
+		</div>
+
+		<ul class="mt-4 space-y-2">
+			{#each data.ha.findings as finding (finding.key)}
+				<li class="rounded-md border px-3 py-2">
+					<div class="flex items-start gap-2">
+						{#if finding.severity === 'blocker'}
+							<TriangleAlertIcon class="mt-0.5 size-4 shrink-0 text-destructive" />
+						{:else}
+							<span class="mt-1.5 size-2 shrink-0 rounded-full bg-muted-foreground/50"></span>
+						{/if}
+						<div class="min-w-0">
+							<p class="text-sm font-medium">
+								{finding.title}
+								<Badge variant={finding.severity === 'blocker' ? 'danger' : finding.severity === 'warning' ? 'warning' : 'outline'} class="ml-1">
+									{finding.severity}
+								</Badge>
+							</p>
+							<p class="text-xs text-muted-foreground">{finding.detail}</p>
+							{#if finding.fix}<p class="mt-1 text-xs"><span class="font-medium">Fix:</span> {finding.fix}</p>{/if}
+						</div>
+					</div>
+				</li>
+			{/each}
+		</ul>
+
+		<div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+			<div class="rounded-lg border p-3">
+				<p class="text-xs text-muted-foreground">Platform object store</p>
+				<p class="mt-1 text-sm font-medium">{data.ha.dependencies.platformStore.kind}</p>
+				<p class="mt-1 text-xs text-muted-foreground">{data.ha.dependencies.platformStore.detail}</p>
+			</div>
+			<div class="rounded-lg border p-3">
+				<p class="text-xs text-muted-foreground">Registry blobs</p>
+				<p class="mt-1 text-sm font-medium">
+					{data.ha.dependencies.registry.enabled ? data.ha.dependencies.registry.mode : 'registry off'}
+				</p>
+				<p class="mt-1 text-xs text-muted-foreground">{data.ha.dependencies.registry.detail}</p>
+				{#if data.canEditPolicies && data.ha.dependencies.registry.enabled}
+					<Button variant="ghost" size="sm" class="mt-2 h-7 px-2 text-xs" href={resolve('/(dashboard)/settings/registry')}>
+						Registry storage
+					</Button>
+				{/if}
+			</div>
+			<div class="rounded-lg border p-3">
+				<p class="text-xs text-muted-foreground">Identity</p>
+				<p class="mt-1 text-sm font-medium">{data.ha.dependencies.identity.nodeName ?? 'No capable node'}</p>
+				<p class="mt-1 text-xs text-muted-foreground">{data.ha.dependencies.identity.detail}</p>
+				{#if data.canEditPolicies}
+					<form method="POST" action="?/moveDependency" class="mt-2 flex items-center gap-2">
+						<select name="identityNode" class="h-8 min-w-0 flex-1 rounded-md border bg-background px-2 text-xs">
+							<option value="">Automatic (first capable node)</option>
+							{#each data.ha.nodes.filter((node) => node.identity) as node (node.id)}
+								<option value={node.id} selected={node.id === data.ha.dependencies.identity.nodeId}>
+									{node.name}{node.online ? '' : ' (offline)'}
+								</option>
+							{/each}
+						</select>
+						<Button type="submit" size="sm" variant="outline" class="h-8">Move</Button>
+					</form>
+				{/if}
+			</div>
+			<div class="rounded-lg border p-3">
+				<p class="text-xs text-muted-foreground">Mail</p>
+				<p class="mt-1 text-sm font-medium">{data.ha.dependencies.mail.nodeName ?? 'No mail node'}</p>
+				<p class="mt-1 text-xs text-muted-foreground">{data.ha.dependencies.mail.detail}</p>
+				{#if data.canEditPolicies}
+					<form method="POST" action="?/moveDependency" class="mt-2 flex items-center gap-2">
+						<select name="mailNode" class="h-8 min-w-0 flex-1 rounded-md border bg-background px-2 text-xs">
+							<option value="">No mail node</option>
+							{#each data.ha.nodes.filter((node) => node.mail) as node (node.id)}
+								<option value={node.id} selected={node.id === data.ha.dependencies.mail.nodeId}>
+									{node.name}{node.online ? '' : ' (offline)'}
+								</option>
+							{/each}
+						</select>
+						<Button type="submit" size="sm" variant="outline" class="h-8">Move</Button>
+					</form>
+				{/if}
+			</div>
+		</div>
+
+		{#if data.ha.dependencies.telemetrySpool.length > 0}
+			<p class="mt-3 text-xs text-muted-foreground">
+				Telemetry spool:
+				{#each data.ha.dependencies.telemetrySpool as spool (spool.nodeId)}
+					<span class="ml-1 font-mono">{spool.nodeName ?? spool.nodeId}: {spool.queued} queued, {spool.dropped} dropped</span>
+				{/each}
+			</p>
+		{/if}
+	</Panel>
+
 	<Panel
 		title="Failover controller"
 		icon={ShieldCheckIcon}

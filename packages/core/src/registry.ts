@@ -116,7 +116,7 @@ interface RegistryConfig {
 	cveScanning: boolean;
 	/** G6: S3 storage; secrets sealed. `managed` means Yoal provisioned the bucket and key. */
 	s3: {
-		mode: 'managed' | 'external';
+		mode: 'managed' | 'external' | 'platform';
 		endpoint: string;
 		bucket: string;
 		region: string;
@@ -252,11 +252,12 @@ export class RegistryService {
 						.where(eq(storageInstances.id, config.s3.storageId))
 						.get() ?? null)
 				: null;
+		const platform = config.s3.mode === 'platform' ? this.ctx.config.platformStore : null;
 		return {
 			mode: config.s3.mode,
-			endpoint: config.s3.endpoint,
-			bucket: config.s3.bucket,
-			region: config.s3.region,
+			endpoint: platform?.s3?.endpoint ?? config.s3.endpoint,
+			bucket: platform?.s3?.bucket ?? config.s3.bucket,
+			region: platform?.s3?.region ?? config.s3.region,
 			storage,
 		};
 	}
@@ -358,7 +359,9 @@ export class RegistryService {
 							s3: s3Input
 								? s3Input.mode === 'managed'
 									? { mode: 'managed', storage: s3Input.storage ?? null, bucket: s3Input.bucket }
-									: { mode: 'external', endpoint: s3Input.endpoint, bucket: s3Input.bucket }
+									: s3Input.mode === 'platform'
+										? { mode: 'platform' }
+										: { mode: 'external', endpoint: s3Input.endpoint, bucket: s3Input.bucket }
 								: null,
 						}
 					: {}),
@@ -376,6 +379,7 @@ export class RegistryService {
 	 */
 	private resolveS3(config: RegistryConfig, input: NonNullable<RegistrySettingsUpdate['s3']>): RegistryConfig['s3'] {
 		if (input.mode === 'managed') return this.configureManagedS3(config, input);
+		if (input.mode === 'platform') return this.configurePlatformS3();
 		return {
 			mode: 'external',
 			endpoint: input.endpoint,
@@ -384,6 +388,35 @@ export class RegistryService {
 			accessKeyId: input.accessKeyId,
 			secretSealed: this.ctx.secrets.seal(PLATFORM_KEY_ORG, input.secretAccessKey),
 			cacheUrlSealed: input.cacheUrl ? this.ctx.secrets.seal(PLATFORM_KEY_ORG, input.cacheUrl) : null,
+			storageId: null,
+			storageOrgId: null,
+		};
+	}
+
+	/**
+	 * Blobs in the platform object store (HA-PLAN H28/W12). Only an S3-compatible store can back
+	 * zot; Azure and GCS are refused with the fix rather than silently falling back to node disk.
+	 * The root key never enters this row: activation reads it from the running config.
+	 */
+	private configurePlatformS3(): NonNullable<RegistryConfig['s3']> {
+		const store = this.ctx.config.platformStore;
+		if (!store || store.kind === 'local')
+			throw new ValidationError(
+				'The platform object store is local, so the registry cannot outlive its node. Set YOAL_OBJECT_STORE=r2 (or an S3 platform store) and its R2_* keys in yoal.env, then choose the platform store again.',
+			);
+		if (!store.s3)
+			throw new ValidationError(
+				`The platform object store is ${store.kind}, which zot cannot use directly. Set an S3-compatible platform store (YOAL_OBJECT_STORE=r2), or use an external S3 endpoint for the registry.`,
+			);
+		return {
+			mode: 'platform',
+			endpoint: store.s3.endpoint,
+			bucket: store.s3.bucket,
+			region: store.s3.region,
+			accessKeyId: store.s3.accessKeyId,
+			// The credential is resolved from the live platform config at activation, never copied.
+			secretSealed: '',
+			cacheUrlSealed: null,
 			storageId: null,
 			storageOrgId: null,
 		};
@@ -473,6 +506,32 @@ export class RegistryService {
 			.sort((a, b) => a.name.localeCompare(b.name));
 	}
 
+	/**
+	 * Where the registry's blobs live (HA-PLAN H28/W12), for preflight and the HA status page.
+	 * `local` is the node's disk; `managed` is a RustFS instance and therefore also one node.
+	 */
+	storagePlacement(): {
+		mode: 'local' | 'managed' | 'external' | 'platform';
+		nodeId: string | null;
+		nodeName: string | null;
+		bucket: string | null;
+	} {
+		const config = this.config();
+		if (!config.s3) return { mode: 'local', nodeId: config.nodeId, nodeName: null, bucket: null };
+		const storage =
+			config.s3.mode === 'managed' && config.s3.storageId
+				? this.ctx.db.select().from(storageInstances).where(eq(storageInstances.id, config.s3.storageId)).get()
+				: null;
+		const node = storage ? this.ctx.db.select({ name: nodes.name }).from(nodes).where(eq(nodes.id, storage.nodeId)).get() : null;
+		const platform = config.s3.mode === 'platform' ? this.ctx.config.platformStore?.s3 : null;
+		return {
+			mode: config.s3.mode,
+			nodeId: storage?.nodeId ?? config.nodeId,
+			nodeName: node?.name ?? null,
+			bucket: platform?.bucket ?? config.s3.bucket,
+		};
+	}
+
 	signaturePolicy(): 'off' | 'warn' | 'enforce' {
 		return this.config().signatures;
 	}
@@ -483,7 +542,8 @@ export class RegistryService {
 
 	private s3Endpoint(config: RegistryConfig): { host: string; secure: boolean } | null {
 		if (!config.s3) return null;
-		const url = new URL(config.s3.endpoint);
+		const platformEndpoint = config.s3.mode === 'platform' ? this.ctx.config.platformStore?.s3?.endpoint : null;
+		const url = new URL(platformEndpoint ?? config.s3.endpoint);
 		return { host: url.host, secure: url.protocol === 'https:' };
 	}
 
@@ -658,6 +718,7 @@ export class RegistryService {
 	}
 
 	private activationVersionOf(config: RegistryConfig): string {
+		const platform = config.s3?.mode === 'platform' ? this.ctx.config.platformStore : null;
 		return sha256Hex(
 			JSON.stringify({
 				cert: this.signingCertificate().certificatePem,
@@ -670,7 +731,19 @@ export class RegistryService {
 				...(config.mirrors.length ? { mirrors: config.mirrors } : {}),
 				...(this.trustOn(config) ? { trust: true, admin: sha256Hex(config.adminPasswordSealed ?? '') } : {}),
 				...(config.cveScanning ? { cve: true } : {}),
-				...(config.s3 ? { s3: sha256Hex(JSON.stringify(config.s3)) } : {}),
+				...(config.s3
+					? {
+							s3: sha256Hex(
+								JSON.stringify({
+									...config.s3,
+									// A platform credential rotation must re-render zot without a settings save.
+									...(config.s3.mode === 'platform' && platform?.s3
+										? { endpoint: platform.s3.endpoint, bucket: platform.s3.bucket, key: sha256Hex(platform.s3.secretAccessKey) }
+										: {}),
+								}),
+							),
+						}
+					: {}),
 			}),
 		);
 	}
@@ -693,6 +766,7 @@ export class RegistryService {
 		if (!config.enabled || config.nodeId !== nodeId || !config.workloadId) return [];
 		// Managed S3 keeps the registry next to its private RustFS instance. On installs with
 		// per-org networks both must join the storage's network or DNS aliases stop resolving.
+		// A platform or external store has no per-node network to join.
 		const managedOrg = config.s3?.mode === 'managed' ? config.s3.storageOrgId : null;
 		const isolated = Boolean(managedOrg) && featureEnabled(this.ctx.config, 'ORG_NETWORKS');
 		return [
@@ -727,8 +801,14 @@ export class RegistryService {
 					cve: config.cveScanning,
 					s3: (() => {
 						const endpoint = this.s3Endpoint(config);
+						const platform = config.s3?.mode === 'platform' ? this.ctx.config.platformStore?.s3 : null;
 						return endpoint && config.s3
-							? { endpoint: endpoint.host, bucket: config.s3.bucket, region: config.s3.region, secure: endpoint.secure }
+							? {
+									endpoint: endpoint.host,
+									bucket: platform?.bucket ?? config.s3.bucket,
+									region: platform?.region ?? config.s3.region,
+									secure: endpoint.secure,
+								}
 							: null;
 					})(),
 				},
@@ -752,6 +832,11 @@ export class RegistryService {
 		const config = this.config();
 		if (!config.enabled || id !== config.workloadId) throw new NotFoundError('Registry');
 		if (config.nodeId !== nodeId) throw new CoreError('forbidden', 'The registry is placed on another node.', 403);
+		const platformS3 = config.s3?.mode === 'platform' ? this.ctx.config.platformStore?.s3 : null;
+		if (config.s3?.mode === 'platform' && !platformS3)
+			throw new ValidationError(
+				'The platform object store is no longer S3-compatible, so the registry cannot render its storage. Set an S3 platform store or switch the registry storage.',
+			);
 		return {
 			workloadId: id,
 			activationVersion: this.activationVersionOf(config),
@@ -759,15 +844,20 @@ export class RegistryService {
 				YOAL_REGISTRY_TOKEN_CERT: this.signingCertificate().certificatePem,
 				YOAL_REGISTRY_EVENTS_URL: this.eventsUrl(config),
 				...(this.trustOn(config) ? { YOAL_REGISTRY_ADMIN_HTPASSWD: this.adminHtpasswd(config)! } : {}),
-				...(config.s3
+				...(config.s3 && platformS3
 					? {
-							YOAL_REGISTRY_S3_ACCESS_KEY: config.s3.accessKeyId,
-							YOAL_REGISTRY_S3_SECRET_KEY: this.ctx.secrets.open(PLATFORM_KEY_ORG, config.s3.secretSealed),
-							...(config.s3.cacheUrlSealed
-								? { YOAL_REGISTRY_CACHE_URL: this.ctx.secrets.open(PLATFORM_KEY_ORG, config.s3.cacheUrlSealed) }
-								: {}),
+							YOAL_REGISTRY_S3_ACCESS_KEY: platformS3.accessKeyId,
+							YOAL_REGISTRY_S3_SECRET_KEY: platformS3.secretAccessKey,
 						}
-					: {}),
+					: config.s3
+						? {
+								YOAL_REGISTRY_S3_ACCESS_KEY: config.s3.accessKeyId,
+								YOAL_REGISTRY_S3_SECRET_KEY: this.ctx.secrets.open(PLATFORM_KEY_ORG, config.s3.secretSealed),
+								...(config.s3.cacheUrlSealed
+									? { YOAL_REGISTRY_CACHE_URL: this.ctx.secrets.open(PLATFORM_KEY_ORG, config.s3.cacheUrlSealed) }
+									: {}),
+							}
+						: {}),
 			},
 			files: {},
 		};

@@ -1209,8 +1209,12 @@ export class WorkloadService {
 				pulls.push({ workloadId: workload.id, image });
 				continue;
 			}
-			if (!rolling) continue;
-			// The failover reserve: one possible destination for a copy while the app rolls.
+			// A spread set has another copy to serve while this one moves, so its reserve is only
+			// needed during a rollout. A single-copy app has no such copy: every eligible node is
+			// its failover reserve, and the image must be there before the node that dies does.
+			if (!rolling && copies.length !== 1) continue;
+			// The failover reserve: one possible destination for a copy while the app rolls or if
+			// its only node is lost (HA-PLAN H28).
 			const candidate = this.copyCandidates(project as ProjectRow, spec, workload.id).find((node) => node.id === nodeId);
 			if (candidate) pulls.push({ workloadId: workload.id, image });
 		}

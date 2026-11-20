@@ -2128,6 +2128,10 @@ uploads, telemetry Parquet, Litestream replicas and database dumps (D83). It is 
 backups fail and Litestream stalls, while serving continues (D23); under §6.3 the control plane also
 becomes read-only after one TTL.
 
+The registry can already keep its blobs here (REGISTRY.md §6, `platform` storage mode), so losing
+the registry node loses no images and a move needs no copy; the `ha` profile's preflight refuses a
+disk or managed-RustFS registry (§W12).
+
 **Multi-target replication** is the plan for this store, not built (ROADMAP). `ObjectStore` already
 abstracts `local` and `s3`, so it means a list of write targets with one primary for reads: a write
 is acknowledged when the primary succeeds, secondaries are fed by a retry queue, and restore reads
