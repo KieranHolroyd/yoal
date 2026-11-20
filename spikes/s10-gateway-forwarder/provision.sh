@@ -25,4 +25,6 @@ systemctl daemon-reload && systemctl start yoal-workloads.slice
 # fills and drops SYNs (seen on the first run). Size it like a busy node.
 modprobe nf_conntrack
 sysctl -qw net.netfilter.nf_conntrack_max=1048576
+echo nf_conntrack >/etc/modules-load.d/yoal-w0.conf
+echo net.netfilter.nf_conntrack_max=1048576 >/etc/sysctl.d/90-yoal-w0.conf
 podman --version; bun --version; pasta --version | head -1; slirp4netns --version | head -1; nft --version; uname -r

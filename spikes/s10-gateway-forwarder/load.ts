@@ -246,7 +246,6 @@ async function main(): Promise<void> {
 			idle.set(t.name, list);
 		}
 		const totals = new Map(targets.map((t) => [t.name, { short: tally(), idleLost: 0, idleChecks: 0 }]));
-		let minute = tally();
 		const perMinute = new Map(targets.map((t) => [t.name, tally()]));
 		const ending = Date.now() + minutes * 60_000;
 		let stop = false;
@@ -292,8 +291,6 @@ async function main(): Promise<void> {
 		}
 		stop = true;
 		await Promise.all(shortLoops);
-		minute = tally();
-		void minute;
 		const final = { test: 'soak', minutes, targets: Object.fromEntries(totals) };
 		out.write(`${JSON.stringify(final)}\n`);
 		await out.end();

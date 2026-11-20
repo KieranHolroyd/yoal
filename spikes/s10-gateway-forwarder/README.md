@@ -56,3 +56,16 @@ A host-network sidecar per attached container (HA-PLAN §4 W2 table).
 One Debian 13 Lima VM `yoal-w0-s10` (VZ, arm64), Podman from Debian, Postgres 18 in a container,
 Bun at the release pin (1.4.4). The rig provisions the VM, runs everything, prints the numbers and
 deletes the VM.
+
+## Run
+
+`./run.sh [soakMinutes]` from a Mac with Lima and Go. It builds the pinned Caddy with caddy-l4,
+generates the prototypes from `apps/agent/src/endpoints.ts` (`make-proto.ts`), runs `lab.sh`
+phases (setup, reach, bench, soak, lifecycle, rootless, reboot), prints `report.ts` and deletes the
+VM (`KEEP_VM=1` keeps it). Results go to `$TMPDIR`, never into the repo.
+
+## Result (2026-11-20)
+
+Bun forwarder, with the converge signature fix; not caddy-l4. Numbers, the bug and what W4 must
+build: [docs/SPIKES.md](../../docs/SPIKES.md), section S10. The 24 h soak is owed to the lab's
+weekly `ha-soak` job.

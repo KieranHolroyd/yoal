@@ -30,7 +30,9 @@ echo "== VM $VM"
 if ! limactl list --format '{{.Name}}' | grep -qx "$VM"; then
 	limactl create --name "$VM" --cpus 4 --memory 4 --disk 15 --mount-none --tty=false template:debian-13
 fi
-limactl start "$VM" >/dev/null 2>&1 || true
+# Detach the host agent into its own session: when the calling shell's session ends, a host agent
+# in it dies and takes the VM (and a running soak) with it. That cut two of three soaks here.
+perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' limactl start "$VM" </dev/null >/dev/null 2>&1 || true
 limactl copy "$HERE/provision.sh" "$VM:/tmp/provision.sh"
 vm sh /tmp/provision.sh
 
@@ -53,7 +55,7 @@ sleep $((SOAK_MIN * 60 + 120))
 vm sh /opt/yoal-w0-s10/lab.sh lifecycle
 vm sh /opt/yoal-w0-s10/lab.sh rootless
 vm sh /opt/yoal-w0-s10/lab.sh stop
-limactl stop "$VM" && limactl start "$VM" >/dev/null 2>&1
+limactl stop "$VM" && perl -MPOSIX -e 'POSIX::setsid(); exec @ARGV' limactl start "$VM" </dev/null >/dev/null 2>&1
 vm sh /opt/yoal-w0-s10/lab.sh after-reboot
 
 echo "== results -> $OUT"

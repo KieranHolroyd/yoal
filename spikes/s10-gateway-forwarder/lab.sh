@@ -11,6 +11,8 @@ PG_IMAGE=docker.io/library/postgres:18-trixie
 BUN_IMAGE=docker.io/oven/bun:1.4.4-alpine
 OVERLAY=10.47.0.1
 TARGETS="asis-tls=db-s10:21000,asis-plain=db-s10:21001,fix-tls=db-s10:21200,fix-plain=db-s10:21201,caddy=db-s10:21500,direct=pg-direct:5432"
+# The soak leaves out the as-is forwarder: the bench already shows it fails (restart bug).
+SOAK_TARGETS="fix-tls=db-s10:21200,fix-plain=db-s10:21201,caddy=db-s10:21500,direct=pg-direct:5432"
 mkdir -p "$OUT"
 say() { printf '%s %s\n' "$(date -u +%H:%M:%S)" "$*" | tee -a "$OUT/lab.log"; }
 gw_of() { podman network inspect "$1" --format '{{range .Subnets}}{{.Gateway}}{{end}}'; }
@@ -197,9 +199,9 @@ bench() {
 soak() {
 	minutes=$1
 	say "soak: $minutes min"
-	systemctl stop yoal-w0-soak yoal-w0-sampler 2>/dev/null || true
+	systemctl stop yoal-w0-soak yoal-w0-sampler yoal-w0-fwd-asis 2>/dev/null || true
 	systemctl reset-failed yoal-w0-soak yoal-w0-sampler 2>/dev/null || true
-	systemd-run -q --unit yoal-w0-soak podman exec yoal-w0-client bun /rig/load.ts soak "$TARGETS" "$minutes" 50 5 /out/soak.jsonl
+	systemd-run -q --unit yoal-w0-soak podman exec yoal-w0-client bun /rig/load.ts soak "$SOAK_TARGETS" "$minutes" 50 5 /out/soak.jsonl
 	systemd-run -q --unit yoal-w0-sampler sh -c "while true; do sh $RIG/lab.sh sample >>$OUT/samples.jsonl; sleep 60; done"
 }
 
@@ -209,38 +211,47 @@ lifecycle() {
 	note() { say "LIFE $*"; echo "$*" >>"$L"; }
 	note "before: gw=$GW bridge=$BR; $(ip -4 -br addr show "$BR" 2>&1)"
 	note "listeners on gw before: $(ss -ltn | grep -c "$GW:" )"
+	as_yoal() { setpriv --reuid=yoal --regid=yoal --clear-groups "$@"; }
+	bridge_state() { ip link show "$BR" >/dev/null 2>&1 && echo present || echo removed; }
+	# 1. Remove the bridge under listeners that were bound while it existed.
 	systemctl stop yoal-w0-client.service
 	podman network disconnect yoal-w0-orga yoal-w0-pg
 	sleep 2
-	note "all containers off orga: bridge $(ip link show "$BR" >/dev/null 2>&1 && echo present || echo removed); listeners on gw: $(ss -ltn | grep -c "$GW:")"
-	systemctl restart yoal-w0-fwd-fix.service 2>/dev/null || true
-	sleep 3
-	note "fix forwarder restarted while bridge absent: $(journalctl -u yoal-w0-fwd-fix --since -10s --no-pager | grep -c 'could not listen') listen errors; gw listeners now $(ss -ltn | grep "$GW:" | grep -c ':212')"
+	note "1 all containers off orga: bridge $(bridge_state); gw listeners still open: $(ss -ltn | grep -c "$GW:")"
 	systemctl start yoal-w0-client.service; sleep 4
-	note "bridge back: $(ip -4 -br addr show "$BR" 2>&1)"
-	note "after bridge back: asis(old listener, restarted every poll) gw:21001 -> $(probe_in yoal-w0-client db-s10:21001); fix(restarted while absent) gw:21201 -> $(probe_in yoal-w0-client db-s10:21201); caddy gw:21500 -> $(probe_in yoal-w0-client db-s10:21500)"
+	note "1 bridge back ($(ip -4 -br addr show "$BR" 2>&1 | awk '{print $1, $3}')): listeners bound before removal: fix gw:21201 -> $(probe_in yoal-w0-client db-s10:21201); caddy gw:21500 -> $(probe_in yoal-w0-client db-s10:21500)"
+	# 2. Start the forwarders while the address does not exist.
+	systemctl stop yoal-w0-client.service; sleep 2
+	note "2 bridge $(bridge_state)"
+	systemctl restart yoal-w0-fwd-fix.service; systemctl restart yoal-w0-caddy.service; sleep 3
+	note "2 fix restarted while absent: $(journalctl -u yoal-w0-fwd-fix --since -10s --no-pager | grep -c 'could not listen') 'could not listen' lines; gw listeners $(ss -ltn | grep "$GW:" | grep -c ':212'); loopback 127.0.0.1:21201 -> $(as_yoal bun "$RIG/load.ts" probe 127.0.0.1:21201)"
+	note "2 caddy restarted while absent, full /load of 200 servers: $(cd "$RIG" && as_yoal bun caddy-l4.ts "$RUN/caddy.sock" 21500 "$GW" 200 --once 2>&1 | tail -1 | cut -c1-220)"
+	note "2 caddy loopback 127.0.0.1:21500 -> $(as_yoal bun "$RIG/load.ts" probe 127.0.0.1:21500); 127.0.0.1:21501 listening: $(ss -ltn | grep -c '127.0.0.1:21501 ')"
+	systemctl start yoal-w0-client.service; sleep 4
+	note "2 bridge back: fix gw:21201 -> $(probe_in yoal-w0-client db-s10:21201); caddy gw:21500 -> $(probe_in yoal-w0-client db-s10:21500)"
 	sleep 70
-	note "after one more caddy load + asis converge: asis -> $(probe_in yoal-w0-client db-s10:21001); fix -> $(probe_in yoal-w0-client db-s10:21201); caddy -> $(probe_in yoal-w0-client db-s10:21500)"
-	# Bind before the address exists, with ip_nonlocal_bind.
+	note "2 after 70 s (8 fix converges, 1 caddy /load): fix -> $(probe_in yoal-w0-client db-s10:21201); caddy -> $(probe_in yoal-w0-client db-s10:21500); last caddy load: $(journalctl -u yoal-w0-caddy-load --no-pager | tail -1 | cut -c40-200)"
+	# 3. The same with net.ipv4.ip_nonlocal_bind=1.
 	systemctl stop yoal-w0-client.service; sleep 2
 	sysctl -qw net.ipv4.ip_nonlocal_bind=1
-	systemctl restart yoal-w0-fwd-fix.service; sleep 3
-	note "nonlocal_bind=1, fix restarted while bridge absent: gw listeners $(ss -ltn | grep "$GW:" | grep -c ':212')"
+	systemctl restart yoal-w0-fwd-fix.service; systemctl restart yoal-w0-caddy.service; sleep 3
+	note "3 nonlocal_bind=1, bridge $(bridge_state), both restarted: fix gw listeners $(ss -ltn | grep "$GW:" | grep -c ':212'); caddy /load: $(cd "$RIG" && as_yoal bun caddy-l4.ts "$RUN/caddy.sock" 21500 "$GW" 200 --once 2>&1 | tail -1 | cut -c1-120)"
 	systemctl start yoal-w0-client.service; sleep 4
-	note "nonlocal_bind=1, bridge back: fix gw:21201 -> $(probe_in yoal-w0-client db-s10:21201)"
+	note "3 nonlocal_bind=1, bridge back: fix gw:21201 -> $(probe_in yoal-w0-client db-s10:21201); caddy gw:21500 -> $(probe_in yoal-w0-client db-s10:21500)"
 	sysctl -qw net.ipv4.ip_nonlocal_bind=0
 	# Recreate the network after another org's network was created in between.
 	systemctl stop yoal-w0-client.service; sleep 2
 	podman network rm -f yoal-w0-orga >/dev/null
 	podman network create yoal-w0-orgc >/dev/null
 	systemctl restart yoal-w0-orga-network.service
-	note "recreated orga after orgc: orga $(subnet_of yoal-w0-orga) gw $(gw_of yoal-w0-orga) bridge $(bridge_of yoal-w0-orga); orgc $(subnet_of yoal-w0-orgc)"
-	podman network rm -f yoal-w0-orgc yoal-w0-orga >/dev/null
-	systemctl restart yoal-w0-orga-network.service
-	note "recreated orga alone: orga $(subnet_of yoal-w0-orga) gw $(gw_of yoal-w0-orga)"
+	note "4 recreated orga after orgc: orga $(subnet_of yoal-w0-orga) gw $(gw_of yoal-w0-orga) bridge $(bridge_of yoal-w0-orga); orgc $(subnet_of yoal-w0-orgc) bridge $(bridge_of yoal-w0-orgc)"
 	cat /etc/containers/networks/yoal-w0-orga.json >"$OUT/orga-network.json"
 	systemctl start yoal-w0-client.service; sleep 4
-	note "AddHost after recreate (unit still says $GW): $(probe_in yoal-w0-client db-s10:21500)"
+	note "4 client on recreated orga, AddHost still $GW (now orgc's gateway): caddy db-s10:21500 -> $(probe_in yoal-w0-client db-s10:21500); fix db-s10:21201 -> $(probe_in yoal-w0-client db-s10:21201); hosts: $(podman exec yoal-w0-client grep -E 'db-s10|host.containers' /etc/hosts | tr '\n' ' ')"
+	systemctl stop yoal-w0-client.service; sleep 2
+	podman network rm -f yoal-w0-orgc yoal-w0-orga >/dev/null
+	systemctl restart yoal-w0-orga-network.service
+	note "4 recreated orga alone: orga $(subnet_of yoal-w0-orga) gw $(gw_of yoal-w0-orga) bridge $(bridge_of yoal-w0-orga)"
 }
 
 rootless() {
@@ -301,6 +312,7 @@ stop_all() {
 case "${1:-}" in
 	setup) setup ;;
 	forwarders) start_forwarders ;;
+	nft) GW=$(gw_of yoal-w0-orga); nft_rules ;;
 	reach) reach ;;
 	sample) sample ;;
 	bench) bench ;;
