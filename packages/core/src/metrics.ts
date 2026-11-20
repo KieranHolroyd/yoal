@@ -107,7 +107,7 @@ export class MetricsService {
 			return { permitted: true, available: false, report: emptyTrafficReport(), reason: unavailableReason(telemetry), installed: telemetry?.installed ?? false };
 		}
 		const report = await telemetry.report({ ...window, projectId: project.id });
-		return { permitted: true, available: true, report, gaps: this.#gaps(report, window) };
+		return { permitted: true, available: true, report, gaps: this.#gaps(report, window, report.hosts.map((host) => host.key)) };
 	}
 
 	/**
@@ -167,7 +167,12 @@ export class MetricsService {
 			return { permitted: true, available: true, report: emptyTrafficReport() };
 		}
 		const report = await telemetry.report({ ...window, projectIds });
-		return { permitted: true, available: true, report, gaps: this.#gaps(report, window) };
+		return {
+			permitted: true,
+			available: true,
+			report,
+			gaps: this.#gaps(report, window, scope === 'all' ? null : report.hosts.map((host) => host.key)),
+		};
 	}
 
 	/**
@@ -175,11 +180,12 @@ export class MetricsService {
 	 * appears in its own report; the fleet overview sees every host. The spool is fleet-wide, so a
 	 * project only inherits a gap when one of its hosts had buckets dropped.
 	 */
-	#gaps(report: TrafficReport, window: TrafficWindow, hosts?: string[]): TelemetrySpoolGap[] {
+	#gaps(report: TrafficReport, window: TrafficWindow, hosts: string[] | null): TelemetrySpoolGap[] {
 		const fromMs = new Date(window.from).getTime();
 		const toMs = new Date(window.to).getTime();
 		if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return [];
-		const wanted = hosts ?? (report.hosts.length > 0 ? report.hosts.map((host) => host.key) : null);
+		// null means the fleet overview; an empty list means "none of my hosts", not "every host".
+		const wanted = hosts === null ? null : hosts;
 		return this.ctx.telemetrySpool.gapsFor(wanted, fromMs, toMs);
 	}
 

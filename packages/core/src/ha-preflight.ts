@@ -54,7 +54,7 @@ export function haFindings(ctx: CoreContext, profile: HaProfile): HaFinding[] {
 					placement.mode === 'local'
 						? 'The registry stores blobs in its node’s data directory, so losing that node loses every image.'
 						: `The registry stores blobs on the RustFS instance${placement.nodeName ? ` on ${placement.nodeName}` : ''}, so losing that node loses every image.`,
-				fix: 'Settings → Registry → Storage: choose the platform store (an external S3 store), let the registry reconcile, then move the registry to another node and confirm it serves a pull.',
+				fix: 'Settings → Registry → Storage: choose the platform store (an external S3 store). Existing blobs are not copied: re-push old images (or copy the bucket) before moving the registry, then confirm an old digest pulls.',
 			});
 		}
 	}

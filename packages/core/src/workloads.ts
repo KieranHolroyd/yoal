@@ -1194,17 +1194,15 @@ export class WorkloadService {
 			if (spec.runtime !== 'container' || !spec.image) continue;
 			const image = desiredImage(spec);
 			if (!image) continue;
-			const copies = this.ctx.db
-				.select()
-				.from(workloadReplicas)
-				.where(eq(workloadReplicas.workloadId, workload.id))
-				.all()
-				.sort((a, b) => a.replicaIndex - b.replicaIndex);
+			// `copyPlacements` synthesises the single-copy shape when there are no replica rows,
+			// which is exactly the steady state of the apps that need a failover reserve.
+			const copies = this.copyPlacements(workload);
 			const here = copies.find((copy) => copy.nodeId === nodeId);
 			const rolling = workload.rolloutStatus === 'rolling';
 			if (here) {
 				// Already on this image: nothing to pull.
-				const running = here.deploymentId && here.deploymentId !== workload.deploymentId ? this.copyRelease(here.deploymentId) : null;
+				const hereDeployment = (here as { deploymentId?: string | null }).deploymentId ?? null;
+				const running = hereDeployment && hereDeployment !== workload.deploymentId ? this.copyRelease(hereDeployment) : null;
 				if (running && desiredImage(running.spec) === image) continue;
 				pulls.push({ workloadId: workload.id, image });
 				continue;

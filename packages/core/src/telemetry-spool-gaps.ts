@@ -67,10 +67,9 @@ export class TelemetrySpoolGapService {
 		const stored = this.#read();
 		const previous = stored.nodes[nodeId];
 		const now = this.ctx.now();
-		const gaps = mergeTelemetryGaps([
-			...(previous?.gaps ?? []),
-			...report.gaps.filter((gap) => gap.to <= now + 60_000),
-		])
+		// The agent replays its cumulative gap list on every flush: replacing, not merging with the
+		// previous list, keeps `buckets` from being counted once per POST.
+		const gaps = mergeTelemetryGaps(report.gaps.filter((gap) => gap.to <= now + 60_000))
 			.filter((gap) => gap.to >= now - RETENTION_MS)
 			.slice(-MAX_GAPS);
 		stored.nodes[nodeId] = {

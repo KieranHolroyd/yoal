@@ -840,6 +840,9 @@ on top of these.
    registry can move to another node without copying data. Azure/GCS platform stores cannot back
    zot directly; use an external S3 endpoint for the registry in that case. A managed Yoal storage
    instance (RustFS) is still one node and is refused by the `ha` preflight.
+   **Existing blobs are not copied by the switch.** Images pushed before it are only in the old
+   backend: re-push them (or copy the bucket) before moving the registry, and confirm a pull of an
+   old digest afterwards.
 3. **Agents spool telemetry to disk.** Every agent keeps buckets in a bounded spool under
    `<YOAL_DATA_DIR>/telemetry-spool` when the control plane is unreachable. The defaults are 5,000
    buckets and 32 MiB; raise them with `YOAL_TELEMETRY_SPOOL_BUCKETS` and
