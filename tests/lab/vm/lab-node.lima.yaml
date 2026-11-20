@@ -1,18 +1,17 @@
 # HA lab, real-VM form (tests/lab/README.md, "The VM form"): one Lima VM per lab node, Debian 13 under VZ.
-# Same nodes, addresses-by-name, roles and zones as the container form (tests/lab/lab.config.ts);
+# Same nodes, roles, zones, sizes and install flow as the container form (tests/lab/lab.config.ts);
 # what changes is that a node loss is a real VM stop and the kernel (clock, WireGuard, nftables)
-# is the node's own. Not provisioned by anything yet: the nightly `ha-chaos` lane on a self-hosted
-# `yoal-lab` runner will create lab-a, lab-b, lab-c and lab-ctl from this file.
+# is the node's own. `tests/lab/vm/lab-vm.ts up` creates yoal-w1-lab-a … -ctl from this file, with
+# each node's CPUs and memory from lab.config.ts, and `down` deletes them.
 #
-#   limactl create --name yoal-w0-vm-lab-a --set '.cpus=3 | .memory="4GiB"' tests/lab/vm/lab-node.lima.yaml
-#
-# Use only yoal-w0-vm-* names, so the lab never touches a VM it did not create.
+# Only yoal-w1-lab-* names: the driver refuses any other VM, so the lab never touches one it did not
+# create.
 vmType: vz
 os: Linux
 arch: default
 cpus: 2
 memory: 3GiB
-disk: 30GiB
+disk: 20GiB
 images:
   - location: https://cloud.debian.org/images/cloud/trixie/latest/debian-13-genericcloud-arm64.qcow2
     arch: aarch64
@@ -24,6 +23,17 @@ mounts: []
 # underlay the WireGuard overlay runs over). Faults (nftables, tc) act on that interface.
 networks:
   - lima: user-v2
+# No port forwards at all: the host may run its own Yoal node, Caddy or dev server, and the lab
+# reaches its VMs over `limactl shell` only.
+portForwards:
+  - guestIP: "0.0.0.0"
+    guestPortRange: [1, 65535]
+    proto: any
+    ignore: true
+  - guestIP: "127.0.0.1"
+    guestPortRange: [1, 65535]
+    proto: any
+    ignore: true
 containerd:
   system: false
   user: false

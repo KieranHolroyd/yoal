@@ -1,9 +1,10 @@
 # tests/ha — the HA checker and the lease simulator
 
-HA-PLAN §4 W1 (bullets 3–4). Two tools:
+HA-PLAN §4 W1 (bullets 3–4) and the M1 acceptance scenarios. Three tools:
 
 | Path | What it is |
 |---|---|
+| `scenarios/` | The **scenarios**: each deploys the checker app on the lab (tests/lab), applies a fault or a change under the checker, and writes numbers plus a verdict. See [Scenarios](#scenarios). |
 | `checker/` | The **checker**: a client that writes numbered rows and reads them back through the public route, plus invariants I1–I7 (CLUSTERING §19.1) and I11–I16 (HA-PLAN §1.3) as pure functions over its request log and the lab's observations. |
 | `checker/app/` | The **checker app** it talks to, deployable on Yoal as a process or container app with a Postgres database attached. |
 | `sim/` | The **deterministic simulator** for `ControlLease` (`packages/core/src/ha-lease.ts`). |
@@ -108,6 +109,66 @@ PORT=46732 HOST=127.0.0.1 DATABASE_URL=postgres://postgres:w0lab@127.0.0.1:46731
   bun tests/ha/checker/app/server.ts &
 bun tests/ha/checker/cli.ts --url http://127.0.0.1:46732 --duration-s 30 --rate 50 --seed 11 --out /tmp/report.json
 ```
+
+## Scenarios
+
+Each scenario runs against a lab brought up with `bun tests/lab/lab.ts up` (the single-node gate:
+`up --only lab-a`), and writes into `tests/lab/.out/<scenario>-<time>/` (or `--out`):
+`scenario.json` (verdict, checks, timings, measures, timeline), `summary.md` (the same, readable),
+`report.json` (the checker's), `observations.jsonl` (what the scenario told the checker), and the
+checker's logs.
+
+| Scenario | For | What it does | Today on `ha/integration` |
+|---|---|---|---|
+| `single-node-gate.ts` | Every lane (§7.3) | One node, every HA flag off: deploy, scale 1→2→1, redeploy, under the checker | see below |
+| `kill-node.ts` | M1, §1.2 node loss | Two copies (keeper + `--node`); power off (`--method kill`), stop, or partition the node; time offline, re-placement, answering, rejoin | **fail** (direct), **invalid** (edge) |
+| `kill-node-b.ts` | W1 exit | `kill-node.ts --node lab-b` | as kill-node |
+| `freeze-agent.ts` | §7.2 Process | `SIGSTOP` the agent on a copy's node for 60 s; the copy must keep serving, nothing restarts or moves | see below |
+| `attachments-three-nodes.ts` | W4 exit, M1 | Container app, three copies on lab-a/b/c, Postgres on lab-ctl; manual promotion must change no env and restart nothing; port scan from the lab bridge | **skip** (container: the D56 pin); `--runtime process` measures the rest |
+| `rolling-deploy-under-load.ts` | W5 exit, M1 | 10,000 requests a minute through a rolling deploy; a failing release command; a release command under a partition (I16) | B measured; C, D **skip** (no `RELEASE_PHASE`) |
+
+### Verdicts
+
+Every scenario ends with one verdict (`scenarios/lib/report.ts`), and every check inside it has one:
+
+| Verdict | Exit | Means |
+|---|---|---|
+| `pass` | 0 | every judged bound and invariant held |
+| `fail` | 1 | one did not; the reason names it, with the number and, for a known bug, `path:line` |
+| `invalid` | 2 | the run cannot measure what it is for, because of how the platform is today (a copy the edge never sends traffic to); its numbers would mislead |
+| `skip` | 3 | it needs a feature another lane is building; the reason quotes the platform's refusal or the missing field |
+| `error` | 4 | the harness could not run (lab down, a deploy timed out); never a statement about the platform |
+
+The overall verdict is the worst check (`error` > `fail` > `invalid` > `skip` > `pass`), or an early
+stop's. `--accept invalid,skip` maps those verdicts to exit 0 for a CI step that is known to be
+invalid or skipped on this tree (each such step in `.github/workflows/ha.yml` says why).
+
+**Targets.** `--target edge` (default) sends the checker through lab-a's public route, as a user.
+`--target direct` bypasses the edge: the scenario's own balancer sends each request straight to a
+copy (relayed through lab-a). A direct run judges re-placement, restarts and the checker's
+invariants, and records request failures without judging them (they describe the harness balancer
+as much as the platform); its report says "Edge bypassed" at the top. Until `ha/w1-fixes` lands,
+every edge run with a remote copy is `invalid`: the edge's active health check sends no app Host
+(`packages/site-config/src/compile.ts:259-264`), so remote copies take no traffic.
+
+### The library (`scenarios/lib/`)
+
+| Module | Gives |
+|---|---|
+| `scenario.ts` | `Scenario`: output directory, observation log, timeline, `check()`, `stop()`, cleanups that run on any exit (Ctrl-C too), the report written last; `waitFor`, `COMMON_OPTIONS` |
+| `app.ts` | `deployChecker()` (project, Postgres on a chosen node, process or container workload, N copies placed on named nodes by drain/resume), `placeCopies`, `copies`, `scaling`, `unitInfo` (a copy's unit invocation, start time and env-file hash, never the values), `loadCheckerImage` (the checker app's image into every node's Podman as `localhost/…`), `appPort` (one port per project in 24000–24999) |
+| `ingress.ts` | `openTarget(edge\|direct)`, `share` (who answers), the direct `CopyBalancer` |
+| `faults.ts` | `Faults.apply(power-off\|stop\|partition\|freeze)` with revert, timeline entries and `fault` observations; everything reverted on exit unless `keep()` |
+| `checker.ts` | `startChecker()`: the checker CLI against a target, reading the scenario's observations |
+| `portscan.ts` | `scanFromBridge()`: a TCP connect scan from a throwaway container on the lab bridge (not the overlay) |
+| `report.ts` | verdicts, exit codes, `scenario.json` and `summary.md` |
+
+`fixtures/release-command.ts` is the release command the W5 scenario ships into each release (it
+records `release:<marker>` through the app's `/singleton`, and can fail or sleep on purpose).
+
+### What the scenarios found on `ha/integration` (2026-11-20)
+
+RESULTS_PLACEHOLDER
 
 ## The simulator
 

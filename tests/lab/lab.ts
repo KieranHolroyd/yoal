@@ -2,8 +2,10 @@
 /**
  * The HA lab, nested-container form (docs/HA-PLAN.md W1, docs/CLUSTERING.md §19.3). See README.md.
  *
- *   bun tests/lab/lab.ts up                 build the image, start s3lab and four nodes, install Yoal
- *                                           from this checkout, join one fleet over the overlay
+ *   bun tests/lab/lab.ts up [--only lab-a] [--upgrade]
+ *                                           build the image, start s3lab and four nodes (or the
+ *                                           --only subset), install Yoal from this checkout, join
+ *                                           one fleet over the overlay
  *   bun tests/lab/lab.ts down [--keep-image] remove every yoal-w0-* container, volume, network, image
  *   bun tests/lab/lab.ts status [--json]
  *   bun tests/lab/lab.ts fault <node|all> <verb|list|revert <id>|clear-all> [--flags]
@@ -242,9 +244,37 @@ async function waitForFleet(expected: string[], timeoutMs = 180_000): Promise<Fl
 	throw new Error(`fleet not ready: ${nodes.map((node) => `${node.name}=${node.status}`).join(', ')}`);
 }
 
-async function up(flags: Set<string>): Promise<void> {
+/**
+ * `--only lab-a[,lab-b]`: bring up that subset (it must include the control node). `--only lab-a` is
+ * a plain single-node install: no overlay adoption and no cluster settings, so the single-node gate
+ * runs on what a one-machine operator has. A later full `lab up` joins the rest and turns the
+ * cluster settings on, as an operator adding machines would.
+ */
+function selectedNodes(args: string[]): LabNode[] {
+	const only = flagArg(args, '--only');
+	if (!only) return [...LAB.nodes];
+	const names = only.split(',').map((name) => labNode(name.trim()).name);
+	if (!names.includes(CONTROL.name)) throw new Error(`--only must include the control node ${CONTROL.name}`);
+	return LAB.nodes.filter((node) => names.includes(node.name));
+}
+
+function flagArg(args: string[], flag: string): string | undefined {
+	const index = args.indexOf(flag);
+	return index >= 0 ? args[index + 1] : undefined;
+}
+
+async function up(flags: Set<string>, args: string[]): Promise<void> {
 	const started = Date.now();
+	const phases: Record<string, number> = {};
+	let phaseStart = Date.now();
+	const phase = (name: string) => {
+		phases[name] = Math.round((Date.now() - phaseStart) / 1000);
+		phaseStart = Date.now();
+	};
 	mkdirSync(OUT_DIR, { recursive: true });
+	const nodes = selectedNodes(args);
+	const single = nodes.length === 1;
+	const workers = WORKERS.filter((node) => nodes.includes(node));
 	const state: LabState = readState() ?? {
 		createdAt: new Date().toISOString(),
 		image: '',
@@ -253,27 +283,31 @@ async function up(flags: Set<string>): Promise<void> {
 	};
 	state.image = ensureImage();
 	writeState(state);
+	phase('image');
 	ensureNetwork();
 	await ensureS3lab(state.image, state);
 	writeState(state);
+	phase('s3lab');
 
-	say('nodes');
-	for (const node of LAB.nodes) ensureNodeContainer(node, state.image);
-	await Promise.all(LAB.nodes.map(waitForSystemd));
+	say(`nodes${single ? ` (single node: ${CONTROL.name} only)` : ''}`);
+	for (const node of nodes) ensureNodeContainer(node, state.image);
+	await Promise.all(nodes.map(waitForSystemd));
+	phase('containers');
 	const tar = checkoutTar(REPO);
-	note(`shipping the checkout (${(tar.length / 1e6).toFixed(1)} MB) to ${LAB.nodes.length} nodes`);
-	for (const node of LAB.nodes) shipCheckout(node, tar);
+	note(`shipping the checkout (${(tar.length / 1e6).toFixed(1)} MB) to ${nodes.length} node${nodes.length === 1 ? '' : 's'}`);
+	for (const node of nodes) shipCheckout(node, tar);
+	phase('ship');
 
 	const upgrade = flags.has('--upgrade');
 	if (!installed(CONTROL)) await installControl(CONTROL, false);
 	else if (upgrade) await installControl(CONTROL, true);
 	else note(`${CONTROL.name}: already installed (pass --upgrade to rebuild from the checkout)`);
+	phase('control');
 
-	const pending = WORKERS.filter((node) => !installed(node));
-	say(`${CONTROL.name}: bootstrap (owner, API key, failover ${LAB.cluster.failover ? 'on' : 'off'}${pending.length ? `, join tokens for ${pending.map((n) => n.name).join(', ')}` : ''})`);
+	const pending = workers.filter((node) => !installed(node));
+	say(`${CONTROL.name}: bootstrap (owner, API key${single ? ', no cluster settings: single node' : `, failover ${LAB.cluster.failover ? 'on' : 'off'}`}${pending.length ? `, join tokens for ${pending.map((n) => n.name).join(', ')}` : ''})`);
 	const boot = bootstrap([
-		'--failover', LAB.cluster.failover ? 'on' : 'off',
-		'--edge-endpoint', CONTROL.ip,
+		...(single ? [] : ['--failover', LAB.cluster.failover ? 'on' : 'off', '--edge-endpoint', CONTROL.ip]),
 		'--nodes', `${CONTROL.name}=${CONTROL.zone}`,
 		...(pending.length ? ['--join', pending.map((node) => node.name).join(','), '--remove', pending.map((node) => node.name).join(',')] : []),
 	]);
@@ -296,14 +330,19 @@ async function up(flags: Set<string>): Promise<void> {
 			exec(control, ['systemctl', 'stop', 'yoal-lab-tls-front.service'], { allowFailure: true });
 		}
 	}
+	phase('workers');
 
-	if (!flags.has('--no-faults')) installFaultHelper(LAB.nodes);
+	if (!flags.has('--no-faults')) installFaultHelper(nodes);
+	phase('faultHelper');
 
 	say('waiting for every node to heartbeat and every overlay tunnel to handshake');
-	await waitForFleet(LAB.nodes.map((node) => node.name));
-	bootstrap(['--nodes-only', '--nodes', LAB.nodes.map((node) => `${node.name}=${node.zone}`).join(','), '--slice-mb', String(LAB.cluster.sliceMb)]);
+	await waitForFleet(nodes.map((node) => node.name));
+	bootstrap(['--nodes-only', '--nodes', nodes.map((node) => `${node.name}=${node.zone}`).join(','), '--slice-mb', String(LAB.cluster.sliceMb)]);
+	phase('fleet');
 	await status(false);
-	say(`lab up in ${Math.round((Date.now() - started) / 1000)} s`);
+	const total = Math.round((Date.now() - started) / 1000);
+	writeFileSync(join(OUT_DIR, 'up-timings.json'), `${JSON.stringify({ at: new Date().toISOString(), nodes: nodes.map((node) => node.name), upgrade, totalS: total, phasesS: phases }, null, 2)}\n`);
+	say(`lab up in ${total} s (${Object.entries(phases).map(([name, secs]) => `${name} ${secs}`).join(', ')})`);
 }
 
 // --- down ------------------------------------------------------------------------------------
@@ -543,7 +582,7 @@ const flags = new Set(rest.filter((arg) => arg.startsWith('--')));
 try {
 	switch (command) {
 		case 'up':
-			await up(flags);
+			await up(flags, rest);
 			break;
 		case 'down':
 			down(flags);

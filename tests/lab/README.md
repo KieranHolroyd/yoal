@@ -5,11 +5,12 @@ The four-node lab and fault harness of [HA-PLAN](../../docs/HA-PLAN.md) W1 and
 live fleet.
 
 ```sh
-bun tests/lab/lab.ts up                     # ~10 min from clean, ~10 s when already up
+bun tests/lab/lab.ts up                     # four nodes + s3lab (timings: "Speed" below)
+bun tests/lab/lab.ts up --only lab-a        # one node, plain install: the single-node gate's lab
 bun tests/lab/verify-faults.ts              # every fault verb applied, checked and auto-reverted
-bun tests/ha/scenarios/kill-node-b.ts       # the W1 exit scenario with the checker (through the edge)
-bun tests/ha/scenarios/kill-node-b.ts --target direct   # the same, edge bypassed (see Scenarios)
+bun tests/ha/scenarios/kill-node.ts --node lab-b --target direct   # M1 node loss (see Scenarios)
 bun tests/lab/lab.ts down                   # clears faults, removes every yoal-w0-* object, checks loop devices
+bun tests/lab/vm/lab-vm.ts up --only lab-a,lab-b   # the real-VM form (Lima), see "The VM form"
 ```
 
 ## What it is
@@ -62,7 +63,7 @@ node's `:80` is published on `127.0.0.1:47080`–`47083`, and the lab's scripts 
 ## Commands
 
 ```sh
-bun tests/lab/lab.ts up [--upgrade] [--no-faults]
+bun tests/lab/lab.ts up [--only lab-a[,lab-b…]] [--upgrade] [--no-faults]
 bun tests/lab/lab.ts status [--json]
 bun tests/lab/lab.ts fault <node|all> <verb> [flags] [--observe obs.jsonl]
 bun tests/lab/lab.ts fault <node|all> list | revert <id> | clear-all
@@ -80,6 +81,12 @@ throwaway privileged container of the lab image and fails if any is still backed
 
 `--upgrade` re-runs the installer on lab-a from the current checkout. Workers keep the agent and
 helper they joined with; rebuild them with `down` and `up`.
+
+`--only lab-a` brings up the control node alone, as a plain single-node install: no overlay
+adoption, no cluster settings (failover stays off). A later `lab up` without `--only` joins the
+workers and turns the cluster settings on, as an operator adding machines would; that is the order
+`ha-integration` runs in (single-node gate first). Every `up` writes its phase timings to
+`.out/up-timings.json`.
 
 ## Fault verbs
 
@@ -146,35 +153,41 @@ A stale read serves the object's previous version with its old ETag. "Unreachabl
 
 ## Scenarios and the checker
 
-[`tests/ha/scenarios/kill-node-b.ts`](../ha/scenarios/kill-node-b.ts) deploys the checker app
-(`tests/ha/checker/app`, Lane B) as a process app with a Postgres database on lab-a, scales it to two
-copies on lab-a and lab-b (it drains the other nodes while placing, then resumes them), measures each
-copy's share of traffic, runs `tests/ha/checker/cli.ts`, powers lab-b off (or `--method partition`:
-everything on 172.30.147.0/24 and the overlay except lab-b's own addresses, s3lab and the host
-gateway included, checked from lab-b), and records when lab-b goes offline, when its copy is re-placed
-and running, when the new copy answers, and each copy's share again at the end. Output in
-`tests/lab/.out/kill-node-b-*`: `report.json` (the checker's), `observations.jsonl` (the lab's, which
-the checker reads), `timings.json` and `summary.md`, each with a verdict.
-
-- `--target edge` (default): through lab-a's public route. If lab-b's copy takes no traffic before
-  the fault, the run is **invalid** (exit 2) and stops there: losing lab-b would lose nothing the
-  checker can see. On the current tree this is the outcome: the edge's active health check reaches a
-  remote copy without the app's Host (`packages/site-config/src/compile.ts`), so remote copies are
-  marked unhealthy.
-- `--target direct`: **the edge is bypassed.** The scenario runs its own client-side balancer (round
-  robin, 5 s passive mark-down, half-open probes) and sends each request straight to a copy at the
-  address the edge would dial (lab-a's local copy port from its Caddy config; a worker's node Caddy on
-  `<overlay>:8080`), through a stdio relay on lab-a ([`node/relay.ts`](./node/relay.ts)), because the
-  host cannot route to the overlay. It measures copy failover and re-placement, not the edge.
+The scenarios live in [`tests/ha/scenarios/`](../ha/scenarios/) and are documented in
+[tests/ha/README.md](../ha/README.md#scenarios): `single-node-gate`, `kill-node` (and its
+`kill-node-b` alias), `freeze-agent`, `attachments-three-nodes` and `rolling-deploy-under-load`,
+on a shared library (`tests/ha/scenarios/lib/`). Each writes `scenario.json`, `summary.md` and the
+checker's `report.json` into `tests/lab/.out/<scenario>-<time>/` with a verdict: pass, fail,
+invalid, skip or error.
 
 ## The VM form
 
-[`vm/lab-node.lima.yaml`](./vm/lab-node.lima.yaml) is the same node as a Lima VM (Debian 13, VZ,
-the same packages, `user-v2` networking so the VMs reach each other). The nightly `ha-chaos` lane
-will create `yoal-w0-vm-lab-a` … `-lab-ctl` from it, install and join exactly as `lab up` does
-(over `limactl shell` instead of `docker exec`), and run node loss as a real VM stop
-(`limactl stop -f`). It is a definition only: nothing creates these VMs yet, and the weekly cloud
-lane on the reference shape (HA-PLAN §7.1) is not built.
+[`vm/lab-vm.ts`](./vm/lab-vm.ts) builds the same lab from [`vm/lab-node.lima.yaml`](./vm/lab-node.lima.yaml):
+one Lima VM per node (Debian 13, VZ), named `yoal-w1-lab-a` … `yoal-w1-lab-ctl`, with each node's
+CPUs and memory from `lab.config.ts`, the same installer flags, the same bootstrap, TLS-front join and
+fault-injection helper. Differences: addresses come from Lima's `user-v2` network (192.168.104.0/24)
+instead of 172.30.147.0/24; each node has its own kernel, clock, WireGuard and nftables; losing a
+node is a real VM stop (`limactl stop -f`); every guest port forward is disabled, so nothing binds on
+the host; there is no s3lab yet.
+
+```sh
+bun tests/lab/vm/lab-vm.ts up [--only lab-a,lab-b]          # default: all four
+bun tests/lab/vm/lab-vm.ts status
+bun tests/lab/vm/lab-vm.ts fault lab-b partition --peers lab-a --duration 60   # checks it from inside
+bun tests/lab/vm/lab-vm.ts fault lab-b freeze --unit yoal-agent.service --duration 60
+bun tests/lab/vm/lab-vm.ts fault lab-b clear-all
+bun tests/lab/vm/lab-vm.ts kill lab-b && bun tests/lab/vm/lab-vm.ts start lab-b
+bun tests/lab/vm/lab-vm.ts down                              # deletes every yoal-w1-lab-* VM
+```
+
+The scenarios run on the container form only (they drive nodes with `docker exec`); the VM form is
+for the node-loss and kernel-level faults the container form cannot fake. Timings: "Speed" below.
+
+VM_PLACEHOLDER
+
+## Speed
+
+SPEED_PLACEHOLDER
 
 ## Limits of the container form
 
