@@ -231,8 +231,14 @@ describe('migration aliases', () => {
 	});
 });
 
-describe('HA Wave 1 migrations 0118–0120 (docs/build-plan/HA-WAVE-1.md)', () => {
-	const wave1 = ['0118_node_ca.sql', '0119_release_phase.sql', '0120_object_store_kinds.sql'];
+describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () => {
+	const wave1 = [
+		'0118_node_ca.sql',
+		'0119_release_phase.sql',
+		'0120_object_store_kinds.sql',
+		// Lane B's reserved spare: endpoint roles (H24).
+		'0121_service_endpoint_roles.sql',
+	];
 	const tables = (sqlite: Database) =>
 		new Set(sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
 	const columns = (sqlite: Database, table: string) =>
@@ -241,7 +247,33 @@ describe('HA Wave 1 migrations 0118–0120 (docs/build-plan/HA-WAVE-1.md)', () =
 	test('are the reserved files, in order, right after 0117', () => {
 		const ids = migrations.map((migration) => migration.id);
 		const at = ids.indexOf('0117_kubernetes_k5_k6.sql');
-		expect(ids.slice(at + 1, at + 4)).toEqual(wave1);
+		expect(ids.slice(at + 1, at + 1 + wave1.length)).toEqual(wave1);
+	});
+
+	test('0121 backfills existing endpoints as primary and allows a pool row beside one', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		sqlite.run('CREATE TABLE yoal_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+		for (const migration of migrations) {
+			if (Number(migration.id.slice(0, 4)) > 120) continue;
+			sqlite.run(migration.sql);
+			sqlite.run('INSERT INTO yoal_migrations (id, applied_at) VALUES (?, ?)', [migration.id, 1]);
+		}
+		sqlite.run(
+			`INSERT INTO service_endpoints (id, consumer_node_id, service_kind, service_id, local_port, upstream_node_id, upstream_port, created_at, updated_at)
+			 VALUES ('sep_old', 'nod_a', 'database', 'db_1', 21000, 'nod_b', 15432, 1, 1)`,
+		);
+		const ran = migrate(sqlite);
+		expect(ran).toContain('0121_service_endpoint_roles.sql');
+		expect(sqlite.query('SELECT role, version FROM service_endpoints WHERE id = ?').get('sep_old')).toEqual({
+			role: 'primary',
+			version: 0,
+		});
+		sqlite.run(
+			`INSERT INTO service_endpoints (id, consumer_node_id, service_kind, service_id, role, local_port, upstream_node_id, upstream_port, version, created_at, updated_at)
+			 VALUES ('sep_pool', 'nod_a', 'database', 'db_1', 'pool', 21001, 'nod_b', 6432, 0, 1, 1)`,
+		);
+		expect(sqlite.query('SELECT COUNT(*) AS n FROM service_endpoints').get()).toEqual({ n: 2 });
+		sqlite.close();
 	});
 
 	test('apply on a fresh database', () => {

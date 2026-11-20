@@ -51,6 +51,7 @@ import type { TemplateService } from './templates.ts';
 import type { AlertService } from './alerts.ts';
 import type { TopologyService } from './topology.ts';
 import type { ServiceEndpointService } from './service-endpoints.ts';
+import type { NodeCaService } from './node-ca.ts';
 import type { ShareService } from './shares.ts';
 import type { RegistryCredentialService } from './registry-credentials.ts';
 import type { RegistryService } from './registry.ts';
@@ -164,6 +165,8 @@ export interface CoreContext {
 	topology: TopologyService;
 	/** Cross-node service endpoints (CLUSTERING §4.3, C2). */
 	endpoints: ServiceEndpointService;
+	/** The per-install CA for endpoint mTLS (HA-PLAN H24). */
+	nodeCa: NodeCaService;
 	/** Cluster shares (CLUSTERING §5.2, C3). */
 	shares: ShareService;
 	/** Credentials for external container registries (docs/REGISTRY.md R2). */

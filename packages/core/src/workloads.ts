@@ -3,6 +3,7 @@ import { deploymentCanaries, deployments, nodes, projects, releases, workloadRep
 import {
 	RUN_LEASES_CAPABILITY,
 	resolvedSpread,
+	ENDPOINTS_GATEWAY_CAPABILITY,
 	type CanarySample,
 	type ImagePrePull,
 	type UpstreamCounter,
@@ -221,13 +222,29 @@ export class WorkloadService {
 			);
 		// A project with attached databases or private storage normally runs next to them (D56, S5).
 		// With C2 endpoints enabled, a process app may run elsewhere: the consumer gets a loopback
-		// endpoint and the provider listens on the overlay. Private storage still pins for now.
-		const crossNode = featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS') && runtime === 'process';
-		// Brokers have no cross-node endpoint yet (D111), so an attached broker pins even then.
-		const pinned = crossNode ? this.ctx.brokers.requiredNode(project.id) : this.attachmentNode(project.id);
+		// endpoint and the provider listens on the overlay. H24 extends that to containers when
+		// ENDPOINTS_GATEWAY is on and the node's agent advertises the capability; private storage and
+		// brokers still pin, because they have no gateway endpoint yet.
+		const processCrossNode = featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS') && runtime === 'process';
+		let gatewayCrossNode = this.gatewayCrossNode(project, spec);
+		let crossNode = processCrossNode || gatewayCrossNode;
+		let pinned = crossNode
+			? gatewayCrossNode
+				? (this.ctx.storage.requiredNode(project.id) ?? this.ctx.brokers.requiredNode(project.id))
+				: this.ctx.brokers.requiredNode(project.id)
+			: this.attachmentNode(project.id);
+		// A node without the capability cannot run a container off its provider's node. Fall back to
+		// today's same-node placement for that node instead of handing it fields it would ignore.
+		if (gatewayCrossNode && pinned && !this.nodeHasCapability(pinned, ENDPOINTS_GATEWAY_CAPABILITY)) {
+			gatewayCrossNode = false;
+			crossNode = processCrossNode;
+			pinned = this.attachmentNode(project.id);
+		}
 		if (pinned) {
 			const conflict = crossNode
-				? this.ctx.brokers.placementConflict(project, pinned)
+				? gatewayCrossNode
+					? (this.ctx.storage.placementConflict(project, pinned) ?? this.ctx.brokers.placementConflict(project, pinned))
+					: this.ctx.brokers.placementConflict(project, pinned)
 				: (this.ctx.databases.placementConflict(project, pinned) ??
 					this.ctx.storage.placementConflict(project, pinned) ??
 					this.ctx.brokers.placementConflict(project, pinned));
@@ -263,12 +280,24 @@ export class WorkloadService {
 			replicas = planned.plan.assignments;
 			decision = { ok: true, nodeId: replicas[0]!.nodeId, mode: 'worker', reason: 'Spread replica placement.' };
 		} else {
+			const baseCandidates = this.withPortConflicts(this.candidates({ excludeWorkloadId: existing?.id }), project.id, spec);
+			let candidates = gatewayCrossNode && !pinned
+				? baseCandidates.filter((candidate) => this.nodeHasCapability(candidate.id, ENDPOINTS_GATEWAY_CAPABILITY))
+				: baseCandidates;
+			// No node can take the container off its database's node: place it next to the database,
+			// which is exactly today's behaviour and needs no gateway.
+			if (gatewayCrossNode && !pinned && candidates.length === 0) {
+				gatewayCrossNode = false;
+				crossNode = processCrossNode;
+				pinned = this.attachmentNode(project.id);
+				candidates = baseCandidates;
+			}
 			const request = {
 				runtime,
 				memoryMb: reservedMemoryMb(spec),
 				cpuMillis: (spec.cpus ?? 1) * 1000 * (spec.replicas ?? 1),
 				edgeNodeId: this.edgeNodeId(),
-				candidates: this.withPortConflicts(this.candidates({ excludeWorkloadId: existing?.id }), project.id, spec),
+				candidates,
 				spec: placementSpec,
 				nearNodeIds: placementSpec?.near ? this.nearNodeIds(placementSpec.near) : undefined,
 				strategy: scheduling.strategy,
@@ -290,9 +319,10 @@ export class WorkloadService {
 			const conflict = nodePortConflict(this.ctx, project.id, spec, nodeId, this.nodeName(nodeId));
 			if (conflict) throw new ConflictError(conflict);
 		}
-		if (crossNode) this.ctx.endpoints.reconcile(project.id, decision.nodeId);
+		if (featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS')) this.ctx.endpoints.reconcile(project.id, decision.nodeId);
 		if (runtime === 'function') this.assertFunctionTarget(decision.nodeId, Boolean(spec.function && functionIsPython(spec.function)));
-		if (crossNode) for (const replica of replicas ?? []) this.ctx.endpoints.reconcile(project.id, replica.nodeId);
+		if (featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS'))
+			for (const replica of replicas ?? []) this.ctx.endpoints.reconcile(project.id, replica.nodeId);
 		if (spec.runtime === 'process' && spec.engine === 'node')
 			for (const nodeId of new Set([decision.nodeId, ...(replicas ?? []).map((replica) => replica.nodeId)]))
 				this.assertNodeEngineTarget(nodeId);
@@ -820,7 +850,14 @@ export class WorkloadService {
 		const all = this.candidates({ excludeWorkloadId });
 		const placementSpec = placementSpecFor(project);
 		const matching = placementSpec ? matchingPlacementSpec(all, placementSpec) : all;
-		return this.replicaCandidates(matching.filter((candidate) => this.canHost(candidate.id, spec, project.id)));
+		const gateway = this.gatewayCrossNode(project, spec);
+		return this.replicaCandidates(
+			matching.filter(
+				(candidate) =>
+					this.canHost(candidate.id, spec, project.id) &&
+					(!gateway || this.nodeHasCapability(candidate.id, ENDPOINTS_GATEWAY_CAPABILITY)),
+			),
+		);
 	}
 
 	/** A deployment a copy can still run: active, with its release and the spec it was made with. */
@@ -863,6 +900,18 @@ export class WorkloadService {
 		return { mode: 'spread', blocker: null };
 	}
 
+	/** Whether a container app may leave its database's node through endpoint gateways (H24). */
+	private gatewayCrossNode(project: ProjectRow, spec: WorkloadSpec): boolean {
+		if (!featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY') || !featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS'))
+			return false;
+		if (spec.runtime !== 'container') return false;
+		try {
+			return this.ctx.databases.requiredNode(project.id) !== null;
+		} catch {
+			return false;
+		}
+	}
+
 	/** Why every copy of this app must share one node; null when copies may run on several. */
 	private nodePin(project: ProjectRow, spec: WorkloadSpec, workload: WorkloadRow | null): string | null {
 		if (project.placement !== 'auto')
@@ -872,6 +921,13 @@ export class WorkloadService {
 		if (workload && this.ctx.appVolumes.mountsForWorkload(workload.id).length > 0) return 'its app volumes live on that node';
 		if (featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS') && spec.runtime === 'process')
 			return this.ctx.brokers.requiredNode(project.id) ? 'its message broker is only reachable on that node (D111)' : null;
+		if (this.gatewayCrossNode(project, spec))
+			// A private share and a broker still have no endpoint; a database does.
+			return this.ctx.storage.requiredNode(project.id)
+				? 'its private storage lives on that node'
+				: this.ctx.brokers.requiredNode(project.id)
+					? 'its message broker is only reachable on that node (D111)'
+					: null;
 		try {
 			return this.attachmentNode(project.id) ? 'it runs next to its attached database, storage or broker (D56)' : null;
 		} catch {
@@ -1000,6 +1056,7 @@ export class WorkloadService {
 					.where(eq(releases.id, deployment.releaseId))
 					.get();
 				const worker = spec.ingress === 'none';
+				const addHosts = spec.runtime === 'container' ? this.ctx.databases.containerAddHosts(project.id, nodeId) : [];
 				return {
 					id: workload.id,
 					projectId: project.id,
@@ -1043,6 +1100,7 @@ export class WorkloadService {
 					secrets: spec.secrets,
 					dataSizeMb: spec.data?.sizeMb ?? null,
 					...(volumes.length > 0 ? { volumes } : {}),
+					...(addHosts.length > 0 ? { addHosts } : {}),
 					...(worker ? { ingress: 'none' as const } : {}),
 					...(spec.runner ? { runner: { provider: 'github' as const } } : {}),
 					...(spec.function ? { function: spec.function } : {}),
@@ -1232,8 +1290,14 @@ export class WorkloadService {
 		if (!options.ignoreVolumes && this.ctx.appVolumes.mountsForWorkload(workload.id).length > 0)
 			return 'its app volumes live on this node';
 		if (spec.runtime === 'compose') return 'a compose stack keeps its volumes and ports on this node';
-		const crossNode = featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS') && spec.runtime === 'process';
+		const crossNode =
+			featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS') && (spec.runtime === 'process' || this.gatewayCrossNode(project, spec));
 		if (crossNode) {
+			if (this.gatewayCrossNode(project, spec) && spec.runtime === 'container') {
+				if (this.ctx.storage.requiredNode(project.id)) return 'its private storage lives on that node';
+				if (this.ctx.brokers.requiredNode(project.id)) return 'its message broker is only reachable on this node (D111)';
+				return null;
+			}
 			if (this.ctx.brokers.requiredNode(project.id)) return 'its message broker is only reachable on this node (D111)';
 			return null;
 		}

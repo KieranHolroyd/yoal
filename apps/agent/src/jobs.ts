@@ -121,6 +121,8 @@ export class JobRunner {
 	private readonly pollMs: number;
 	private readonly held = new Map<string, HeldRun>();
 	private loaded = false;
+	/** The state file exists but cannot be read: refuse to start anything (I16). */
+	private corrupt = false;
 	private lastHeartbeat = Number.NEGATIVE_INFINITY;
 	private controlPlaneHasJobs = true;
 
@@ -484,6 +486,8 @@ export class ReleaseCommandRunner {
 	private readonly seen = new Set<string>();
 	private readonly runs = new Map<string, HeldReleaseCommand>();
 	private loaded = false;
+	/** The state file exists but cannot be read: refuse to start anything (I16). */
+	private corrupt = false;
 	private dirty = false;
 
 	constructor(private readonly options: ReleaseCommandRunnerOptions) {
@@ -521,11 +525,41 @@ export class ReleaseCommandRunner {
 	/** One round: prune acknowledged results, start new tasks, watch held ones. */
 	async tick(state: DesiredState | null, signal: AbortSignal): Promise<void> {
 		await this.load();
+		const known = state !== null;
 		const tasks = state?.releaseCommands ?? [];
 		const live = new Set(tasks.map((task) => task.runId));
+		// A state file we cannot read may already have run this id. Refuse to start, and report each
+		// task failed, rather than recomputing "never seen" and running a migration twice.
+		if (this.corrupt) {
+			for (const task of tasks) {
+				if (this.seen.has(task.runId)) continue;
+				this.seen.add(task.runId);
+				this.runs.set(task.runId, {
+					runId: task.runId,
+					releaseId: task.releaseId,
+					workloadId: task.workloadId,
+					helperRunId: releaseHelperRunId(task.runId),
+					timeoutSeconds: task.timeoutSeconds,
+					startedAt: null,
+					stop: null,
+					result: {
+						runId: task.runId,
+						releaseId: task.releaseId,
+						status: 'failed',
+						exitCode: null,
+						startedAt: null,
+						finishedAt: this.now(),
+						error: 'This node’s release-command state is unreadable, so it will not risk running a command twice. Remove the state file to allow new runs.',
+					},
+				});
+				this.dirty = true;
+			}
+			if (this.dirty) await this.persist();
+			return;
+		}
 
 		// A finished result is kept until the control plane removes its task (proof it was applied).
-		for (const run of [...this.runs.values()]) {
+		if (known) for (const run of [...this.runs.values()]) {
 			if (run.result && run.result.status !== 'running' && !live.has(run.runId)) {
 				this.runs.delete(run.runId);
 				this.dirty = true;
@@ -533,11 +567,12 @@ export class ReleaseCommandRunner {
 		}
 		// A task that left desired state while running lost its lease here: stop it, never let a
 		// second node's copy race this one.
-		for (const run of this.runs.values()) {
-			if ((!run.result || run.result.status === 'running') && !live.has(run.runId) && !run.stop) {
-				await this.requestStop(run, 'lease-lost');
+		if (known)
+			for (const run of this.runs.values()) {
+				if ((!run.result || run.result.status === 'running') && !live.has(run.runId) && !run.stop) {
+					await this.requestStop(run, 'lease-lost');
+				}
 			}
-		}
 
 		for (const task of tasks) {
 			if (signal.aborted) break;
@@ -641,6 +676,9 @@ export class ReleaseCommandRunner {
 			result: null,
 		};
 		this.runs.set(task.runId, held);
+		// Persist the pending record before the helper can start anything: a crash from here on
+		// resumes this id and reconciles it with jobStatus, never starts it again (I16).
+		await this.persist();
 		try {
 			const activation = await this.options.fetchActivation(workload.id, signal);
 			// The deadline still applies after the activation fetch and release check: a slow
@@ -790,7 +828,10 @@ export class ReleaseCommandRunner {
 		try {
 			text = await fs.readFile(this.options.statePath, 'utf8');
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') this.log('warn', `Release-command state is unreadable (${errorText(error)}); starting fresh`);
+			if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
+				this.corrupt = true;
+				this.log('error', `Release-command state is unreadable (${errorText(error)}); refusing to run any release command until it is removed`);
+			}
 			return;
 		}
 		try {
@@ -811,7 +852,8 @@ export class ReleaseCommandRunner {
 			}
 			if (this.runs.size > 0) this.log('info', `Resuming ${this.runs.size} release-command run(s) from ${this.options.statePath}`);
 		} catch (error) {
-			this.log('warn', `Release-command state is invalid (${errorText(error)}); starting fresh`);
+			this.corrupt = true;
+			this.log('error', `Release-command state is invalid (${errorText(error)}); refusing to run any release command until it is removed`);
 		}
 	}
 

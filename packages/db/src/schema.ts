@@ -325,15 +325,19 @@ export const serviceEndpoints = sqliteTable(
 		consumerNodeId: text('consumer_node_id').notNull(),
 		serviceKind: text('service_kind', { enum: ['database', 'storage'] }).notNull(),
 		serviceId: text('service_id').notNull(),
+		/** `primary` (the attachment), `pool` (its PgBouncer) or `read` (a stable read port). */
+		role: text('role', { enum: ['primary', 'pool', 'read'] }).notNull().default('primary'),
 		localPort: integer('local_port').notNull(),
 		upstreamNodeId: text('upstream_node_id').notNull(),
 		upstreamPort: integer('upstream_port').notNull(),
+		/** Bumps on every re-point of the upstream; the local port never changes with it. */
+		version: integer('version').notNull().default(0),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
 		updatedAt: integer('updated_at').notNull().$defaultFn(now),
 	},
 	(t) => [
 		uniqueIndex('service_endpoints_consumer_port_idx').on(t.consumerNodeId, t.localPort),
-		uniqueIndex('service_endpoints_pair_idx').on(t.consumerNodeId, t.serviceKind, t.serviceId),
+		uniqueIndex('service_endpoints_pair_idx').on(t.consumerNodeId, t.serviceKind, t.serviceId, t.role),
 		index('service_endpoints_upstream_idx').on(t.upstreamNodeId),
 	],
 );

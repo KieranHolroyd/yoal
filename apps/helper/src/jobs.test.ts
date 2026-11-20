@@ -256,6 +256,7 @@ describe('rendering', () => {
 			podmanPath: '/usr/bin/podman',
 			dataDir: '/var/lib/yoal-workloads/wld_abc123',
 			apparmorProfile: null,
+			appContainer: true,
 		};
 		expect(renderContainerJobArgs(options)).toContain('--add-host=db-db_1:10.89.0.1');
 		// Absent entries (the flag off) leave the argv exactly as before.

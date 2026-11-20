@@ -900,7 +900,9 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	/** Retry once the drain deadline passes, without tightening a failure backoff already sooner. */
 	private scheduleRetryAt(at: number): void {
 		this.pendingFailure = true;
-		this.retryAt = this.retryAt === 0 ? at : Math.min(this.retryAt, at);
+		// Only tighten a live backoff; a stale deadline from before the last success must not
+		// make the next converge spin (a drain then retried every loop instead of at its deadline).
+		this.retryAt = this.retryAt > Date.now() ? Math.min(this.retryAt, at) : at;
 	}
 
 	/**
