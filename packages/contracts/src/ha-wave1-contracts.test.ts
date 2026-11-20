@@ -147,7 +147,8 @@ describe('workload spec (H25)', () => {
 			placement: { spread: 'zone' },
 		});
 		expect(parsed.release).toEqual({ command: ['bun', 'run', 'migrate'], timeoutSeconds: 600 });
-		expect(parsed.rollout).toEqual({ canary: 1, soakSeconds: 120, maxUnavailable: 0 });
+		// No maxUnavailable given: none is invented (reviewer item 5); absent means today's path.
+		expect(parsed.rollout).toEqual({ canary: 1, soakSeconds: 120 });
 		expect(parsed.placement).toEqual({ spread: 'zone' });
 	});
 
@@ -418,5 +419,19 @@ describe('object-store targets (W3, G17)', () => {
 		expect(parsePlatformObjectStoreKind('r2')).toBe('r2');
 		expect(parsePlatformObjectStoreKind('azure')).toBe('azure');
 		expect(parsePlatformObjectStoreKind('ftp')).toBeNull();
+	});
+});
+
+describe('rollout defaults are today\'s behaviour (reviewer item 5)', () => {
+	test('an empty rollout invents no maxUnavailable, and there is no DEFAULT_ROLLOUT', async () => {
+		const contracts = (await import('./index.ts')) as Record<string, unknown>;
+		expect('DEFAULT_ROLLOUT' in contracts).toBe(false);
+		const parsed = workloadSpecSchema.parse({ ...oldProcessSpec, rollout: {} });
+		expect(parsed.rollout).toEqual({ canary: 0, soakSeconds: 0 });
+		expect('maxUnavailable' in parsed.rollout!).toBe(false);
+	});
+
+	test('a canary needs a soak', () => {
+		expect(workloadSpecSchema.safeParse({ ...oldProcessSpec, rollout: { canary: 1 } }).success).toBe(false);
 	});
 });

@@ -45,18 +45,28 @@ export const readinessPathSchema = z.string().startsWith('/').max(512);
 export const drainSecondsSchema = z.number().int().min(0).max(MAX_DRAIN_SECONDS);
 export const stopTimeoutSecondsSchema = z.number().int().min(1).max(MAX_STOP_TIMEOUT_SECONDS);
 
-export const DEFAULT_ROLLOUT = { canary: 0, soakSeconds: 0, maxUnavailable: 0 } as const;
-
 /**
- * How a deploy rolls. Absent is today's rolling deploy: one copy at a time, surge for one copy, no
- * canary. `canary: 1` rolls one copy first and soaks it. `maxUnavailable` is how many old copies
- * may be stopped before their replacements are ready (0 = surge).
+ * How a deploy rolls. **Absent means exactly today's path** (`WorkloadService.record`,
+ * docs/SCALING.md §4), and lane C must keep it so: an app with two or more copies rolls in place,
+ * one copy at a time, each old copy stopped before its replacement starts on that node; a
+ * single-copy HTTP app surges (a temporary second copy on another node takes the traffic first),
+ * when `scheduling.surgeDeploys` allows it. No field below has a default that differs from that:
+ * - `canary` (default 0, no canary): this many copies roll first and soak before the rest; needs
+ *   `soakSeconds` of at least 1.
+ * - `soakSeconds` (default 0): how long the canary copies are judged (`judgeCanary`).
+ * - `maxUnavailable` (no default): absent keeps today's choice above; 0 means surge every copy
+ *   (start the new one before stopping the old); n means up to n copies may be down at once.
  */
-export const rolloutSpecSchema = z.strictObject({
-	canary: z.number().int().min(0).max(5).default(DEFAULT_ROLLOUT.canary),
-	soakSeconds: z.number().int().min(0).max(3_600).default(DEFAULT_ROLLOUT.soakSeconds),
-	maxUnavailable: z.number().int().min(0).max(10).default(DEFAULT_ROLLOUT.maxUnavailable),
-});
+export const rolloutSpecSchema = z
+	.strictObject({
+		canary: z.number().int().min(0).max(5).default(0),
+		soakSeconds: z.number().int().min(0).max(3_600).default(0),
+		maxUnavailable: z.number().int().min(0).max(10).optional(),
+	})
+	.refine((rollout) => rollout.canary === 0 || rollout.soakSeconds > 0, {
+		message: 'A canary needs soakSeconds of at least 1.',
+		path: ['soakSeconds'],
+	});
 export type RolloutSpec = z.infer<typeof rolloutSpecSchema>;
 
 /** Per-app placement; `spread` absent means the cluster's `replicas.spread`. */

@@ -218,7 +218,7 @@ export const workloadSpecSchema = z
 		/*
 		 * Release phase (HA-PLAN H25, `RELEASE_PHASE`). All optional with no zod default, so a spec
 		 * saved before them parses, hashes and renders exactly as it did; `resolvedStopSettings`
-		 * and `DEFAULT_ROLLOUT` give the values a missing field means. Refused while the flag is off
+		 * give the values a missing field means; an absent `rollout` is today's rollout path. Refused while the flag is off
 		 * (`releasePhaseSpecIssues`).
 		 */
 		/** Run once per release, before the first copy rolls; failure fails the deployment (I16). */
@@ -229,7 +229,7 @@ export const workloadSpecSchema = z
 		drainSeconds: drainSecondsSchema.optional(),
 		/** `TimeoutStopSec` for each copy. Absent = 30, today's fixed value. */
 		stopTimeoutSeconds: stopTimeoutSecondsSchema.optional(),
-		/** Canary and surge for deploys. Absent = today's rolling deploy. */
+		/** Canary and surge for deploys. Absent = exactly today's path (see `rolloutSpecSchema`). */
 		rollout: rolloutSpecSchema.optional(),
 		/** Per-app placement; `spread` overrides the cluster's `replicas.spread`. */
 		placement: workloadPlacementSpecSchema.optional(),
