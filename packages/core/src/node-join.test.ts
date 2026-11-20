@@ -55,7 +55,7 @@ const thrown = (fn: () => unknown): unknown => {
 describe('retrying a node join (F11)', () => {
 	test('the same token and key return the same node with a fresh node token', () => {
 		const token = core.nodes.createJoinToken(admin, 'retry-1').token;
-		const input = { token, name: 'retry-1', networkMode: 'yoal' as const, wireguardPublicKey: key('C') };
+		const input = { token, name: 'retry-1', networkMode: 'yoal' as const, wireguardPublicKey: key('C'), publicAddress: '198.51.100.1' };
 		const first = core.nodes.join(input);
 		// The response was lost; the installer runs the join again.
 		const second = core.nodes.join(input);
@@ -115,9 +115,60 @@ describe('retrying a node join (F11)', () => {
 
 	test('an external (bring-your-own network) join retries the same way', () => {
 		const token = core.nodes.createJoinToken(admin, 'retry-6').token;
-		const first = core.nodes.join({ token, name: 'retry-6', publicAddress: '10.9.0.6:8080' });
-		const second = core.nodes.join({ token, name: 'retry-6', publicAddress: '10.9.0.6:8080' });
+		const first = core.nodes.join({ token, name: 'retry-6', publicAddress: '10.9.0.6:8080', version: '0.15.3' });
+		const second = core.nodes.join({ token, name: 'retry-6', publicAddress: '10.9.0.6:8080', version: '0.15.3' });
 		expect(second.nodeId).toBe(first.nodeId);
 		expect(second.wireguard).toBeUndefined();
+	});
+
+	describe('a replayed join token is not a credential for its node (F11 review)', () => {
+		const managed = (name: string, letter: string, publicAddress = '198.51.100.7') => ({
+			token: core.nodes.createJoinToken(admin, name).token,
+			name,
+			networkMode: 'yoal' as const,
+			wireguardPublicKey: key(letter),
+			publicAddress,
+		});
+
+		test('a replay after the 10-minute retry window is refused, inside the token\'s hour', () => {
+			const input = managed('replay-1', 'K');
+			const first = core.nodes.join(input);
+			clock.now += 10 * 60_000 + 1;
+			expect(() => core.nodes.join(input)).toThrow(UnauthorizedError);
+			// The real node keeps its token and nothing new was issued.
+			expect(core.nodes.authenticate(first.token).id).toBe(first.nodeId);
+		});
+
+		test('a retry from another address is refused, even with the same token, name and key', () => {
+			const input = managed('replay-2', 'L');
+			const first = core.nodes.join(input);
+			expect(() => core.nodes.join({ ...input, publicAddress: '203.0.113.66' })).toThrow(UnauthorizedError);
+			expect(() => core.nodes.join({ ...input, publicAddress: undefined })).toThrow(UnauthorizedError);
+			expect(core.nodes.authenticate(first.token).id).toBe(first.nodeId);
+		});
+
+		test('inside the window with every field the same it is still a retry', () => {
+			const input = managed('replay-3', 'M');
+			const first = core.nodes.join(input);
+			clock.now += 10 * 60_000;
+			expect(core.nodes.join(input).nodeId).toBe(first.nodeId);
+		});
+
+		test('an external join with no address to bind it is never retried', () => {
+			const token = core.nodes.createJoinToken(admin, 'replay-4').token;
+			const first = core.nodes.join({ token, name: 'replay-4' });
+			expect(() => core.nodes.join({ token, name: 'replay-4' })).toThrow(UnauthorizedError);
+			expect(core.nodes.authenticate(first.token).id).toBe(first.nodeId);
+		});
+
+		test('an external retry needs every identifying field to match', () => {
+			const token = core.nodes.createJoinToken(admin, 'replay-5').token;
+			const input = { token, name: 'replay-5', publicAddress: '10.9.0.9:8080', version: '0.15.3' };
+			const first = core.nodes.join(input);
+			expect(() => core.nodes.join({ ...input, version: '0.15.4' })).toThrow(UnauthorizedError);
+			expect(() => core.nodes.join({ ...input, publicAddress: '10.9.0.10:8080' })).toThrow(UnauthorizedError);
+			expect(() => core.nodes.join({ ...input, networkMode: 'yoal', wireguardPublicKey: key('N') })).toThrow(UnauthorizedError);
+			expect(core.nodes.authenticate(first.token).id).toBe(first.nodeId);
+		});
 	});
 });

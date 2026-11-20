@@ -390,8 +390,11 @@ stays `online` for heartbeat, reporting and everything else, and only stops rece
 **Join.** A single-use token (1 h) and one-line command (§4.1, plan 23) carry the node's WireGuard
 public key; the control plane allocates the id, overlay `/32` and token in one transaction, and the
 node stays `pending` until its first heartbeat. A re-run repairs a half-installed node. Until that
-heartbeat, the same join again (same token, name and key) returns the same node with a new node token;
-a key another node holds is a 409 naming that node, and the refused token is not consumed.
+heartbeat, and for 10 minutes after the token's use, the same join again returns the same node with a
+new node token: same token and name, and on the overlay the same key and endpoint (a bring-your-own
+network join: the same public address and version, never without an address). Anything else is the
+used-token 401, so a replayed token is not a credential. A key another node holds is a 409 naming
+that node, and the refused token is not consumed.
 
 **Verify.** First heartbeat within 60 s; overlay handshake within 20 s; Caddy answers on its overlay
 health host; helper reports its version; clock skew under 120 s; the volume inventory parses; the
