@@ -506,7 +506,7 @@ async function fixture(respond?: Responder) {
 describe('helper PITR verbs', () => {
 	test('configure writes 0400 files owned by uid 70 into the mounted directory and restarts nothing', async () => {
 		const { runtimeDir, driver, runner, chowns } = await fixture();
-		const configured = await driver.pitrConfigure(SOURCE, repo);
+		const configured = await driver.pitrConfigure(SOURCE, repo, SOURCE);
 		const paths = pitrPaths(runtimeDir, SOURCE);
 		expect(configured).toEqual({ stanza: SOURCE, configPath: paths.config });
 		expect((await fs.stat(paths.dir)).mode & 0o777).toBe(0o700);
@@ -517,7 +517,7 @@ describe('helper PITR verbs', () => {
 		for (const path of [paths.dir, paths.config, paths.pgpass]) expect(chowns).toContainEqual([path, 70, 70]);
 		expect(runner.calls).toHaveLength(0);
 		// Idempotent: the agent calls it before every task.
-		await driver.pitrConfigure(SOURCE, repo);
+		await driver.pitrConfigure(SOURCE, repo, SOURCE);
 		expect(runner.calls).toHaveLength(0);
 	});
 
@@ -528,12 +528,12 @@ describe('helper PITR verbs', () => {
 			store: { kind: 'gcs' as const, bucket: 'yoal-pitr', endpoint: 'http://127.0.0.1:4443', pathPrefix: 'yoal/pitr' },
 			storeCredentials: { kind: 'gcs' as const, serviceAccountJson: key },
 		};
-		await driver.pitrConfigure(SOURCE, gcsRepo);
+		await driver.pitrConfigure(SOURCE, gcsRepo, SOURCE);
 		const paths = pitrPaths(runtimeDir, SOURCE);
 		expect((await fs.stat(paths.gcsKey)).mode & 0o777).toBe(0o400);
 		expect(await fs.readFile(paths.gcsKey, 'utf8')).toBe(key);
 		expect(await fs.readFile(paths.config, 'utf8')).toContain('repo1-gcs-key=/etc/pgbackrest/gcs-key.json');
-		await driver.pitrConfigure(SOURCE, repo);
+		await driver.pitrConfigure(SOURCE, repo, SOURCE);
 		await expect(fs.stat(paths.gcsKey)).rejects.toThrow();
 	});
 
@@ -554,9 +554,9 @@ describe('helper PITR verbs', () => {
 
 	test('a base backup is stanza-create then backup, via podman exec', async () => {
 		const { driver, runner } = await fixture();
-		await expect(driver.pitrBaseBackup(SOURCE, 'full')).rejects.toThrow(/configure PITR first/);
-		await driver.pitrConfigure(SOURCE, repo);
-		expect(await driver.pitrBaseBackup(SOURCE, 'diff')).toEqual({ stanza: SOURCE, type: 'diff' });
+		await expect(driver.pitrBaseBackup(SOURCE, 'full', SOURCE)).rejects.toThrow(/configure PITR first/);
+		await driver.pitrConfigure(SOURCE, repo, SOURCE);
+		expect(await driver.pitrBaseBackup(SOURCE, 'diff', SOURCE)).toEqual({ stanza: SOURCE, type: 'diff' });
 		const exec = runner.podman();
 		expect(exec).toHaveLength(2);
 		expect(exec[0]!.slice(0, 2)).toEqual(['/usr/bin/podman', 'exec']);
@@ -564,12 +564,43 @@ describe('helper PITR verbs', () => {
 		expect(exec[1]!.slice(-2)).toEqual(['--type=diff', 'backup']);
 	});
 
+	test('a backup inside a replica uses the database stanza carried on the verb, not the replica id', async () => {
+		const { runtimeDir, driver, runner } = await fixture();
+		const replica = 'db_dbr_abc123';
+		await fs.mkdir(join(runtimeDir, replica), { recursive: true });
+		await fs.writeFile(
+			join(runtimeDir, replica, 'env'),
+			'POSTGRES_USER=main_db\nPOSTGRES_PASSWORD=replica-password-0123456789\nPOSTGRES_DB=main_db\nPGDATA=/data/pgdata\n',
+			{ mode: 0o400 },
+		);
+		await driver.pitrConfigure(replica, repo, SOURCE);
+		const config = await fs.readFile(pitrPaths(runtimeDir, replica).config, 'utf8');
+		// The exact stanza in the rendered config, and never one derived from the replica workload id.
+		expect(config).toContain(`\n[${SOURCE}]\n`);
+		expect(config).not.toContain(`[${replica}]`);
+
+		expect(await driver.pitrBaseBackup(replica, 'full', SOURCE)).toEqual({ stanza: SOURCE, type: 'full' });
+		const argv = runner.podman();
+		expect(argv).toHaveLength(2);
+		for (const call of argv) expect(call).toContain(`--stanza=${SOURCE}`);
+		expect(argv.join(' ')).not.toContain(`--stanza=${replica}`);
+		// A status read uses the config's stanza too, so it reports the database's stanza.
+		expect((await driver.pitrStatus(replica)).stanza).toBe(SOURCE);
+	});
+
+	test('a backup refuses a stanza the node config was not written for', async () => {
+		const { driver, runner } = await fixture();
+		await driver.pitrConfigure(SOURCE, repo, SOURCE);
+		await expect(driver.pitrBaseBackup(SOURCE, 'full', 'db_other')).rejects.toThrow(/configured for stanza/);
+		expect(runner.podman()).toHaveLength(0);
+	});
+
 	test('a failed backup reports pgBackRest stderr', async () => {
 		const { driver } = await fixture((argv) =>
 			argv.at(-1) === 'backup' ? { code: 82, stdout: '', stderr: 'ERROR: [082]: WAL segment was not archived' } : undefined,
 		);
-		await driver.pitrConfigure(SOURCE, repo);
-		await expect(driver.pitrBaseBackup(SOURCE, 'full')).rejects.toThrow(/backup failed \(82\).*not archived/);
+		await driver.pitrConfigure(SOURCE, repo, SOURCE);
+		await expect(driver.pitrBaseBackup(SOURCE, 'full', SOURCE)).rejects.toThrow(/backup failed \(82\).*not archived/);
 	});
 
 	test('status reports the recoverable window without credentials', async () => {
@@ -586,7 +617,7 @@ describe('helper PITR verbs', () => {
 			return undefined;
 		});
 		expect((await driver.pitrStatus(SOURCE)).configured).toBe(false);
-		await driver.pitrConfigure(SOURCE, repo);
+		await driver.pitrConfigure(SOURCE, repo, SOURCE);
 		const status = await driver.pitrStatus(SOURCE);
 		expect(status).toEqual({
 			configured: true,
@@ -610,7 +641,7 @@ describe('helper PITR verbs', () => {
 
 	test('rejects an in-place or future restore target before touching the data dir', async () => {
 		const { driver, runner, stateDir } = await fixture();
-		await driver.pitrConfigure(SOURCE, repo);
+		await driver.pitrConfigure(SOURCE, repo, SOURCE);
 		await expect(
 			driver.pitrRestore(SOURCE, { targetDatabaseId: SOURCE, targetTime: Date.now() - 60_000 }),
 		).rejects.toThrow(/different database/);
@@ -640,7 +671,7 @@ describe('helper PITR verbs', () => {
 			return undefined;
 		});
 		driverRef = driver;
-		await driver.pitrConfigure(SOURCE, repo);
+		await driver.pitrConfigure(SOURCE, repo, SOURCE);
 		const targetTime = Date.now() - 60_000;
 		expect(await driver.pitrRestore(SOURCE, { targetDatabaseId: TARGET, targetTime })).toEqual({
 			targetDatabaseId: TARGET,
@@ -695,7 +726,7 @@ describe('helper PITR verbs', () => {
 				return { code: 0, stdout: '', stderr: 'FATAL:  recovery ended before configured recovery target was reached' };
 			return undefined;
 		});
-		await driver.pitrConfigure(SOURCE, repo);
+		await driver.pitrConfigure(SOURCE, repo, SOURCE);
 		await expect(
 			driver.pitrRestore(SOURCE, { targetDatabaseId: TARGET, targetTime: Date.now() - 60_000 }),
 		).rejects.toThrow(/Recovery stopped before reaching the target time: FATAL:  recovery ended/);
@@ -710,7 +741,7 @@ describe('helper PITR verbs', () => {
 	test('a source without a readable PG_VERSION is refused before anything is stopped', async () => {
 		const { driver, runner, stateDir } = await fixture();
 		await fs.rm(join(stateDir, SOURCE, 'pgdata', 'PG_VERSION'));
-		await driver.pitrConfigure(SOURCE, repo);
+		await driver.pitrConfigure(SOURCE, repo, SOURCE);
 		await expect(
 			driver.pitrRestore(SOURCE, { targetDatabaseId: TARGET, targetTime: Date.now() - 60_000 }),
 		).rejects.toThrow(/PG_VERSION/);
@@ -763,15 +794,19 @@ describe('pg_rewind (HA-PLAN W10)', () => {
 			return undefined;
 		});
 		await fs.mkdir(join(root, 'replication', REPLICA), { recursive: true });
-		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, slot: 'yoal_test', user: 'main_db', password: PASSWORD });
+		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, user: 'main_db', password: PASSWORD });
 		expect(result).toEqual({ replicaId: REPLICA, rewound: true, fallback: null, reason: null });
 		expect(await fs.lstat(join(stateDir, SOURCE)).catch(() => null)).toBeNull();
 		expect(await fs.readFile(join(stateDir, REPLICA, 'pgdata', 'PG_VERSION'), 'utf8')).toBe('18\n');
+		// Only a real rewind writes the adoption marker; `PG_VERSION` alone is not proof.
+		const marker = JSON.parse(await fs.readFile(join(stateDir, REPLICA, 'yoal-rewind.json'), 'utf8')) as Record<string, unknown>;
+		expect(marker).toMatchObject({ databaseId: SOURCE, replicaId: REPLICA });
+		expect(typeof marker.rewoundAt).toBe('string');
 		const rewind = runner.podman().find((argv) => argv.includes('pg_rewind'));
 		expect(rewind).toBeDefined();
 		expect(runner.calls.find((call) => call.argv.includes('pg_rewind'))?.options?.env).toEqual({ PGPASSWORD: PASSWORD });
 		// Idempotent: a re-run sees the adopted directory and reports success again.
-		expect(await driver.rewindReplica(REPLICA, { databaseId: SOURCE, slot: 'yoal_test', user: 'main_db', password: PASSWORD })).toMatchObject({
+		expect(await driver.rewindReplica(REPLICA, { databaseId: SOURCE, user: 'main_db', password: PASSWORD })).toMatchObject({
 			rewound: true,
 		});
 	});
@@ -781,7 +816,7 @@ describe('pg_rewind (HA-PLAN W10)', () => {
 			if (argv.includes('pg_controldata')) return controldata(false);
 			return undefined;
 		});
-		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, slot: 'yoal_test', user: 'main_db', password: PASSWORD });
+		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, user: 'main_db', password: PASSWORD });
 		expect(result).toMatchObject({ rewound: false, fallback: 'rebuild' });
 		expect(result.reason).toMatch(/neither data checksums nor wal_log_hints/);
 		expect(runner.podman().some((argv) => argv.includes('pg_rewind'))).toBe(false);
@@ -794,7 +829,7 @@ describe('pg_rewind (HA-PLAN W10)', () => {
 			return undefined;
 		});
 		await fs.writeFile(join(stateDir, SOURCE, 'pgdata', 'postgresql.auto.conf'), "wal_log_hints = 'on'\n");
-		expect(await driver.rewindReplica(REPLICA, { databaseId: SOURCE, slot: 'yoal_test', user: 'main_db', password: PASSWORD })).toMatchObject({
+		expect(await driver.rewindReplica(REPLICA, { databaseId: SOURCE, user: 'main_db', password: PASSWORD })).toMatchObject({
 			rewound: true,
 		});
 	});
@@ -806,16 +841,80 @@ describe('pg_rewind (HA-PLAN W10)', () => {
 				return { code: 1, stdout: '', stderr: 'FATAL: source and target clusters are from different systems' };
 			return undefined;
 		});
-		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, slot: 'yoal_test', user: 'main_db', password: PASSWORD });
+		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, user: 'main_db', password: PASSWORD });
 		expect(result).toMatchObject({ rewound: false, fallback: 'rebuild' });
 		expect(result.reason).toMatch(/different systems/);
 		expect(runner.podman().some((argv) => argv.includes('pg_rewind'))).toBe(true);
 		expect(await fs.lstat(join(stateDir, SOURCE)).catch(() => null)).toBeNull();
 	});
 
+	test('a PG_VERSION without the rewind marker is not reported as a successful rewind', async () => {
+		const { driver, runner, stateDir } = await fixture();
+		await fs.mkdir(join(stateDir, REPLICA, 'pgdata'), { recursive: true });
+		await fs.writeFile(join(stateDir, REPLICA, 'pgdata', 'PG_VERSION'), '18\n');
+		await fs.rm(join(stateDir, SOURCE), { recursive: true, force: true });
+		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, user: 'main_db', password: PASSWORD });
+		expect(result).toMatchObject({ rewound: false, fallback: 'rebuild' });
+		expect(result.reason).toMatch(/no old primary data directory/);
+		expect(runner.podman().some((argv) => argv.includes('pg_rewind'))).toBe(false);
+	});
+
+	test('a transport failure is retried before the rebuild fallback', async () => {
+		let rewinds = 0;
+		const { driver, runner, stateDir } = await fixture((argv) => {
+			if (argv.includes('pg_controldata')) return controldata(true);
+			if (argv.includes('pg_rewind')) {
+				rewinds += 1;
+				if (rewinds === 1)
+					return { code: 1, stdout: '', stderr: 'FATAL: could not connect to server: Connection refused' };
+			}
+			return undefined;
+		});
+		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, user: 'main_db', password: PASSWORD });
+		expect(result).toMatchObject({ rewound: true, fallback: null });
+		expect(rewinds).toBe(2);
+		expect(await fs.readFile(join(stateDir, REPLICA, 'pgdata', 'PG_VERSION'), 'utf8')).toBe('18\n');
+	});
+
+	test('a transport failure that never clears gives up after the bounded retries and rebuilds', async () => {
+		let rewinds = 0;
+		const { driver, stateDir } = await fixture((argv) => {
+			if (argv.includes('pg_controldata')) return controldata(true);
+			if (argv.includes('pg_rewind')) {
+				rewinds += 1;
+				return { code: 1, stdout: '', stderr: 'FATAL: could not receive data from WAL stream: timeout expired' };
+			}
+			return undefined;
+		});
+		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, user: 'main_db', password: PASSWORD });
+		expect(result).toMatchObject({ rewound: false, fallback: 'rebuild' });
+		expect(result.reason).toMatch(/after 3 transport attempts/);
+		expect(rewinds).toBe(3);
+		expect(await fs.lstat(join(stateDir, SOURCE)).catch(() => null)).toBeNull();
+		expect(await fs.lstat(join(stateDir, REPLICA)).catch(() => null)).toBeNull();
+	});
+
+	test('walLogHints from the control plane covers a runtime -c flag the config files cannot show', async () => {
+		const { driver, runner } = await fixture((argv) => {
+			if (argv.includes('pg_controldata')) return controldata(false);
+			return undefined;
+		});
+		const result = await driver.rewindReplica(REPLICA, {
+			databaseId: SOURCE,
+			walLogHints: true,
+			user: 'main_db',
+			password: PASSWORD,
+		});
+		expect(result).toMatchObject({ rewound: true, fallback: null });
+		expect(runner.podman().some((argv) => argv.includes('pg_rewind'))).toBe(true);
+		await expect(
+			driver.rewindReplica(REPLICA, { databaseId: SOURCE, walLogHints: 'yes', user: 'main_db', password: PASSWORD }),
+		).rejects.toThrow(/walLogHints/);
+	});
+
 	test('a missing old primary reports the rebuild fallback without running anything', async () => {
 		const { driver, runner } = await fixture();
-		const result = await driver.rewindReplica(REPLICA, { databaseId: 'db_missing', slot: 'yoal_test', user: 'main_db', password: PASSWORD });
+		const result = await driver.rewindReplica(REPLICA, { databaseId: 'db_missing', user: 'main_db', password: PASSWORD });
 		expect(result).toMatchObject({ rewound: false, fallback: 'rebuild' });
 		expect(runner.podman()).toHaveLength(0);
 	});

@@ -467,7 +467,7 @@ export const databaseReplicas = sqliteTable(
 		purgedAt: integer('purged_at'),
 		/** Re-add a fresh replica on the same node once this one is purged (after a promotion). */
 		rebuildOnPurge: integer('rebuild_on_purge', { mode: 'boolean' }).notNull().default(false),
-		/** Old primary data dir to adopt by pg_rewind (0129, HA-PLAN W10); null for a normal replica. */
+		/** Old primary data dir to adopt by pg_rewind (HA-PLAN W10); null for a normal replica. */
 		rewindFromDatabaseId: text('rewind_from_database_id'),
 		rewindRequestedAt: integer('rewind_requested_at'),
 		rewindDoneAt: integer('rewind_done_at'),

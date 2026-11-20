@@ -766,6 +766,9 @@ export class DatabaseReplicaService {
 						replicaId: row.id,
 						replicaWorkloadId: databaseReplicaWorkloadId(row.id),
 						slot: row.slot!,
+						// The old primary ran with `-c wal_log_hints=on` since `pgRewind` was rendered
+						// for its unit; a runtime flag is invisible to the helper's config probe.
+						walLogHints: true,
 					},
 				];
 			});
@@ -813,11 +816,18 @@ export class DatabaseReplicaService {
 			const row = this.ctx.db.select().from(databaseReplicas).where(eq(databaseReplicas.id, result.replicaId)).get();
 			if (!row || row.nodeId !== nodeId || row.rewindFromDatabaseId === null || row.rewindDoneAt !== null) continue;
 			if (result.status === 'failed') {
+				// A failed rewind must not leave the row pending forever or the diverged dir on disk:
+				// the replica becomes a removal that rebuilds a fresh copy once the node confirms the
+				// purge. Its slot goes too, so the new primary's next replication task drops it.
+				if (row.removingAt) continue;
 				this.ctx.db
 					.update(databaseReplicas)
 					.set({
+						removingAt: now,
+						rebuildOnPurge: true,
+						slot: null,
 						rewindError: (result.error ?? result.reason ?? 'The rewind failed on the node.').slice(0, 2_000),
-						message: 'pg_rewind failed; this replica will not start. Remove it and add a new one.',
+						message: 'pg_rewind failed; the old data directory is purged and a fresh replica is rebuilt on this node.',
 						updatedAt: now,
 					})
 					.where(eq(databaseReplicas.id, row.id))
@@ -885,7 +895,9 @@ export class DatabaseReplicaService {
 				currentNode !== nodeId
 			) {
 				// A rewind replica on this node adopts the old dir; deleting it first would force the
-				// full rebuild this path exists to avoid (HA-PLAN W10).
+				// full rebuild this path exists to avoid (HA-PLAN W10). A failed rewind is not
+				// adopting: it is marked removing with an error, so the old dir is purged and a
+				// fresh replica is rebuilt below.
 				const adopting = this.ctx.db
 					.select({ id: databaseReplicas.id })
 					.from(databaseReplicas)
@@ -895,6 +907,8 @@ export class DatabaseReplicaService {
 							eq(databaseReplicas.databaseId, failover.databaseId),
 							eq(databaseReplicas.rewindFromDatabaseId, failover.databaseId),
 							isNull(databaseReplicas.rewindDoneAt),
+							isNull(databaseReplicas.rewindError),
+							isNull(databaseReplicas.removingAt),
 						),
 					)
 					.get();

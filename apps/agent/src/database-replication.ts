@@ -233,6 +233,7 @@ export class DatabaseReplicationRunner {
 			const result = await this.helper.rewindReplica(task.replicaWorkloadId, {
 				databaseId: task.databaseId,
 				slot: activation.slot,
+				walLogHints: task.walLogHints,
 				user: activation.user,
 				password: activation.password,
 			});

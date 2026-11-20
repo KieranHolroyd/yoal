@@ -64,7 +64,6 @@ import {
 	REPLICATION_STATUS_SQL,
 	assertPrimaryDatabaseId,
 	assertReplicaWorkloadId,
-	assertSlot,
 	parseReplicationPassword,
 	parseReplicationStatus,
 	parseSlots,
@@ -125,15 +124,19 @@ import {
 } from './validate.ts';
 import {
 	computePitrWindow,
+	PG_REWIND_TRANSPORT_ATTEMPTS,
 	parseArchiverStats,
 	parseDataChecksums,
 	parsePgBackRestInfo,
 	parsePitrBackupType,
 	parsePitrRepo,
+	parsePitrStanza,
+	pgRewindFailureKind,
 	pitrContainerName,
 	pitrPaths,
 	pitrRecoveryContainerName,
 	pitrRestoreContainerName,
+	pitrRewindMarkerPath,
 	pitrStanzaFor,
 	renderPgBackRestConfig,
 	renderPgBackRestKey,
@@ -147,6 +150,8 @@ import {
 	renderPitrRecoveryPsqlArgs,
 	renderPitrRenameSql,
 	renderPitrRestoreArgs,
+	renderPitrRewindMarker,
+	validatePitrStanza,
 	validatePitrTargetTime,
 	type HelperPitrStatus,
 	type PitrBaseBackupType,
@@ -1423,24 +1428,26 @@ export class SystemdDriver {
 	 */
 	async rewindReplica(
 		replicaId: string,
-		raw: { databaseId?: unknown; slot?: unknown; user?: unknown; password?: unknown },
+		raw: { databaseId?: unknown; walLogHints?: unknown; user?: unknown; password?: unknown },
 	): Promise<{ replicaId: string; rewound: boolean; fallback: 'rebuild' | null; reason: string | null }> {
 		const id = assertReplicaWorkloadId(replicaId);
 		const databaseId = assertPrimaryDatabaseId(raw.databaseId, 'databaseId');
-		assertSlot(raw.slot, 'slot');
+		if (raw.walLogHints !== undefined && typeof raw.walLogHints !== 'boolean')
+			throw new ValidationError('walLogHints must be a boolean');
+		// The control plane rendered `-c wal_log_hints=on` on the old primary's unit; a runtime `-c`
+		// flag is not visible in its config files, so the config probe below would miss it.
+		const walLogHints = raw.walLogHints === true;
 		const user = typeof raw.user === 'string' ? raw.user : '';
 		if (!/^[a-z_][a-z0-9_]{0,62}$/.test(user)) throw new ValidationError('user must be a plain Postgres identifier');
 		if (typeof raw.password !== 'string' || raw.password.length < 8 || raw.password.length > 200)
 			throw new ValidationError('password must be 8–200 characters');
+		const password = raw.password;
 
 		const source = await this.dataDirFor(databaseId);
 		const target = resolve(dirname(source), id);
-		// A previous run already adopted the directory: report success again.
-		const targetReady = await fs
-			.lstat(join(target, 'pgdata', 'PG_VERSION'))
-			.then((stat) => stat.isFile())
-			.catch(() => false);
-		if (targetReady) return { replicaId: id, rewound: true, fallback: null, reason: null };
+		// A previous run wrote the adoption marker: report success again. Never infer this from
+		// `PG_VERSION`, which a fallback rebuild's fresh directory also has.
+		if (await this.rewindMarkerPresent(target)) return { replicaId: id, rewound: true, fallback: null, reason: null };
 		const sourceReady = await fs
 			.lstat(join(source, 'pgdata', 'PG_VERSION'))
 			.then((stat) => stat.isFile())
@@ -1465,7 +1472,7 @@ export class SystemdDriver {
 		);
 		if (controldata.code !== 0)
 			return this.rebuildAfterRewind(source, id, `pg_controldata failed (${controldata.code}): ${commandDetail(controldata)}`);
-		if (!parseDataChecksums(controldata.stdout) && !(await this.walLogHintsEnabled(path)))
+		if (!parseDataChecksums(controldata.stdout) && !walLogHints && !(await this.walLogHintsEnabled(path)))
 			return this.rebuildAfterRewind(
 				source,
 				id,
@@ -1473,19 +1480,40 @@ export class SystemdDriver {
 			);
 
 		const linkDir = join(this.replicationDir, id);
-		const rewound = await this.runner.run(
-			renderPgRewindArgs({
-				podmanPath: this.podmanPath,
-				image,
-				replicaId: id,
-				targetRoot: source,
-				linkDir,
-				user,
-			}),
-			{ env: { PGPASSWORD: raw.password } },
-		);
-		if (rewound.code !== 0)
-			return this.rebuildAfterRewind(source, id, `pg_rewind failed (${rewound.code}): ${commandDetail(rewound)}`);
+		const runRewind = () =>
+			this.runner.run(
+				renderPgRewindArgs({
+					podmanPath: this.podmanPath,
+					image,
+					replicaId: id,
+					targetRoot: source,
+					linkDir,
+					user,
+				}),
+				{ env: { PGPASSWORD: password } },
+			);
+		let rewound = await runRewind();
+		let attempts = 1;
+		// A transport failure leaves the diverged dir intact, so retry it before paying for a full
+		// rebuild. Anything else (no common ancestor, hint logging off) cannot succeed by retrying.
+		while (
+			rewound.code !== 0 &&
+			pgRewindFailureKind(rewound.stderr) === 'transport' &&
+			attempts < PG_REWIND_TRANSPORT_ATTEMPTS
+		) {
+			attempts += 1;
+			await Bun.sleep(this.restorePollMs);
+			rewound = await runRewind();
+		}
+		if (rewound.code !== 0) {
+			const transport = pgRewindFailureKind(rewound.stderr) === 'transport';
+			const suffix = transport && attempts > 1 ? ` after ${attempts} transport attempts` : '';
+			return this.rebuildAfterRewind(
+				source,
+				id,
+				`pg_rewind failed${suffix} (${rewound.code}): ${commandDetail(rewound)}`,
+			);
+		}
 
 		const existingTarget = await fs.lstat(target).catch(() => null);
 		if (existingTarget) {
@@ -1493,7 +1521,26 @@ export class SystemdDriver {
 			await fs.rm(target, { recursive: true, force: true });
 		}
 		await fs.rename(source, target);
+		// Only a real rewind writes this; a fallback leaves the replica to bootstrap and the control
+		// plane sees `fallback` instead of a false success.
+		await this.writeAtomic(
+			pitrRewindMarkerPath(target),
+			renderPitrRewindMarker({ databaseId, replicaId: id, rewoundAt: new Date().toISOString() }),
+			0o600,
+		);
 		return { replicaId: id, rewound: true, fallback: null, reason: null };
+	}
+
+	/** True when a previous successful `pg_rewind` adopted this replica's directory. */
+	private async rewindMarkerPresent(target: string): Promise<boolean> {
+		const text = await fs.readFile(pitrRewindMarkerPath(target), 'utf8').catch(() => null);
+		if (text === null) return false;
+		try {
+			const marker = JSON.parse(text) as Record<string, unknown>;
+			return typeof marker.databaseId === 'string' && typeof marker.replicaId === 'string';
+		} catch {
+			return false;
+		}
 	}
 
 	/** True while a workload's container is running; used before touching a fenced primary's data. */
@@ -1503,7 +1550,7 @@ export class SystemdDriver {
 			'inspect',
 			'--format',
 			'{{.State.Running}}',
-			`yoal-workload-${id}`,
+			pitrContainerName(id),
 		]);
 		return result.code === 0 && result.stdout.trim() === 'true';
 	}
@@ -2027,11 +2074,15 @@ END $$;`];
 	 * container sees a rewrite at once and nothing restarts. `/run` is a tmpfs: the agent calls
 	 * this before every PITR task, which is what puts the files back after a reboot.
 	 */
-	async pitrConfigure(id: string, rawRepo: unknown): Promise<{ stanza: string; configPath: string }> {
+	async pitrConfigure(id: string, rawRepo: unknown, rawStanza: unknown): Promise<{ stanza: string; configPath: string }> {
 		assertDatabaseId(id, 'database id');
 		const repo = parsePitrRepo(rawRepo);
+		// The stanza belongs to the DATABASE, not to the container a backup happens to run in
+		// (a replica's workload id differs). It is carried on the fixed verb and validated, never
+		// re-derived here: a derived replica stanza would write to an orphan stanza and restores
+		// against the primary's stanza would see nothing.
+		const stanza = validatePitrStanza(rawStanza, 'pitr.stanza');
 		const env = await this.readPostgresEnv(id);
-		const stanza = pitrStanzaFor(id);
 		const paths = pitrPaths(this.runtimeDir, id);
 		await this.ensurePitrConfigDir(id);
 		const files: Array<[string, string]> = [
@@ -2059,11 +2110,21 @@ END $$;`];
 	 * `podman exec` inside the database's own container: pgBackRest must share the host with
 	 * Postgres and talks to it over the Unix socket.
 	 */
-	async pitrBaseBackup(id: string, rawType: unknown): Promise<{ stanza: string; type: PitrBaseBackupType }> {
+	async pitrBaseBackup(
+		id: string,
+		rawType: unknown,
+		rawStanza: unknown,
+	): Promise<{ stanza: string; type: PitrBaseBackupType }> {
 		assertDatabaseId(id, 'database id');
 		const type = parsePitrBackupType(rawType);
-		const stanza = pitrStanzaFor(id);
-		await this.requirePitrConfig(id);
+		const stanza = validatePitrStanza(rawStanza, 'pitr.stanza');
+		const configured = await this.requirePitrConfig(id);
+		// Refuse a stanza the config on this node was not written for: that would create an empty,
+		// orphan stanza in the repository instead of backing up into the database's own history.
+		if (configured.stanza !== stanza)
+			throw new ValidationError(
+				`Database ${id} is configured for stanza "${configured.stanza}", not "${stanza}".`,
+			);
 		for (const args of renderPitrBackupArgs(stanza, type)) {
 			const result = await this.runner.run(renderPitrExecArgs({ podmanPath: this.podmanPath, workloadId: id, args }));
 			if (result.code !== 0)
@@ -2079,7 +2140,7 @@ END $$;`];
 	 */
 	async pitrStatus(id: string): Promise<HelperPitrStatus> {
 		assertDatabaseId(id, 'database id');
-		const stanza = pitrStanzaFor(id);
+		const fallbackStanza = pitrStanzaFor(id);
 		const paths = pitrPaths(this.runtimeDir, id);
 		const configured = await fs
 			.lstat(paths.config)
@@ -2087,7 +2148,7 @@ END $$;`];
 			.catch(() => false);
 		const empty: HelperPitrStatus = {
 			configured: false,
-			stanza,
+			stanza: fallbackStanza,
 			repo: { bucket: null, region: null, endpoint: null, path: null },
 			archiveStatus: 'unknown',
 			recoverableFrom: null,
@@ -2101,6 +2162,7 @@ END $$;`];
 		};
 		if (!configured) return empty;
 		const text = await fs.readFile(paths.config, 'utf8');
+		const stanza = parsePitrStanza(text) ?? fallbackStanza;
 		const value = (key: string) => {
 			const line = text.split('\n').find((entry) => entry.startsWith(`${key}=`));
 			return line ? line.slice(key.length + 1).trim() || null : null;
@@ -2178,8 +2240,8 @@ END $$;`];
 		if (targetDatabaseId === id)
 			throw new ValidationError('A PITR restore must target a different database; in-place restore is not supported.');
 		const targetTime = validatePitrTargetTime(input.targetTime, Date.now());
-		const stanza = pitrStanzaFor(id);
-		await this.requirePitrConfig(id);
+		const config = await this.requirePitrConfig(id);
+		const stanza = config.stanza;
 		const configDir = pitrPaths(this.runtimeDir, id).dir;
 		const sourceDir = await this.dataDirFor(id);
 		// The one-shots must run the pgBackRest that wrote the repository: the source's PITR image,
@@ -2308,14 +2370,16 @@ END $$;`];
 		return dir;
 	}
 
-	private async requirePitrConfig(id: string): Promise<{ config: string; pgpass: string }> {
+	private async requirePitrConfig(id: string): Promise<{ config: string; pgpass: string; stanza: string }> {
 		const paths = pitrPaths(this.runtimeDir, id);
 		const ready = await fs
 			.lstat(paths.config)
 			.then((stat) => stat.isFile())
 			.catch(() => false);
 		if (!ready) throw new ValidationError(`Database ${id} has no pgBackRest config; configure PITR first.`);
-		return { config: paths.config, pgpass: paths.pgpass };
+		const stanza = parsePitrStanza(await fs.readFile(paths.config, 'utf8'));
+		if (!stanza) throw new ValidationError(`Database ${id} has a pgBackRest config without a stanza; configure PITR first.`);
+		return { config: paths.config, pgpass: paths.pgpass, stanza };
 	}
 
 	/** Resolve a managed database's data dir from the same roots `purge` uses (D78). */

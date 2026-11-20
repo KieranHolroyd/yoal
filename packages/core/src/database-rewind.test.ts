@@ -180,7 +180,7 @@ describe('PITR with replicas (PITR_REWIND on)', () => {
 		const oldState = await core.nodes.desiredState(primary.token);
 		expect(oldState.databasePurges).not.toContain(db.id);
 		expect(oldState.databaseReplicaRewinds).toEqual([
-			{ databaseId: db.id, replicaId: rewind.id, replicaWorkloadId: rewind.workloadId, slot: rewind.slot! },
+			{ databaseId: db.id, replicaId: rewind.id, replicaWorkloadId: rewind.workloadId, slot: rewind.slot!, walLogHints: true },
 		]);
 		// It is not in desired state until the rewind reports, so no basebackup races the adoption.
 		expect(oldState.workloads.some((item) => item.id === rewind.workloadId)).toBe(false);
@@ -263,6 +263,58 @@ describe('PITR with replicas (PITR_REWIND on)', () => {
 		expect(row.rewind).toMatchObject({ fallback: true, doneAt: expect.any(String) });
 		expect(row.message).toContain('Rebuilding instead of rewinding');
 		expect((await core.nodes.desiredState(primary.token)).workloads.some((item) => item.id === rewind.workloadId)).toBe(true);
+	});
+
+	test('a failed rewind marks the row for removal and purge, and a fresh replica is rebuilt', async () => {
+		const db = core.databases.create(owner, { name: 'rewind-fails', version: '18', placement: primary.nodeId });
+		core.databases.setPitrPolicy(owner, 'rewind-fails', { enabled: true });
+		const replica = core.databaseReplicas.add(owner, 'rewind-fails', { node: third.nodeId });
+		report(primary, db.id, [slotSample(replica.slot!)]);
+		const started = core.databaseReplicas.promote(owner, 'rewind-fails', replica.id, { confirm: true });
+		beat(primary, { workloads: [] });
+		beat(third, { databaseReplicaPromotionResults: [{ failoverId: started.id, status: 'ok', lsn: null }] });
+		beat(third, { workloads: [{ id: db.id, status: 'running', restarts: 0 }] });
+		report(third, db.id, []);
+		const rewind = core.databaseReplicas.list(owner, 'rewind-fails').find((row) => row.nodeId === primary.nodeId)!;
+		expect(rewind.rewind).toMatchObject({ doneAt: null, error: null });
+		// While the rewind is in flight the old dir is kept (not purged).
+		expect((await core.nodes.desiredState(primary.token)).databasePurges).not.toContain(db.id);
+
+		beat(primary, {
+			databaseReplicaRewindResults: [
+				{ replicaId: rewind.id, status: 'failed', rewound: false, error: 'could not connect to server' },
+			],
+		});
+		const failed = core.databaseReplicas.list(owner, 'rewind-fails').find((row) => row.id === rewind.id)!;
+		expect(failed.removing).toBe(true);
+		expect(failed.rewind?.error).toContain('could not connect');
+		expect(failed.message).toContain('fresh replica is rebuilt');
+		// No pending rewind task and the old primary's dir is now purgeable.
+		expect(core.databaseReplicas.rewindsForNode(primary.nodeId)).toEqual([]);
+		const state = await core.nodes.desiredState(primary.token);
+		expect(state.databaseReplicaRewinds).toBeUndefined();
+		expect(state.databasePurges).toContain(db.id);
+		expect(state.databasePurges).toContain(rewind.workloadId);
+
+		// The node confirms both purges: a new, ordinary replica is rebuilt on that node.
+		core.databaseReplicas.applyPurged(primary.nodeId, [db.id, rewind.workloadId]);
+		const rebuilt = core.databaseReplicas.list(owner, 'rewind-fails').find((row) => row.nodeId === primary.nodeId)!;
+		expect(rebuilt.id).not.toBe(rewind.id);
+		expect(rebuilt.rewind).toBeNull();
+	});
+
+	test('db-member is accepted as the W10 capability on a mixed fleet', () => {
+		const row = opened.sqlite
+			.query<{ capabilities_json: string }, [string]>('SELECT capabilities_json FROM nodes WHERE id = ?')
+			.get(third.nodeId)!;
+		const original = row.capabilities_json;
+		const mixed = [...JSON.parse(original).filter((item: string) => item !== 'pitr-rewind'), 'db-member'];
+		opened.sqlite.run('UPDATE nodes SET capabilities_json = ? WHERE id = ?', [JSON.stringify(mixed), third.nodeId]);
+		try {
+			expect(core.databases.pitrRewindForNode(third.nodeId)).toBe(true);
+		} finally {
+			opened.sqlite.run('UPDATE nodes SET capabilities_json = ? WHERE id = ?', [original, third.nodeId]);
+		}
 	});
 });
 

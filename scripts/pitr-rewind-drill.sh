@@ -38,6 +38,7 @@ TARGET="${YOAL_REWIND_DRILL_TARGET:-${SOURCE}-rewind-drill-$(date +%s)}"
 CANARY_SQL="${YOAL_REWIND_DRILL_CANARY_SQL:-SELECT 1}"
 TIMEOUT="${YOAL_REWIND_DRILL_TIMEOUT:-3600}"
 PROMOTE="${YOAL_REWIND_DRILL_PROMOTE:-0}"
+PROMOTION_SECONDS=0
 BASE="${YOAL_CONTROL_URL%/}/api/v1/databases"
 
 for tool in curl python3 psql; do
@@ -136,22 +137,25 @@ print((d.get("failovers") or [{}])[0].get("message", "unknown"))
 	PROMOTION_SECONDS=$(( $(date +%s) - START_PROMOTE ))
 	say "promotion completed in ${PROMOTION_SECONDS}s; the stanza follows the new primary"
 
-	# Write the second marker on the new primary. Use the fresh credentials URL (same name).
-	SOURCE_URL=$(url_of "$SOURCE")
-	psql "$SOURCE_URL" -X -v ON_ERROR_STOP=1 -qc \
-		"INSERT INTO yoal_restore_drill (marker) VALUES ('${AFTER}')"
-	say "post-promotion marker written"
+	if [ "$MARKERS" = 1 ]; then
+		# Write the second marker on the new primary. Use the fresh credentials URL (same name).
+		SOURCE_URL=$(url_of "$SOURCE")
+		psql "$SOURCE_URL" -X -v ON_ERROR_STOP=1 -qc \
+			"INSERT INTO yoal_restore_drill (marker) VALUES ('${AFTER}')"
+		say "post-promotion marker written"
+	fi
 fi
 
+# Wait out the archive timeout and force a segment in both branches, so an explicit
+# YOAL_REWIND_DRILL_TARGET_TIME is covered by archived WAL too (not just the marker path).
 if [ "${MARKERS:-0}" = 1 ]; then
-	sleep 2
 	TARGET_TIME=$(python3 -c 'import datetime; print(datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"))')
-	say "restoring to ${TARGET_TIME}; waiting 150 s for the archive"
-	sleep 150
-	SOURCE_URL=$(url_of "$SOURCE")
-	psql "$SOURCE_URL" -X -qtAc 'SELECT pg_switch_wal()' >/dev/null
-	sleep 10
 fi
+say "restoring to ${TARGET_TIME}; waiting 150 s for the archive"
+sleep 150
+SOURCE_URL=$(url_of "$SOURCE")
+psql "$SOURCE_URL" -X -qtAc 'SELECT pg_switch_wal()' >/dev/null
+sleep 10
 
 # 3. Restore and wait for the node to verify it.
 BODY=$(python3 -c 'import json,sys; print(json.dumps({"name": sys.argv[1], "targetTime": sys.argv[2]}))' "$TARGET" "$TARGET_TIME")
@@ -190,4 +194,8 @@ say "canary: $(psql "$TARGET_URL" -X -v ON_ERROR_STOP=1 -tAc "$CANARY_SQL")"
 if [ "${YOAL_REWIND_DRILL_KEEP:-0}" != 1 ]; then
 	api DELETE "/$(enc "$TARGET")" >/dev/null && say "moved ${TARGET} to the trash"
 fi
-say "PASS (RTO ${RTO}s${PROMOTE:+; promotion ${PROMOTION_SECONDS:-0}s})"
+PROMOTE_SUFFIX=""
+if [ "$PROMOTE" = 1 ]; then
+	PROMOTE_SUFFIX="; promotion ${PROMOTION_SECONDS}s"
+fi
+say "PASS (RTO ${RTO}s${PROMOTE_SUFFIX})"

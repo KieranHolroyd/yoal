@@ -100,13 +100,13 @@ function harness() {
 		settleMs: 30_000,
 		now: () => clock,
 		helper: {
-			async pitrConfigure(id) {
-				calls.push(`configure:${id}`);
-				return { stanza: id, configPath: `/run/yoal-workloads/${id}/pgbackrest/pgbackrest.conf` };
+			async pitrConfigure(id, _repo, stanza) {
+				calls.push(`configure:${id}:${stanza}`);
+				return { stanza, configPath: `/run/yoal-workloads/${id}/pgbackrest/pgbackrest.conf` };
 			},
-			async pitrBaseBackup(id, type) {
-				calls.push(`backup:${id}:${type}`);
-				return { stanza: id, type };
+			async pitrBaseBackup(id, type, stanza) {
+				calls.push(`backup:${id}:${type}:${stanza}`);
+				return { stanza, type };
 			},
 			async pitrRestore(id, input) {
 				calls.push(`restore:${id}:${input.targetDatabaseId}`);
@@ -136,7 +136,7 @@ describe('database PITR runner', () => {
 		advance(30_000);
 		await runner.runOnce(state([check]), () => ready, signal);
 		// The status check rewrites the tmpfs config first, then reads the window.
-		expect(calls).toEqual([`configure:${SOURCE}`, `status:${SOURCE}`]);
+		expect(calls).toEqual([`configure:${SOURCE}:${SOURCE}`, `status:${SOURCE}`]);
 		expect(runner.pendingResults()).toEqual([
 			expect.objectContaining({
 				taskId: check.id,
@@ -170,7 +170,7 @@ describe('database PITR runner', () => {
 		expect(calls).toEqual([]);
 		advance(30_000);
 		await runner.runOnce(state([backup]), () => ready, signal);
-		expect(calls).toEqual([`configure:${SOURCE}`, `backup:${SOURCE}:full`]);
+		expect(calls).toEqual([`configure:${SOURCE}:${SOURCE}`, `backup:${SOURCE}:full:${SOURCE}`]);
 	});
 
 	test('a backup task with a workloadId runs in the replica container, on the same stanza', async () => {
@@ -181,9 +181,38 @@ describe('database PITR runner', () => {
 		await runner.runOnce(state([backup]), () => ready, signal);
 		advance(30_000);
 		await runner.runOnce(state([backup]), () => ready, signal);
-		expect(calls).toEqual([`configure:${replicaId}`, `backup:${replicaId}:full`]);
+		expect(calls).toEqual([`configure:${replicaId}:${SOURCE}`, `backup:${replicaId}:full:${SOURCE}`]);
 		expect(runner.pendingResults()).toEqual([
 			expect.objectContaining({ taskId: backup.id, databaseId: SOURCE, status: 'ok', baseBackupType: 'full' }),
+		]);
+	});
+
+	test('a backup task with a workloadId waits for the replica workload, not the database id', async () => {
+		const { runner, calls, advance } = harness();
+		const replicaId = 'db_dbr_fedcba9876543210fedcba9876543210';
+		const backup = task({ action: 'basebackup', baseBackupType: 'full', workloadId: replicaId });
+		// Only the database id exists as a workload here; the replica's is on another node.
+		const ready = new Set([SOURCE]);
+		await runner.runOnce(state([backup]), (id) => ready.has(id), signal);
+		advance(60_000);
+		await runner.runOnce(state([backup]), (id) => ready.has(id), signal);
+		expect(calls).toEqual([]);
+		ready.add(replicaId);
+		await runner.runOnce(state([backup]), (id) => ready.has(id), signal);
+		advance(30_000);
+		await runner.runOnce(state([backup]), (id) => ready.has(id), signal);
+		expect(calls).toEqual([`configure:${replicaId}:${SOURCE}`, `backup:${replicaId}:full:${SOURCE}`]);
+	});
+
+	test('a task whose stanza is not the database stanza fails without touching the helper', async () => {
+		const { runner, calls, advance } = harness();
+		const backup = task({ action: 'basebackup', baseBackupType: 'full', stanza: 'db_dbr_wrong' });
+		await runner.runOnce(state([backup]), () => true, signal);
+		advance(30_000);
+		await runner.runOnce(state([backup]), () => true, signal);
+		expect(calls).toEqual([]);
+		expect(runner.pendingResults()).toEqual([
+			expect.objectContaining({ taskId: backup.id, status: 'failed', error: expect.stringContaining('not the stanza') }),
 		]);
 	});
 
@@ -199,7 +228,7 @@ describe('database PITR runner', () => {
 		await runner.runOnce(state([restore]), (id) => ready.has(id), signal);
 		advance(30_000);
 		await runner.runOnce(state([restore]), (id) => ready.has(id), signal);
-		expect(calls).toEqual([`configure:${SOURCE}`, `restore:${SOURCE}:${TARGET}`]);
+		expect(calls).toEqual([`configure:${SOURCE}:${SOURCE}`, `restore:${SOURCE}:${TARGET}`]);
 		expect(runner.pendingResults()).toEqual([
 			expect.objectContaining({ taskId: restore.id, status: 'ok', targetDatabaseId: TARGET, verified: true }),
 		]);

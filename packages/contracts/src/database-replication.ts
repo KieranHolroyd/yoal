@@ -140,6 +140,12 @@ export const databaseReplicaRewindTaskSchema = z.object({
 	replicaWorkloadId: z.string().min(1).max(100),
 	/** The replica's physical slot on the new primary, written to `primary_slot_name`. */
 	slot: slotSchema,
+	/**
+	 * The control plane rendered `wal_log_hints=on` for the old primary's unit (HA-PLAN W10), so
+	 * the helper may skip the config-file probe. `pg_rewind` failing is still the backstop: an old
+	 * agent/helper that ignored this simply falls back to a rebuild.
+	 */
+	walLogHints: z.boolean().default(false),
 });
 export type DatabaseReplicaRewindTask = z.infer<typeof databaseReplicaRewindTaskSchema>;
 

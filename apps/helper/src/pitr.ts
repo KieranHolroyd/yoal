@@ -104,6 +104,20 @@ export function pitrStanzaFor(databaseId: string): string {
 	return databaseId.replace(/[^A-Za-z0-9_-]/g, '_');
 }
 
+/**
+ * Read the stanza back from a rendered pgBackRest config (`[global]` is not a stanza). The helper
+ * uses it for `status`/`restore` so a config written for a replica workload (which carries the
+ * database's stanza) is never re-derived from the replica's own workload id.
+ */
+export function parsePitrStanza(config: string): string | null {
+	for (const line of config.split('\n')) {
+		const match = /^\[([^\]]+)\]\s*$/.exec(line.trim());
+		if (!match || match[1] === 'global') continue;
+		return validatePitrStanza(match[1]);
+	}
+	return null;
+}
+
 function clean(value: unknown, label: string, max: number): string {
 	if (typeof value !== 'string') throw new ValidationError(`${label} must be a string`);
 	const trimmed = value.trim();
@@ -424,6 +438,53 @@ export function renderPgBackRestKey(repo: PitrRepoConfig): string | null {
 export function pgRewindContainerName(replicaId: string): string {
 	return `yoal-rewind-${replicaId}`;
 }
+
+/**
+ * Written beside the adopted `pgdata` only by a successful `pg_rewind` (never by a rebuild). The
+ * helper reads it to make a re-run idempotent, instead of inferring success from `PG_VERSION`:
+ * a fallback rebuild that then bootstrapped a fresh directory has a `PG_VERSION` too, and reporting
+ * that as a successful rewind hid the rebuild from the control plane.
+ */
+export const PITR_REWIND_MARKER_FILENAME = 'yoal-rewind.json';
+
+export interface PitrRewindMarker {
+	databaseId: string;
+	replicaId: string;
+	rewoundAt: string;
+}
+
+export function renderPitrRewindMarker(marker: PitrRewindMarker): string {
+	return `${JSON.stringify(marker)}\n`;
+}
+
+/** The marker path for a replica's data-dir root (`<state>/<replica id>`). */
+export function pitrRewindMarkerPath(replicaRoot: string): string {
+	return `${replicaRoot}/${PITR_REWIND_MARKER_FILENAME}`;
+}
+
+const PG_REWIND_TRANSPORT_PATTERNS = [
+	/could not connect/i,
+	/connection (?:to server )?(?:refused|failed|closed)/i,
+	/server closed the connection/i,
+	/could not receive data/i,
+	/timed out|timeout expired/i,
+	/no route to host/i,
+	/network is unreachable/i,
+	/broken pipe|unexpected eof/i,
+	/(?:ssl|tls|certificate) (?:error|failure|handshake)/i,
+];
+
+/**
+ * Classify a failed `pg_rewind` by its stderr. A transport failure (the new primary was
+ * unreachable, a TLS/socket error) is worth retrying before throwing away the diverged directory;
+ * everything else (no common ancestor, different systems, hint logging off) is a rebuild.
+ */
+export function pgRewindFailureKind(stderr: string): 'transport' | 'rebuild' {
+	return PG_REWIND_TRANSPORT_PATTERNS.some((pattern) => pattern.test(stderr)) ? 'transport' : 'rebuild';
+}
+
+/** How often a transport failure is retried before the rebuild fallback deletes the directory. */
+export const PG_REWIND_TRANSPORT_ATTEMPTS = 3;
 
 /**
  * `--source-server` for `pg_rewind`: the same agent-served link socket a replica streams through,

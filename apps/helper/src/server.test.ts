@@ -123,14 +123,18 @@ class FakeRuntime implements HelperRuntime {
 		this.calls.push('studio-stop');
 	}
 
-	async pitrConfigure(id: string, repo: unknown): Promise<{ stanza: string; configPath: string }> {
-		this.calls.push(`pitr-configure:${id}`);
-		return { stanza: id, configPath: `/run/yoal-workloads/${id}/pgbackrest.conf` };
+	async pitrConfigure(id: string, repo: unknown, stanza: unknown): Promise<{ stanza: string; configPath: string }> {
+		this.calls.push(`pitr-configure:${id}:${String(stanza)}`);
+		return { stanza: String(stanza), configPath: `/run/yoal-workloads/${id}/pgbackrest.conf` };
 	}
 
-	async pitrBaseBackup(id: string, type: unknown): Promise<{ stanza: string; type: 'full' | 'diff' | 'incr' }> {
-		this.calls.push(`pitr-basebackup:${id}:${String(type)}`);
-		return { stanza: id, type: type === 'diff' || type === 'incr' ? type : 'full' };
+	async pitrBaseBackup(
+		id: string,
+		type: unknown,
+		stanza: unknown,
+	): Promise<{ stanza: string; type: 'full' | 'diff' | 'incr' }> {
+		this.calls.push(`pitr-basebackup:${id}:${String(type)}:${String(stanza)}`);
+		return { stanza: String(stanza), type: type === 'diff' || type === 'incr' ? type : 'full' };
 	}
 
 	async pitrRestore(

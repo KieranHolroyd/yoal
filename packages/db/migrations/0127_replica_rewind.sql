@@ -1,8 +1,7 @@
 -- Old-primary re-attachment by pg_rewind (HA-PLAN W10; Wave 3 lane C). Additive only.
 --
--- Lane C's reservation is 0129, but the checked-in stream must be sequential (scripts/check-
--- migrations.ts) and 0127/0128 belong to lanes A/B, which are not in this branch. Renumber this
--- file to 0129 at integration; the SQL is independent of its number.
+-- The integrator renumbers this file into the checked-in stream; the SQL is independent of its
+-- number (scripts/check-migrations.ts requires a sequential stream).
 --
 -- After a promotion the old primary may come back with a diverged data dir. Instead of purging it
 -- and paying for a full `pg_basebackup`, the control plane can record a replica on that node whose

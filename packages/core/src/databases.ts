@@ -1,10 +1,11 @@
-import { and, desc, eq, inArray, isNotNull, isNull, lte } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm';
 import {
 	databaseAttachments,
 	databaseBackups,
 	databasePitr,
 	databasePitrTasks,
 	databaseCredentials,
+	databaseReplicas,
 	databaseRotations,
 	databases,
 	nodes,
@@ -17,6 +18,7 @@ import {
 	DATABASE_MONITOR_USER,
 	DATABASE_PORT_MAX,
 	DATABASE_PORT_MIN,
+	DB_MEMBER_CAPABILITY,
 	PITR_ARCHIVE_TIMEOUT_SECONDS,
 	PITR_DIFF_SCHEDULE,
 	PITR_FULL_SCHEDULE,
@@ -2382,12 +2384,31 @@ export class DatabaseService {
 	/** Pending PITR tasks for one node, additive to the logical backup task list. */
 	async pitrTasksForNode(nodeId: string): Promise<DatabasePitrTask[]> {
 		if (!featureEnabled(this.ctx.config, 'PITR')) return [];
+		// Narrow in SQL to this node's primary databases plus databases with a live replica here
+		// (a backup may run from it); scanning every pending task on every node does not scale.
+		const replicaDatabaseIds = [
+			...new Set(
+				this.ctx.db
+					.select({ databaseId: databaseReplicas.databaseId })
+					.from(databaseReplicas)
+					.where(and(eq(databaseReplicas.nodeId, nodeId), isNull(databaseReplicas.removingAt)))
+					.all()
+					.map((row) => row.databaseId),
+			),
+		];
+		const scope =
+			replicaDatabaseIds.length > 0
+				? or(
+						eq(databases.nodeId, nodeId),
+						and(inArray(databases.id, replicaDatabaseIds), eq(databasePitrTasks.action, 'basebackup')),
+					)
+				: eq(databases.nodeId, nodeId);
 		const rows = this.ctx.db
 			.select({ task: databasePitrTasks, db: databases, state: databasePitr })
 			.from(databasePitrTasks)
 			.innerJoin(databases, eq(databases.id, databasePitrTasks.databaseId))
 			.leftJoin(databasePitr, eq(databasePitr.databaseId, databasePitrTasks.databaseId))
-			.where(and(eq(databasePitrTasks.status, 'pending'), isNull(databases.deletedAt)))
+			.where(and(eq(databasePitrTasks.status, 'pending'), isNull(databases.deletedAt), scope))
 			.all();
 		return rows.flatMap(({ task, db, state }) => {
 			// A backup may run from a streaming replica (HA-PLAN W10); every other task needs the
@@ -2658,7 +2679,11 @@ export class DatabaseService {
 		return featureEnabled(this.ctx.config, 'PITR_REWIND');
 	}
 
-	/** True when the flag is on and this node's agent advertises the W10 capability (fail closed). */
+	/**
+	 * True when the flag is on and this node's agent advertises the W10 capability (fail closed).
+	 * `db-member` is the Wave 3 name lane B/B' advertises; accept it as equivalent so a mixed fleet
+	 * is not fail-closed while some nodes still report the lane-C capability name.
+	 */
 	pitrRewindForNode(nodeId: string): boolean {
 		if (!this.pitrRewindEnabled()) return false;
 		const node = this.ctx.db
@@ -2666,7 +2691,9 @@ export class DatabaseService {
 			.from(nodes)
 			.where(eq(nodes.id, nodeId))
 			.get();
-		return node ? nodeHasCapability(node, PITR_REWIND_CAPABILITY) : false;
+		return node
+			? nodeHasCapability(node, PITR_REWIND_CAPABILITY) || nodeHasCapability(node, DB_MEMBER_CAPABILITY)
+			: false;
 	}
 
 	/** The workload a PITR task should run in: a streaming replica for a backup, else the primary. */
