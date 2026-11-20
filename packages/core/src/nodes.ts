@@ -1,6 +1,5 @@
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { featureFlagsForGate, gateDesiredState, nodeHasCapability } from './capability-gate';
-import { ingressNodeIds, isIngressNode } from './ingress.ts';
 import { featureEnabled } from './config.ts';
 import {
 	appVolumes,
@@ -527,6 +526,11 @@ export class NodeService {
 				agentVersion: input.agentVersion,
 				// An agent that predates capabilities declares none, so work it would ignore is refused.
 				capabilitiesJson: JSON.stringify(input.capabilities ?? []),
+				// Ingress drift (HA-PLAN W6): the applied version, and when it last changed rather than
+				// every heartbeat, so "behind for two minutes" survives a control-plane restart.
+				actualStateVersion: input.actualStateVersion,
+				actualStateAt:
+					node.actualStateVersion === input.actualStateVersion ? node.actualStateAt : now,
 				...hardwarePatch(input.hardware, now),
 				...wireguardStatusPatch(input.wireguard, now),
 				...(adoptedKey ? { wgPublicKey: adoptedKey } : {}),
@@ -997,10 +1001,9 @@ export class NodeService {
 		this.assertPlatformAdmin(principal);
 		const node = this.ctx.db.select().from(nodes).where(eq(nodes.id, nodeId)).get();
 		if (!node) throw new NotFoundError('Node');
-		const allNodes = this.ctx.db.select({ id: nodes.id, mode: nodes.mode, rolesJson: nodes.rolesJson }).from(nodes).all();
-		if (isIngressNode(nodeId, ingressNodeIds(allNodes, this.ctx.config.edgeNodeId ?? null)))
+		if (this.ctx.ingressSet.isIngress(nodeId))
 			throw new ConflictError(
-				`"${node.name}" is the edge node. It terminates ingress for every site, so it cannot be removed.`,
+				`"${node.name}" is an ingress node (an edge node). It terminates ingress for every site, so it cannot be removed.`,
 			);
 		const blockers = this.removalBlockers(nodeId);
 		if (blockers.length)
@@ -1127,7 +1130,7 @@ export class NodeService {
 	async desiredState(token: string): Promise<DesiredState> {
 		const node = this.authenticate(token);
 		const state = new DesiredStateContext(this.ctx, node);
-		const { now, allNodes, ingressId, isIngress, nodeById } = state;
+		const { now, allNodes, ingressId, isIngress } = state;
 		const routeState = new RouteState(state);
 		const ingress = new IngressState(state);
 		const releaseState = new ReleaseState(state);
@@ -1189,27 +1192,30 @@ export class NodeService {
 			linkTests: this.ctx.links.testsForNode(node.id),
 			...(await releaseState.appVolumes()),
 			...(await new DatabaseState(state).tasks()),
-			storageGateway: this.ctx.storage.gatewayForNode(node.id, isIngress, (id) => nodeById.get(id)?.publicAddress ?? null),
+			storageGateway: this.ctx.storage.gatewayForNode(node.id, isIngress, state.proxyAddress),
 			studio: this.ctx.databaseStudio.desiredForNode(node.id),
 			databaseGateway,
 			containerConsole: this.ctx.containerConsole.desiredForNode(node),
 			storageRoutes: [
-				...this.ctx.storage.routesForNode(node.id, isIngress, (id) => nodeById.get(id)?.publicAddress ?? null),
+				...this.ctx.storage.routesForNode(node.id, isIngress, state.proxyAddress),
 				// The registry host streams like public S3: no body limit, no buffering (G1).
-				...this.ctx.registry.routesForNode(node.id, isIngress, (id) => nodeById.get(id)?.publicAddress ?? null),
+				...this.ctx.registry.routesForNode(node.id, isIngress, state.proxyAddress),
 			],
 			// The registry's pull-through cache (G4): Podman mirrors docker.io/ghcr.io/quay.io through it.
 			registryMirror: this.ctx.registry.mirrorForNodes(),
 			storagePurges: this.ctx.storage.purgesForNode(node.id),
 			brokerPurges: this.ctx.brokers.purgesForNode(node.id),
 			kubernetesPurges: this.ctx.kubernetes.purgesForNode(node.id),
-			kubernetesRoutes: this.ctx.kubernetes.routesForNode(node.id, isIngress, (id) => nodeById.get(id)?.publicAddress ?? null),
+			kubernetesRoutes: this.ctx.kubernetes.routesForNode(node.id, isIngress, state.proxyAddress),
 			kubernetesManifests: this.ctx.kubernetes.manifestsForNode(node.id),
 			kubernetesComponentRequest: this.ctx.kubernetes.componentRequestForNode(node.id),
 			kubernetesBackupTasks: await this.ctx.kubernetes.backupTasksForNode(node.id),
 			mail: this.ctx.email.desiredForNode(node.id),
 			identity: node.id === identityNodeId ? identityDesiredForNode(this.ctx, node.id) : null,
 			domains: this.ctx.domains.desiredForProjects(servedProjectIds),
+			// Ingress-set payload (H17/G5): listeners, TLS and the platform route on every member,
+			// only while the flag is on and the agent declares `ingress-set` (gate strips it).
+			...(ingress.ingress() ? { ingress: ingress.ingress() } : {}),
 			serviceEndpoints: endpoints.serviceEndpointsForNode(node.id),
 			readEndpoints: endpoints.readEndpointsForNode(node.id),
 			nodeTrust: endpoints.nodeTrustForNode(node.id),

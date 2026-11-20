@@ -129,7 +129,7 @@ export class RouteState extends DesiredStatePart {
 					? (workload?.upstream ?? null)
 					: local
 						? null
-						: `http://${nodeById.get(target)?.publicAddress ?? '127.0.0.1:1'}`;
+						: `http://${this.state.proxyAddress(target) ?? '127.0.0.1:1'}`;
 			const rows = this.ctx.db
 				.select()
 				.from(deployments)

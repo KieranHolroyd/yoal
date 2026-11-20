@@ -1,13 +1,17 @@
 import { isNull } from 'drizzle-orm';
 import { nodes, projects, workloadReplicas, workloads, type nodes as nodesTable } from '@yoal/db';
 import type { CoreContext } from '../context.ts';
+import { featureEnabled } from '../config.ts';
 import { effectiveRuntime } from '../runtime-tier.ts';
 import { firstIngress, ingressNodeIds, isIngressNode } from '../ingress.ts';
 
 export type NodeRow = typeof nodesTable.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 /** The node columns every part of desired state reads about the rest of the fleet. */
-export type FleetNode = Pick<NodeRow, 'id' | 'mode' | 'publicAddress' | 'status' | 'capabilitiesJson' | 'rolesJson'>;
+export type FleetNode = Pick<
+	NodeRow,
+	'id' | 'mode' | 'publicAddress' | 'privateAddress' | 'status' | 'capabilitiesJson' | 'rolesJson'
+>;
 
 /**
  * What one node's desired state is built from: the node, the fleet around it, where each project's
@@ -30,6 +34,13 @@ export class DesiredStateContext {
 	readonly readyNodesByProject: Map<string, Set<string>>;
 	readonly holdsCopy: (projectId: string) => boolean;
 	readonly targetOf: (project: { id: string; runtime: string; runtimeName?: string | null; placement: string }) => string | null;
+	/**
+	 * Where another node reaches this node's Caddy: the overlay address on port 8080 when the
+	 * ingress set is on and the node has one, else its recorded public address. The ingress set
+	 * needs a private path because an edge's public address is its :443 listener, which would
+	 * bounce a plain cross-ingress proxy through the HTTP redirect.
+	 */
+	readonly proxyAddress: (nodeId: string) => string | null;
 	/** The projects this node serves (every project on the edge). */
 	readonly projectRows: ProjectRow[];
 
@@ -43,6 +54,7 @@ export class DesiredStateContext {
 				id: nodes.id,
 				mode: nodes.mode,
 				publicAddress: nodes.publicAddress,
+				privateAddress: nodes.privateAddress,
 				status: nodes.status,
 				capabilitiesJson: nodes.capabilitiesJson,
 				rolesJson: nodes.rolesJson,
@@ -100,7 +112,24 @@ export class DesiredStateContext {
 		/** This node holds a copy of the project's workload, whichever index it is. */
 		const holdsCopy = (projectId: string): boolean => replicaNodesByProject.get(projectId)?.includes(node.id) ?? false;
 
+		const ingressSet = featureEnabled(this.ctx.config, 'INGRESS_SET');
+		const proxyAddress = (nodeId: string): string | null => {
+			const target = nodeById.get(nodeId);
+			if (!target) return null;
+			if (ingressSet && target.privateAddress) return `${target.privateAddress}:8080`;
+			return target.publicAddress;
+		};
+
 		const targetOf = (project: { id: string; runtime: string; runtimeName?: string | null; placement: string }): string | null =>
+			// Every node in the ingress set serves the edge-placed static release itself (H17). With
+			// `INGRESS_SET` off only the compatibility first ingress does, which is exactly the old
+			// behaviour (`configuredEdge` can name a second node while the `edge` node still serves).
+			(effectiveRuntime(project) === 'static' &&
+			(project.placement === 'edge' || project.placement === 'auto') &&
+			isIngress &&
+			(node.id === ingressId || featureEnabled(this.ctx.config, 'INGRESS_SET'))
+				? node.id
+				: undefined) ??
 			// Every node holding a copy serves the project itself: it needs the route and the release,
 			// not only the node `workloads.node_id` names (copy 0).
 			(effectiveRuntime(project) !== 'static' && holdsCopy(project.id) ? node.id : undefined) ??
@@ -131,6 +160,7 @@ export class DesiredStateContext {
 		this.readyNodesByProject = readyNodesByProject;
 		this.holdsCopy = holdsCopy;
 		this.targetOf = targetOf;
+		this.proxyAddress = proxyAddress;
 		this.projectRows = projectRows;
 	}
 }

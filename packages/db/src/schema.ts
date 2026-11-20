@@ -74,6 +74,10 @@ export const nodes = sqliteTable(
 		diskInventoryJson: text('volume_inventory_json'),
 		/** Capabilities from the last heartbeat (JSON array); `[]` for agents that predate them. */
 		capabilitiesJson: text('capabilities_json'),
+		/** The desired-state version the node last reported applying (HA-PLAN W6 drift). */
+		actualStateVersion: integer('actual_state_version'),
+		/** When `actualStateVersion` last changed; the drift window counts from here. */
+		actualStateAt: integer('actual_state_at'),
 		/** Outstanding dashboard update target (D99); NULL when none is pending. */
 		updateVersion: text('update_version'),
 		/** Bumped on every update request, so a retry is a new task. */

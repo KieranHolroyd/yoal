@@ -1,4 +1,6 @@
 import type { DesiredState } from '@yoal/contracts';
+import { featureEnabled } from '../config.ts';
+import { nodeRoles } from '../ingress.ts';
 import { DesiredStatePart } from './context.ts';
 import type { DeploymentRoutes } from './routes.ts';
 import type { EnvironmentRoutes } from './environment-routes.ts';
@@ -14,7 +16,7 @@ export class IngressState extends DesiredStatePart {
 	 * copy (its socket or loopback port), or null when that copy is blocked.
 	 */
 	copyUpstreams(projectId: string, local: string | null): { everyCopyNode: string[]; replicaUpstreams: string[] } {
-		const { node, isIngress, nodeById, replicaNodesByProject, readyNodesByProject } = this.state;
+		const { node, isIngress, proxyAddress, replicaNodesByProject, readyNodesByProject } = this.state;
 		// Only an ingress balances across copies. A copy on this node is dialled directly (its
 		// socket or loopback port); the others through their node's Caddy over the overlay. A
 		// worker never fans out: it serves its own copy and nothing else.
@@ -29,8 +31,8 @@ export class IngressState extends DesiredStatePart {
 						.map((nodeId) =>
 							nodeId === node.id
 								? local
-								: nodeById.get(nodeId)?.publicAddress
-									? `http://${nodeById.get(nodeId)!.publicAddress}`
+								: proxyAddress(nodeId)
+									? `http://${proxyAddress(nodeId)}`
 									: null,
 						)
 						.filter((address): address is string => Boolean(address))
@@ -65,16 +67,69 @@ export class IngressState extends DesiredStatePart {
 
 	/** The internal gateway for studio and container-console fronts. */
 	databaseGateway(): DesiredState['databaseGateway'] {
-		const { node, isIngress, nodeById } = this.state;
-		// The native studio (D96) routes ride one internal gateway listener on the edge's loopback.
-		const publicAddressOf = (id: string) => nodeById.get(id)?.publicAddress ?? null;
+		const { node, isIngress, proxyAddress } = this.state;
+		// The native studio (D96) routes ride one internal gateway on every ingress's loopback.
+		const proxyAddressOf = (id: string) => proxyAddress(id);
 		return {
 			listen: isIngress ? `127.0.0.1:${this.ctx.config.databaseGatewayPort ?? 8082}` : null,
 			routes: [
-				...this.ctx.databaseStudio.gatewayRoutes(node.id, isIngress, publicAddressOf),
+				...this.ctx.databaseStudio.gatewayRoutes(node.id, isIngress, proxyAddressOf),
 				// Container console fronts (D127) share the internal gateway with `console.internal` hosts.
-				...this.ctx.containerConsole.gatewayRoutes(node.id, isIngress, publicAddressOf),
+				...this.ctx.containerConsole.gatewayRoutes(node.id, isIngress, proxyAddressOf),
 			],
 		};
+	}
+
+	/**
+	 * What a node in the ingress set renders for its public role (HA-PLAN H17/G5): extra public
+	 * listeners, TLS from ACME, and the platform route. Only while `INGRESS_SET` is on and for a
+	 * member, so a single-node install and a worker produce no field at all (golden-identical).
+	 *
+	 * No secret rides here: the ACME email and CA are public, the Cloudflare token arrives through
+	 * the node-authenticated activation endpoint (`IngressSetService.activation`).
+	 */
+	ingress(): DesiredState['ingress'] | undefined {
+		if (!featureEnabled(this.ctx.config, 'INGRESS_SET') || !this.state.isIngress) return undefined;
+		const { node, nodeById, ingressId } = this.state;
+		const email = this.ctx.config.acmeEmail;
+		const tls = email ? { email, ...(this.ctx.config.acmeCa ? { ca: this.ctx.config.acmeCa } : {}) } : null;
+		const platformHost = platformHostOf(this.ctx.config.platformOrigin);
+		// A control node dials its own socket. Any other ingress relays to the compatibility first
+		// ingress over HTTPS with the platform host as SNI; W9 replaces this with the control-node
+		// upstream list rendered to every ingress.
+		const control = node.mode === 'edge' || nodeRoles(node).includes('control');
+		const first = ingressId ? nodeById.get(ingressId) : undefined;
+		const relay = first ? addressHost(first.privateAddress ?? first.publicAddress) : null;
+		const upstream = control
+			? (this.ctx.config.platformUpstream ?? 'unix//run/yoal/control.sock')
+			: relay && tls
+				? `https://${relay}`
+				: null;
+		return {
+			listeners: [...(tls ? [':443'] : []), ...(node.privateAddress ? [`${node.privateAddress}:8080`] : [])],
+			tls,
+			platform: platformHost && upstream ? { host: platformHost, upstream } : null,
+		};
+	}
+}
+
+/** The host part of a node address, without a port; brackets stay on an IPv6 literal. */
+function addressHost(address: string | null): string | null {
+	const value = address?.trim();
+	if (!value) return null;
+	if (value.startsWith('[')) {
+		const end = value.indexOf(']');
+		return end > 0 ? value.slice(0, end + 1) : null;
+	}
+	const colon = value.indexOf(':');
+	return colon > 0 ? value.slice(0, colon) : value;
+}
+
+/** The dashboard/API hostname from the platform origin, or null when it has none. */
+function platformHostOf(origin: string): string | null {
+	try {
+		return new URL(origin).hostname || null;
+	} catch {
+		return null;
 	}
 }

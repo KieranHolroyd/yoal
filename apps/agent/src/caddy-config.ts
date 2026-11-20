@@ -33,6 +33,34 @@ export interface CompileAgentConfigOptions {
 
 const ACCESS_LOGGER = 'yoal_access';
 
+/**
+ * Rewrite the compiled platform route's dial to an HTTPS relay. `upstream` is
+ * `https://<host>[:port]`; SNI is the platform host, so the first ingress presents a certificate
+ * for it. Only used by a non-control ingress until W9 renders the control-node upstream list.
+ */
+function securePlatformRoute(server: HttpServerConfig, platform: { host: string; upstream: string }): void {
+	let url: URL;
+	try {
+		url = new URL(platform.upstream);
+	} catch {
+		return;
+	}
+	const host = url.hostname.startsWith('[') ? url.hostname : url.hostname;
+	const port = url.port || '443';
+	const dial = host.includes(':') && !host.startsWith('[') ? `[${host}]:${port}` : `${host}:${port}`;
+	const route = server.routes.find((candidate) => candidate['@id'] === 'platform');
+	if (!route?.handle) return;
+	route.handle = route.handle.map((handler) =>
+		handler.handler === 'reverse_proxy'
+			? {
+					...handler,
+					upstreams: [{ dial }],
+					transport: { protocol: 'http', tls: { server_name: platform.host } },
+				}
+			: handler,
+	);
+}
+
 type DesiredDomain = DesiredState['domains'][number];
 
 interface HttpServerConfig {
@@ -608,6 +636,12 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 		| undefined;
 	const server = apps?.http.servers.content;
 	if (!server) throw new Error('site-config compiler did not produce an HTTP server config');
+
+	// The platform route may be rendered as an HTTPS relay to another ingress (see the W6 payload:
+	// a non-control ingress relays `control.<domain>` to the first ingress until W9's upstream
+	// list). site-config dials a bare address, so add the TLS transport here: SNI is the platform
+	// host, which is what the relay's certificate covers.
+	if (options.platform?.upstream.startsWith('https://')) securePlatformRoute(server, options.platform);
 
 	// User-pool issuers (`auth.<contentDomain>`) rewrite to the control-plane OIDC and hosted paths.
 	// Put them before the platform route: an operator may point the platform at the same host.
