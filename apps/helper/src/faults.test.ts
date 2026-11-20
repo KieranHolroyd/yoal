@@ -437,15 +437,16 @@ describe('FaultInjector', () => {
 	});
 
 	test('pause-heartbeat without endpoints blocks the agent’s configured control-plane address and port', async () => {
+		writeFileSync(join(root, 'yoal.env'), 'YOAL_CONTROL_URL=http://ignored.example\nYOAL_DATA_DIR=/x\n');
 		writeFileSync(join(root, 'agent.env'), 'YOAL_CONTROL_URL=https://control.lab:8443\n');
 		const runner = fakeRunner();
-		const faults = injector(runner, { agentEnvPath: join(root, 'agent.env'), resolveIpv4: async () => ['172.30.147.11', '10.47.0.1'] });
+		const faults = injector(runner, { agentEnvPaths: [join(root, 'yoal.env'), join(root, 'agent.env'), join(root, 'missing.env')], resolveIpv4: async () => ['172.30.147.11', '10.47.0.1'] });
 		const fault = await faults.apply(parseFaultRequest('pause-heartbeat', { durationS: 20 }));
 		expect(fault.params).toMatchObject({ endpoints: [{ cidr: '172.30.147.11/32', port: 8443 }, { cidr: '10.47.0.1/32', port: 8443 }] });
 		expect(runner.calls[0]!.stdin).toContain('meta skuid "yoal" ip daddr 172.30.147.11/32 tcp dport 8443 drop');
 		expect(fault.evidence[0]).toContain('https://control.lab:8443');
 
-		writeFileSync(join(root, 'agent.env'), 'YOAL_CONTROL_SOCKET=/run/yoal/control.sock\n');
+		writeFileSync(join(root, 'agent.env'), 'YOAL_CONTROL_URL=http://172.30.147.11\nYOAL_CONTROL_SOCKET=/run/yoal/control.sock\n');
 		await expect(faults.apply(parseFaultRequest('pause-heartbeat', { durationS: 20 }))).rejects.toThrow(/unix socket/);
 		expect(faults.list()).toHaveLength(1);
 	});

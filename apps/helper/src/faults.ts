@@ -60,7 +60,8 @@ const TC_HANDLE = 'fa17:';
 const TC_NETEM_HANDLE = 'fa18:';
 const CLOCK_DROP_IN = '90-yoal-fault-clock.conf';
 const AGENT_USER = 'yoal';
-const AGENT_ENV = '/etc/yoal/agent.env';
+/** The agent unit's EnvironmentFiles, in the order systemd reads them (later wins). */
+const AGENT_ENV_FILES = ['/etc/yoal/yoal.env', '/etc/yoal/agent.env'];
 const AGENT_DATA_DIR = '/var/lib/yoal-agent';
 const LIBFAKETIME = [
 	'/usr/lib/aarch64-linux-gnu/faketime/libfaketime.so.1',
@@ -375,8 +376,8 @@ export interface FaultInjectorOptions {
 	mountInfoPath?: string;
 	/** Where a path-mode fill's loop backing file must live (default: `dataDir` and `/var/lib/yoal`). */
 	fillBackingRoots?: string[];
-	/** The agent's EnvironmentFile (default `/etc/yoal/agent.env`), for pause-heartbeat. */
-	agentEnvPath?: string;
+	/** The agent unit's EnvironmentFiles in order (default `/etc/yoal/yoal.env`, `/etc/yoal/agent.env`), for pause-heartbeat. */
+	agentEnvPaths?: string[];
 	/** libfaketime candidates (tests point it at a stub). */
 	faketimeLibraries?: string[];
 	/** Host name → IPv4 addresses, for a control-plane URL that is not an address literal. */
@@ -405,7 +406,7 @@ export class FaultInjector {
 	private readonly netDir: string;
 	private readonly mountInfoPath: string;
 	private readonly fillBackingRoots: string[];
-	private readonly agentEnvPath: string;
+	private readonly agentEnvPaths: string[];
 	private readonly faketimeLibraries: string[];
 	private readonly resolveIpv4: (host: string) => Promise<string[]>;
 	private readonly now: () => number;
@@ -425,7 +426,7 @@ export class FaultInjector {
 		this.netDir = options.netDir ?? '/sys/class/net';
 		this.mountInfoPath = options.mountInfoPath ?? '/proc/self/mountinfo';
 		this.fillBackingRoots = (options.fillBackingRoots ?? [this.dataDir, '/var/lib/yoal']).map((root) => root.replace(/\/+$/, ''));
-		this.agentEnvPath = options.agentEnvPath ?? AGENT_ENV;
+		this.agentEnvPaths = options.agentEnvPaths ?? AGENT_ENV_FILES;
 		this.faketimeLibraries = options.faketimeLibraries ?? LIBFAKETIME;
 		this.resolveIpv4 = options.resolveIpv4 ?? defaultResolveIpv4;
 		this.now = options.now ?? Date.now;
@@ -919,9 +920,15 @@ export class FaultInjector {
 
 	/** The agent's real control-plane address and port, from its own config. */
 	private async agentControlEndpoints(fault: ActiveFault): Promise<CidrEndpoint[]> {
-		const envText = await fs.readFile(this.agentEnvPath, 'utf8').catch(() => null);
-		if (envText === null) throw new FaultError(`cannot read the agent config ${this.agentEnvPath}; pass endpoints`);
-		const env = parseEnvFile(envText);
+		const env: Record<string, string> = {};
+		const read: string[] = [];
+		for (const path of this.agentEnvPaths) {
+			const text = await fs.readFile(path, 'utf8').catch(() => null);
+			if (text === null) continue;
+			Object.assign(env, parseEnvFile(text));
+			read.push(path);
+		}
+		if (read.length === 0) throw new FaultError(`cannot read the agent config (${this.agentEnvPaths.join(', ')}); pass endpoints`);
 		const nodeJson = env.YOAL_CONTROL_URL ? null : await fs.readFile(join(env.YOAL_DATA_DIR || AGENT_DATA_DIR, 'node.json'), 'utf8').catch(() => null);
 		const { url, source } = agentControlTarget(env, nodeJson);
 		const host = url.hostname.replace(/^\[|\]$/g, '');
@@ -929,7 +936,7 @@ export class FaultInjector {
 		const addresses = /^\d{1,3}(\.\d{1,3}){3}$/.test(host) ? [host] : await this.resolveIpv4(host);
 		if (addresses.length === 0) throw new FaultError(`${host} (the agent control-plane host) has no IPv4 address`);
 		const endpoints = addresses.slice(0, MAX_ENDPOINTS).map((address) => ({ cidr: parseCidr(address, 'control-plane address'), port }));
-		fault.evidence.push(`control plane from ${this.agentEnvPath} ${source}: ${url.origin} → ${endpoints.map((endpoint) => `${endpoint.cidr}:${endpoint.port}`).join(', ')}`);
+		fault.evidence.push(`control plane from ${read.join(' + ')} ${source}: ${url.origin} → ${endpoints.map((endpoint) => `${endpoint.cidr}:${endpoint.port}`).join(', ')}`);
 		return endpoints;
 	}
 
