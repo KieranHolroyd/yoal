@@ -227,6 +227,32 @@ describe('container unit', () => {
 		expect(unit).not.toContain('User=');
 	});
 
+	test('renders AddHost lines for attached services, and none when the feature is off', () => {
+		const base = {
+			workload: workload({
+				runtime: 'container',
+				release: null,
+				image: 'ghcr.io/acme/app:1.2.3',
+				socketActivation: false,
+				addHosts: [{ host: 'db-db_1', address: '10.89.0.1' }],
+			}),
+			image: 'ghcr.io/acme/app:1.2.3',
+			envFile: '/run/yoal-workloads/wld_abc123/env',
+			dataDir: '/var/lib/yoal-workloads/wld_abc123',
+			secretsDir: null,
+		};
+		const unit = renderContainerUnit(base);
+		expect(unit).toContain('AddHost=db-db_1:10.89.0.1');
+		// The Quadlet section, where Podman reads it; one line per attachment, never free text.
+		expect(unit.indexOf('AddHost=')).toBeGreaterThan(unit.indexOf('[Container]'));
+		expect(unit.indexOf('AddHost=')).toBeLessThan(unit.indexOf('EnvironmentFile='));
+		const off = renderContainerUnit({
+			...base,
+			workload: workload({ runtime: 'container', release: null, image: 'ghcr.io/acme/app:1.2.3', socketActivation: false }),
+		});
+		expect(off).not.toContain('AddHost=');
+	});
+
 	test('passes an AppArmor override only when the host needs it', () => {
 		const base = {
 			workload: workload({

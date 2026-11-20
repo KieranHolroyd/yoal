@@ -1,9 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createServer, connect, type Server } from 'node:net';
-import { ServiceForwarder } from './endpoints.ts';
+import { ServiceForwarder, type NodeTrustMaterial } from './endpoints.ts';
+import { TestPki } from './test-pki.ts';
 
 const servers: Server[] = [];
 const forwarders: ServiceForwarder[] = [];
+const pkis: TestPki[] = [];
 
 async function echoServer(): Promise<number> {
 	const server = createServer((socket) => socket.pipe(socket));
@@ -19,6 +21,8 @@ function readOnce(port: number, message: string): Promise<string> {
 		const socket = connect({ host: '127.0.0.1', port });
 		socket.setEncoding('utf8');
 		socket.on('error', reject);
+		socket.on('end', () => reject(new Error('closed before a reply')));
+		socket.on('close', () => reject(new Error('closed before a reply')));
 		socket.on('connect', () => socket.write(message));
 		socket.once('data', (data) => {
 			socket.end();
@@ -30,6 +34,7 @@ function readOnce(port: number, message: string): Promise<string> {
 afterEach(() => {
 	for (const forwarder of forwarders.splice(0)) forwarder.close();
 	for (const server of servers.splice(0)) server.close();
+	for (const pki of pkis.splice(0)) pki.dispose();
 });
 
 describe('ServiceForwarder', () => {
@@ -282,5 +287,157 @@ describe('ServiceForwarder read endpoints (HA-PLAN H24)', () => {
 		expect(replies.sort()).toEqual(['r1:x', 'r1:x', 'r2:x', 'r2:x']);
 		forwarder.converge([], [], { readEndpoints: [read([upstream('n1', dead), upstream('n0', primary)])] });
 		expect(await readOnce(port, 'y')).toBe('p:y');
+	});
+});
+
+describe('ServiceForwarder install-CA trust (HA-PLAN H24)', () => {
+	function pki(): TestPki {
+		const created = new TestPki();
+		pkis.push(created);
+		return created;
+	}
+
+	/** One node's install-CA material, with an option to revoke the provider instead. */
+	function material(ca: TestPki, nodeId: string, revoked: string[] = []): { trust: NodeTrustMaterial; serial: string } {
+		const leaf = ca.leaf(nodeId);
+		return {
+			serial: leaf.serial,
+			trust: {
+				keyPem: leaf.keyPem,
+				certPem: leaf.certPem,
+				caBundlePem: ca.caPem,
+				revokedSerials: new Set(revoked),
+				generation: 1,
+			},
+		};
+	}
+
+	function provider(port: number, target: number, allowed: string[] = ['nod_a']) {
+		return {
+			id: 'svc_ca',
+			listenAddress: '127.0.0.1',
+			listenPort: port,
+			targetPort: target,
+			allowedClientFingerprints: [],
+			clientAuth: 'install-ca' as const,
+			allowedClientNodeIds: allowed,
+		};
+	}
+
+	function consumer(port: number, upstreamPort: number, extra: Record<string, unknown> = {}) {
+		return {
+			id: 'sep_ca',
+			kind: 'database' as const,
+			serviceId: 'db_ca',
+			localPort: port,
+			upstream: { nodeId: 'nod_b', address: '127.0.0.1', port: upstreamPort },
+			tlsFingerprint: null,
+			trust: 'install-ca' as const,
+			...extra,
+		};
+	}
+
+	test.skipIf(!Bun.which('openssl'))('a CA leaf on each node forwards without any pinned fingerprint', async () => {
+		const ca = pki();
+		const target = await echoServer();
+		const providerPort = await freePort();
+		const localPort = await freePort();
+		const server = new ServiceForwarder();
+		const client = new ServiceForwarder();
+		forwarders.push(server, client);
+		server.converge([], [provider(providerPort, target)], { trust: material(ca, 'nod_b').trust });
+		client.converge([consumer(localPort, providerPort)], [], { trust: material(ca, 'nod_a').trust });
+		await Bun.sleep(50);
+		expect(await readOnce(localPort, 'over-ca')).toBe('over-ca');
+	});
+
+	test.skipIf(!Bun.which('openssl'))('a revoked provider leaf fails closed, and the next upstream is tried', async () => {
+		const ca = pki();
+		const target = await echoServer();
+		const providerPort = await freePort();
+		const localPort = await freePort();
+		const server = new ServiceForwarder();
+		const client = new ServiceForwarder();
+		forwarders.push(server, client);
+		const providerMaterial = material(ca, 'nod_b');
+		server.converge([], [provider(providerPort, target)], { trust: providerMaterial.trust });
+		client.converge([consumer(localPort, providerPort)], [], { trust: material(ca, 'nod_a', [providerMaterial.serial]).trust });
+		await Bun.sleep(50);
+		await expect(readOnce(localPort, 'x')).rejects.toBeTruthy();
+	});
+
+	test.skipIf(!Bun.which('openssl'))('a provider whose certificate names another node is refused', async () => {
+		const ca = pki();
+		const target = await echoServer();
+		const providerPort = await freePort();
+		const localPort = await freePort();
+		const server = new ServiceForwarder();
+		const client = new ServiceForwarder();
+		forwarders.push(server, client);
+		// The listener presents a leaf for nod_c while the endpoint names nod_b.
+		server.converge([], [provider(providerPort, target)], { trust: material(ca, 'nod_c').trust });
+		client.converge([consumer(localPort, providerPort)], [], { trust: material(ca, 'nod_a').trust });
+		await Bun.sleep(50);
+		await expect(readOnce(localPort, 'x')).rejects.toBeTruthy();
+	});
+
+	test.skipIf(!Bun.which('openssl'))('a bundle from another CA is refused', async () => {
+		const ca = pki();
+		const other = pki();
+		const target = await echoServer();
+		const providerPort = await freePort();
+		const localPort = await freePort();
+		const server = new ServiceForwarder();
+		const client = new ServiceForwarder();
+		forwarders.push(server, client);
+		server.converge([], [provider(providerPort, target)], { trust: material(ca, 'nod_b').trust });
+		client.converge([consumer(localPort, providerPort)], [], { trust: material(other, 'nod_a').trust });
+		await Bun.sleep(50);
+		await expect(readOnce(localPort, 'x')).rejects.toBeTruthy();
+	});
+
+	test.skipIf(!Bun.which('openssl'))('a consumer without a leaf never dials; a provider without one refuses', async () => {
+		const ca = pki();
+		const target = await echoServer();
+		const providerPort = await freePort();
+		const localPort = await freePort();
+		const server = new ServiceForwarder();
+		const client = new ServiceForwarder();
+		forwarders.push(server, client);
+		// The provider has no leaf: it must not serve an install-ca listener.
+		server.converge([], [provider(providerPort, target)], { trust: null });
+		client.converge([consumer(localPort, providerPort)], [], { trust: null });
+		await Bun.sleep(50);
+		await expect(readOnce(localPort, 'x')).rejects.toBeTruthy();
+	});
+
+	test.skipIf(!Bun.which('openssl'))('the provider allows only the client node ids listed', async () => {
+		const ca = pki();
+		const target = await echoServer();
+		const providerPort = await freePort();
+		const localPort = await freePort();
+		const server = new ServiceForwarder();
+		const client = new ServiceForwarder();
+		forwarders.push(server, client);
+		server.converge([], [provider(providerPort, target, ['nod_c'])], { trust: material(ca, 'nod_b').trust });
+		client.converge([consumer(localPort, providerPort)], [], { trust: material(ca, 'nod_a').trust });
+		await Bun.sleep(50);
+		await expect(readOnce(localPort, 'x')).rejects.toBeTruthy();
+	});
+
+	test('with the flag off (no trust, no gateway) the forwarder behaves as before', async () => {
+		const target = await echoServer();
+		const providerPort = await freePort();
+		const localPort = await freePort();
+		const forwarder = new ServiceForwarder();
+		forwarders.push(forwarder);
+		const result = forwarder.converge([plainEndpoint('sep_off', localPort, target)], [provider(providerPort, target, [])], {
+			trust: null,
+			gatewayAllowed: false,
+			readEndpoints: [],
+		});
+		expect(result).toMatchObject({ started: 2, stopped: 0 });
+		expect(forwarder.listening()[localPort]).toEqual(['127.0.0.1']);
+		expect(await readOnce(localPort, 'unchanged')).toBe('unchanged');
 	});
 });

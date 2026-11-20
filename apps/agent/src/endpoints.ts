@@ -147,7 +147,9 @@ export class ServiceForwarder {
 
 		for (const [port, entry] of this.providers) {
 			const provider = wantedProviders.get(port);
-			if (provider && provider.listenAddress === entry.provider.listenAddress) continue;
+			// Reuse only if the address and the transport (plain versus TLS) are unchanged; a CA leaf
+			// appearing or disappearing moves an install-ca listener between them.
+			if (provider && provider.listenAddress === entry.provider.listenAddress && this.providerTls(provider) === entry.tls) continue;
 			closeServer(entry.server);
 			this.providers.delete(port);
 			result.stopped += 1;
@@ -329,7 +331,7 @@ export class ServiceForwarder {
 	private listenProvider(provider: ServiceProvider): ProviderEntry {
 		const bind = provider.listenAddress;
 		const port = provider.listenPort;
-		if (!this.certificate) {
+		if (!this.providerTls(provider)) {
 			const entry: ProviderEntry = { provider, server: createServer(), tls: false, contextKey: 'plain' };
 			entry.server.on('connection', (socket: Socket) => {
 				// Without a node certificate there is no TLS to check; `install-ca` fails closed.
@@ -378,6 +380,12 @@ export class ServiceForwarder {
 		if (trust.revokedSerials.has(normalizeSerial(certificate.serialNumber ?? ''))) return 'client certificate is revoked';
 		const allowed = provider.allowedClientNodeIds ?? [];
 		return certificateNodeIds(certificate).some((id) => allowed.includes(id)) ? null : 'client node is not allowed';
+	}
+
+	/** Whether this provider listener must speak TLS: install-ca needs CA material or a pinned identity. */
+	private providerTls(provider: ServiceProvider): boolean {
+		if ((provider.clientAuth ?? 'pinned') === 'install-ca') return this.trust !== null || this.certificate !== undefined;
+		return this.certificate !== undefined;
 	}
 
 	private providerContext(provider: ServiceProvider): { key: string; context: SecureContextOptions } {

@@ -23,6 +23,17 @@ import { normalizeSerial, type NodeTrustMaterial } from './endpoints.ts';
 /** Node ids reach `openssl -subj` and a URI SAN; anything else gets no CSR. */
 const NODE_ID = /^[A-Za-z0-9_-]{1,100}$/;
 const DAY_MS = 86_400_000;
+const PEM_CERTIFICATE_BLOCK = /-----BEGIN CERTIFICATE-----[\s\S]+?-----END CERTIFICATE-----/g;
+
+interface LeafCheck {
+	/** Valid key, chain, URI SAN and dates; presentable to a peer. */
+	usable: boolean;
+	/** Normalized serial when usable, else null. */
+	serial: string | null;
+	notAfter: number;
+	/** `notAfter` minus the renewal window: the CSR starts when now passes this. */
+	renewAt: number;
+}
 
 export interface NodeCaOptions {
 	/** openssl on PATH, for the CSR. Null means no CSR can be made (and no capability). */
@@ -72,8 +83,10 @@ export class NodeCaIdentity {
 		if (!trust || !this.available()) return null;
 		const keyPem = this.ensureKey();
 		if (!keyPem || !trust.certificatePem) return null;
-		const leaf = this.inspect(trust.certificatePem, keyPem);
-		if (!leaf.matches || leaf.notAfter <= this.now()) return null;
+		const leaf = this.inspect(trust.certificatePem, keyPem, trust.caBundlePem);
+		// A leaf that is the wrong key, names another node or does not chain to the bundle would be
+		// refused by peers; presenting it is worse than failing closed with no material at all.
+		if (!leaf.usable || revoked(trust, leaf.serial)) return null;
 		this.store(trust.certificatePem);
 		return {
 			keyPem,
@@ -87,7 +100,7 @@ export class NodeCaIdentity {
 	/**
 	 * The CSR to send in this heartbeat, or null. Sent only while desired state carries `nodeTrust`
 	 * (so a node with the feature off sends exactly what it sent before), and repeated every
-	 * heartbeat until a matching, not-yet-due leaf arrives.
+	 * heartbeat until a usable, not-yet-due leaf arrives.
 	 */
 	request(trust: NodeTrustDesired | undefined): NodeCsr | null {
 		if (!trust || !this.available()) return null;
@@ -95,9 +108,9 @@ export class NodeCaIdentity {
 		if (!keyPem) return null;
 		let reason: NodeCsr['reason'] = 'enrol';
 		if (trust.certificatePem) {
-			const leaf = this.inspect(trust.certificatePem, keyPem);
-			if (!leaf.matches) reason = 'rekey';
-			else if (leaf.notAfter - NODE_CERT_RENEW_BEFORE_DAYS * DAY_MS > this.now()) return null;
+			const leaf = this.inspect(trust.certificatePem, keyPem, trust.caBundlePem);
+			if (!leaf.usable || revoked(trust, leaf.serial)) reason = 'rekey';
+			else if (leaf.renewAt > this.now()) return null;
 			else reason = 'renew';
 		}
 		const pem = this.csrPem(keyPem);
@@ -124,14 +137,33 @@ export class NodeCaIdentity {
 		}
 	}
 
-	private inspect(certPem: string, keyPem: string): { matches: boolean; notAfter: number } {
+	/**
+	 * Whether a leaf is usable by this node: its public key is this node's, it chains to one of the
+	 * CAs in the bundle, its URI SAN names this node, and it is inside its validity window.
+	 */
+	private inspect(certPem: string, keyPem: string, bundlePem: string): LeafCheck {
+		const unusable: LeafCheck = { usable: false, serial: null, notAfter: 0, renewAt: 0 };
 		try {
 			const certificate = new X509Certificate(certPem);
 			const leafKey = certificate.publicKey.export({ type: 'spki', format: 'der' }) as Buffer;
 			const ownKey = createPublicKey(createPrivateKey(keyPem)).export({ type: 'spki', format: 'der' }) as Buffer;
-			return { matches: leafKey.equals(ownKey), notAfter: new Date(certificate.validTo).getTime() };
+			const notAfter = new Date(certificate.validTo).getTime();
+			const notBefore = new Date(certificate.validFrom).getTime();
+			const now = this.now();
+			const usable =
+				leafKey.equals(ownKey) &&
+				notBefore <= now &&
+				notAfter > now &&
+				certificateNamesNode(certificate, this.nodeId) &&
+				chainsToBundle(certificate, bundlePem, now);
+			return {
+				usable,
+				serial: usable ? normalizeSerial(certificate.serialNumber) : null,
+				notAfter,
+				renewAt: notAfter - NODE_CERT_RENEW_BEFORE_DAYS * DAY_MS,
+			};
 		} catch {
-			return { matches: false, notAfter: 0 };
+			return unusable;
 		}
 	}
 
@@ -171,4 +203,38 @@ export class NodeCaIdentity {
 		this.csr = { forKey: keyPem, pem };
 		return pem;
 	}
+}
+
+/** Whether a serial appears in the revoked list, comparing normalized forms. */
+function revoked(trust: NodeTrustDesired, serial: string | null): boolean {
+	return serial !== null && trust.revokedSerials.some((entry) => normalizeSerial(entry) === serial);
+}
+
+/** Whether the leaf's URI SANs include `yoal://node/<nodeId>` (the identity peers check). */
+function certificateNamesNode(certificate: X509Certificate, nodeId: string): boolean {
+	const names = certificate.subjectAltName ?? '';
+	const wanted = nodeCertificateUri(nodeId);
+	for (const part of names.split(',')) {
+		if (part.trim() === `URI:${wanted}`) return true;
+	}
+	return false;
+}
+
+/**
+ * Whether the leaf was signed by one of the CA certificates in the bundle and is currently valid.
+ * The bundle is public material from desired state; a leaf that does not chain to it is never
+ * presented (peers would refuse it, and a mis-issued leaf could name another node).
+ */
+function chainsToBundle(certificate: X509Certificate, bundlePem: string, now: number): boolean {
+	for (const match of bundlePem.match(PEM_CERTIFICATE_BLOCK) ?? []) {
+		try {
+			const authority = new X509Certificate(match);
+			if (new Date(authority.validFrom).getTime() > now) continue;
+			if (new Date(authority.validTo).getTime() <= now) continue;
+			if (certificate.checkIssued(authority) && certificate.verify(authority.publicKey)) return true;
+		} catch {
+			// A block that is not a certificate cannot be the issuer; try the next one.
+		}
+	}
+	return false;
 }

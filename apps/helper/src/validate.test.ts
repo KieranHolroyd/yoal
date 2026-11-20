@@ -15,6 +15,7 @@ import {
 	orgNetworkName,
 	parseActivation,
 	parseApplyRequest,
+	parseAddHosts,
 	parseWorkload,
 	renderRegistryAuthFile,
 	storageAlias,
@@ -154,6 +155,59 @@ describe('parseWorkload', () => {
 		expect(() => parseWorkload(workloadInput({ healthPath: 'health' }))).toThrow(/start with/);
 		expect(() => parseWorkload(workloadInput({ healthPath: '/a b' }))).toThrow(ValidationError);
 		expect(() => parseWorkload(workloadInput({ upstream: 42 }))).toThrow(ValidationError);
+	});
+});
+
+describe('workload.addHosts (HA-PLAN H24)', () => {
+	const container = () => workloadInput({ runtime: 'container', release: null, image: 'ghcr.io/acme/app:1.2.3' });
+
+	test('accepts structured managed-service aliases with a private gateway address', () => {
+		const workload = parseWorkload({
+			...container(),
+			addHosts: [
+				{ host: 'db-db_1', address: '10.89.0.1' },
+				{ host: 's3-store_2', address: '172.20.0.1' },
+			],
+		});
+		expect(workload.addHosts).toEqual([
+			{ host: 'db-db_1', address: '10.89.0.1' },
+			{ host: 's3-store_2', address: '172.20.0.1' },
+		]);
+		// An empty list is the same as absent: no field and no AddHost line.
+		expect('addHosts' in parseWorkload({ ...container(), addHosts: [] })).toBe(false);
+	});
+
+	test('only container app workloads take AddHost entries', () => {
+		expect(() => parseWorkload({ ...workloadInput(), addHosts: [{ host: 'db-db_1', address: '10.89.0.1' }] })).toThrow(
+			/Only container workloads/,
+		);
+		expect(() => parseWorkload({ ...databaseInput(), addHosts: [{ host: 'db-db_1', address: '10.89.0.1' }] })).toThrow(
+			/Managed services/,
+		);
+	});
+
+	test('refuses injection, arbitrary names, public addresses and duplicate names', () => {
+		const add = (host: string, address: string) => parseWorkload({ ...container(), addHosts: [{ host, address }] });
+		expect(() => add('db-1:10.0.0.1\nExec=/bin/sh', '10.89.0.1')).toThrow(/managed service alias/);
+		expect(() => add('db.example.com', '10.89.0.1')).toThrow(/managed service alias/);
+		expect(() => add('DB-db_1', '10.89.0.1')).toThrow(/managed service alias/);
+		expect(() => add('db-db_1', '8.8.8.8')).toThrow(/private IPv4/);
+		expect(() => add('db-db_1', '10.89.0.1 evil')).toThrow(/private IPv4/);
+		expect(() =>
+			parseWorkload({
+				...container(),
+				addHosts: [
+					{ host: 'db-db_1', address: '10.89.0.1' },
+					{ host: 'db-db_1', address: '10.89.0.2' },
+				],
+			}),
+		).toThrow(/names db-db_1 twice/);
+	});
+
+	test('caps the list and rejects a non-array', () => {
+		const entries = Array.from({ length: 65 }, (_, index) => ({ host: `db-db_${index}`, address: '10.89.0.1' }));
+		expect(() => parseWorkload({ ...container(), addHosts: entries })).toThrow(/at most 64/);
+		expect(() => parseAddHosts('db-db_1')).toThrow(/must be an array/);
 	});
 });
 

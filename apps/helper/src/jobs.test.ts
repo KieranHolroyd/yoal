@@ -228,6 +228,35 @@ describe('rendering', () => {
 		expect(podman.filter((arg) => arg.startsWith('--volume=') && !arg.includes('/run/yoal-secrets')).some((arg) => /:(Z|U)|,U/.test(arg))).toBe(false);
 		expect(podman.slice(-5)).toEqual(['ghcr.io/acme/api:1', 'bun', 'scripts/migrate.ts', '--to', 'latest version']);
 	});
+
+	test('a container release run reaches db-<id> through the app’s AddHost entries', () => {
+		const { run, workload } = parseJobRequest(
+			requestInput({
+				workload: {
+					runtime: 'container',
+					image: 'ghcr.io/acme/api:1',
+					release: null,
+					socketActivation: false,
+					addHosts: [{ host: 'db-db_1', address: '10.89.0.1' }],
+				},
+			}),
+		);
+		const options = {
+			run,
+			workload,
+			jobDir: `/run/yoal-workloads/jobs/${RUN}`,
+			secrets: [],
+			volumeMounts: [],
+			expandFlag: true,
+			systemdRunPath: '/usr/bin/systemd-run',
+			podmanPath: '/usr/bin/podman',
+			dataDir: '/var/lib/yoal-workloads/wld_abc123',
+			apparmorProfile: null,
+		};
+		expect(renderContainerJobArgs(options)).toContain('--add-host=db-db_1:10.89.0.1');
+		// Absent entries (the flag off) leave the argv exactly as before.
+		expect(renderContainerJobArgs({ ...options, workload: { ...workload, addHosts: undefined } }).some((arg) => arg.startsWith('--add-host='))).toBe(false);
+	});
 });
 
 describe('status', () => {
