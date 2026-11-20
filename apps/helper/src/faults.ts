@@ -738,7 +738,7 @@ export class FaultInjector {
 		);
 	}
 
-	/** Leftovers no record names: nft tables, qdiscs, clock drop-ins, scratch disks and their loop devices. */
+	/** Leftovers no record names: nft tables, qdiscs, clock drop-ins, scratch disks. */
 	private async sweepByName(swept: string[], failed: { id: string; error: string }[]): Promise<void> {
 		const owned = (kind: string, name: string) => [...this.active.values()].some((fault) => kind === 'nft' && nftTableName(fault.id) === name);
 		const tables = (await this.runner.run(['nft', 'list', 'tables'])).stdout;
@@ -781,14 +781,10 @@ export class FaultInjector {
 				failed.push({ id: `disk:${entry}`, error: message(error) });
 			}
 		}
-		// A loop device still bound to a scratch image whose directory is already gone.
-		for (const { device, backing } of await this.loopDevices()) {
-			if (!backing.startsWith(`${this.dataDir}/scratch-`)) continue;
-			if ([...scratches].some((dir) => backing.startsWith(`${dir}/`))) continue;
-			const result = await this.runner.run(['losetup', '-d', device]);
-			if (result.code === 0) swept.push(`loop:${device}`);
-			else failed.push({ id: `loop:${device}`, error: (result.stderr || result.stdout).trim().slice(0, 200) });
-		}
+		// No sweep of loop devices by backing path: every lab node shares one kernel, so the same path
+		// names a different node's scratch disk on each node, and only `losetup -j` (which matches the
+		// backing file's device and inode, as this namespace sees it) can tell this node's own apart;
+		// unfillScratch uses that. Scratch disks are mounted with `-o loop` (autoclear) besides.
 	}
 
 	// --- disk ----------------------------------------------------------------------------------
@@ -884,17 +880,6 @@ export class FaultInjector {
 		const still = (await this.runner.run(['losetup', '-j', image])).stdout.trim();
 		if (still) throw new FaultError(`loop device still attached to ${image}: ${still.slice(0, 200)}`);
 		await fs.rm(dir, { recursive: true, force: true });
-	}
-
-	/** Every loop device and its backing file, as this namespace sees it. */
-	private async loopDevices(): Promise<{ device: string; backing: string }[]> {
-		const listed = await this.runner.run(['losetup', '--list', '--noheadings', '--raw', '--output', 'NAME,BACK-FILE']);
-		if (listed.code !== 0) return [];
-		return listed.stdout
-			.split('\n')
-			.map((line) => line.trim().split(/\s+/))
-			.filter((fields): fields is [string, string] => /^\/dev\/loop\d+$/.test(fields[0] ?? '') && Boolean(fields[1]))
-			.map(([device, backing]) => ({ device, backing: unescapeRaw(backing) }));
 	}
 
 	private async isMounted(path: string): Promise<boolean> {

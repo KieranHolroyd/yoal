@@ -385,6 +385,15 @@ describe('FaultInjector', () => {
 		expect(((await cleared!.json()) as { failed: { id: string }[] }).failed.map((entry) => entry.id)).toEqual([fault.id]);
 	});
 
+	test('a sweep never detaches a loop device by its backing path (another node on the same kernel may own it)', async () => {
+		const runner = fakeRunner((argv) =>
+			argv[0] === 'losetup' && argv.includes('--list') ? { stdout: `/dev/loop0 ${join(root, 'data', 'scratch-0badc0de', 'disk.img')}\n` } : {},
+		);
+		const result = await injector(runner).clearAll();
+		expect(result.swept).toEqual([]);
+		expect(runner.calls.some((call) => call.argv[0] === 'losetup' && call.argv.includes('-d'))).toBe(false);
+	});
+
 	// --- fill-disk bounds ----------------------------------------------------------------------
 
 	test('fill-disk scratch mode uses mount -o loop (autoclear), and caps fills by count and total size', async () => {
