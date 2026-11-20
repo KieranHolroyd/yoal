@@ -41,4 +41,8 @@ CREATE TABLE IF NOT EXISTS node_ca_certificates (
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS node_ca_certificates_node_idx ON node_ca_certificates (node_id, not_after);
+-- At most one unrevoked leaf per node and key: a re-sent CSR is answered with the existing leaf,
+-- and a renewal for the same key revokes (supersedes) the old leaf in the same transaction.
+CREATE UNIQUE INDEX IF NOT EXISTS node_ca_certificates_live_key_idx
+  ON node_ca_certificates (node_id, public_key_sha256) WHERE revoked_at IS NULL;
 CREATE INDEX IF NOT EXISTS node_ca_certificates_revoked_idx ON node_ca_certificates (revoked_at);

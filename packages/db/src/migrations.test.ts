@@ -328,3 +328,23 @@ describe('HA Wave 1 migrations 0118–0120 (docs/build-plan/HA-WAVE-1.md)', () =
 		sqlite.close();
 	});
 });
+
+describe('node_ca_certificates (reviewer item 9)', () => {
+	test('one live leaf per node and public key; a revoked one does not block a re-issue', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		migrate(sqlite);
+		const issue = (serial: string, nodeId: string, key: string) =>
+			sqlite.run(
+				`INSERT INTO node_ca_certificates (serial, ca_id, node_id, cert_pem, public_key_sha256, not_before, not_after, created_at)
+				 VALUES (?, 'ca_1', ?, 'pem', ?, 1, 2, 1)`,
+				[serial, nodeId, key],
+			);
+		issue('aa01', 'nod_1', 'k1');
+		expect(() => issue('aa02', 'nod_1', 'k1')).toThrow();
+		issue('aa03', 'nod_1', 'k2');
+		issue('aa04', 'nod_2', 'k1');
+		sqlite.run("UPDATE node_ca_certificates SET revoked_at = 5 WHERE serial = 'aa01'");
+		issue('aa05', 'nod_1', 'k1');
+		sqlite.close();
+	});
+});

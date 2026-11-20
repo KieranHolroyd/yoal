@@ -117,7 +117,10 @@ export const nodeCa = sqliteTable('node_ca', {
 	updatedAt: integer('updated_at').notNull().$defaultFn(now),
 });
 
-/** Leaves the install CA signed from node CSRs (0118); public material only. */
+/**
+ * Leaves the install CA signed from node CSRs (0118); public material only. A partial unique index
+ * allows one unrevoked leaf per `(nodeId, publicKeySha256)`.
+ */
 export const nodeCaCertificates = sqliteTable(
 	'node_ca_certificates',
 	{
