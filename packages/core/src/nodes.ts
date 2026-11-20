@@ -69,7 +69,7 @@ import { routeBlockReason, tcpPortWinners } from './route-guard.ts';
 import { allocateOverlayAddress, buildWireguardState, type OverlayNode } from './overlay.ts';
 import { effectiveAccessMode } from './access.ts';
 import { newId, randomToken, sha256Hex, parseJson } from './util.ts';
-import { assertJoinKeyFree, retriedJoin } from './node-join.ts';
+import { assertJoinKeyFree, assertJoinTokenUnused } from './node-join.ts';
 import { IDENTITY_NODE_SETTING, identityDesiredForNode } from './identity-desired.ts';
 import type { ParsedConfig } from '@yoal/site-config';
 
@@ -422,16 +422,8 @@ export class NodeService {
 		mode: 'edge' | 'worker';
 		wireguard?: WireguardState;
 	} {
-		// A retried join gets its node back; a key another node holds is a 409, not a 500 (F11).
-		const retried = retriedJoin(this.ctx, input);
-		if (retried) {
-			const cfg = this.ctx.cluster.get().overlay;
-			return {
-				...retried,
-				controlUrl: this.ctx.config.platformOrigin,
-				...(input.networkMode === 'yoal' ? { wireguard: buildWireguardState(retried.nodeId, this.overlayNodes(), cfg.cidr, cfg) } : {}),
-			};
-		}
+		// A used token or a key another node holds is a 409 that says why, not a 500 (F11).
+		assertJoinTokenUnused(this.ctx, input);
 		const tokenHash = sha256Hex(input.token);
 		const join = this.ctx.sqlite
 			.query<{ id: string; expiresAt: number; usedAt: number | null }, [string]>(
