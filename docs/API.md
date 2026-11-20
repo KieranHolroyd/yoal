@@ -113,8 +113,8 @@ project's public DSN key (`X-Sentry-Auth` or `?sentry_key=`), never a session co
 | POST | `/shares/:name/mounts` | platform admin **session** | `{ node, diskName? }`: mount at `/mnt/yoal-shares/<name>` on that node. A read-write share becomes a `bulk`, network disk named `diskName` (default: the share name) once mounted; a read-only share stays a plain mount (docs/STORAGE.md §3) |
 | DELETE | `/shares/:name/mounts/:node` | platform admin **session** | remove the share's disk (refused while anything is stored on it), then unmount |
 | PUT/DELETE | `/shares/:name/mounts/:node/disk` | platform admin **session** | `{ diskName }` uses a mounted share as a disk (**Use as disk**); DELETE stops using it as a disk (**Stop using as disk**; refused while anything is stored on it; the share stays mounted) |
-| GET | `/cluster/config` | platform admin | cluster tunables: overlay, endpoints, replicas, database/storage limits, lease, failover, shares |
-| PATCH | `/cluster/config` | platform admin **session** | section patches; unknown keys rejected; endpoint port range must have min < max |
+| GET | `/cluster/config` | platform admin | cluster tunables: overlay, endpoints, replicas, database/storage limits, lease, failover, scheduling, updates |
+| PATCH | `/cluster/config` | platform admin **session** | section patches; only the keys sent change; an unknown section is rejected; keys nothing reads (HA-PLAN F6) are refused unless at their old default; the endpoint port range must have min < max and not overlap another platform range |
 | GET | `/ingress/status` | platform admin | ingress driver, hold-down policy and ingress-node readiness (C5) |
 | GET | `/ha/status` | platform admin | the failover controller (`FailoverStatusView`): switch, lease epoch/holder, policy, per-node silence and copies, ingress record set, database promotion candidates, last 50 `failover_events` (C8) |
 | GET | `/scheduling` | platform admin | fleet capacity (`SchedulingView`): per node the admission ceiling, reserved and live memory, CPU, copies and how many may move; every copy with the reason it is pinned, if any; and the moves a rebalance would make (D214) |
@@ -429,6 +429,22 @@ MCP has `get_email_status`, `list_email_domains`, `get_email_domain`, `create_em
 `get_email_message`, `list_email_suppressions`, `remove_email_suppression` (confirmed),
 `list_email_addresses`, `add_email_address` and `remove_email_address` (both confirmed). It has no
 credential, settings, org-state or access-request tools.
+
+## Docs (`/api/v1/docs`)
+
+The user docs this platform version shipped with, the same content as MCP `search_docs` and
+`read_docs` (HA-PLAN F5). Any signed-in caller; anonymous requests get `401`, so the version is not
+disclosed.
+
+| Method | Path | Returns |
+|---|---|---|
+| GET | `/docs` | `{ version, fingerprint, bundleFingerprint, pages, engine, sections }`, where `sections` is the table of contents (as MCP `read_docs` without a slug) |
+| GET | `/docs?q=&limit=&section=` | `{ version, query, results }`, ranked sections (`limit` 1–50, default 8) |
+| GET | `/docs/:slug?anchor=` | one page, or one section of it, as Markdown; `404` when either is unknown |
+| GET | `/docs/bundle` | `{ version, fingerprint, bundle }`: every page split into sections, the shape `yoal docs` searches; `fingerprint` equals `bundleFingerprint` above |
+
+`yoal docs` compares `bundleFingerprint` with its own bundle's and, when they differ, reads the
+platform's bundle instead (cached by fingerprint).
 
 ## CLI browser login (`/cli/login`, `/api/v1/cli/token`)
 

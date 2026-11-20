@@ -1,5 +1,12 @@
 import { describe, expect, test } from 'bun:test';
-import { PLATFORM_HOST_PORTS, appHostPorts, appPortProblem, platformPortOwner } from './host-ports.ts';
+import {
+	PLATFORM_HOST_PORTS,
+	RESERVED_LATER_HOST_PORTS,
+	appHostPorts,
+	appPortProblem,
+	laterPortOwner,
+	platformPortOwner,
+} from './host-ports.ts';
 
 describe('platform host ports (D225)', () => {
 	test('names the platform service behind each reserved port', () => {
@@ -10,8 +17,11 @@ describe('platform host ports (D225)', () => {
 		expect(platformPortOwner(19_950)).toBe('managed object storage and link tests');
 		expect(platformPortOwner(31_000)).toBe('compose service routes');
 		expect(platformPortOwner(22_000)).toBe('Kubernetes clusters');
-		expect(platformPortOwner(23_000)).toBe('service read endpoints');
-		expect(platformPortOwner(23_999)).toBe('service read endpoints');
+		// Reserved for later: not a platform port yet, so a running app there keeps being served.
+		expect(platformPortOwner(23_000)).toBeNull();
+		expect(laterPortOwner(23_000)).toBe('service read endpoints');
+		expect(laterPortOwner(23_999)).toBe('service read endpoints');
+		expect(laterPortOwner(24_000)).toBeNull();
 		expect(platformPortOwner(443)).toContain('privileged');
 	});
 
@@ -36,7 +46,7 @@ describe('platform host ports (D225)', () => {
 
 describe('platform port ranges never overlap (HA-PLAN F2)', () => {
 	test('every pair of reserved ranges is disjoint', () => {
-		const ranges = [...PLATFORM_HOST_PORTS].sort((a, b) => a.min - b.min);
+		const ranges = [...PLATFORM_HOST_PORTS, ...RESERVED_LATER_HOST_PORTS].sort((a, b) => a.min - b.min);
 		for (const range of ranges) expect(range.min).toBeLessThanOrEqual(range.max);
 		for (let i = 1; i < ranges.length; i++) {
 			const previous = ranges[i - 1]!;

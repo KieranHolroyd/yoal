@@ -46,7 +46,7 @@ import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import { matchingPlacementSpec, resolvePlacement, type PlacementCandidate } from './placement.ts';
-import { appSpecPortProblem, nodeAppPortClaims, nodePortConflict } from './host-ports.ts';
+import { appSpecPortProblem, laterPortProblem, nodeAppPortClaims, nodePortConflict } from './host-ports.ts';
 import { planReplicas } from './replicas.ts';
 import type { BalanceNode, BalanceUnit } from './rebalance.ts';
 import { effectiveRuntime, storedRuntime, workloadRuntimeOf } from './runtime-tier.ts';
@@ -185,8 +185,9 @@ export class WorkloadService {
 				ingress: spec.compose.routes.length === 0 ? ('none' as const) : ('http' as const),
 			};
 		}
-		// An app never takes a port the platform holds on every node (D225).
-		const reservedPort = appSpecPortProblem(this.ctx, spec);
+		// An app never takes a port the platform holds on every node (D225), nor newly one it has
+		// reserved for later (HA-PLAN F2).
+		const reservedPort = appSpecPortProblem(this.ctx, spec) ?? laterPortProblem(this.ctx, project.id, spec);
 		if (reservedPort) throw new ValidationError(reservedPort);
 		if (this.ctx.relocations.isRelocating(project.id))
 			throw new ConflictError(`"${project.slug}" is stopped while it moves to another node with its data. Deploy again once the move finishes.`);
@@ -340,7 +341,7 @@ export class WorkloadService {
 			};
 		this.assertEnvResolvable(project, spec);
 		this.assertRunnerResolvable(project, spec);
-		const reservedPort = appSpecPortProblem(this.ctx, spec);
+		const reservedPort = appSpecPortProblem(this.ctx, spec) ?? laterPortProblem(this.ctx, project.id, spec);
 		if (reservedPort) throw new ValidationError(reservedPort);
 		const existing = this.ctx.db.select().from(workloads).where(eq(workloads.projectId, project.id)).get();
 		// A port change applies on the app's current node(s) at once (the row below is re-applied),

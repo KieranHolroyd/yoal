@@ -96,6 +96,13 @@ describe('cluster configuration', () => {
 		expect(old.shares).toBeUndefined();
 	});
 
+	test('refuses an endpoint range that overlaps another platform range (HA-PLAN F2)', () => {
+		expect(() => core.cluster.update(owner, { endpoints: { portMin: 22500, portMax: 23500 } })).toThrow(/overlaps Kubernetes clusters/);
+		expect(() => core.cluster.update(owner, { endpoints: { portMin: 23100, portMax: 23200 } })).toThrow(/overlaps service read endpoints/);
+		expect(core.cluster.update(owner, { endpoints: { portMin: 24000, portMax: 24999 } }).endpoints.portMin).toBe(24000);
+		core.cluster.update(owner, { endpoints: { portMin: 21000, portMax: 21999 } });
+	});
+
 	test('refuses an inverted endpoint range', () => {
 		expect(() => core.cluster.update(owner, { endpoints: { portMin: 22000, portMax: 21000 } })).toThrow(/min < max/);
 	});

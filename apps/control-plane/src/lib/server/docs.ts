@@ -1,6 +1,6 @@
 import { resolve } from '$app/paths';
 import { createLibrary, filesBySlug } from '@yoal/docs';
-import { buildDocsBundle, type DocsBundle } from '@yoal/docs/bundle';
+import { buildDocsBundle, docsBundleFingerprint, type DocsBundle } from '@yoal/docs/bundle';
 import { createDocsDatabase } from '@yoal/docs/database';
 import { platformOrigin } from './config';
 import { platformVersion } from './version';
@@ -28,10 +28,16 @@ export const docsDatabase = createDocsDatabase(docs, {
 	url: (slug, anchor) => `${platformOrigin}${pagePath(slug)}${anchor ? `#${anchor}` : ''}`
 });
 
-let bundle: DocsBundle | null = null;
+let bundle: { bundle: DocsBundle; fingerprint: string } | null = null;
 
-/** Every page split into sections: what `yoal docs` searches, served at `GET /api/v1/docs/bundle`. */
-export function docsBundle(): DocsBundle {
-	bundle ??= buildDocsBundle(filesBySlug(files));
+/**
+ * Every page split into sections, what `yoal docs` searches (`GET /api/v1/docs/bundle`), and its
+ * fingerprint, which the CLI compares with its own bundle's.
+ */
+export function docsBundle(): { bundle: DocsBundle; fingerprint: string } {
+	if (!bundle) {
+		const built = buildDocsBundle(filesBySlug(files));
+		bundle = { bundle: built, fingerprint: docsBundleFingerprint(built) };
+	}
 	return bundle;
 }

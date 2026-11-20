@@ -425,14 +425,14 @@ export class ApiClient {
 	 * The platform's docs version and fingerprint (`GET /api/v1/docs`, HA-PLAN F5). Null when the
 	 * platform predates the endpoint.
 	 */
-	async docsInfo(timeoutMs?: number): Promise<{ version: string; fingerprint: string } | null> {
+	async docsInfo(timeoutMs?: number): Promise<{ version: string; fingerprint: string; bundleFingerprint: string | null } | null> {
 		const { response, url, text, parsed } = await this.exchange('GET', '/api/v1/docs', { timeoutMs });
 		if (response.status === 404) return null;
 		if (!response.ok) throw apiError(response, 'GET', url, text, parsed);
 		const record = asRecord(parsed) ?? {};
 		const version = stringValue(record.version);
 		const fingerprint = stringValue(record.fingerprint);
-		return version && fingerprint ? { version, fingerprint } : null;
+		return version && fingerprint ? { version, fingerprint, bundleFingerprint: stringValue(record.bundleFingerprint) ?? null } : null;
 	}
 
 	/** Every docs page split into sections, as the platform shipped them (`GET /api/v1/docs/bundle`). */

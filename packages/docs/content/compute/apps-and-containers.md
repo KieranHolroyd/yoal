@@ -180,7 +180,7 @@ These fields make up the workload spec. Send them as the JSON body of `PUT /api/
 A container, or a process app with socket activation off, holds its `port` on the node's loopback interface. The project's public host is routed there. Yoal makes sure only your app can answer on that host:
 
 - **One app per port on each node.** Saving or deploying an app on a port another app already holds on that node is refused. The error names the other project and a free port nearby. Automatic placement, copies and moves skip nodes where the port is taken. Socket-activated apps and functions use unix sockets, so they never conflict.
-- **Platform ports are reserved.** Ports below 1024, 8081 to 8086, 8788, 15000, 18123 and the ranges 14222–14721, 15432–17431, 19000–19999, 21000–21999, 22000–22999, 23000–23999 and 30000–39999 belong to the platform on every node. An operator who moved a platform port gets that port reserved instead.
+- **Platform ports are reserved.** Ports below 1024, 8081 to 8086, 8788, 15000, 18123 and the ranges 14222–14721, 15432–17431, 19000–19999, 21000–21999, 22000–22999 and 30000–39999 belong to the platform on every node. An operator who moved a platform port gets that port reserved instead. The range 23000–23999 is set aside for a coming release: a new app cannot take a port there, and an app that already uses one keeps it, but should move before that release.
 - **No route to a stranger.** If your app is not running, has no workload yet, or its port belongs to someone else, its host returns a 503 page. It is never proxied to another listener, and a process or container release is never served as files.
 
 ### Scale to zero

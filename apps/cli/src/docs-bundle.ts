@@ -8,7 +8,7 @@
  */
 import { readFileSync } from 'node:fs';
 import { gzipSync } from 'node:zlib';
-import { buildDocsBundle } from '../../../packages/docs/src/bundle.ts';
+import { buildDocsBundle, docsBundleFingerprint } from '../../../packages/docs/src/bundle.ts';
 import { readContent } from '../../../packages/docs/src/disk.ts';
 import type { BundledDocs } from './docs.ts';
 
@@ -24,4 +24,9 @@ export function bundledDocs(): string {
  */
 export function bundledDocsPlatformVersion(): string {
 	return readFileSync(new URL('../../../VERSION', import.meta.url), 'utf8').trim();
+}
+
+/** The bundled docs' fingerprint, as the platform computes it for its own (`bundleFingerprint`). */
+export function bundledDocsFingerprint(): string {
+	return docsBundleFingerprint(buildDocsBundle(readContent()));
 }

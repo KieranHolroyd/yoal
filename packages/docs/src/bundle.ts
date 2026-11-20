@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { SECTIONS } from './manifest.ts';
 import { splitPage, type PageSection } from './sections.ts';
 
@@ -29,4 +30,18 @@ export function buildDocsBundle(sources: Record<string, string>): DocsBundle {
 				.map((slug) => ({ slug, ...splitPage(sources[slug]!) })),
 		})).filter((section) => section.pages.length > 0),
 	};
+}
+
+/**
+ * sha256 over every section of a bundle, in order (first 16 hex chars). The CLI computes it for
+ * the docs it bundles and the platform for the docs it serves, so `yoal docs` can tell whether
+ * they are the same docs whatever the version numbers say: a build from a branch keeps the
+ * release's version while its docs change.
+ */
+export function docsBundleFingerprint(bundle: DocsBundle): string {
+	const hash = createHash('sha256');
+	for (const section of bundle.sections)
+		for (const page of section.pages)
+			for (const part of page.sections) hash.update(`${page.slug}#${part.anchor}\n${part.markdown}\n`);
+	return hash.digest('hex').slice(0, 16);
 }

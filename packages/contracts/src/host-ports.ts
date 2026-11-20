@@ -54,9 +54,24 @@ export const PLATFORM_HOST_PORTS: readonly ReservedPortRange[] = [
 	{ min: STORAGE_PORT_MIN, max: STORAGE_PORT_MAX, owner: 'managed object storage and link tests' },
 	{ min: endpointPortRange.min, max: endpointPortRange.max, owner: 'service endpoints' },
 	{ min: KUBERNETES_API_PORT_MIN, max: KUBERNETES_INGRESS_PORT_MAX, owner: 'Kubernetes clusters' },
-	{ min: readEndpointPortRange.min, max: readEndpointPortRange.max, owner: 'service read endpoints' },
 	{ min: COMPOSE_HOST_PORT_MIN, max: COMPOSE_HOST_PORT_MAX, owner: 'compose service routes' },
 ];
+
+/**
+ * Ranges reserved for a platform feature that nothing allocates yet (HA-PLAN F2). Unlike
+ * `PLATFORM_HOST_PORTS`, they do not stop an app that already holds such a port from being served
+ * or redeployed on it: only a new app, or a port change, is refused. The workstream that starts
+ * allocating a range moves its apps off first, then moves the range into `PLATFORM_HOST_PORTS`.
+ */
+export const RESERVED_LATER_HOST_PORTS: readonly ReservedPortRange[] = [
+	{ min: readEndpointPortRange.min, max: readEndpointPortRange.max, owner: 'service read endpoints' },
+];
+
+/** Which reserved-for-later range holds `port`; null when none. */
+export function laterPortOwner(port: number): string | null {
+	for (const range of RESERVED_LATER_HOST_PORTS) if (port >= range.min && port <= range.max) return range.owner;
+	return null;
+}
 
 /**
  * The upstream a route gets when its node must not proxy to the app (RouteSpec `unavailable`).
