@@ -462,7 +462,7 @@ export class ReleaseCommandScheduler {
 		if (row.nodeId) this.ctx.projects.bump(row.orgId);
 		const project = this.ctx.db.select({ slug: projects.slug }).from(projects).where(eq(projects.id, row.projectId)).get();
 		this.ctx.audit.record({
-			principal: buildSystemPrincipal('system:release', row.orgId),
+			principal: buildSystemPrincipal('system:rollout', row.orgId),
 			action: 'deployment.release_command',
 			resource: 'deployment',
 			resourceId: row.releaseId,

@@ -237,6 +237,26 @@ describe('release-command lease (I16)', () => {
 		close();
 	});
 
+	test('a late success under a partition never revives the run or opens the gate', async () => {
+		const { core, close, deployment, node, schedule } = await fixture();
+		const releaseId = deployment({});
+		const run = schedule(releaseId);
+		const row = core.ctx.db.select().from(releaseCommandRuns).where(eq(releaseCommandRuns.id, run.id)).get()!;
+		clock = ReleaseCommandScheduler.leaseExpiresAt(row)!;
+		core.releaseCommands.tick(clock);
+		// The command did run on the node; its result arrives after the lease was declared lost.
+		core.releaseCommands.recordResults(node, [{ runId: run.id, releaseId, status: 'succeeded', exitCode: 0 }]);
+		expect(core.releaseCommands.gate(releaseId).state).toBe('failed');
+		const kept = core.ctx.db.select().from(releaseCommandRuns).where(eq(releaseCommandRuns.id, run.id)).get()!;
+		expect(kept.status).toBe('timeout');
+		expect(kept.error).toContain('later reported "succeeded"');
+		// A retry is a new attempt, and only a person starts it.
+		const retry = schedule(releaseId);
+		expect(retry.id).not.toBe(run.id);
+		expect(retry.attempt).toBe(2);
+		close();
+	});
+
 	test('a queued run past its start deadline is not served', async () => {
 		const { core, close, deployment, node, schedule } = await fixture();
 		const run = schedule(deployment({}));

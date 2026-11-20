@@ -35,12 +35,6 @@ export const systemPrincipals = {
 		// It acts through the deployment service directly and records its own audit row.
 		permissions: ['project:read', 'deployment:read'],
 	},
-	'system:release': {
-		name: 'system:release',
-		description: 'Records the outcome of a release-command run in the audit log.',
-		// The scheduler writes the run row directly and audits it; the read is what the audit names.
-		permissions: ['deployment:read'],
-	},
 	'system:relocation': {
 		name: 'system:relocation',
 		description: 'Moves an app to another node together with its app volumes: snapshots them, restores them on the target and re-points the app.',
