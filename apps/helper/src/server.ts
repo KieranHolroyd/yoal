@@ -49,6 +49,7 @@ import {
 } from './app-volumes.ts';
 import { assertRunId, parseJobRequest, type JobApi } from './jobs.ts';
 import { routePipelineRequest, type PipelineJobApi } from './pipeline-jobs.ts';
+import type { FaultInjector } from './faults.ts';
 
 /**
  * The helper's entire network surface is a fixed set of verbs (slice, apply, status, remove, logs,
@@ -183,6 +184,8 @@ export interface HandlerOptions {
 	jobs?: JobApi;
 	/** Pipeline job containers (docs/PIPELINES.md W5/W6); absent on a helper that predates them. */
 	pipelineJobs?: PipelineJobApi;
+	/** HA lab fault verbs (docs/HA-PLAN.md W1). Only a `build:faults` helper ever sets this. */
+	faults?: Pick<FaultInjector, 'handle'>;
 }
 
 class BodyTooLargeError extends Error {}
@@ -204,6 +207,13 @@ export function createHandler(
 			if (path === '/healthz') {
 				if (method !== 'GET' && method !== 'HEAD') return methodNotAllowed('GET');
 				return json({ ok: true, version: options.version });
+			}
+
+			// HA lab fault verbs: test builds only. The release build defines YOAL_FAULT_INJECTION
+			// false, so this branch (and faults.ts) is not in a release binary (HA-PLAN §10).
+			if (typeof YOAL_FAULT_INJECTION !== 'undefined' && YOAL_FAULT_INJECTION && options.faults) {
+				const handled = await options.faults.handle(request, url);
+				if (handled) return handled;
 			}
 
 			if (path === '/v1/registry/mirror') {
@@ -894,7 +904,7 @@ export interface RunningHelper {
 export async function startHelperServer(
 	config: HelperConfig,
 	runtime: HelperRuntime,
-	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler'> = {},
+	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler' | 'faults'> = {},
 ): Promise<RunningHelper> {
 	const directory = dirname(config.socketPath);
 	const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;

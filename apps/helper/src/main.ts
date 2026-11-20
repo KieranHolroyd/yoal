@@ -92,7 +92,24 @@ export async function runHelper(): Promise<void> {
 		runner: spawnRunner(),
 		log: (level, message) => log(level, `container console: ${message}`),
 	});
+	// HA lab fault verbs (docs/HA-PLAN.md W1): compiled only into `build:faults` helpers. In a
+	// release build YOAL_FAULT_INJECTION is defined false and this import is dropped by the bundler.
+	let faults: import('./faults.ts').FaultInjector | undefined;
+	if (typeof YOAL_FAULT_INJECTION !== 'undefined' && YOAL_FAULT_INJECTION) {
+		const { FaultInjector } = await import('./faults.ts');
+		faults = new FaultInjector({
+			runner: spawnRunner(),
+			systemctlPath: config.systemctlPath,
+			log: (level, message) => log(level, `faults: ${message}`),
+		});
+		log('warn', 'TEST BUILD: fault injection verbs are enabled on this helper');
+		// A helper that restarted with faults active reverts them: their timers died with it.
+		await faults.clearAll('startup sweep').catch((error: unknown) =>
+			log('error', `faults: startup sweep failed: ${error instanceof Error ? error.message : String(error)}`),
+		);
+	}
 	helper = await startHelperServer(config, driver, {
+		faults,
 		nodeUpdate,
 		wireguard,
 		shares: new ShareMounter(),
