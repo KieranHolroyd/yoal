@@ -64,6 +64,7 @@ import {
 	REPLICATION_STATUS_SQL,
 	assertPrimaryDatabaseId,
 	assertReplicaWorkloadId,
+	assertSlot,
 	parseReplicationPassword,
 	parseReplicationStatus,
 	parseSlots,
@@ -110,6 +111,7 @@ import {
 	assertId,
 	assertRelativePath,
 	databaseAlias,
+	databaseImage,
 	functionNeedsDurableStorage,
 	postgresPitrImage,
 	renderRegistryAuthFile,
@@ -124,6 +126,7 @@ import {
 import {
 	computePitrWindow,
 	parseArchiverStats,
+	parseDataChecksums,
 	parsePgBackRestInfo,
 	parsePitrBackupType,
 	parsePitrRepo,
@@ -133,7 +136,10 @@ import {
 	pitrRestoreContainerName,
 	pitrStanzaFor,
 	renderPgBackRestConfig,
+	renderPgBackRestKey,
+	renderPgControldataArgs,
 	renderPgPass,
+	renderPgRewindArgs,
 	renderPitrArchiverArgs,
 	renderPitrBackupArgs,
 	renderPitrExecArgs,
@@ -1407,7 +1413,129 @@ export class SystemdDriver {
 		return { databaseId, lsn: lsn && /^[0-9A-F]{1,8}\/[0-9A-F]{1,8}$/i.test(lsn) ? lsn : null };
 	}
 
-	/** `podman exec` psql as the database owner over the container's loopback; no secret in argv. */
+	/**
+	 * Re-attach an old primary as a replica without a full rebuild (HA-PLAN W10). The diverged data
+	 * dir `<state root>/<databaseId>` is stopped, checked for `pg_rewind` support (data checksums or
+	 * `wal_log_hints=on`), rewound against the new primary through the replica's link socket, and
+	 * renamed to `<state root>/<replicaId>` so the replica unit starts on it. Any failure falls back
+	 * to a rebuild: the diverged dir is deleted and the replica's normal `pg_basebackup` start runs.
+	 * Re-running it is safe: an adopted target reports success again.
+	 */
+	async rewindReplica(
+		replicaId: string,
+		raw: { databaseId?: unknown; slot?: unknown; user?: unknown; password?: unknown },
+	): Promise<{ replicaId: string; rewound: boolean; fallback: 'rebuild' | null; reason: string | null }> {
+		const id = assertReplicaWorkloadId(replicaId);
+		const databaseId = assertPrimaryDatabaseId(raw.databaseId, 'databaseId');
+		assertSlot(raw.slot, 'slot');
+		const user = typeof raw.user === 'string' ? raw.user : '';
+		if (!/^[a-z_][a-z0-9_]{0,62}$/.test(user)) throw new ValidationError('user must be a plain Postgres identifier');
+		if (typeof raw.password !== 'string' || raw.password.length < 8 || raw.password.length > 200)
+			throw new ValidationError('password must be 8–200 characters');
+
+		const source = await this.dataDirFor(databaseId);
+		const target = resolve(dirname(source), id);
+		// A previous run already adopted the directory: report success again.
+		const targetReady = await fs
+			.lstat(join(target, 'pgdata', 'PG_VERSION'))
+			.then((stat) => stat.isFile())
+			.catch(() => false);
+		if (targetReady) return { replicaId: id, rewound: true, fallback: null, reason: null };
+		const sourceReady = await fs
+			.lstat(join(source, 'pgdata', 'PG_VERSION'))
+			.then((stat) => stat.isFile())
+			.catch(() => false);
+		if (!sourceReady)
+			return {
+				replicaId: id,
+				rewound: false,
+				fallback: 'rebuild',
+				reason: `There is no old primary data directory at ${source}; the replica will bootstrap.`,
+			};
+
+		const image = databaseImage({ engine: 'postgres', version: await this.readPgVersion(databaseId) });
+		// The old primary is fenced before the rewind; stopping idempotently also handles a node that
+		// came back after the fence had already removed it from desired state.
+		await this.systemctl(['stop', serviceUnitName(databaseId)], { allowFailure: true });
+		if (await this.containerRunning(databaseId))
+			throw new Error(`The old primary container for ${databaseId} is still running; refusing to rewind or delete it.`);
+		const path = join(source, 'pgdata');
+		const controldata = await this.runner.run(
+			renderPgControldataArgs({ podmanPath: this.podmanPath, image, replicaId: id, targetRoot: source }),
+		);
+		if (controldata.code !== 0)
+			return this.rebuildAfterRewind(source, id, `pg_controldata failed (${controldata.code}): ${commandDetail(controldata)}`);
+		if (!parseDataChecksums(controldata.stdout) && !(await this.walLogHintsEnabled(path)))
+			return this.rebuildAfterRewind(
+				source,
+				id,
+				'The old primary has neither data checksums nor wal_log_hints=on, so pg_rewind cannot run.',
+			);
+
+		const linkDir = join(this.replicationDir, id);
+		const rewound = await this.runner.run(
+			renderPgRewindArgs({
+				podmanPath: this.podmanPath,
+				image,
+				replicaId: id,
+				targetRoot: source,
+				linkDir,
+				user,
+			}),
+			{ env: { PGPASSWORD: raw.password } },
+		);
+		if (rewound.code !== 0)
+			return this.rebuildAfterRewind(source, id, `pg_rewind failed (${rewound.code}): ${commandDetail(rewound)}`);
+
+		const existingTarget = await fs.lstat(target).catch(() => null);
+		if (existingTarget) {
+			if (!existingTarget.isDirectory()) throw new ValidationError(`${target} is not a directory; refusing to adopt it.`);
+			await fs.rm(target, { recursive: true, force: true });
+		}
+		await fs.rename(source, target);
+		return { replicaId: id, rewound: true, fallback: null, reason: null };
+	}
+
+	/** True while a workload's container is running; used before touching a fenced primary's data. */
+	private async containerRunning(id: string): Promise<boolean> {
+		const result = await this.runner.run([
+			this.podmanPath,
+			'inspect',
+			'--format',
+			'{{.State.Running}}',
+			`yoal-workload-${id}`,
+		]);
+		return result.code === 0 && result.stdout.trim() === 'true';
+	}
+
+	/** Remove a diverged old primary and let the replica's next start run `pg_basebackup`. */
+	private async rebuildAfterRewind(
+		source: string,
+		replicaId: string,
+		reason: string,
+	): Promise<{ replicaId: string; rewound: false; fallback: 'rebuild'; reason: string }> {
+		await fs.rm(source, { recursive: true, force: true });
+		return { replicaId, rewound: false, fallback: 'rebuild', reason: reason.slice(0, 1_000) };
+	}
+
+	/** `wal_log_hints` from either config file, the fallback when a cluster predates data checksums. */
+	private async walLogHintsEnabled(pgdata: string): Promise<boolean> {
+		for (const name of ['postgresql.auto.conf', 'postgresql.conf']) {
+			const text = await fs.readFile(join(pgdata, name), 'utf8').catch(() => '');
+			if (/^\s*wal_log_hints\s*=\s*['"]?(?:on|true)['"]?\s*$/m.test(text)) return true;
+		}
+		return false;
+	}
+
+	/** The major version of an existing data dir, used only to pick a postgres image with pg_rewind. */
+	private async readPgVersion(id: string): Promise<string> {
+		const version = await fs.readFile(join(await this.dataDirFor(id), 'pgdata', 'PG_VERSION'), 'utf8').catch(() => '');
+		const major = version.trim().split('.')[0] ?? '';
+		if (!/^\d+$/.test(major)) throw new ValidationError(`Database ${id} has no readable PG_VERSION.`);
+		return major;
+	}
+
+
 	private psqlArgs(id: string, env: { user: string; database: string }, extra: string[]): string[] {
 		return [
 			this.podmanPath,
@@ -1911,6 +2039,8 @@ END $$;`];
 			// pgBackRest and psql reach Postgres over the container's Unix socket.
 			[paths.pgpass, renderPgPass(env.user, env.password)],
 		];
+		const key = renderPgBackRestKey(repo);
+		if (key) files.push([paths.gcsKey, key]);
 		for (const [path, content] of files) {
 			// Podman may once have created a directory at a bind-mount source (pre-0070 layout).
 			const stat = await fs.lstat(path).catch(() => null);
@@ -1919,6 +2049,8 @@ END $$;`];
 			// Postgres (archive-push) and the restore containers run as uid 70: keep 0400, hand over.
 			await this.chown(path, DATABASE_ENGINES.postgres.uid, DATABASE_ENGINES.postgres.gid);
 		}
+		// A repository kind change must not leave a stale key behind (it is a credential).
+		if (!key) await fs.rm(paths.gcsKey, { force: true });
 		return { stanza, configPath: paths.config };
 	}
 
@@ -1973,10 +2105,21 @@ END $$;`];
 			const line = text.split('\n').find((entry) => entry.startsWith(`${key}=`));
 			return line ? line.slice(key.length + 1).trim() || null : null;
 		};
+		const repoType = value('repo1-type');
 		const repo = {
-			bucket: value('repo1-s3-bucket'),
+			bucket:
+				repoType === 'azure'
+					? value('repo1-azure-container')
+					: repoType === 'gcs'
+						? value('repo1-gcs-bucket')
+						: value('repo1-s3-bucket'),
 			region: value('repo1-s3-region'),
-			endpoint: value('repo1-s3-endpoint'),
+			endpoint:
+				repoType === 'azure'
+					? value('repo1-azure-endpoint')
+					: repoType === 'gcs'
+						? value('repo1-gcs-endpoint')
+						: value('repo1-s3-endpoint'),
 			path: value('repo1-path'),
 		};
 		const env = await this.readPostgresEnv(id);

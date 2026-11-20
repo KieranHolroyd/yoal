@@ -134,6 +134,11 @@ export interface HelperRuntime {
 	): Promise<{ targetDatabaseId: string; targetTime: number; verified: true }>;
 	/** Credential-free archive/repository status and the recoverable window. */
 	pitrStatus(id: string): Promise<HelperPitrStatus>;
+	/** Rewind an old primary onto the new primary and adopt it as `replicaId` (W10). */
+	rewindReplica?(
+		replicaId: string,
+		input: { databaseId?: unknown; slot?: unknown; user?: unknown; password?: unknown },
+	): Promise<{ replicaId: string; rewound: boolean; fallback: 'rebuild' | null; reason: string | null }>;
 	/** Mounts and block devices, from which Settings → Storage lists disk candidates (D72). */
 	volumesInventory(): Promise<HelperInventory>;
 	/** Replace the disk registry from desired state (D76). */
@@ -779,6 +784,16 @@ export function createHandler(
 				for (const key of Object.keys(body))
 					if (key !== 'databaseId') throw new ValidationError(`request.${key} is not supported`);
 				return json({ ok: true, ...(await runtime.replicaPromote(id, body)) });
+			}
+			const rewindMatch = /^\/v1\/workloads\/([^/]+)\/replica\/rewind$/.exec(path);
+			if (rewindMatch && runtime.rewindReplica) {
+				if (method !== 'POST') return methodNotAllowed('POST');
+				const id = assertDatabaseId(decodeURIComponent(rewindMatch[1]!), 'replica id');
+				const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
+				for (const key of Object.keys(body))
+					if (key !== 'databaseId' && key !== 'slot' && key !== 'user' && key !== 'password')
+						throw new ValidationError(`request.${key} is not supported`);
+				return json({ ok: true, ...(await runtime.rewindReplica(id, body)) });
 			}
 
 			const rotateMatch = /^\/v1\/workloads\/([^/]+)\/rotate$/.exec(path);

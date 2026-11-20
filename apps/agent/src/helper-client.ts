@@ -111,6 +111,11 @@ export interface HelperApi {
 	replicationConfigure(id: string, input: { slots: string[]; password: string | null }): Promise<void>;
 	replicationStatus(id: string): Promise<DatabaseReplicationSlotStatus[]>;
 	replicaPromote(replicaId: string, databaseId: string): Promise<{ lsn: string | null }>;
+	/** Rewind an old primary onto the new primary and adopt it as `replicaId` (HA-PLAN W10). */
+	rewindReplica(
+		replicaId: string,
+		input: { databaseId: string; slot: string; user: string; password: string },
+	): Promise<{ rewound: boolean; fallback: 'rebuild' | null; reason: string | null }>;
 	/** Write the 0400 pgBackRest config for PITR (docs/PITR.md). */
 	pitrConfigure(
 		id: string,
@@ -384,6 +389,24 @@ export class HelperClient
 			240_000,
 		)) as { lsn?: unknown };
 		return { lsn: typeof body.lsn === 'string' ? body.lsn : null };
+	}
+
+	async rewindReplica(
+		replicaId: string,
+		input: { databaseId: string; slot: string; user: string; password: string },
+	): Promise<{ rewound: boolean; fallback: 'rebuild' | null; reason: string | null }> {
+		// pg_rewind copies only the diverged blocks, but a large data dir can still take minutes.
+		const body = (await this.request(
+			'POST',
+			`/v1/workloads/${encodeURIComponent(replicaId)}/replica/rewind`,
+			input,
+			600_000,
+		)) as { rewound?: unknown; fallback?: unknown; reason?: unknown };
+		return {
+			rewound: body.rewound === true,
+			fallback: body.fallback === 'rebuild' ? 'rebuild' : null,
+			reason: typeof body.reason === 'string' ? body.reason : null,
+		};
 	}
 
 	async studioStart(): Promise<void> {

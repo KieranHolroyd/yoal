@@ -48,7 +48,7 @@ function makeCore(features: Partial<FeatureFlags>, pitrRepository: DatabasePitrR
 			siteCookieSecret: 'site-cookie-secret-123',
 			objectStoreSecret: 'object-secret-123',
 			desiredAgentVersion: '0.1.0',
-			features: { ...DEFAULT_FEATURES, PITR: true, ...features },
+			features: { ...DEFAULT_FEATURES, PITR: true, PITR_REWIND: true, ...features },
 			pitrRepository,
 		},
 	});
@@ -64,6 +64,14 @@ describe('PITR on Azure or GCS (W3)', () => {
 		capabilities([OBJECT_STORE_KINDS_CAPABILITY]);
 		core.databases.create(owner, { name: 'main-db', version: '18' });
 		expect(() => core.databases.setPitrPolicy(owner, 'main-db', { enabled: true })).toThrow('YOAL_FEATURE_OBJECT_STORE_AZURE');
+		close();
+	});
+
+	test('refused while PITR_REWIND is off: PITR stays S3-only', () => {
+		const { core, capabilities, close } = makeCore({ OBJECT_STORE_AZURE: true, PITR_REWIND: false }, azureRepo);
+		capabilities([OBJECT_STORE_KINDS_CAPABILITY]);
+		core.databases.create(owner, { name: 'main-db', version: '18' });
+		expect(() => core.databases.setPitrPolicy(owner, 'main-db', { enabled: true })).toThrow('YOAL_FEATURE_PITR_REWIND');
 		close();
 	});
 

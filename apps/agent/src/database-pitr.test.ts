@@ -51,6 +51,7 @@ function task(overrides: Partial<DatabasePitrTask>): DatabasePitrTask {
 		action: 'status',
 		databaseId: SOURCE,
 		databaseName: 'orders',
+		workloadId: null,
 		engine: 'postgres',
 		stanza: SOURCE,
 		baseBackupType: null,
@@ -170,6 +171,20 @@ describe('database PITR runner', () => {
 		advance(30_000);
 		await runner.runOnce(state([backup]), () => ready, signal);
 		expect(calls).toEqual([`configure:${SOURCE}`, `backup:${SOURCE}:full`]);
+	});
+
+	test('a backup task with a workloadId runs in the replica container, on the same stanza', async () => {
+		const { runner, calls, advance } = harness();
+		const replicaId = 'db_dbr_fedcba9876543210fedcba9876543210';
+		const backup = task({ action: 'basebackup', baseBackupType: 'full', workloadId: replicaId });
+		const ready = true;
+		await runner.runOnce(state([backup]), () => ready, signal);
+		advance(30_000);
+		await runner.runOnce(state([backup]), () => ready, signal);
+		expect(calls).toEqual([`configure:${replicaId}`, `backup:${replicaId}:full`]);
+		expect(runner.pendingResults()).toEqual([
+			expect.objectContaining({ taskId: backup.id, databaseId: SOURCE, status: 'ok', baseBackupType: 'full' }),
+		]);
 	});
 
 	test('a restore needs both the source and the target ready', async () => {

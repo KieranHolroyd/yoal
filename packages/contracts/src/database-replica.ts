@@ -40,6 +40,14 @@ export interface DatabaseReplicaView extends DatabaseReplica {
 	removing: boolean;
 	/** When the primary last reported this replica's slot (ISO 8601). */
 	reportedAt: string | null;
+	/** HA-PLAN W10: set when this replica adopts an old primary's data dir by pg_rewind. */
+	rewind: {
+		fromDatabaseId: string;
+		requestedAt: string | null;
+		doneAt: string | null;
+		fallback: boolean;
+		error: string | null;
+	} | null;
 	createdAt: string;
 }
 

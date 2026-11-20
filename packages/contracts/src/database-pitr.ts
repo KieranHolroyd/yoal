@@ -18,6 +18,12 @@ import { objectStoreCredentialsSchema, objectStoreTargetSchema, type ObjectStore
  */
 
 export const DATABASE_PITR_FORMAT = 'pgbackrest' as const;
+/**
+ * HA-PLAN W10: the agent can run a backup inside a replica, render `wal_log_hints` and execute the
+ * `pg_rewind` verb. Sent only to a node that advertises it, so an older helper never receives
+ * `database.pgRewind` (which it would reject) or a task whose container is a replica.
+ */
+export const PITR_REWIND_CAPABILITY = 'pitr-rewind';
 export const pitrBaseBackupTypes = ['full', 'diff', 'incr'] as const;
 export type PitrBaseBackupType = (typeof pitrBaseBackupTypes)[number];
 
@@ -160,6 +166,12 @@ export const databasePitrTaskSchema = z.object({
 	/** Source database: the one whose data/WAL the task operates on. */
 	databaseId: z.string().min(1).max(100),
 	databaseName: z.string().min(1).max(80),
+	/**
+	 * HA-PLAN W10: the container the helper runs the task in, when it is not the primary's own
+	 * (`pitrBaseBackup` can run from a replica). Null means `databaseId`; the stanza and repository
+	 * stay the source database's, so a backup from a replica lands in the same repository.
+	 */
+	workloadId: z.string().min(1).max(120).nullable().optional(),
 	engine: z.enum(databaseEngines),
 	stanza: z.string().min(1).max(64),
 	baseBackupType: z.enum(pitrBaseBackupTypes).nullable().default(null),

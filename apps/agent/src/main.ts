@@ -1639,6 +1639,7 @@ class AgentRuntime {
 		const poolerRestarted = this.databasePoolerRestarts.pending();
 		const databaseReplication = this.databaseReplication.reports();
 		const promotionResults = this.databaseReplication.pendingPromotionResults();
+		const rewindResults = this.databaseReplication.pendingRewindResults();
 		const nodeUpdateResult = this.nodeUpdate.pendingResult();
 		const databaseTls = databaseTlsHeartbeat(reports);
 		// Release commands this node ran or refused; re-sent until the control plane drops the task.
@@ -1686,6 +1687,7 @@ class AgentRuntime {
 			...(poolerRestarted.length > 0 ? { databasePoolerRestarted: poolerRestarted } : {}),
 			...(databaseReplication.length > 0 ? { databaseReplication } : {}),
 			...(promotionResults.length > 0 ? { databaseReplicaPromotionResults: promotionResults } : {}),
+			...(rewindResults.length > 0 ? { databaseReplicaRewindResults: rewindResults } : {}),
 			...(nodeUpdateResult ? { nodeUpdateResult } : {}),
 			...(releaseCommandResults.length > 0 ? { releaseCommandResults } : {}),
 			...(databaseTls.length > 0 ? { databaseTls } : {}),
@@ -1743,6 +1745,7 @@ class AgentRuntime {
 		this.studioPrincipals.acknowledge(studioPrincipalResults);
 		this.databasePoolerRestarts.acknowledge(poolerRestarted);
 		this.databaseReplication.acknowledgePromotions(promotionResults.map((result) => result.failoverId));
+		this.databaseReplication.acknowledgeRewinds(rewindResults.map((result) => result.replicaId));
 		await this.nodeUpdate.acknowledge(nodeUpdateResult);
 		// The control plane accepted a heartbeat from this binary: stand the rollback guard down.
 		await this.nodeUpdate.confirmHealthy(this.shutdownController.signal);

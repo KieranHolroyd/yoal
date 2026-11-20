@@ -7,13 +7,17 @@ import {
 	computePitrWindow,
 	formatPitrTarget,
 	parseArchiverStats,
+	parseDataChecksums,
 	parsePgBackRestInfo,
 	parsePitrBackupType,
 	parsePitrRepo,
 	pitrPaths,
 	pitrRepoEndpoint,
 	renderPgBackRestConfig,
+	renderPgBackRestKey,
+	renderPgControldataArgs,
 	renderPgPass,
+	renderPgRewindArgs,
 	renderPitrBackupArgs,
 	renderPitrExecArgs,
 	renderPitrRecoveryArgs,
@@ -58,9 +62,10 @@ describe('pgBackRest repository config', () => {
 	});
 
 	test('AWS S3 gets its regional host; a custom port becomes repo1-storage-port', () => {
-		expect(pitrRepoEndpoint({ endpoint: null, region: 'eu-west-2' })).toEqual({
+		expect(pitrRepoEndpoint(parsePitrRepo({ ...repo, endpoint: null, region: 'eu-west-2' }))).toEqual({
 			host: 's3.eu-west-2.amazonaws.com',
 			port: null,
+			tls: true,
 		});
 		const config = renderPgBackRestConfig({
 			stanza: SOURCE,
@@ -99,7 +104,74 @@ describe('pgBackRest repository config', () => {
 			dir: '/run/yoal-workloads/db_abc123/pgbackrest',
 			config: '/run/yoal-workloads/db_abc123/pgbackrest/pgbackrest.conf',
 			pgpass: '/run/yoal-workloads/db_abc123/pgbackrest/pgpass',
+			gcsKey: '/run/yoal-workloads/db_abc123/pgbackrest/gcs-key.json',
 		});
+	});
+
+	test('Azure and GCS render the provider repository, not an S3 one', () => {
+		const azure = parsePitrRepo({
+			store: {
+				kind: 'azure',
+				account: 'devstoreaccount1',
+				container: 'yoal-pitr',
+				endpoint: 'http://127.0.0.1:10000/devstoreaccount1',
+				pathPrefix: 'yoal/pitr',
+			},
+			storeCredentials: { kind: 'azure', accountKey: 'a'.repeat(32) },
+		});
+		const azureConfig = renderPgBackRestConfig({ stanza: SOURCE, repo: azure, pg1User: 'main_db' });
+		expect(azureConfig).toContain('repo1-type=azure');
+		expect(azureConfig).toContain('repo1-azure-account=devstoreaccount1');
+		expect(azureConfig).toContain('repo1-azure-container=yoal-pitr');
+		expect(azureConfig).toContain('repo1-azure-key-type=shared');
+		expect(azureConfig).toContain('repo1-azure-endpoint=127.0.0.1');
+		expect(azureConfig).toContain('repo1-storage-port=10000');
+		expect(azureConfig).toContain('repo1-azure-uri-style=path');
+		expect(azureConfig).toContain('repo1-storage-verify-tls=n');
+		expect(azureConfig).not.toContain('repo1-s3-bucket');
+
+		const serviceAccount = JSON.stringify({ client_email: 'backups@example.test', private_key: 'not-a-real-key' });
+		const gcs = parsePitrRepo({
+			store: { kind: 'gcs', bucket: 'yoal-pitr', endpoint: 'http://127.0.0.1:4443', pathPrefix: 'yoal/pitr' },
+			storeCredentials: { kind: 'gcs', serviceAccountJson: serviceAccount },
+		});
+		const gcsConfig = renderPgBackRestConfig({ stanza: SOURCE, repo: gcs, pg1User: 'main_db' });
+		expect(gcsConfig).toContain('repo1-type=gcs');
+		expect(gcsConfig).toContain('repo1-gcs-bucket=yoal-pitr');
+		expect(gcsConfig).toContain('repo1-gcs-key-type=service');
+		expect(gcsConfig).toContain('repo1-gcs-key=/etc/pgbackrest/gcs-key.json');
+		expect(gcsConfig).toContain('repo1-gcs-endpoint=127.0.0.1');
+		expect(gcsConfig).toContain('repo1-storage-verify-tls=n');
+		expect(renderPgBackRestKey(gcs)).toBe(serviceAccount);
+		expect(renderPgBackRestKey(azure)).toBeNull();
+		// A service-account key is a file, not an INI value: pretty-printed JSON is accepted.
+		const pretty = JSON.stringify({ client_email: 'backups@example.test', private_key: 'not-a-real-key' }, null, 2);
+		const parsedPretty = parsePitrRepo({
+			store: { kind: 'gcs', bucket: 'yoal-pitr', endpoint: null, pathPrefix: '' },
+			storeCredentials: { kind: 'gcs', serviceAccountJson: pretty },
+		});
+		expect(renderPgBackRestKey(parsedPretty)).toBe(pretty);
+	});
+
+	test('refuses a store without its credentials or with a mismatched kind', () => {
+		expect(() =>
+			parsePitrRepo({
+				store: { kind: 'gcs', bucket: 'yoal-pitr', endpoint: null, pathPrefix: '' },
+				storeCredentials: { kind: 'azure', accountKey: 'a'.repeat(32) },
+			}),
+		).toThrow(/another kind/);
+		expect(() =>
+			parsePitrRepo({
+				store: { kind: 'azure', account: 'Bad', container: 'yoal-pitr', endpoint: null, pathPrefix: '' },
+				storeCredentials: { kind: 'azure', accountKey: 'a'.repeat(32) },
+			}),
+		).toThrow(/account/);
+		expect(() =>
+			parsePitrRepo({
+				store: { kind: 'gcs', bucket: 'yoal-pitr', endpoint: null, pathPrefix: '' },
+				storeCredentials: { kind: 'gcs', serviceAccountJson: '{"client_email":"x"}' },
+			}),
+		).toThrow(/private_key/);
 	});
 });
 
@@ -327,6 +399,37 @@ describe('archive settings in the Postgres unit', () => {
 		expect(unit).toContain('RunInit=true');
 	});
 
+	test('a replica of a PITR database archives once promoted, and renders hint logging', () => {
+		const replicaId = 'db_dbr_fedcba9876543210fedcba9876543210';
+		const unit = renderDatabaseUnit({
+			workload: databaseWorkload(
+				{
+					engine: 'postgres',
+					version: '18',
+					pitr: { stanza: SOURCE, archiveTimeoutSeconds: 60 },
+					replica: { slot: `yoal_${replicaId}` },
+					pgRewind: true,
+				},
+				postgresPitrImage('18'),
+				replicaId,
+			),
+			envFile: `/run/yoal-workloads/${replicaId}/env`,
+			dataDir: `/var/lib/yoal-workloads/${replicaId}`,
+			pitr: { stanza: SOURCE, configDir: `/run/yoal-workloads/${replicaId}/pgbackrest`, archiveTimeoutSeconds: 60 },
+			replica: {
+				linkDir: `/var/lib/yoal/agent/replication/${replicaId}`,
+				scriptPath: `/run/yoal-workloads/${replicaId}/replica-start.sh`,
+			},
+		});
+		expect(unit).toContain(`ContainerName=yoal-workload-${replicaId}`);
+		expect(unit).toContain('Image=ghcr.io/kieranholroyd/yoal-postgres-pitr:18-1');
+		expect(unit).toContain('archive_mode=on');
+		expect(unit).toContain('wal_log_hints=on');
+		expect(unit).toContain('primary_slot_name=');
+		expect(unit).toContain(`Volume=/run/yoal-workloads/${replicaId}/pgbackrest:/etc/pgbackrest:ro,z`);
+		expect(unit).toContain('/run/yoal-upstream:ro,z');
+	});
+
 	test('leaves a non-PITR database unchanged', () => {
 		const unit = renderDatabaseUnit({
 			workload: databaseWorkload({ engine: 'postgres', version: '17' }, 'docker.io/library/postgres:17-alpine'),
@@ -390,6 +493,7 @@ async function fixture(respond?: Responder) {
 		quadletDir: join(root, 'quadlet'),
 		runtimeDir,
 		stateDir,
+		replicationDir: join(root, 'replication'),
 		volumeRegistryFile: join(root, 'volumes.json'),
 		releaseDirs: [join(root, 'releases')],
 		bunPath: '/usr/local/bin/bun',
@@ -415,6 +519,22 @@ describe('helper PITR verbs', () => {
 		// Idempotent: the agent calls it before every task.
 		await driver.pitrConfigure(SOURCE, repo);
 		expect(runner.calls).toHaveLength(0);
+	});
+
+	test('configure writes a GCS key file 0400 and removes it when the repository kind changes', async () => {
+		const { driver, runtimeDir } = await fixture();
+		const key = JSON.stringify({ client_email: 'backups@example.test', private_key: 'not-a-real-key' }, null, 2);
+		const gcsRepo = {
+			store: { kind: 'gcs' as const, bucket: 'yoal-pitr', endpoint: 'http://127.0.0.1:4443', pathPrefix: 'yoal/pitr' },
+			storeCredentials: { kind: 'gcs' as const, serviceAccountJson: key },
+		};
+		await driver.pitrConfigure(SOURCE, gcsRepo);
+		const paths = pitrPaths(runtimeDir, SOURCE);
+		expect((await fs.stat(paths.gcsKey)).mode & 0o777).toBe(0o400);
+		expect(await fs.readFile(paths.gcsKey, 'utf8')).toBe(key);
+		expect(await fs.readFile(paths.config, 'utf8')).toContain('repo1-gcs-key=/etc/pgbackrest/gcs-key.json');
+		await driver.pitrConfigure(SOURCE, repo);
+		await expect(fs.stat(paths.gcsKey)).rejects.toThrow();
 	});
 
 	test('apply creates the config directory before the unit that mounts it', async () => {
@@ -595,5 +715,108 @@ describe('helper PITR verbs', () => {
 			driver.pitrRestore(SOURCE, { targetDatabaseId: TARGET, targetTime: Date.now() - 60_000 }),
 		).rejects.toThrow(/PG_VERSION/);
 		expect(runner.calls).toHaveLength(0);
+	});
+});
+
+describe('pg_rewind (HA-PLAN W10)', () => {
+	const REPLICA = 'db_dbr_abc123';
+	const PASSWORD = 'replication-password-0123456789';
+
+	const controldata = (checksums: boolean): { code: number; stdout: string; stderr: string } => ({
+		code: 0,
+		stdout: `pg_control version number: 1300\nData page checksum version: ${checksums ? 1 : 0}\n`,
+		stderr: '',
+	});
+
+	test('parses data checksums and renders the fixed pg_rewind argv', () => {
+		expect(parseDataChecksums('Data page checksum version: 1\n')).toBe(true);
+		expect(parseDataChecksums('Data page checksum version: 0\n')).toBe(false);
+		expect(parseDataChecksums('garbage')).toBe(false);
+		const args = renderPgRewindArgs({
+			podmanPath: '/usr/bin/podman',
+			image: postgresPitrImage('18'),
+			replicaId: REPLICA,
+			targetRoot: '/state/db_abc123',
+			linkDir: '/var/lib/yoal/agent/replication/db_dbr_abc123',
+			user: 'main_db',
+		});
+		expect(args).toContain('pg_rewind');
+		expect(args).toContain('--target-pgdata=/data/pgdata');
+		expect(args).toContain('--source-server=host=/run/yoal-upstream port=5432 user=main_db dbname=postgres connect_timeout=10');
+		expect(args).toContain('--write-recovery-conf');
+		expect(args).toContain('/var/lib/yoal/agent/replication/db_dbr_abc123:/run/yoal-upstream:ro,z');
+		expect(args).not.toContain(PASSWORD);
+		expect(args).not.toContain('pg_basebackup');
+		expect(
+			renderPgControldataArgs({
+				podmanPath: '/usr/bin/podman',
+				image: postgresPitrImage('18'),
+				replicaId: REPLICA,
+				targetRoot: '/state/db_abc123',
+			}),
+		).toContain('pg_controldata');
+	});
+
+	test('a successful rewind adopts the old data dir under the replica id', async () => {
+		const { driver, runner, stateDir, root } = await fixture((argv) => {
+			if (argv.includes('pg_controldata')) return controldata(true);
+			return undefined;
+		});
+		await fs.mkdir(join(root, 'replication', REPLICA), { recursive: true });
+		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, slot: 'yoal_test', user: 'main_db', password: PASSWORD });
+		expect(result).toEqual({ replicaId: REPLICA, rewound: true, fallback: null, reason: null });
+		expect(await fs.lstat(join(stateDir, SOURCE)).catch(() => null)).toBeNull();
+		expect(await fs.readFile(join(stateDir, REPLICA, 'pgdata', 'PG_VERSION'), 'utf8')).toBe('18\n');
+		const rewind = runner.podman().find((argv) => argv.includes('pg_rewind'));
+		expect(rewind).toBeDefined();
+		expect(runner.calls.find((call) => call.argv.includes('pg_rewind'))?.options?.env).toEqual({ PGPASSWORD: PASSWORD });
+		// Idempotent: a re-run sees the adopted directory and reports success again.
+		expect(await driver.rewindReplica(REPLICA, { databaseId: SOURCE, slot: 'yoal_test', user: 'main_db', password: PASSWORD })).toMatchObject({
+			rewound: true,
+		});
+	});
+
+	test('no checksums and no wal_log_hints falls back to a rebuild without running pg_rewind', async () => {
+		const { driver, runner, stateDir } = await fixture((argv) => {
+			if (argv.includes('pg_controldata')) return controldata(false);
+			return undefined;
+		});
+		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, slot: 'yoal_test', user: 'main_db', password: PASSWORD });
+		expect(result).toMatchObject({ rewound: false, fallback: 'rebuild' });
+		expect(result.reason).toMatch(/neither data checksums nor wal_log_hints/);
+		expect(runner.podman().some((argv) => argv.includes('pg_rewind'))).toBe(false);
+		expect(await fs.lstat(join(stateDir, SOURCE)).catch(() => null)).toBeNull();
+	});
+
+	test('wal_log_hints=on is enough for an old cluster without checksums', async () => {
+		const { driver, stateDir } = await fixture((argv) => {
+			if (argv.includes('pg_controldata')) return controldata(false);
+			return undefined;
+		});
+		await fs.writeFile(join(stateDir, SOURCE, 'pgdata', 'postgresql.auto.conf'), "wal_log_hints = 'on'\n");
+		expect(await driver.rewindReplica(REPLICA, { databaseId: SOURCE, slot: 'yoal_test', user: 'main_db', password: PASSWORD })).toMatchObject({
+			rewound: true,
+		});
+	});
+
+	test('a failed pg_rewind deletes the old dir and reports the rebuild fallback', async () => {
+		const { driver, runner, stateDir } = await fixture((argv) => {
+			if (argv.includes('pg_controldata')) return controldata(true);
+			if (argv.includes('pg_rewind'))
+				return { code: 1, stdout: '', stderr: 'FATAL: source and target clusters are from different systems' };
+			return undefined;
+		});
+		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, slot: 'yoal_test', user: 'main_db', password: PASSWORD });
+		expect(result).toMatchObject({ rewound: false, fallback: 'rebuild' });
+		expect(result.reason).toMatch(/different systems/);
+		expect(runner.podman().some((argv) => argv.includes('pg_rewind'))).toBe(true);
+		expect(await fs.lstat(join(stateDir, SOURCE)).catch(() => null)).toBeNull();
+	});
+
+	test('a missing old primary reports the rebuild fallback without running anything', async () => {
+		const { driver, runner } = await fixture();
+		const result = await driver.rewindReplica(REPLICA, { databaseId: 'db_missing', slot: 'yoal_test', user: 'main_db', password: PASSWORD });
+		expect(result).toMatchObject({ rewound: false, fallback: 'rebuild' });
+		expect(runner.podman()).toHaveLength(0);
 	});
 });

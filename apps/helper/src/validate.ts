@@ -516,6 +516,11 @@ export interface WorkloadDatabase {
 	tls?: boolean;
 	/** Streaming read replica (C7): the standby unit variant, streaming from this slot. */
 	replica?: { slot: string };
+	/**
+	 * HA-PLAN W10: render `wal_log_hints=on`, so an old cluster without data checksums can still be
+	 * rewound (`pg_rewind` needs one of the two). Omitted while `PITR_REWIND` is off.
+	 */
+	pgRewind?: boolean;
 }
 
 /** Workload ids of managed databases carry this prefix; `purge` accepts these and `st_` ids. */
@@ -547,7 +552,7 @@ export function parseDatabase(value: unknown, label = 'workload.database'): Work
 	if (typeof version !== 'string' || !(info.versions as readonly string[]).includes(version))
 		throw new ValidationError(`${label}.version must be one of ${info.versions.join(', ')}`);
 	for (const key of Object.keys(record)) {
-		if (key !== 'engine' && key !== 'version' && key !== 'variant' && key !== 'pitr' && key !== 'tls' && key !== 'replica')
+		if (key !== 'engine' && key !== 'version' && key !== 'variant' && key !== 'pitr' && key !== 'tls' && key !== 'replica' && key !== 'pgRewind')
 			throw new ValidationError(`${label}.${key} is not supported`);
 	}
 	const parsed: WorkloadDatabase = { engine: engine as DatabaseEngine, version };
@@ -589,10 +594,15 @@ export function parseDatabase(value: unknown, label = 'workload.database'): Work
 		if (typeof record.tls !== 'boolean') throw new ValidationError(`${label}.tls must be a boolean`);
 		parsed.tls = record.tls;
 	}
+	if (record.pgRewind !== undefined) {
+		if (typeof record.pgRewind !== 'boolean') throw new ValidationError(`${label}.pgRewind must be a boolean`);
+		if (engine !== 'postgres') throw new ValidationError(`${label}.pgRewind is only supported for postgres`);
+		parsed.pgRewind = record.pgRewind;
+	}
 	if (record.replica !== undefined) {
-		// Streaming replicas are Postgres-only and never archive WAL themselves (docs/CLUSTERING.md §9.2).
+		// Streaming replicas are Postgres-only; they archive only once promoted.
 		if (engine !== 'postgres') throw new ValidationError(`${label}.replica is only supported for postgres`);
-		if (parsed.pitr) throw new ValidationError(`${label}.replica cannot be combined with ${label}.pitr`);
+		if (parsed.pitr && !parsed.pgRewind) throw new ValidationError(`${label}.replica cannot be combined with ${label}.pitr`);
 		const replica = assertRecord(record.replica, `${label}.replica`);
 		for (const key of Object.keys(replica))
 			if (key !== 'slot') throw new ValidationError(`${label}.replica.${key} is not supported`);

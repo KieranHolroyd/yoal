@@ -1,3 +1,4 @@
+import { REPLICA_UPSTREAM_DIR } from './replication.ts';
 import { ValidationError } from './validate.ts';
 
 /**
@@ -24,6 +25,9 @@ export const PITR_PGDATA = '/data/pgdata';
 export const PITR_CONFIG_DIRNAME = 'pgbackrest';
 export const PITR_CONFIG_FILENAME = 'pgbackrest.conf';
 export const PITR_PGPASS_FILENAME = 'pgpass';
+/** HA-PLAN W3/W10: a GCS service-account key is a 0400 file beside the config, never inline. */
+export const PITR_GCS_KEY_FILENAME = 'gcs-key.json';
+export const PITR_GCS_KEY_PATH = `${PITR_CONTAINER_CONFIG_DIR}/${PITR_GCS_KEY_FILENAME}`;
 export const PITR_ARCHIVE_TIMEOUT_SECONDS = 60;
 /** Weekly full and daily differential base backups, at 02:00 UTC. */
 export const PITR_FULL_SCHEDULE = '0 2 * * 0';
@@ -42,7 +46,14 @@ export const PITR_NEEDS_INIT = true;
 /** A temporary superuser the restore creates to rename the owner role, then drops. */
 export const PITR_RESTORE_ROLE = 'yoal_pitr_restore';
 
-export interface PitrRepoConfig {
+/**
+ * A validated repository. `s3` keeps the shape every node has parsed since PITR shipped; `azure`
+ * and `gcs` are HA-PLAN W3/W10 and only exist on an install whose node declares
+ * `object-store-kinds`. The helper parses the store shape itself and never accepts a raw target.
+ */
+export type PitrRepoConfig = PitrS3RepoConfig | PitrAzureRepoConfig | PitrGcsRepoConfig;
+
+export interface PitrS3RepoConfig {
 	kind: 's3';
 	endpoint: string | null;
 	bucket: string;
@@ -51,6 +62,27 @@ export interface PitrRepoConfig {
 	forcePathStyle: boolean;
 	accessKeyId: string;
 	secretAccessKey: string;
+}
+
+export interface PitrAzureRepoConfig {
+	kind: 'azure';
+	account: string;
+	container: string;
+	/** Null means `blob.core.windows.net`; an `http://` endpoint is an emulator (Azurite). */
+	endpoint: string | null;
+	pathPrefix: string;
+	keyType: 'shared' | 'sas';
+	key: string;
+}
+
+export interface PitrGcsRepoConfig {
+	kind: 'gcs';
+	bucket: string;
+	/** Null means `storage.googleapis.com`; an `http://` endpoint is an emulator. */
+	endpoint: string | null;
+	pathPrefix: string;
+	/** The service-account JSON, written as a 0400 file beside the config. */
+	serviceAccountJson: string;
 }
 
 export const PITR_STANZA_PATTERN = /^[A-Za-z0-9_-]{1,64}$/;
@@ -81,42 +113,128 @@ function clean(value: unknown, label: string, max: number): string {
 	return trimmed;
 }
 
+const AZURE_ACCOUNT_PATTERN = /^[a-z0-9]{3,24}$/;
+const AZURE_CONTAINER_PATTERN = /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/;
+const GCS_BUCKET_PATTERN = /^[a-z0-9][a-z0-9._-]*[a-z0-9]$/;
+
+/** An endpoint origin; `allowHttp` is only for Azure/GCS emulators, never for S3. */
+function parseRepoEndpoint(value: unknown, label: string, allowHttp: boolean): string | null {
+	if (value === undefined || value === null) return null;
+	const endpoint = clean(value, `${label}.endpoint`, 300);
+	let url: URL;
+	try {
+		url = new URL(endpoint);
+	} catch {
+		throw new ValidationError(`${label}.endpoint must be an ${allowHttp ? 'http(s)' : 'https'} URL`);
+	}
+	if (url.protocol !== 'https:' && !(allowHttp && url.protocol === 'http:'))
+		throw new ValidationError(
+			`${label}.endpoint must use ${allowHttp ? 'https (or http for an emulator)' : 'https (pgBackRest has no plain-HTTP S3 client)'}`,
+		);
+	if (url.username || url.password) throw new ValidationError(`${label}.endpoint must not embed credentials`);
+	if (url.search || url.hash) throw new ValidationError(`${label}.endpoint must not contain a query or fragment`);
+	return url.toString();
+}
+
+function parseRepoPathPrefix(value: unknown, label: string): string {
+	const raw = value === undefined ? '' : value;
+	if (typeof raw !== 'string') throw new ValidationError(`${label}.pathPrefix must be a string`);
+	const pathPrefix = raw.trim().replace(/^\/+|\/+$/g, '');
+	if (!PREFIX_PATTERN.test(pathPrefix))
+		throw new ValidationError(`${label}.pathPrefix contains unsupported characters`);
+	if (pathPrefix && pathPrefix.split('/').some((part) => part === '.' || part === '..' || part === ''))
+		throw new ValidationError(`${label}.pathPrefix must be normalized`);
+	return pathPrefix;
+}
+
+function parseObjectStoreRepo(record: Record<string, unknown>, label: string): PitrAzureRepoConfig | PitrGcsRepoConfig {
+	const store = record.store;
+	if (typeof store !== 'object' || store === null || Array.isArray(store))
+		throw new ValidationError(`${label}.store must be an object`);
+	const target = store as Record<string, unknown>;
+	const credentials = record.storeCredentials;
+	if (typeof credentials !== 'object' || credentials === null || Array.isArray(credentials))
+		throw new ValidationError(`${label}.storeCredentials must be an object`);
+	const creds = credentials as Record<string, unknown>;
+	if (target.kind !== 'azure' && target.kind !== 'gcs')
+		throw new ValidationError(`${label}.store.kind must be "azure" or "gcs"`);
+	if (creds.kind !== target.kind)
+		throw new ValidationError(`${label}.storeCredentials are for another kind of store`);
+	const pathPrefix = parseRepoPathPrefix(target.pathPrefix, `${label}.store`);
+	const endpoint = parseRepoEndpoint(target.endpoint, `${label}.store`, true);
+
+	if (target.kind === 'azure') {
+		const account = clean(target.account, `${label}.store.account`, 24);
+		if (!AZURE_ACCOUNT_PATTERN.test(account))
+			throw new ValidationError(`${label}.store.account must be 3-24 lowercase letters and digits`);
+		const container = clean(target.container, `${label}.store.container`, 63);
+		if (!AZURE_CONTAINER_PATTERN.test(container) || container.includes('--'))
+			throw new ValidationError(`${label}.store.container is not a valid Azure container name`);
+		// Azurite's service endpoint carries the account as a path (`/devstoreaccount1`). It is the
+		// only path accepted: pgBackRest derives the account prefix itself in path style.
+		if (endpoint) {
+			const url = new URL(endpoint);
+			const trimmed = url.pathname.replace(/^\/+|\/+$/g, '');
+			if (trimmed !== '' && trimmed !== account)
+				throw new ValidationError(`${label}.store.endpoint must be an origin or end with the account name`);
+		}
+		const accountKey = creds.accountKey === undefined ? null : clean(creds.accountKey, `${label}.storeCredentials.accountKey`, 512);
+		const sasToken = creds.sasToken === undefined ? null : clean(creds.sasToken, `${label}.storeCredentials.sasToken`, 2048);
+		if ((accountKey === null) === (sasToken === null))
+			throw new ValidationError(`${label}.storeCredentials need exactly one of accountKey or sasToken`);
+		return {
+			kind: 'azure',
+			account,
+			container,
+			endpoint,
+			pathPrefix,
+			keyType: accountKey ? 'shared' : 'sas',
+			key: (accountKey ?? sasToken)!,
+		};
+	}
+
+	const bucket = clean(target.bucket, `${label}.store.bucket`, 63);
+	if (!GCS_BUCKET_PATTERN.test(bucket) || bucket.startsWith('goog') || bucket.includes('google'))
+		throw new ValidationError(`${label}.store.bucket is not a valid GCS bucket name`);
+	if (endpoint) {
+		const url = new URL(endpoint);
+		if (url.pathname !== '' && url.pathname !== '/')
+			throw new ValidationError(`${label}.store.endpoint must be a bare origin`);
+	}
+	const serviceAccountJson = creds.serviceAccountJson;
+	if (typeof serviceAccountJson !== 'string' || serviceAccountJson.length < 20 || serviceAccountJson.length > 16_384)
+		throw new ValidationError(`${label}.storeCredentials.serviceAccountJson must be a service-account key (20-16384 characters)`);
+	try {
+		const key = JSON.parse(serviceAccountJson) as Record<string, unknown>;
+		if (typeof key.client_email !== 'string' || typeof key.private_key !== 'string')
+			throw new Error('missing fields');
+	} catch {
+		throw new ValidationError(
+			`${label}.storeCredentials.serviceAccountJson must be a service-account key with client_email and private_key`,
+		);
+	}
+	return { kind: 'gcs', bucket, endpoint, pathPrefix, serviceAccountJson };
+}
+
 /** Validate the structured repository config handed to the helper over the privileged socket. */
 export function parsePitrRepo(value: unknown, label = 'pitr.repo'): PitrRepoConfig {
 	if (typeof value !== 'object' || value === null || Array.isArray(value))
 		throw new ValidationError(`${label} must be an object`);
 	const record = value as Record<string, unknown>;
+	if (record.store !== undefined) return parseObjectStoreRepo(record, label);
 	if (record.kind !== 's3') throw new ValidationError(`${label}.kind must be "s3"`);
 
 	const bucket = clean(record.bucket, `${label}.bucket`, 63);
 	if (!BUCKET_PATTERN.test(bucket)) throw new ValidationError(`${label}.bucket is not a valid bucket name`);
 	const region = clean(record.region, `${label}.region`, 63);
 	if (!REGION_PATTERN.test(region)) throw new ValidationError(`${label}.region is not a valid region`);
-
-	let endpoint: string | null = null;
-	if (record.endpoint !== undefined && record.endpoint !== null) {
-		endpoint = clean(record.endpoint, `${label}.endpoint`, 300);
-		let url: URL;
-		try {
-			url = new URL(endpoint);
-		} catch {
-			throw new ValidationError(`${label}.endpoint must be an https URL`);
-		}
-		// pgBackRest speaks TLS to S3 only; a plain-HTTP endpoint could never archive a segment.
-		if (url.protocol !== 'https:') throw new ValidationError(`${label}.endpoint must use https (pgBackRest has no plain-HTTP S3 client)`);
-		if (url.username || url.password)
-			throw new ValidationError(`${label}.endpoint must not embed credentials`);
+	const endpoint = parseRepoEndpoint(record.endpoint, label, false);
+	if (endpoint) {
+		const url = new URL(endpoint);
 		if ((url.pathname !== '/' && url.pathname !== '') || url.search || url.hash)
 			throw new ValidationError(`${label}.endpoint must be a bare origin (put the path in pathPrefix)`);
 	}
-
-	const rawPrefix = record.pathPrefix === undefined ? '' : record.pathPrefix;
-	if (typeof rawPrefix !== 'string') throw new ValidationError(`${label}.pathPrefix must be a string`);
-	const pathPrefix = rawPrefix.trim().replace(/^\/+|\/+$/g, '');
-	if (!PREFIX_PATTERN.test(pathPrefix))
-		throw new ValidationError(`${label}.pathPrefix contains unsupported characters`);
-	if (pathPrefix && pathPrefix.split('/').some((part) => part === '.' || part === '..' || part === ''))
-		throw new ValidationError(`${label}.pathPrefix must be normalized`);
+	const pathPrefix = parseRepoPathPrefix(record.pathPrefix, label);
 
 	if (typeof record.forcePathStyle !== 'boolean')
 		throw new ValidationError(`${label}.forcePathStyle must be a boolean`);
@@ -139,14 +257,25 @@ export function parsePitrRepo(value: unknown, label = 'pitr.repo'): PitrRepoConf
 }
 
 /**
- * The endpoint host and (non-default) port pgBackRest connects to. AWS S3 has no default in
- * pgBackRest, so a null endpoint becomes the regional AWS host.
+ * The endpoint host and (non-default) port pgBackRest connects to. A null endpoint is the
+ * backend's default: AWS S3 for the region, `blob.core.windows.net`, or `storage.googleapis.com`.
  */
-export function pitrRepoEndpoint(repo: Pick<PitrRepoConfig, 'endpoint' | 'region'>): { host: string; port: number | null } {
-	if (!repo.endpoint) return { host: `s3.${repo.region}.amazonaws.com`, port: null };
+export function pitrRepoEndpoint(repo: PitrRepoConfig): { host: string; port: number | null; tls: boolean } {
+	if (repo.kind === 's3') {
+		if (!repo.endpoint) return { host: `s3.${repo.region}.amazonaws.com`, port: null, tls: true };
+		const url = new URL(repo.endpoint);
+		return { host: url.hostname, port: url.port ? Number(url.port) : null, tls: url.protocol === 'https:' };
+	}
+	if (!repo.endpoint)
+		return {
+			host: repo.kind === 'azure' ? 'blob.core.windows.net' : 'storage.googleapis.com',
+			port: null,
+			tls: true,
+		};
 	const url = new URL(repo.endpoint);
-	return { host: url.hostname, port: url.port ? Number(url.port) : null };
+	return { host: url.hostname, port: url.port ? Number(url.port) : null, tls: url.protocol === 'https:' };
 }
+
 
 /**
  * A restore target cannot be in the future or outside the repository retention window. The helper
@@ -200,6 +329,10 @@ export interface PgBackRestConfigOptions {
  * is off so a busy archive cannot fill the 64 MB `/tmp`: warnings reach the journal via stderr.
  * `repo1-cipher-type=none` is deliberate: the repository lives in an encrypted-at-rest bucket and
  * the control plane does not hold a second key that a restore runbook would have to recover.
+ *
+ * A non-S3 repository uses pgBackRest's own Azure/GCS client (HA-PLAN W3): the same config works
+ * from the primary, a replica and a restore one-shot, so a stanza follows the primary across a
+ * promotion with no rewrite. Emulator endpoints stay plain HTTP and skip TLS verification.
  */
 export function renderPgBackRestConfig(options: PgBackRestConfigOptions): string {
 	const { repo } = options;
@@ -207,17 +340,51 @@ export function renderPgBackRestConfig(options: PgBackRestConfigOptions): string
 	if (!IDENTIFIER_PATTERN.test(options.pg1User)) throw new ValidationError('pitr pg1-user must be a plain identifier');
 	const repoPath = [repo.pathPrefix, options.stanza].filter(Boolean).join('/');
 	const endpoint = pitrRepoEndpoint(repo);
+	const repoLines: string[] =
+		repo.kind === 's3'
+			? [
+					'repo1-type=s3',
+					`repo1-s3-bucket=${repo.bucket}`,
+					`repo1-s3-endpoint=${endpoint.host}`,
+					...(endpoint.port ? [`repo1-storage-port=${endpoint.port}`] : []),
+					`repo1-s3-region=${repo.region}`,
+					`repo1-s3-key=${repo.accessKeyId}`,
+					`repo1-s3-key-secret=${repo.secretAccessKey}`,
+					`repo1-s3-uri-style=${repo.forcePathStyle ? 'path' : 'host'}`,
+				]
+			: repo.kind === 'azure'
+				? [
+						'repo1-type=azure',
+						`repo1-azure-account=${repo.account}`,
+						`repo1-azure-container=${repo.container}`,
+						`repo1-azure-key-type=${repo.keyType}`,
+						`repo1-azure-key=${repo.key}`,
+						...(repo.endpoint
+							? [
+									`repo1-azure-endpoint=${endpoint.host}`,
+									...(endpoint.port ? [`repo1-storage-port=${endpoint.port}`] : []),
+									'repo1-azure-uri-style=path',
+									...(endpoint.tls ? [] : ['repo1-storage-verify-tls=n']),
+								]
+							: []),
+					]
+				: [
+						'repo1-type=gcs',
+						`repo1-gcs-bucket=${repo.bucket}`,
+						'repo1-gcs-key-type=service',
+						`repo1-gcs-key=${PITR_GCS_KEY_PATH}`,
+						...(repo.endpoint
+							? [
+									`repo1-gcs-endpoint=${endpoint.host}`,
+									...(endpoint.port ? [`repo1-storage-port=${endpoint.port}`] : []),
+									...(endpoint.tls ? [] : ['repo1-storage-verify-tls=n']),
+								]
+							: []),
+					];
 	const lines = [
 		'# Generated by yoal-helper (docs/PITR.md). Do not edit; changes are overwritten.',
 		'[global]',
-		'repo1-type=s3',
-		`repo1-s3-bucket=${repo.bucket}`,
-		`repo1-s3-endpoint=${endpoint.host}`,
-		...(endpoint.port ? [`repo1-storage-port=${endpoint.port}`] : []),
-		`repo1-s3-region=${repo.region}`,
-		`repo1-s3-key=${repo.accessKeyId}`,
-		`repo1-s3-key-secret=${repo.secretAccessKey}`,
-		`repo1-s3-uri-style=${repo.forcePathStyle ? 'path' : 'host'}`,
+		...repoLines,
 		`repo1-path=/${repoPath}`,
 		'repo1-retention-full-type=count',
 		`repo1-retention-full=${PITR_RETENTION_FULL}`,
@@ -246,6 +413,106 @@ export function renderPgBackRestConfig(options: PgBackRestConfigOptions): string
 	return lines.join('\n');
 }
 
+/** The extra 0400 file a GCS repository needs (its service-account key); null for S3 and Azure. */
+export function renderPgBackRestKey(repo: PitrRepoConfig): string | null {
+	return repo.kind === 'gcs' ? repo.serviceAccountJson : null;
+}
+
+// ---------------------------------------------------------------- pg_rewind (HA-PLAN W10)
+
+/** One-shot container that rewinds an old primary's data dir against the new primary. */
+export function pgRewindContainerName(replicaId: string): string {
+	return `yoal-rewind-${replicaId}`;
+}
+
+/**
+ * `--source-server` for `pg_rewind`: the same agent-served link socket a replica streams through,
+ * so the old primary's node reaches the new primary over the same pinned mTLS path and never needs
+ * a new listener.
+ */
+export function pgRewindSourceServer(user: string): string {
+	if (!IDENTIFIER_PATTERN.test(user)) throw new ValidationError('pg_rewind source user must be a plain identifier');
+	return `host=${REPLICA_UPSTREAM_DIR} port=5432 user=${user} dbname=postgres connect_timeout=10`;
+}
+
+/**
+ * `pg_controldata` reads the target cluster without starting it. `pg_rewind` can only run when the
+ * target has data checksums (new databases get them) or `wal_log_hints=on`; anything else takes the
+ * rebuild path.
+ */
+export function parseDataChecksums(stdout: string): boolean {
+	const match = /^Data page checksum version:\s*(\d+)\s*$/m.exec(stdout);
+	return match ? Number(match[1]) > 0 : false;
+}
+
+export function renderPgControldataArgs(options: {
+	podmanPath: string;
+	image: string;
+	replicaId: string;
+	/** Host directory of the old primary's data dir root (`<…>/<databaseId>`), mounted at /data. */
+	targetRoot: string;
+}): string[] {
+	return [
+		options.podmanPath,
+		'run',
+		'--rm',
+		'--name',
+		pgRewindContainerName(options.replicaId),
+		'--user',
+		'70:70',
+		'--read-only',
+		'--tmpfs',
+		'/tmp:rw,size=64m',
+		'--volume',
+		`${options.targetRoot}:/data:ro`,
+		'--entrypoint',
+		'pg_controldata',
+		options.image,
+		PITR_PGDATA,
+	];
+}
+
+/**
+ * `pg_rewind` in a one-shot container of the PITR image. `--write-recovery-conf` writes
+ * `standby.signal` and `primary_conninfo` from the source-server, so the adopted directory starts
+ * as a standby; the replica unit also passes `primary_slot_name`. `PGPASSWORD` arrives through the
+ * container environment, never argv.
+ */
+export function renderPgRewindArgs(options: {
+	podmanPath: string;
+	image: string;
+	replicaId: string;
+	targetRoot: string;
+	linkDir: string;
+	user: string;
+}): string[] {
+	return [
+		options.podmanPath,
+		'run',
+		'--rm',
+		'--name',
+		pgRewindContainerName(options.replicaId),
+		'--user',
+		'70:70',
+		'--read-only',
+		'--tmpfs',
+		'/tmp:rw,size=64m',
+		'--volume',
+		`${options.targetRoot}:/data:Z`,
+		'--volume',
+		`${options.linkDir}:${REPLICA_UPSTREAM_DIR}:ro,z`,
+		'--env',
+		'PGPASSWORD',
+		'--entrypoint',
+		'pg_rewind',
+		options.image,
+		`--target-pgdata=${PITR_PGDATA}`,
+		`--source-server=${pgRewindSourceServer(options.user)}`,
+		'--write-recovery-conf',
+		'--progress',
+	];
+}
+
 /** `~/.pgpass` format: host:port:database:user:password, with `:` and `\` escaped. */
 export function renderPgPass(user: string, password: string, host = '*', port = '*', database = '*'): string {
 	const escape = (value: string) => value.replace(/\\/g, '\\\\').replace(/:/g, '\\:');
@@ -257,12 +524,13 @@ export function renderPgPass(user: string, password: string, host = '*', port = 
  * files) is bind-mounted, so an atomic rewrite of the config is visible to the running container
  * without a restart.
  */
-export function pitrPaths(runtimeDir: string, id: string): { dir: string; config: string; pgpass: string } {
+export function pitrPaths(runtimeDir: string, id: string): { dir: string; config: string; pgpass: string; gcsKey: string } {
 	const dir = `${runtimeDir}/${id}/${PITR_CONFIG_DIRNAME}`;
 	return {
 		dir,
 		config: `${dir}/${PITR_CONFIG_FILENAME}`,
 		pgpass: `${dir}/${PITR_PGPASS_FILENAME}`,
+		gcsKey: `${dir}/${PITR_GCS_KEY_FILENAME}`,
 	};
 }
 
