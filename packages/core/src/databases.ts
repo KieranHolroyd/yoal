@@ -2930,7 +2930,7 @@ export class DatabaseService {
 			// that follows the replicas without changing the app's environment (H24).
 			if (item.gateway) {
 				const read = this.endpointRow(nodeId!, item.row.id, 'read');
-				if (read && this.ctx.databaseReplicas.readableUpstreamsFor(item.row.id).length > 0) {
+				if (read) {
 					const host = runtime === 'container' ? databaseAlias(item.row.id) : '127.0.0.1';
 					const url = databaseConnectionUrl({
 						scheme: item.scheme,
@@ -2999,7 +2999,9 @@ export class DatabaseService {
 						const reads = this.ctx.databaseReplicas.readTargets(item.row, nodeId!, runtime);
 						return reads.length > 0 ? { reads: reads.map((target) => `${target.replicaId}@${target.host}:${target.port}`) } : {};
 					})()
-				: {}),
+				: this.endpointRow(nodeId!, item.row.id, 'read')
+					? { reads: true }
+					: {}),
 			...(item.credential
 				? { credential: item.credential.id, secret: sha256Hex(item.secretSealed) }
 				: this.ownerRotated(item.databaseId)

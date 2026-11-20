@@ -39,10 +39,21 @@ export class ServiceEndpointService {
 		const gateway = this.gatewayAt(consumerNodeId);
 		const projectIds = new Set(this.projectsOnNode(consumerNodeId));
 		if (projectId) projectIds.add(projectId);
+		// A read endpoint survives losing every readable replica: its stable port keeps pointing at
+		// the primary as a fallback, so a promotion or a replica going away never changes an app's
+		// environment. It is created only once a replica actually serves reads.
+		const existingReadIds = new Set(
+			this.ctx.db
+				.select({ serviceId: serviceEndpoints.serviceId })
+				.from(serviceEndpoints)
+				.where(and(eq(serviceEndpoints.consumerNodeId, consumerNodeId), eq(serviceEndpoints.role, 'read')))
+				.all()
+				.map((row) => row.serviceId),
+		);
 		const services: PlannedService[] = [];
 		const readServices: Array<{ serviceId: string; upstreamNodeId: string; upstreamPort: number }> = [];
 		for (const id of projectIds) {
-			const planned = this.servicesForProject(id, consumerNodeId, gateway);
+			const planned = this.servicesForProject(id, consumerNodeId, gateway, existingReadIds);
 			services.push(...planned.services);
 			readServices.push(...planned.reads);
 		}
@@ -223,6 +234,7 @@ export class ServiceEndpointService {
 		projectId: string,
 		consumerNodeId: string,
 		gateway: boolean,
+		existingReadIds: ReadonlySet<string>,
 	): {
 		services: PlannedService[];
 		reads: Array<{ serviceId: string; upstreamNodeId: string; upstreamPort: number }>;
@@ -268,6 +280,7 @@ export class ServiceEndpointService {
 					upstreamPort: row.poolerPort,
 				});
 			// A read endpoint follows every readable replica; one representative upstream allocates it.
+			// Once it exists it stays, pointing at the primary as a fallback when none serves reads.
 			if (row.engine === 'postgres') {
 				const upstreams = this.ctx.databaseReplicas.readableUpstreamsFor(row.id);
 				if (upstreams.length > 0)
@@ -276,6 +289,8 @@ export class ServiceEndpointService {
 						upstreamNodeId: upstreams[0]!.nodeId,
 						upstreamPort: upstreams[0]!.port,
 					});
+				else if (existingReadIds.has(row.id))
+					reads.push({ serviceId: row.id, upstreamNodeId: row.nodeId, upstreamPort: row.port });
 			}
 		}
 		const storageOnProject = this.ctx.db

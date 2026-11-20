@@ -269,12 +269,6 @@ describe('promotion changes no app environment and restarts none', () => {
 		const db = core.databases.create(owner, { name: 'promotion-db', placement: data.nodeId });
 		core.databases.attach(owner, core.projects.requireRow(owner, project.slug), { database: 'promotion-db', envPrefix: 'DATABASE' });
 		activate(project.slug, 1);
-		const beforeEnv = core.databases.consumerEnv(project.id, workerB.nodeId, 'container');
-		const beforeVersion = core.databases.consumerVersion(project.id, workerB.nodeId, 'container');
-		const beforeState = await core.nodes.desiredState(workerB.token);
-		const beforeWorkload = beforeState.workloads.find((item) => item.projectId === project.id)!;
-		const beforePort = Number(beforeEnv.DATABASE_PORT);
-
 		const replica = core.databaseReplicas.add(owner, 'promotion-db', { node: workerB.nodeId });
 		beat(data, {
 			databaseReplication: [
@@ -287,6 +281,13 @@ describe('promotion changes no app environment and restarts none', () => {
 				},
 			],
 		});
+		// Capture after the replica exists: a read URL appearing is a deliberate restart (C7), and
+		// everything after it — the promotion — must change nothing.
+		const beforeEnv = core.databases.consumerEnv(project.id, workerB.nodeId, 'container');
+		const beforeVersion = core.databases.consumerVersion(project.id, workerB.nodeId, 'container');
+		const beforeState = await core.nodes.desiredState(workerB.token);
+		const beforeWorkload = beforeState.workloads.find((item) => item.projectId === project.id)!;
+		const beforePort = Number(beforeEnv.DATABASE_PORT);
 		const started = core.databaseReplicas.promote(owner, 'promotion-db', replica.id, { confirm: true }, { ifMatch: 0 });
 		beat(data, { workloads: [] });
 		beat(workerB, {
@@ -344,10 +345,29 @@ describe('promotion changes no app environment and restarts none', () => {
 		expect(state.readEndpoints![0]!.upstreams.map((item) => item.nodeId)).toEqual(
 			expect.arrayContaining([workerA.nodeId, data.nodeId]),
 		);
+
+		// Losing every readable replica keeps the same port and URL (the endpoint falls back to the
+		// primary), so a failover is not a reason to restart the app or change its environment.
+		const before = core.databases.consumerVersion(project.id, workerC.nodeId, 'container');
+		beat(data, {
+			databaseReplication: [
+				{
+					databaseId: db.id,
+					appliedVersion: core.databaseReplicas.replicationTasksForNode(data.nodeId).find((item) => item.databaseId === db.id)!.version,
+					error: null,
+					slots: [slotSample(replica.slot!, { active: false, state: null })],
+					sampledAt: new Date(clock).toISOString(),
+				},
+			],
+		});
+		expect(core.databaseReplicas.list(owner, 'read-db')[0]!.status).toBe('stopped');
+		expect(endpointRows(workerC.nodeId, db.id).find((row) => row.role === 'read')).toMatchObject({ localPort: read.localPort });
+		expect(core.databases.consumerEnv(project.id, workerC.nodeId, 'container').DATABASE_READ_URL).toBe(env.DATABASE_READ_URL);
+		expect(core.databases.consumerVersion(project.id, workerC.nodeId, 'container')).toBe(before);
 	});
 });
 
-function slotSample(slot: string): DatabaseReplicationSlotStatus {
+function slotSample(slot: string, extra: Partial<DatabaseReplicationSlotStatus> = {}): DatabaseReplicationSlotStatus {
 	return {
 		slot,
 		active: true,
@@ -358,6 +378,7 @@ function slotSample(slot: string): DatabaseReplicationSlotStatus {
 		lagBytes: 0,
 		lagSeconds: 0,
 		syncState: 'async',
+		...extra,
 	};
 }
 
