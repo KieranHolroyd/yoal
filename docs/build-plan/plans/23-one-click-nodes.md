@@ -10,9 +10,11 @@
 `packages/contracts/src/index.ts`, `scripts/install/main.ts`, new `scripts/install/node.sh`
 (served by the control plane), `apps/control-plane/src/routes/(dashboard)/nodes/**`
 
-> **Status (6 Nov 2026):** Proposal. Research summary is at the end of this file. Its single
-> edge hub is generalised to hubs plus LAN mesh in [CLUSTERING.md](../../CLUSTERING.md) §4.1, so
-> several ingress nodes don't make one hub a single point of failure. "Proposed D98" below was
+> **Status (20 Nov 2026):** Built, as CLUSTERING phase C1, and verified on two real hosts on
+> 2026-11-12 (CLUSTERING status table). The design below is the original proposal; where the
+> build differs, CLUSTERING §4.1 is the as-built description. Its single edge hub is generalised
+> to hubs plus LAN mesh there, so several ingress nodes don't make one hub a single point of
+> failure. Research summary is at the end of this file. "Proposed D98" below was
 > never adopted under that number (D98 is the edge hand-off).
 
 ## Problem
