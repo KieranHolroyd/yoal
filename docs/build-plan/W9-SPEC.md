@@ -20,6 +20,16 @@ this document, not the code.
 5. **An unverifiable master key blocks promotion** (`canPromote: false`, fence and page). A primary
    that cannot decrypt its own state is not a primary; promoting it would look healthy and fail
    every secret read.
+6. **A sync-set change is a non-promotable transition.** The first model proved that recording the
+   new set before changing `synchronous_standby_names` loses an acknowledged commit (I13). The lease
+   now carries `syncState: 'steady'|'changing'`; while `changing`, `sync` is empty and no member may
+   promote automatically. The cost is a brief no-auto-failover window during a deliberate change;
+   the alternative is RPO > 0 in a `sync` database.
+
+**Revision 1 (model, 2026-11-20).** The model's minimal trace: primary acks a commit via replica B,
+records `sync: [A]`, dies before switching the setting; A is eligible at generation+1 and is missing
+that commit. §5.5 was rewritten to make the transition non-promotable; the model is re-run against
+this revision before any implementation.
 
 Scope: HA-PLAN H21 (arbiter and failsafe), H22 (member-decided database failover), H23
 (`sync` as a recorded synchronous replica), plus the control-plane half of C6 (CLUSTERING §6.3).
@@ -159,6 +169,7 @@ Supporting rules:
   "holderNodeId": "nod_…",
   "expiresAt": "…",
   "sync": ["nod_replica_a"],
+  "syncState": "steady",
   "durability": "sync",
   "syncSetAt": "…"
 }
@@ -168,8 +179,8 @@ Supporting rules:
 - Acquire: only when the stream is down, the lease has expired by the arbiter's clock, the replica
   is eligible, and the CAS at `generation + 1` succeeds. A lost CAS means another member won; the
   loser re-follows.
-- The `sync` set and `durability` are changed only by the holder, in two steps: record the new set
-  under the lease, then change `synchronous_standby_names` (H23).
+- The `sync` set and `durability` are changed only by the holder, through the non-promotable
+  transition in §5.5. A member may acquire only when `syncState` is `steady`.
 
 ### 5.2 States per member
 
@@ -209,13 +220,32 @@ Supporting rules:
 ### 5.5 Sync set (H23)
 
 - `sync` renders `synchronous_standby_names` for one named replica and `synchronous_commit = on`.
-- The name of the synchronous replica lives in the lease. Changing it is two steps under the lease:
-  record the new set, then change the setting.
-- Losing the synchronous replica: the primary picks another replica the same way. With none left it
-  follows `on_sync_loss`: `downgrade` after `SYNC_DOWNGRADE_AFTER` (alert,
-  `durability_effective = async`, recorded in the lease) or `block`.
+- The name of the synchronous replica, the effective durability and the transition state live in the
+  lease; it is the authority.
+- **Changing the set is a three-step, non-promotable transition.** The old two-step order (record
+  the set, then change the setting) loses an acknowledged commit if the primary dies between them;
+  the model's minimal trace is in Revision 1.
+  1. **Open the transition.** CAS the lease to `sync: []`, `syncState: 'changing'`, same generation.
+     From this moment until step 3, **no member may acquire the lease automatically**: a takeover
+     would be an RPO > 0 promotion by definition.
+  2. **Switch the setting.** Set `synchronous_standby_names` to the new member and wait until it is
+     streaming and acknowledges a barrier write (a commit that the primary watches reach the new
+     member). If it cannot within `SYNC_CHANGE_TIMEOUT` (30 s), close the transition at step 3 with
+     the new set only if the barrier was acknowledged; otherwise fall back to the old member if it
+     is healthy, or to the `on_sync_loss` policy.
+  3. **Close the transition.** CAS the lease to `sync: [new]`, `syncState: 'steady'`. Only now is the
+     new member eligible to promote.
+- If the primary dies while `syncState: 'changing'`, no automatic promotion happens. The fleet pages
+  and a person chooses: promote the old member if it is known caught up, or `accept_data_loss` for
+  the new one. This is deliberate: the alternative is silently losing an acknowledged commit.
+- If the new member acknowledged the barrier and the lease was not closed, the barrier write is in
+  its history; a person may promote it without data loss (the lease does not say so, hence manual).
+- Losing the synchronous replica: the primary runs the same transition to another replica. With none
+  left it follows `on_sync_loss`: `downgrade` after `SYNC_DOWNGRADE_AFTER` (alert,
+  `durability_effective = async`, recorded in the lease, `sync: []`, `syncState: 'steady'`) or
+  `block`.
 - A replica that was dropped from the set cannot promote itself with RPO > 0 without
-  `accept_data_loss`, because the lease records the effective durability.
+  `accept_data_loss`, because the lease records the effective durability and the transition state.
 
 ### 5.6 Consumers
 
@@ -233,7 +263,8 @@ Supporting rules:
 | Primary control node killed | Standby takes over after 40 s quiet + CAS at E+1. | Unaffected unless the database runs there. | I3, I11 |
 | Stale leader resumes | Sees a higher epoch, fences before writing. | Sees higher generation, fences. | I3 |
 | Clock skew ±5 s | Timers skew by up to 5 s; takeover quiet window absorbs it. | Expiry uses the arbiter clock; keep-alive windows absorb skew. | I3, I13 |
-| Sync replica lost | No control-plane change. | Downgrade after 30 s or block; alert. | I13 until downgrade |
+| Sync replica lost | No control-plane change. | Three-step transition; no auto promotion while `changing`; downgrade after 30 s or block; alert. | I13 |
+| Primary dies mid sync-change | No control-plane change. | No automatic promotion (`syncState: 'changing'`); page and choose manually. | I13 |
 | Arbiter outage + one replica unreachable | Primary unaffected unless it is the control holder? It fences on quorum loss (H21). | Primary fences; no promotion (no arbiter). | I3 preserved, availability lost, as designed |
 
 ## 7. Model obligations (step 2)
@@ -243,7 +274,8 @@ The model is written from this spec only and checks:
 - **I3**: never two `primary` actors at one generation/epoch.
 - **I12**: an automatic promotion occurs only for a member named in the lease's `sync` set at the
   acquired generation.
-- **I13**: under `sync`, no acknowledged commit is absent from the promoted primary's history.
+- **I13**: under `sync`, no acknowledged commit is absent from the promoted primary's history —
+  including a promotion after a primary dies in the middle of a sync-set change.
 - **I11**: with the control plane unavailable, traffic continues and database failover (when the
   arbiter is reachable) still completes.
 
