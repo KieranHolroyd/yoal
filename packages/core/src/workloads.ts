@@ -685,8 +685,9 @@ export class WorkloadService {
 		else if (!options.holdCopies && changed && total === 0 && existing && scheduling.rollingDeploys && scheduling.surgeDeploys && !releaseSpec)
 			this.startSurge(project, { ...existing, ...values, id }, resolved.spec, running!, existing.status === 'running', now);
 		// Queue the release command (idempotent: the I16 index is the lease). A superseded deploy's
-		// unstarted attempt is cancelled so its migrations never run after the fact.
-		if (releaseSpec && changed && !options.holdCopies) {
+		// unstarted attempt is cancelled so its migrations never run after the fact. A first deploy
+		// has no previous release to hold, so its copies are withheld by desired state instead.
+		if (releaseSpec && (changed || running === null) && !options.holdCopies) {
 			this.ctx.releaseCommands.cancelSuperseded(id, deploymentId);
 			this.ctx.releaseCommands.schedule({
 				releaseId: deploymentId,
@@ -2197,6 +2198,8 @@ export class WorkloadService {
 			.set({ rolloutStatus: 'rolling', rolloutMessage: null, updatedAt: now })
 			.where(eq(workloads.id, workload.id))
 			.run();
+		// A resumed rollout judges its canary again: a person chose to try it once more.
+		this.ctx.db.delete(deploymentCanaries).where(eq(deploymentCanaries.deploymentId, workload.deploymentId)).run();
 		this.ctx.audit.record({
 			principal,
 			action: 'workload.rollout_resume',

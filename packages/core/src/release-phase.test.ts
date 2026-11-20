@@ -147,6 +147,22 @@ describe('release command gates the rollout (I16, H25)', () => {
 		expect(f.run(second.id)).toHaveLength(1);
 	});
 
+	test('a first deploy with a release command starts no copy until it succeeds', async () => {
+		const f = fleet(['a', 'b']);
+		await f.core.projects.create(principal, { name: 'web', slug: 'web', runtime: 'process', placement: 'auto', productionAccess: 'public', previewAccess: 'platform' });
+		f.core.workloads.setSpec(principal, f.project('web'), { ...baseSpec, replicas: 2, release: { command: ['bin/migrate'] } });
+		const deployment = await f.deploy('web', '1');
+		const [run] = f.run(deployment.id);
+		expect(run?.status).toBe('queued');
+		// No previous release to hold: desired state withholds the copies until the gate opens.
+		expect(await f.desired('a', 'web')).toEqual([]);
+		expect(await f.desired('b', 'web')).toEqual([]);
+		f.core.releaseCommands.recordResults(run!.nodeId!, [{ runId: run!.id, releaseId: deployment.id, status: 'succeeded', exitCode: 0 }]);
+		const rendered = [...(await f.desired('a', 'web')), ...(await f.desired('b', 'web'))];
+		expect(rendered).toHaveLength(2);
+		expect(rendered.every((entry) => entry.deploymentId === deployment.id)).toBe(true);
+	});
+
 	test('a release command runs once and no copy moves before it succeeds', async () => {
 		const f = fleet(['a', 'b']);
 		const first = await f.app('web', { replicas: 2 });
