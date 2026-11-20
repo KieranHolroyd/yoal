@@ -9,6 +9,8 @@ export * from './slugs.ts';
 export * from './semver.ts';
 export * from './features.ts';
 export * from './cluster.ts';
+export * from './control-plane.ts';
+export * from './database-member.ts';
 export * from './cluster-config.ts';
 export * from './scheduling.ts';
 export * from './scaling.ts';

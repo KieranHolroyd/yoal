@@ -67,6 +67,8 @@ import type { ReleaseCommandScheduler } from './release-commands.ts';
 import type { RelocationService } from './relocation-service.ts';
 import type { ClusterConfigService } from './cluster-config-service.ts';
 import type { CertificateService, IngressSetService, SteeringService } from './ingress-service.ts';
+import type { ControlPlaneService } from './control-plane-service.ts';
+import type { DatabaseMemberService } from './database-member-service.ts';
 import type { IamService } from './iam/service.ts';
 import type { GovernanceService } from './iam/governance.ts';
 import type { AuthPolicyService } from './iam/auth-policy.ts';
@@ -190,6 +192,10 @@ export interface CoreContext {
 	steering: SteeringService;
 	/** Shared certificates (HA-PLAN H20). */
 	certificates: CertificateService;
+	/** Control-plane standby status and actions (HA-PLAN H21, Wave 3). */
+	controlPlane: ControlPlaneService;
+	/** Database members, durability and the sync set (HA-PLAN H21–H23, Wave 3). */
+	databaseMembers: DatabaseMemberService;
 	/** Fleet scheduling: utilisation, rebalance and workload moves (CLUSTERING §3.10). */
 	scheduling: SchedulingService;
 	/** Fleet node updates in waves (CLUSTERING §3.11, D217). */

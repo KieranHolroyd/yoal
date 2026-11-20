@@ -256,6 +256,28 @@ export const FEATURE_FLAGS = {
 		area: 'networking',
 		description: 'Issue each host certificate once, seal it and distribute it to every ingress by fingerprint (HA-PLAN H20).'
 	},
+	CONTROL_STANDBY: {
+		name: 'CONTROL_STANDBY',
+		// HA Wave 3, W9. Opt-in: a second control node can take over via the arbiter lease; agents
+		// hold an address list and an epoch. Off until the W9 spec's model and lab pass.
+		default: false,
+		area: 'networking',
+		description: 'Warm control-plane standby with an object-store lease, epoch fencing and an agent address list (HA-PLAN H21, C6).'
+	},
+	SYNC_REPLICA: {
+		name: 'SYNC_REPLICA',
+		// HA Wave 3, W10. Opt-in: `sync` databases block or downgrade on losing the synchronous set.
+		default: false,
+		area: 'databases',
+		description: 'Recorded synchronous Postgres replica, two-step sync-set change and the on-sync-loss policy (HA-PLAN H23).'
+	},
+	PITR_REWIND: {
+		name: 'PITR_REWIND',
+		// HA Wave 3, W10. Opt-in: pgBackRest in the replica image, backups from a replica, rewind.
+		default: false,
+		area: 'backups',
+		description: 'Replica PITR, backups from a replica and pg_rewind when an old primary re-attaches (HA-PLAN W10).'
+	},
 	STEERING: {
 		name: 'STEERING',
 		// HA Wave 2, W8. Opt-in: a driver starts deciding which ingress nodes receive traffic.
@@ -285,7 +307,10 @@ export const OPT_IN_FEATURES: ReadonlySet<FeatureName> = new Set<FeatureName>([
 	'OBJECT_STORE_GCS',
 	'INGRESS_SET',
 	'SHARED_CERTIFICATES',
-	'STEERING'
+	'STEERING',
+	'CONTROL_STANDBY',
+	'SYNC_REPLICA',
+	'PITR_REWIND'
 ]);
 
 export type FeatureFlags = {

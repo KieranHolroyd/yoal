@@ -43,6 +43,8 @@ import { ReleaseCommandScheduler } from './release-commands.ts';
 import { RelocationService } from './relocation-service.ts';
 import { ClusterConfigService } from './cluster-config-service.ts';
 import { CertificateService, IngressSetService, SteeringService } from './ingress-service.ts';
+import { ControlPlaneService } from './control-plane-service.ts';
+import { DatabaseMemberService } from './database-member-service.ts';
 import { createDnsFailoverDriver } from './steering/dns-failover/core.ts';
 import { STEERING_DRIVER_FACTORIES } from './steering/registry.ts';
 import { WorkloadService } from './workloads.ts';
@@ -332,6 +334,8 @@ export interface Core {
 	ingressSet: IngressSetService;
 	steering: SteeringService;
 	certificates: CertificateService;
+	controlPlane: ControlPlaneService;
+	databaseMembers: DatabaseMemberService;
 	/** Identity and access management (IAM.md I1). */
 	iam: IamService;
 	/** Guardrails and just-in-time access (IAM.md I11/I22, §9.2–§9.4). */
@@ -494,6 +498,8 @@ export function createCore(options: CoreOptions): Core {
 		'dns-failover': () => createDnsFailoverDriver(ctx),
 	});
 	ctx.certificates = new CertificateService(ctx);
+	ctx.controlPlane = new ControlPlaneService(ctx);
+	ctx.databaseMembers = new DatabaseMemberService(ctx);
 	// Flow definitions register once every service exists, so their steps can call any of them.
 	ctx.flows.register(ctx.moves.databaseMoveFlow());
 	ctx.flows.register(ctx.nodeRollouts.rolloutFlow());
@@ -581,6 +587,8 @@ export function createCore(options: CoreOptions): Core {
 		ingressSet: ctx.ingressSet,
 		steering: ctx.steering,
 		certificates: ctx.certificates,
+		controlPlane: ctx.controlPlane,
+		databaseMembers: ctx.databaseMembers,
 		iam: ctx.iam,
 		governance: ctx.governance,
 		authPolicy: ctx.authPolicy,

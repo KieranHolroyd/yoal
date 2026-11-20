@@ -35,7 +35,7 @@ foundation.
 
 | Plan | Worktree | Branch | Migration reservation |
 |---|---|---|---|
-| Opening: foundation PR 3 | agent worktree | `ha/w3-foundation` | `0125_control_epoch.sql`, `0126_replica_durability.sql` |
+| Opening: foundation PR 3 | `ha/w3-foundation` | `ha/w3-foundation` | **`0125_control_epoch.sql`, `0126_replica_durability.sql` used** |
 | A — W9 control-plane standby and arbiter (single author, per §6.4) | agent worktree | `ha/w3-a-control-standby` | `0127` spare |
 | B — W10 sync, switchover, rewind, replica PITR | agent worktree | `ha/w3-b-sync-switchover` | `0128` spare |
 | C — W10 PITR/rewind and backup from replicas | agent worktree | `ha/w3-c-pitr-rewind` | `0129` spare |

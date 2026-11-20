@@ -74,6 +74,8 @@ export const nodes = sqliteTable(
 		diskInventoryJson: text('volume_inventory_json'),
 		/** Capabilities from the last heartbeat (JSON array); `[]` for agents that predate them. */
 		capabilitiesJson: text('capabilities_json'),
+		/** Highest control-plane epoch this node has observed (HA-PLAN H21). Never decreases. */
+		haEpoch: integer('ha_epoch').notNull().default(0),
 		/** The desired-state version the node last reported applying (HA-PLAN W6 drift). */
 		actualStateVersion: integer('actual_state_version'),
 		/** When `actualStateVersion` last changed; the drift window counts from here. */
@@ -1247,6 +1249,13 @@ export const databases = sqliteTable(
 		restartGeneration: integer('restart_generation').notNull().default(0),
 		/** Counts replica promotions (C7, 0069); replicas follow the generation they were created under. */
 		primaryGeneration: integer('primary_generation').notNull().default(0),
+		/** Durability policy (HA-PLAN H23): async today; sync is opt-in and lane B renders it. */
+		durability: text('durability', { enum: ['async', 'sync'] }).notNull().default('async'),
+		/** `on_sync_loss: downgrade` waits this long before switching to async. */
+		syncTimeoutSeconds: integer('sync_timeout_seconds').notNull().default(30),
+		onSyncLoss: text('on_sync_loss', { enum: ['downgrade', 'block'] }).notNull().default('downgrade'),
+		/** The node the lease currently names as synchronous (display cache; the lease is authority). */
+		syncReplicaNodeId: text('sync_replica_node_id'),
 		/** Set while a pooler-only restart is waiting for the node to acknowledge it. */
 		poolerRestartRequestedAt: integer('pooler_restart_requested_at'),
 		status: text('status', { enum: ['pending', 'starting', 'running', 'failed', 'stopped'] })
@@ -3264,4 +3273,20 @@ export const acmeLeases = sqliteTable(
 		createdAt: integer('created_at').notNull(),
 	},
 	(t) => [index('acme_leases_node_idx').on(t.nodeId)],
+);
+
+/** Per control node: the last role and lease it reported (HA-PLAN H21, Wave 3). */
+export const controlState = sqliteTable(
+	'control_state',
+	{
+		nodeId: text('node_id').primaryKey(),
+		role: text('role').notNull().default('joining'),
+		epoch: integer('epoch').notNull().default(0),
+		holderNodeId: text('holder_node_id'),
+		leaseExpiresAt: integer('lease_expires_at'),
+		canPromote: integer('can_promote', { mode: 'boolean' }).notNull().default(false),
+		replicationLagSeconds: integer('replication_lag_seconds'),
+		updatedAt: integer('updated_at').notNull(),
+	},
+	(t) => [index('control_state_role_idx').on(t.role, t.epoch)],
 );

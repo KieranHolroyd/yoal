@@ -44,6 +44,9 @@ describe('feature registry', () => {
 			'OBJECT_STORE_GCS',
 			'INGRESS_SET',
 			'SHARED_CERTIFICATES',
+			'CONTROL_STANDBY',
+			'SYNC_REPLICA',
+			'PITR_REWIND',
 			'STEERING'
 		]);
 		for (const name of FEATURE_FLAG_NAMES) {
@@ -64,6 +67,15 @@ describe('feature registry', () => {
 		expect(OPT_IN_FEATURES.has('DB_AUTO_PROMOTE')).toBe(true);
 	});
 
+	test('HA Wave 3 flags are opt-in and cite their H-section (HA-WAVE-3.md)', () => {
+		for (const name of ['CONTROL_STANDBY', 'SYNC_REPLICA', 'PITR_REWIND'] as const) {
+			expect(FEATURE_FLAGS[name].default).toBe(false);
+			expect(OPT_IN_FEATURES.has(name)).toBe(true);
+		}
+		expect(FEATURE_FLAGS.CONTROL_STANDBY.description).toContain('H21');
+		expect(FEATURE_FLAGS.SYNC_REPLICA.description).toContain('H23');
+	});
+
 	test('HA Wave 2 flags are opt-in and cite their H-section (HA-WAVE-2.md)', () => {
 		expect(FEATURE_FLAGS.INGRESS_SET.default).toBe(false);
 		expect(FEATURE_FLAGS.SHARED_CERTIFICATES.default).toBe(false);
@@ -82,7 +94,10 @@ describe('feature registry', () => {
 			'OBJECT_STORE_GCS',
 			'INGRESS_SET',
 			'SHARED_CERTIFICATES',
-			'STEERING'
+			'STEERING',
+			'CONTROL_STANDBY',
+			'SYNC_REPLICA',
+			'PITR_REWIND'
 		]);
 		expect(FEATURE_FLAGS.ENDPOINTS_GATEWAY.description).toContain('H24');
 		expect(FEATURE_FLAGS.RELEASE_PHASE.description).toContain('H25');
