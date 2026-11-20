@@ -384,7 +384,7 @@ stays `online` for heartbeat, reporting and everything else, and only stops rece
 |---|---|---|
 | `pending` | Token issued, no heartbeat yet | Token created; it expires after 1 h |
 | `online` | Heartbeat within 30 s, placement-eligible | First heartbeat plus a passing checklist |
-| `offline` | No heartbeat for 30 s (`OFFLINE_AFTER_MS`); alert at 2 min (`ALERT_AFTER_MS`) | Missed heartbeats |
+| `offline` | No heartbeat for 30 s (`OFFLINE_AFTER_MS`), marked on the failover controller's next tick (`controlPlane.renewSeconds`, 5 s); alert at 2 min (`ALERT_AFTER_MS`) | Missed heartbeats |
 | `draining` | Cordoned: no new placements; existing work moves or stays | Operator action, UPS event or decommission |
 
 **Join.** A single-use token (1 h) and one-line command (§4.1, plan 23) carry the node's WireGuard
