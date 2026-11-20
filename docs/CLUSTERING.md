@@ -730,7 +730,9 @@ clamping rule is needed.
 passively unhealthy (health checks every 5 s) and dropped for `fail_duration` (30 s), so later
 requests go to another replica. With no healthy upstream the branded 503 is served, and
 `handle_errors` maps 502 and 504 on app routes to it; a single-replica app on a lost node shows it
-within the passive window, not instantly (§11).
+within the passive window, not instantly (§11). The active check sends the route's own Host, as
+a proxied request does, because a copy on another node is reached through that node's Caddy, which
+routes by Host.
 
 ### 4.5 Trust boundaries on the overlay
 

@@ -401,10 +401,45 @@ describe('per-deployment roots, worker routes and logging', () => {
 			healthIntervalSeconds: 12,
 		};
 		const json = JSON.stringify(config(value));
-		expect(json).toContain('"active":{"uri":"/healthz","interval":"12s"}');
+		expect(json).toContain('"active":{"uri":"/healthz","interval":"12s",');
 		// An older control plane sends no interval: the agent keeps the 5 s default.
 		delete value.routes[0]!.healthIntervalSeconds;
-		expect(JSON.stringify(config(value))).toContain('"active":{"uri":"/healthz","interval":"5s"}');
+		expect(JSON.stringify(config(value))).toContain('"active":{"uri":"/healthz","interval":"5s",');
+	});
+
+	test('a copy on another node passes the active health check through that node\'s Caddy (F7)', async () => {
+		// Stands in for the remote node's Caddy: it routes by Host and has no route for anything else.
+		const remoteNode = Bun.serve({
+			hostname: '127.0.0.1',
+			port: 0,
+			fetch: (request) => {
+				const host = request.headers.get('host');
+				return host === 'public.example.com' && new URL(request.url).pathname === '/healthz'
+					? new Response('ok')
+					: new Response('no route', { status: 404 });
+			},
+		});
+		try {
+			const value = state();
+			value.routes[0] = {
+				...value.routes[0]!,
+				upstreams: ['127.0.0.1:19001', `http://127.0.0.1:${remoteNode.port}`],
+				healthPath: '/healthz',
+			};
+			const route = routes(config(value)).find((entry) => JSON.stringify(entry.match).includes('public.example.com'))!;
+			const proxy = collectHandlers(route).find((handler) => handler.handler === 'reverse_proxy' && handler.health_checks)!;
+			const active = (proxy.health_checks as Json).active as Json;
+			// Probe the remote upstream the way Caddy's active checker does: GET <dial><uri>, with the
+			// configured Host header or, when there is none, the dial address as the Host.
+			const remote = (proxy.upstreams as Json[]).map((upstream) => upstream.dial as string).find((dial) => dial.endsWith(`:${remoteNode.port}`))!;
+			const headers = (active.headers as Record<string, string[]> | undefined) ?? {};
+			const response = await fetch(`http://${remote}${active.uri as string}`, {
+				headers: { host: headers.Host?.[0] ?? remote },
+			});
+			expect(response.status).toBe(200);
+		} finally {
+			remoteNode.stop(true);
+		}
 	});
 
 	test('domain helpers tolerate missing origins and production routes', () => {
