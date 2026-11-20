@@ -3,8 +3,8 @@
 > Wave 1's lane D hand-off (W5 runtime/drain) is preserved as `LANE-D-HANDOFF-W1.md`; this file is
 > Wave 2 lane D's.
 
-Branch `ha/w2-d-external-lb`, base `ha/integration` at `416996dd`. Implementation commit
-**`80c681d3`**. No merge to `main`, no cloud spend, no `VERSION` bump.
+Branch `ha/w2-d-external-lb`, base `ha/integration` at `416996dd`. Implementation commits
+**`80c681d3`** and **`34fa7612`**. No merge to `main`, no cloud spend, no `VERSION` bump.
 
 ## What shipped
 
@@ -26,8 +26,9 @@ Branch `ha/w2-d-external-lb`, base `ha/integration` at `416996dd`. Implementatio
   - `probes: 'external'`, `writes: false`, `preservesClientIp` derived from config:
     `proxyProtocol` → `proxy-protocol`, else non-empty `trustedProxies` → `header`, else `native`.
   - `preflight()`: refuses an empty fleet (fleet-wide), a node whose agent lacks `ingress-set`, a
-    node that never heartbeated, and `proxyProtocol` with an empty `trustedProxies` (the Access-rule
-    address would be the balancer's).
+    node that never heartbeated, `proxyProtocol` with an empty `trustedProxies` (the Access-rule
+    address would be the balancer's), and `drainSeconds` below 15 s (shorter than a balancer that
+    meets the plan's removal bound can still be sending).
   - `desired()`: pure/idempotent, no provider call, computes the intended serving set and keeps the
     previous set when every node is unhealthy (never empties it).
   - `observe()`: the health path (`/.well-known/yoal/health`), port (`ingress.healthPort`, else
@@ -59,7 +60,7 @@ No migration. `0127` is unused; all state is the existing `settings` JSON row.
   code-level single-node gate (one node, every flag at its default; desired state unchanged).
 - Conformance: `direct` + `external-lb` (21 suite assertions plus driver-specific tests).
 - Preflight refusals: empty fleet, missing `ingress-set`, never-heartbeated node, PROXY header with
-  no trusted proxy; all return a reason and the right `nodeId`.
+  no trusted proxy, drain below the 15 s removal bound; all return a reason and the right `nodeId`.
 - Driver selection: default `direct`; saved `external-lb` inert with `STEERING` off; selected and
   acting with the flag on; unimplemented `vip`/`dns-failover` reported as a reason, not a crash.
 - Never-remove-last-healthy: conformance mutates 3 healthy → 1 healthy → 0 healthy and asserts the
@@ -109,5 +110,6 @@ No migration. `0127` is unused; all state is the existing `settings` JSON row.
 
 ## Final SHA
 
-- Implementation: `80c681d3` (branch `ha/w2-d-external-lb`).
+- Implementation: `80c681d3`, plus `34fa7612` for the drain-bound refusal (branch
+  `ha/w2-d-external-lb`).
 - This hand-off is committed on top; the tip is reported in the hand-back message.
