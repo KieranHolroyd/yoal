@@ -54,7 +54,7 @@ export const ingressSettingsSchema = z
 		/** CIDRs whose forwarded client address is trusted. Empty means none. */
 		trustedProxies: z.array(cidrSchema).max(32).default([]),
 		/** The plain HTTP port for L4 balancers (H19); null uses the reserved default. */
-		healthPort: z.number().int().min(1).max(65_535).nullable().default(null),
+		healthPort: z.number().int().min(1_024).max(65_535).nullable().default(null),
 	})
 	.strict();
 
@@ -202,13 +202,19 @@ export interface IngressHealth {
 	certificateFingerprint: string | null;
 }
 
-export const ingressHealthSchema = z.object({
-	status: z.enum(['ok', 'draining', 'unready']),
-	reason: z.enum(['caddy', 'desired-state', 'releases', 'certificates']).nullable(),
-	desiredStateVersion: z.number().int().nonnegative().nullable(),
-	appliedStateVersion: z.number().int().nonnegative().nullable(),
-	certificateFingerprint: z.string().max(128).nullable(),
-});
+export const ingressHealthSchema = z
+	.object({
+		status: z.enum(['ok', 'draining', 'unready']),
+		reason: z.enum(['caddy', 'desired-state', 'releases', 'certificates']).nullable(),
+		desiredStateVersion: z.number().int().nonnegative().nullable(),
+		appliedStateVersion: z.number().int().nonnegative().nullable(),
+		certificateFingerprint: z.string().max(128).nullable(),
+	})
+	// An `ok` answer cannot carry a failure reason; the inverse is what the endpoint's one word means.
+	.superRefine((value, issue) => {
+		if (value.status === 'ok' && value.reason !== null)
+			issue.addIssue({ code: 'custom', path: ['reason'], message: 'status ok cannot carry a reason' });
+	});
 
 /** One certificate the fleet serves for a host (H20). */
 export const ingressCertificateSchema = z.object({

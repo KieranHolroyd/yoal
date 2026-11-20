@@ -38,7 +38,30 @@ export class NodeCaService {
 	/** Create the install CA if there is none; return the active one. */
 	issue(): NodeCaView {
 		const existing = this.activeRow();
-		if (existing) return this.view(existing);
+		return this.view(existing ?? this.createActive());
+	}
+
+	/**
+	 * Rotate the install CA: the current one becomes `previous` (still trusted by every bundle) and
+	 * a new one signs from now. Existing leaves stay valid until their own renewal, so no node loses
+	 * mTLS at the moment of rotation.
+	 */
+	rotate(): NodeCaView {
+		if (!featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY'))
+			throw new ValidationError('The install CA is not in use until ENDPOINTS_GATEWAY is on.');
+		const now = this.ctx.now();
+		this.ctx.sqlite.transaction(() => {
+			// Keep one previous CA at most: an older previous is retired (its leaves are long gone or
+			// already superseded).
+			this.ctx.db.update(nodeCa).set({ state: 'retired', updatedAt: now }).where(eq(nodeCa.state, 'previous')).run();
+			this.ctx.db.update(nodeCa).set({ state: 'previous', updatedAt: now }).where(eq(nodeCa.state, 'active')).run();
+			this.createActive();
+		})();
+		this.ctx.projects.bump();
+		return this.view(this.activeRow()!);
+	}
+
+	private createActive(): CaRow {
 		const generated = generateInstallCa(CA_COMMON_NAME, this.ctx.now(), NODE_CA_VALIDITY_DAYS);
 		const sealed = encrypt(this.ctx.config.masterKey, new TextEncoder().encode(generated.keyPem));
 		const id = newId('nca_');
@@ -62,7 +85,7 @@ export class NodeCaService {
 		// A concurrent caller may have won the partial unique index; its row is the one that signs.
 		const row = this.activeRow();
 		if (!row) throw new ValidationError('Could not create the install CA.');
-		return this.view(row);
+		return row;
 	}
 
 	/**
@@ -92,7 +115,10 @@ export class NodeCaService {
 				),
 			)
 			.get();
-		if (live && live.notAfter > now + 86_400_000) return this.signed(live);
+		// Renew at two-thirds of the leaf's life, so a control plane that is unreachable during the
+		// last day does not let the leaf expire. A re-sent CSR before that gets its existing leaf.
+		const renewAt = live ? live.notBefore + ((live.notAfter - live.notBefore) * 2) / 3 : 0;
+		if (live && now < renewAt) return this.signed(live);
 
 		this.issue();
 		const caRow = this.activeRow()!;

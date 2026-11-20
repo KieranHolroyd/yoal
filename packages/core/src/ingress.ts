@@ -17,7 +17,10 @@ export interface IngressCandidate {
 
 /** The node the old code called "the edge": the configured id, else the first `mode: 'edge'`. */
 export function firstIngress(allNodes: readonly IngressCandidate[], configEdgeId: string | null): string | null {
-	if (configEdgeId && allNodes.some((node) => node.id === configEdgeId)) return configEdgeId;
+	// The configured id wins even when it names no current row: that is what the pre-refactor code
+	// did (the id is also what placement and deployment fallbacks still use). A stale id is an
+	// operator error shown elsewhere, not a silent move of the first ingress.
+	if (configEdgeId) return configEdgeId;
 	return allNodes.find((node) => node.mode === 'edge')?.id ?? null;
 }
 

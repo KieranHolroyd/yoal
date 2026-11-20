@@ -159,3 +159,32 @@ describe('the install CA issues node leaves (H24)', () => {
 		});
 	});
 });
+
+describe('CA rotation (H24)', () => {
+	test('keeps old leaves trusted and signs new ones under the new CA', () => {
+		const before = core.nodeCa.issue();
+		const request = makeCsr({ cn: node.nodeId, san: `yoal://node/${node.nodeId}` });
+		const oldLeaf = core.nodeCa.signCsr(node.nodeId, { csrPem: request, reason: 'enrol' });
+
+		const rotated = core.nodeCa.rotate();
+		expect(rotated.fingerprint).not.toBe(before.fingerprint);
+		expect(rotated.state).toBe('active');
+
+		// The bundle still trusts the old CA, so the leaf issued before rotation keeps working.
+		const trust = core.nodeCa.trustFor(node.nodeId)!;
+		const bundle = (trust.caBundlePem.match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g) ?? []).map(
+			(pem) => new X509Certificate(pem),
+		);
+		expect(bundle.length).toBeGreaterThanOrEqual(2);
+		expect(bundle.some((ca) => new X509Certificate(oldLeaf.certPem).checkIssued(ca))).toBe(true);
+		// A leaf cut after rotation chains to the new CA.
+		const fresh = core.nodeCa.signCsr(node.nodeId, {
+			csrPem: makeCsr({ cn: node.nodeId, san: `yoal://node/${node.nodeId}` }),
+			reason: 'renew',
+		});
+		expect(bundle.some((ca) => new X509Certificate(fresh.certPem).checkIssued(ca))).toBe(true);
+
+		// The CA private key never appears in trust material or desired state.
+		expect(JSON.stringify(trust)).not.toContain('PRIVATE KEY');
+	});
+});

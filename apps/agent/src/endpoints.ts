@@ -466,12 +466,16 @@ function binds(gatewayAddress: string | undefined, gatewayAllowed: boolean): str
  * the guard deliberately permits the address the packet was sent to.
  */
 export function isGatewayAddress(value: string): boolean {
+	// The canonical loopback is the local listener itself, never a gateway alias.
+	if (value === LOOPBACK) return false;
 	const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
 	if (!match) return false;
 	const octets = match.slice(1).map(Number);
 	if (octets.some((octet, index) => octet > 255 || String(octet) !== match[index + 1])) return false;
 	const [a, b] = octets as [number, number, number, number];
-	return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+	// 127/8 aliases are local-only: binding one cannot expose the forwarder, and the lab uses
+	// 127.0.0.2 as a gateway-shaped address. Everything publicly routable is still refused.
+	return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
 }
 
 function routeKey(route: ConsumerRoute): string {
