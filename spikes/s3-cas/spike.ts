@@ -126,8 +126,9 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 		check('store-clock', 'store time within 5 s of true time', skews.length === 20 && worst <= 5_000, skews.length ? `store − true ∈ [${Math.round(skews[0]!)}, ${Math.round(skews.at(-1)!)}] ms over ${skews.length} reads (${ntp.source}; Date truncates to 1 s)` : 'no Date header');
 	}
 
+	const only = env.ONLY;
 	// ── Conditions on one key, and what the store answers to each. ──
-	{
+	if (!only) {
 		const k = key('single');
 		const absentIfMatch = await probe('conditions', () => target.putRaw(k, '{"epoch":0}', { 'if-match': target.unknownToken }));
 		codes['If-Match on absent key'] = code(absentIfMatch);
@@ -328,11 +329,24 @@ export async function runSpike(config: TargetConfig, env: Record<string, string 
 			check('put-p99-under-300ms', 'p99 PUT ≤ 300 ms', result.putP99 <= 300, `p50 ${result.putP50} ms, p99 ${result.putP99} ms, max ${result.putMax} ms`);
 		}
 	};
-	await race('rounds', 'rounds', seconds);
-	if (floodSeconds > 0) await race('flood', 'flood', floodSeconds);
+	if (!only) {
+		// A lease-sized body (the §6.3 record is ~110 bytes): is the token a read returns usable as a
+		// condition? R2 gzips compressible bodies ≥ ~50 bytes and then sends a weak ETag on GET/HEAD.
+		const k = key('lease-sized');
+		const body = JSON.stringify({ epoch: 7, holderNodeId: 'nod_01JB8Q3K9XABCDEFGHJKMNPQRS', holderVersion: '1.4.0', expiresAt: 1795164600000 });
+		const created = await probe('conditions', () => target.writeConditional(k, body, { ifNoneMatch: '*' }));
+		const read = await target.readVersioned(k);
+		const head = await target.head(k);
+		const cas = read.etag ? await probe('conditions', () => target.writeConditional(k, body.replace('"epoch":7', '"epoch":8'), { ifMatch: read.etag! })) : null;
+		numbers.leaseSizedBody = { bytes: body.length, putToken: created.etag, getToken: read.etag, headToken: head.etag, casWithGetToken: cas?.status ?? 'no token' };
+		codes['If-Match with the GET token of a lease-sized body'] = cas ? String(cas.status) : 'no token';
+		check('read-token-usable', 'T6: a lease-sized object’s GET token satisfies If-Match (the lease reads, then writes)', cas?.status === 200, `${body.length}-byte body: PUT token ${created.etag}, GET ${read.etag}, HEAD ${head.etag}; If-Match with the GET token → ${cas?.status ?? 'no token'}`);
+		await race('rounds', 'rounds', seconds);
+		if (floodSeconds > 0) await race('flood', 'flood', floodSeconds);
+	}
 
 	// ── T4: one request or response held 5 s; the client gives up after 2 s and retries. ──
-	{
+	if (!only) {
 		const endpoint = new URL(config.endpoint);
 		const plainHttp = endpoint.protocol === 'http:';
 		let proxy: DelayProxy | null = null;

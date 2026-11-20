@@ -53,6 +53,8 @@ the answer and are recorded as untested.
 bun spikes/s3-cas/run-local.ts          # MinIO, Garage, RustFS in yoal-w0-s3-* containers, then removed
 # or one target you already have:
 S3_ENDPOINT=… S3_BUCKET=… S3_ACCESS_KEY_ID=… S3_SECRET_ACCESS_KEY=… [S3_REGION=auto] bun spikes/s3-cas/spike.ts
+# R2 and GCS (credentials from the environment only; output is scrubbed; the run prefix is emptied and re-listed):
+set -a; . creds.env; set +a; bun spikes/s3-cas/run-cloud.ts > results.json   # STORES=r2,r2-identity,gcs ONLY=lease
 ```
 
 ## Result (2026-11-20)
@@ -111,3 +113,12 @@ signed JWT, credentials from the environment only). The checks in `spike.ts` sta
 R2 runs the S3 criteria unchanged through the production `S3ObjectStore`, including `ControlLease`.
 All objects live under `yoal-w0-spikes/<run-id>/` and are deleted at the end; the run proves the
 prefix empty. Not run: AWS S3 and Azure Blob (no credentials).
+
+### Result on R2 and GCS (2026-11-20)
+
+**GCS passes S7.** **R2 fails S3** as the production client stands. R2 is a correct CAS store, but its ETag is
+the body's MD5 (ABA → 200). Its edge also gzips JSON bodies of about 50 bytes or more and then serves a
+*weak* ETag on GET/HEAD. That weak ETag can never satisfy `If-Match`, so the unchanged `ControlLease`
+fenced on its first renewal and no standby could ever take over. The rig's `r2-identity` target
+(`Accept-Encoding: identity` on reads) is the prototype fix: with it, T5 passes. Numbers:
+[docs/SPIKES.md § S3 (R2) and S7 (GCS)](../../docs/SPIKES.md).

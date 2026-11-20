@@ -7,7 +7,8 @@
  *
  *   R2:  R2_ENDPOINT R2_BUCKET R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY
  *   GCS: GCS_BUCKET GCS_SERVICE_ACCOUNT_JSON (path to a service-account key file)
- *   STORES=r2,gcs (default both) RUN_ID=<id> FLOOD_MAX_ATTEMPTS=2000 RENEW=1 (renewal-rate probe)
+ *   STORES=r2,gcs (default both; `r2-identity` = R2 with the Accept-Encoding: identity read fix)
+ *   ONLY=lease (clock + ControlLease only) RUN_ID=<id> FLOOD_MAX_ATTEMPTS=2000 RENEW=1 (renewal-rate probe)
  *   The spike's knobs (WRITERS, ATTEMPTS, SECONDS, FLOOD_SECONDS, LEASE_SECONDS) pass through;
  *   LEASE_SECONDS is forced to 0 for GCS (ControlLease runs on R2 only, per the brief).
  *
@@ -63,9 +64,10 @@ function configFor(store: string): TargetConfig {
 		if (!value) throw new Error(`missing ${name}`);
 		return value;
 	};
-	if (store === 'r2')
+	if (store === 'r2' || store === 'r2-identity')
 		return {
-			name: 'r2',
+			name: store === 'r2' ? 'r2' : 'r2+identity-reads',
+			...(store === 'r2-identity' ? { identityReads: true } : {}),
 			protocol: 's3',
 			endpoint: need('R2_ENDPOINT'),
 			bucket: need('R2_BUCKET'),
@@ -174,7 +176,7 @@ for (const store of stores) {
 		});
 		if (env.RENEW !== '0') {
 			const extras: Record<string, unknown> = {};
-			if (store === 'r2') extras.conflictProbe = await conflictProbe(target, `${prefix}/${store}/conflict`);
+			if (store.startsWith('r2')) extras.conflictProbe = await conflictProbe(target, `${prefix}/${store}/conflict`);
 			extras.renewEvery5s = await renewals(target, `${prefix}/${store}/renew-5s`, 5_000, 24);
 			extras.renewEvery1s = await renewals(target, `${prefix}/${store}/renew-1s`, 1_000, 60);
 			extras.renewBackToBack = await renewals(target, `${prefix}/${store}/renew-0s`, 0, 30);

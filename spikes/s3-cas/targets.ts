@@ -30,6 +30,12 @@ export interface S3TargetConfig extends BaseTargetConfig {
 	accessKeyId: string;
 	secretAccessKey: string;
 	forcePathStyle?: boolean;
+	/**
+	 * Prototype fix (not in production code): send `Accept-Encoding: identity` on GET/HEAD. R2's
+	 * edge gzips compressible bodies (≥ ~50 bytes of JSON/text) and then serves a weak `W/` ETag,
+	 * which no `If-Match` can satisfy.
+	 */
+	identityReads?: boolean;
 }
 export interface GcsTargetConfig extends BaseTargetConfig {
 	protocol: 'gcs';
@@ -107,6 +113,17 @@ const parseDate = (value: string | null): number | null => {
 	return Number.isFinite(parsed) ? parsed : null;
 };
 
+/** Added after SigV4 signing: an unsigned header, which S3 ignores for the signature. */
+function identityReads(fetchImpl: typeof fetch): typeof fetch {
+	return ((input: string | URL | Request, init?: RequestInit) => {
+		const request = new Request(input as string, init);
+		if (request.method !== 'GET' && request.method !== 'HEAD') return fetchImpl(request);
+		const headers = new Headers(request.headers);
+		headers.set('accept-encoding', 'identity');
+		return fetchImpl(new Request(request, { headers }));
+	}) as typeof fetch;
+}
+
 class S3CasTarget implements CasTarget {
 	readonly unknownToken = '"00000000000000000000000000000000"';
 	readonly ungated = ['malformed-condition-refused', 'etag-is-not-body-md5'] as const;
@@ -119,6 +136,7 @@ class S3CasTarget implements CasTarget {
 		readonly config: S3TargetConfig,
 		fetchImpl: typeof fetch,
 	) {
+		if (config.identityReads) fetchImpl = identityReads(fetchImpl);
 		this.#fetch = fetchImpl;
 		this.#store = new S3ObjectStore({
 			endpoint: config.endpoint,

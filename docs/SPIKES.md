@@ -237,3 +237,158 @@ R2/S3/Azure/GCS are still to run.
 - Latency on dedicated hardware, without OrbStack port forwarding and other lanes' load.
 - RustFS's 503 error code (the production client drops the body).
 - The fetch-layer variant of T4 for TLS endpoints, written for R2/S3 but not exercised here.
+
+## S3 (R2) and S7 (GCS): conditional writes on real stores (2026-11-20)
+
+Question, criteria and fallback: [`spikes/s3-cas/README.md`](../spikes/s3-cas/README.md). For R2, the S3 section
+is unchanged. For GCS, the S7 section was committed before any GCS code. Rig: `bun spikes/s3-cas/run-cloud.ts`
+(one command; credentials from the environment only; output scrubbed). Every object lived under
+`yoal-w0-spikes/<run-id>/`. Each run deleted its prefix, and a fresh LIST of every prefix used (4 runs + 2
+debug probes) returned 0 objects in both buckets.
+
+**Environment.** Apple M3 Pro, macOS 27.3, Bun 1.4.5. The client is this Mac on a home broadband line, so
+latency includes the WAN round trip. **R2**: one bucket, automatic location, through the production
+`S3ObjectStore` (SigV4, region `auto`, path style). **GCS**: one bucket through the JSON API v1, with a
+service-account OAuth token (RS256 JWT, `node:crypto`). Bucket location and class were not read. The
+GCS adapter (`spikes/s3-cas/gcs.ts`) maps `If-Match` → `ifGenerationMatch=<generation>` and
+`If-None-Match: *` → `ifGenerationMatch=0`. The CAS token is the generation. Clock reference: `sntp
+time.apple.com` (±21 ms).
+
+**Method.** This is the local run's method, unchanged: 20 `Date` readings; the single-key condition table;
+50 identical-body writes; stale and ABA `If-Match`; an unconditional PUT under a held condition; 200
+sequential write→GET→HEAD rounds; **10,000 CAS attempts by 200 writers in 50 rounds over 60 s**; a 200-writer
+flood (capped at 2,000 attempts to limit cost); and T4 at the fetch layer, since both stores are TLS-only.
+On R2 only, the unchanged `ControlLease` ran for 240 s with 3 contenders. Additions:
+
+- A lease-sized body check (T6, see Deviations).
+- An R2 conflict probe: 10 bursts of 20 simultaneous `If-Match` writes on one ETag.
+- Renewal-rate probes on one key: 24 writes at 5 s intervals, 60 at 1 s, and 30 back to back.
+
+About 15,000 writes per store over all runs.
+
+**Response codes.**
+
+| Condition | R2 | GCS (translated) |
+|---|---|---|
+| Create-only, key absent | 200 | 200 |
+| Create-only, key exists | 412 PreconditionFailed | 412 conditionNotMet |
+| Match current | 200 | 200 |
+| Match stale / unknown token | 412 / 412 | 412 / 412 |
+| Match on an absent key | 412 (MinIO/RustFS: 404) | 412 |
+| Match stale, body since restored (ABA) | **200** | 412 |
+| `W/` token (GCS: `ifGenerationMatch=W/<g>`) | 412 | 400 invalidParameter |
+| `If-Match: *` (GCS: `ifGenerationNotMatch=0`) on existing | 200 | 200 |
+| Match + create-only (GCS: `ifGenerationMatch=g&ifGenerationNotMatch=g`) | 412 | 304 (not applied) |
+| `If-None-Match: <current ETag>` header on PUT/upload | 412 (evaluated, like MinIO) | **200, object replaced** (the JSON API ignores the header) |
+| Holder's condition after an unconditional write | 412 | 412 |
+| Retry of an applied conditional write after a client timeout | 412 | 412 |
+| Losers under 200-writer contention | 412 only: 9,875 + 1,988 + 190 in the probe; **never 409** | 412 (2,604 + 825) and **429** (7,303 + 1,167); no 503 |
+| GET/HEAD token of a 109-byte JSON lease body | **`W/"<md5>"`** (gzip at the edge); `If-Match` with it → **412** | the generation; `ifGenerationMatch` with it → 200 |
+
+**Numbers per criterion.**
+
+| Criterion | R2 (S3 criteria) | GCS (S7 criteria) |
+|---|---|---|
+| Exactly one winner per epoch/generation, 200 writers | **PASS**: 125 wins in 10,000 attempts and 12 in the 2,000-attempt flood. Every 200 is one link of the chain, and 0 tokens were consumed twice. Conflict probe: exactly 1 winner in each of 10 bursts of 20 | **PASS**: 93 wins in 10,000 attempts and 8 in 2,000. Chain intact; 0 doubles |
+| Stale condition refused | **PASS** for stale, unknown and absent (412); **FAIL** in the ABA form (200) | **PASS**: 412 for stale, unknown, absent, create-on-existing and ABA |
+| Token changes on every write (no ABA) | **FAIL**: 50 identical-body writes, 1 ETag. The ETag **is the body's MD5** (`"11e1a16f…"` = MD5 of `{"epoch":1}`) | **PASS**: 50 identical-body writes, 51 distinct generations |
+| Store clock within 5 s | **PASS**: −894 to +31 ms | **PASS**: −962 to −6 ms |
+| p99 at 200 writers | **PASS** (≤ 300 ms): p50 196 ms, p99 282 ms, max 571 ms | Reported: p50 69 ms, p99 251 ms, max 1,574 ms |
+| p99 sequential (reported) | p50 226 ms, p99 318 ms (WAN) | p50 164 ms, p99 247 ms (241 PUTs, 41 of them 429) |
+| Throttling (S7.5; recorded for R2) | None: 0 × 429/503 in any phase. Renewals 24/24 at 5 s, 60/60 at 1 s, 30/30 back to back (4.6 writes/s on one key) | **429 is the main loser answer under contention** (73% of rounds attempts). It is also returned to a lone writer above ~1 write/s per object: 14 of 50 identical-body writes, 41 in the sequential phase, 1 of 60 renewals at 1 s, 5 of 30 back to back, 0 of 24 at 5 s. **0 throttled writes applied** (chain intact; every re-read after a 429 showed the old generation) |
+| Unsupported condition, never silent success | **PASS** (412, object unchanged) | Recorded, not gating: the S3-dialect header is ignored (200, replaced). The malformed generation condition is refused with 400: **PASS** |
+| T1 create-only on an existing key | PASS | PASS |
+| T2 unconditional write breaks a held condition | PASS | PASS |
+| T3 read-after-write (200 sequential + every winner) | PASS: 0 stale | PASS: 0 stale |
+| T4 held request/response (fetch layer, 5 s, deadline 2 s) | **PASS**: applied-then-timed-out retry 412; late stale write lost to the competitor; late copy lost to the retry | **PASS**: same three cases |
+| T5 `ControlLease`, 3 contenders, 240 s (R2 only) | **FAIL as shipped**: node-a fenced on its first renewal ("lost the compare-and-swap"); 0 takeovers in 240 s; epochs 1→1. **PASS with the rig's identity-read fix**: 13 terms, 12 freezes, 27 held requests/responses, 12 fences, 0 overlaps, epochs 1→13 | Not run (brief: R2 only) |
+| T6 the GET token of a lease-sized body satisfies `If-Match` (new) | **FAIL** as shipped; **PASS** with `Accept-Encoding: identity` | PASS |
+| `client-late-confirm` (client bug from the local run) | Reproduced: 1 overlap of 130 ms | — |
+
+**Verdict.**
+
+- **GCS: PASS** on every S7 criterion and every tightening. Generation preconditions are a sound sole
+  arbiter: generations never repeat, so there is no ABA. Throttling answers 429 and never applies the write.
+  It can be **offered as an arbiter once a GCS `ConditionalStore` exists** (the rig's `gcs.ts` is the
+  prototype; production has none).
+- **R2: FAIL** as an arbiter with today's client, on two counts:
+  1. *ETag = MD5 of the body*: the ABA case returns 200. This is the local stores' failure.
+  2. **New, and fatal for the shipped lease**: Cloudflare's edge gzips `application/json` and `text/*` bodies
+     of ≥ ~50 bytes when the client accepts gzip, which Bun's `fetch` does by default. It then returns
+     `ETag: W/"…"` on GET and HEAD. RFC 9110 `If-Match` uses strong comparison, so every renewal and takeover
+     loses with 412. Under 50 bytes, and for `application/octet-stream`, the ETag stays strong. That is why
+     the contention phases (≈30-byte bodies) passed and the lease did not.
+
+  As a CAS engine R2 is correct: one winner per ETag across 12,200 contended writes, every loser 412, no stale
+  reads, late writes refused. With both client fixes below, it would fail only the "ETag changes on every
+  write" criterion as a store property.
+
+**Fallback triggered.** Per HA-PLAN W2, R2 is not offered as an arbiter until the client fixes land and
+this rig passes on R2 (re-run `STORES=r2-identity` after the fixes). GCS is not offered until a production
+GCS adapter exists, then gated by the conformance probe. Installs on either get no automatic promotion
+until then (CLUSTERING §15.4 S3: fail closed).
+
+**What this proves wrong in the plan.**
+
+1. CLUSTERING §6.3: *"S3 and R2 return `409 ConditionalRequestConflict` when two conditional writes race"* is
+   wrong for R2 as observed: 0 × 409 in 12,200 contended writes, and every loser got `412 PreconditionFailed`.
+   Keep handling 409 (AWS may send it), but nothing should depend on seeing it.
+2. §6.3 treats the ETag as opaque and usable as read. On R2 the read ETag is weak for any real lease body.
+   The lease must read with `Accept-Encoding: identity` (an unsigned header; SigV4 is unaffected). It must
+   also treat a `W/` token as "store unusable: fail closed with a clear reason", not as a lost CAS. Two
+   alternatives: write the lease as `application/octet-stream`, or strip `W/`. Stripping is unsafe for a
+   general store.
+3. *"The token changes on every write"* holds for GCS (generation) and fails for R2 (MD5), as predicted from
+   the local run. AWS S3 is still untested.
+4. GCS answers **429 to a lone writer above ~1 write/s per object**. That is harmless at the 5 s production
+   renew interval (0/24). `ControlLease` treats 429 as "unreachable", which is correct, and only fences after
+   `fenceAfterMs`. A 1 s renew cadence would see sporadic 429s (1/60).
+
+**Recommendation on the local run's proposed client fix.** Adopt both parts, and add a third:
+
+- **A per-write counter in the lease body, not a random nonce**: `seq = read.seq + 1` on every write
+  (renewal, takeover, release). Each successful write is CAS'd against the previous object, so `seq` strictly
+  increases along the chain. No later body can equal an earlier one, and an MD5-ETag store (R2, MinIO,
+  RustFS) can no longer be fooled by ABA. Unlike a nonce, it is deterministic and shows write order when
+  debugging. GCS does not need it, but it is harmless there.
+- **An active conformance probe before HA is enabled, not reliance on 501.** 501 is no signal: GCS ignores
+  unknown conditional headers with 200, and Garage ignores all of them. The probe runs about 10 requests
+  under a scratch key in the lease bucket:
+  - create-only on an existing key → 409/412;
+  - a stale condition → 409/412;
+  - an unconditional write, then the holder's condition → 409/412;
+  - **the GET token of a lease-sized body satisfies the condition** (catches R2's weak ETag);
+  - for MD5 stores, an ABA probe *with `seq` bodies* is moot; record whether the token is the body MD5, for
+    information only.
+
+  The probe refuses the store on any failure, and the setup surfaces the reason.
+- **Identity reads plus weak-ETag rejection**, as in point 2 above, and the T5 overlap fix from the local
+  run: confirm at send time, and give the request a deadline below `fenceAfterMs`. Reproduced on R2 again:
+  130 ms of overlap.
+
+**Not tested.**
+
+- **AWS S3 and Azure Blob** (no credentials).
+- `ControlLease` on GCS (brief: R2 only; it needs a production GCS adapter first).
+- R2 with multiple buckets/locations or jurisdictions.
+- GCS dual- and multi-region buckets (the location was not read).
+- Latency from a datacentre rather than home broadband.
+- T4 case (d), the waited-for late 200, at the fetch layer. The rig never ran it on TLS stores.
+- R2's documented per-key write limit: not reached at 4.6 writes/s sequential.
+- The 429 error reason from GCS: the rig records the status only in the contention phases.
+
+**Deviations from the brief and plan.**
+
+- **Tightening T6** (the read token of a lease-sized body satisfies the condition), gating for all stores.
+  It was added after T5 failed on R2 and the cause was found.
+- The **flood was capped at 2,000 attempts** per store for cost (rounds kept the full 10,000).
+- **GCS gating**: the S3-dialect "unsupported condition", "losers only 409/412", and the 300 ms p99 bound are
+  recorded but not gating for GCS. S7 words them as "record" and "report", and its adapter never sends
+  S3 headers.
+- The **R2 identity-read run** (`r2-identity`) is a prototype of a client change inside the rig. Production
+  code is untouched. The 200-writer contention was not repeated with it, because the contention bodies are
+  below the gzip threshold, so the result is identical.
+- The **GCS key path** in the creds file is relative to its directory. The run command resolves it there;
+  the rig itself reads only the environment.
+- **docs/HA-PLAN.md was not read.** It exists only as uncommitted work in the owner's main checkout, which
+  the credential rule forbids reading beyond the creds files. The S7 criteria were taken from the brief.
