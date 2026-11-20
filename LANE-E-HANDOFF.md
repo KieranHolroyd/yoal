@@ -2,7 +2,7 @@
 
 Branch: `ha/w3-e-drivers`, base `main` (`0b187500`). Worktree:
 `/Users/kieranholroyd/.t3/worktrees/private-cloud-deploys/t3-w3-e-drivers`.
-Final commit: `<filled after amend>`.
+Implementation commit: `cc07f72`; this hand-off is one docs commit on top (HEAD).
 
 ## Verified
 
