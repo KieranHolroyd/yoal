@@ -128,7 +128,12 @@ export class KeepalivedManager {
 		const state = this.#last ?? (await this.readLast());
 		if (!state) return { service: this.paths.service, running, interface: null, virtualAddress: null, addressPresent: false };
 		const address = await this.runner([this.paths.ipPath, '-o', 'addr', 'show', 'dev', state.interface]);
-		const addressPresent = address.code === 0 && address.stdout.includes(state.virtualAddress);
+		const addressPresent =
+			address.code === 0 &&
+			// Exact address, not a substring: 10.0.0.1 must not match 10.0.0.10.
+			(address.stdout.match(/\binet6?\s+([0-9a-fA-F:.]+)\/\d{1,3}/g) ?? []).some(
+				(entry) => entry.replace(/^.*\s/, '').split('/')[0] === state.virtualAddress,
+			);
 		return {
 			service: this.paths.service,
 			running,
@@ -157,7 +162,7 @@ export class KeepalivedManager {
 		const text = await fs.readFile(this.paths.configPath, 'utf8').catch(() => '');
 		if (!text) return null;
 		const interfaceName = /^\s*interface\s+(\S+)\s*$/m.exec(text)?.[1] ?? null;
-		const virtualAddress = /^\s*(\d{1,3}(?:\.\d{1,3}){3}(?:\/\d{1,3})?)\s+dev\s+\S+\s*$/m.exec(text)?.[1]?.split('/')[0] ?? null;
+		const virtualAddress = /^\s*([0-9a-fA-F:.]+(?:\/\d{1,3})?)\s+dev\s+\S+\s*$/m.exec(text)?.[1]?.split('/')[0] ?? null;
 		if (!interfaceName || !virtualAddress) return null;
 		this.#last = {
 			instance: 'YOAL',
@@ -211,7 +216,7 @@ export function renderKeepalivedConfig(state: KeepalivedState): string {
 		`        auth_pass ${state.authPass}`,
 		'    }',
 		'    virtual_ipaddress {',
-		`        ${state.virtualAddress}/32 dev ${state.interface}`,
+		`        ${state.virtualAddress}/${isIP(state.virtualAddress) === 6 ? 128 : 32} dev ${state.interface}`,
 		'    }',
 		'}',
 		'',

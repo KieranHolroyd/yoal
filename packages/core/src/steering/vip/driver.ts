@@ -118,10 +118,12 @@ export class VipDriver implements SteeringDriver {
 	readonly #options: VipDriverOptions;
 	private readonly context: SteeringDriverContext;
 	#serving: string[] | null = null;
+	/** The serving set at the previous pass, for the `added` report only. */
+	#servingBefore: string[] | null = null;
 	#master: string | null = null;
 	/** Fingerprint of the state last accepted by each node's helper. */
 	readonly #configured = new Map<string, string>();
-	readonly #running = new Set<string>();
+	#running = new Set<string>();
 	#report: VipReport = { withdrawn: [], added: [], records: [], holder: null, writes: 0, error: null };
 
 	constructor(context: SteeringDriverContext, options: VipDriverOptions) {
@@ -140,6 +142,12 @@ export class VipDriver implements SteeringDriver {
 			});
 			return findings;
 		}
+		const addressed = nodes.filter((node) => this.#address(node) !== null);
+		if (addressed.length < 2)
+			findings.push({
+				nodeId: null,
+				reason: 'vip needs at least two ingress nodes with a segment address: one node cannot form a VRRP group (and a peerless unicast config would fall back to multicast).',
+			});
 		const seen = new Map<string, string>();
 		for (const node of nodes) {
 			if (!node.capable) {
@@ -182,27 +190,35 @@ export class VipDriver implements SteeringDriver {
 		const config = this.#options.config!;
 		const nodes = ingressNodes(this.context);
 		const byId = new Map(nodes.map((node) => [node.id, node]));
+		// The helper is the authority on what is running: a control-plane restart, a reboot or a
+		// driver re-selection must not leave a demoted node advertising the address.
+		const running = new Set<string>();
+		for (const node of nodes) {
+			try {
+				if ((await this.#options.control.status(node.id)).running) running.add(node.id);
+			} catch {
+				/* a node without a reachable helper is simply not known to be running */
+			}
+		}
 		const eligible = nodes
 			.filter((node) => node.capable && isHealthy(node, now) && !isDraining(node) && this.#address(node) !== null)
 			.map((node) => node.id);
-
-		const previous = this.#serving;
-		// The last healthy ingress is never withdrawn. An empty eligible set keeps the previous
-		// intent, and a first pass with no eligible node keeps the fleet's ingress ids, so keepalived
-		// is never told to leave every node without the address.
-		const next = eligible.length > 0 ? eligible : previous && previous.length > 0 ? previous.filter((id) => byId.has(id)) : nodes.map((node) => node.id);
-		const serving = next.length > 0 ? next : (previous ?? []);
+		// Never seed the intent from every ingress node: an unhealthy or address-less node must not
+		// be configured just because the set is empty. An empty eligible set withdraws every running
+		// node; a stale address is worse than a briefly absent one.
+		const serving = eligible.filter((id) => byId.has(id));
 		this.#serving = serving;
-
 		const master =
-			this.#master && serving.includes(this.#master)
-				? this.#master
-				: this.#options.preferredNodeId && serving.includes(this.#options.preferredNodeId)
-					? this.#options.preferredNodeId
-					: serving[0]!;
+			serving.length === 0
+				? null
+				: this.#master && serving.includes(this.#master)
+					? this.#master
+					: this.#options.preferredNodeId && serving.includes(this.#options.preferredNodeId)
+						? this.#options.preferredNodeId
+						: serving[0]!;
 		this.#master = master;
-
 		const report: VipReport = { withdrawn: [], added: [], records: [...serving], holder: master, writes: 0, error: null };
+		let configureFailed = false;
 		const family = isIP(config.address);
 		const localAddresses = new Map(
 			nodes.map((node) => [node.id, this.#address(node)]).filter((entry): entry is [string, string] => typeof entry[1] === 'string'),
@@ -212,16 +228,15 @@ export class VipDriver implements SteeringDriver {
 			const node = byId.get(nodeId);
 			if (!node) continue;
 			const localAddress = localAddresses.get(nodeId) ?? '';
-			if (!localAddress) {
-				// Kept in the intended set (never remove the last healthy ingress) but not configured:
-				// next tick, when it has an address, it joins.
-				report.error ??= `${node.name} has no address on the shared segment, so keepalived cannot be configured on it.`;
-				continue;
-			}
 			const peers = serving
 				.filter((id) => id !== nodeId)
 				.map((id) => localAddresses.get(id) ?? '')
 				.filter((peer) => peer.length > 0 && isIP(peer) === family && peer !== localAddress);
+			// Unicast VRRP only: a state without peers would silently fall back to multicast.
+			if (serving.length < 2 || peers.length === 0) {
+				report.error ??= `${node.name} has no addressed peer on the shared segment; vip would fall back to multicast, so it was not configured.`;
+				continue;
+			}
 			const state: VipNodeState = {
 				instance: config.instance,
 				state: nodeId === master ? 'MASTER' : 'BACKUP',
@@ -241,27 +256,28 @@ export class VipDriver implements SteeringDriver {
 					this.#configured.set(nodeId, fingerprint);
 					report.writes += 1;
 				}
-				if (!this.#running.has(nodeId)) {
+				if (!running.has(nodeId)) {
 					await this.#options.control.start(nodeId);
-					this.#running.add(nodeId);
+					running.add(nodeId);
 					report.writes += 1;
 				}
-				if (!previous?.includes(nodeId)) report.added.push(nodeId);
+				if (!this.#servingBefore?.includes(nodeId)) report.added.push(nodeId);
 			} catch (error) {
 				this.#configured.delete(nodeId);
 				report.error = message(error);
+				configureFailed = true;
 				break;
 			}
 		}
 
-		// Withdraw nodes that are no longer intended, but only after a healthy target exists and no
-		// configure failed. A stop is what proves the node is not the holder.
-		if (report.error === null && serving.length > 0) {
-			for (const nodeId of [...this.#running]) {
+		// Withdraw every node the helper says is running but which is no longer intended. With no
+		// eligible node, that is every running node: no stale holder survives an empty set.
+		if (!configureFailed) {
+			for (const nodeId of [...running]) {
 				if (serving.includes(nodeId)) continue;
 				try {
 					await this.#options.control.stop(nodeId);
-					this.#running.delete(nodeId);
+					running.delete(nodeId);
 					this.#configured.delete(nodeId);
 					report.withdrawn.push(nodeId);
 					report.writes += 1;
@@ -271,6 +287,8 @@ export class VipDriver implements SteeringDriver {
 				}
 			}
 		}
+		this.#servingBefore = serving;
+		this.#running = running;
 		this.#report = report;
 	}
 

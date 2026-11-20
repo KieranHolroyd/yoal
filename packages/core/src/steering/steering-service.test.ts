@@ -259,8 +259,11 @@ describe('vip and webhook through the controller lease (W8 lane E)', () => {
 		const control = new RecordingVipControl();
 		const h = harness({ STEERING: true, INGRESS_SET: true }, { vipControl: control });
 		const node = h.addNode('edge');
+		const second = h.addNode('edge-b');
 		h.beat('edge');
+		h.beat('edge-b');
 		h.core.ctx.sqlite.run(`UPDATE nodes SET roles_json = '["ingress","compute"]', public_address = ? WHERE id = ?`, ['10.0.0.21', node.id]);
+		h.core.ctx.sqlite.run(`UPDATE nodes SET roles_json = '["ingress","compute"]', public_address = ? WHERE id = ?`, ['10.0.0.22', second.id]);
 		h.core.cluster.update(principal, { steering: { driver: 'vip' } });
 		setVipSettings(h.core.ctx, {
 			address: '192.0.2.100',

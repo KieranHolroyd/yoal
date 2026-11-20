@@ -94,6 +94,7 @@ function create(context: SteeringDriverContext, overrides: { preferredNodeId?: s
 
 describeSteeringConformance('vip', {
 	create: (context) => create(context).driver,
+	lastHealthyAllFail: 'withdraw',
 });
 
 describe('vip driver (H18)', () => {
@@ -155,7 +156,7 @@ describe('vip driver (H18)', () => {
 		expect(control.states.get('node-1')?.state).toBe('MASTER');
 	});
 
-	test('never removes the last healthy ingress and never exposes the VRRP secret', async () => {
+	test('withdraws every node when none is healthy, and never exposes the VRRP secret', async () => {
 		let nodes = fleet();
 		const context: SteeringDriverContext = { now: () => NOW, nodes: () => nodes, settings: () => ({}) as never };
 		const { driver, control } = create(context);
@@ -166,8 +167,9 @@ describe('vip driver (H18)', () => {
 		nodes = fleet([{ status: 'offline' }, { status: 'offline' }, { status: 'offline' }]);
 		await driver.desired();
 		const report = driver.report();
-		expect(report.withdrawn).toEqual([]);
-		expect(report.records).toEqual(['node-1']);
+		// A stale floating address is worse than a briefly absent one.
+		expect(report.withdrawn).toEqual(['node-1']);
+		expect(report.records).toEqual([]);
 		const observed = JSON.stringify(await driver.observe());
 		expect(observed).not.toContain('s3cr3t');
 	});
@@ -178,10 +180,8 @@ describe('vip driver (H18)', () => {
 		const { driver, control } = create(context);
 		await driver.desired();
 		control.failConfigure = 'node-1';
-		nodes = fleet([{}, { status: 'offline' }, { status: 'offline' }]);
+		nodes = fleet([{}, {}, { status: 'offline' }]);
 		await driver.desired();
-		// The last healthy node is kept in the intended set, and no stop is issued after the failure.
-		expect(driver.report().withdrawn).toEqual([]);
 		expect(driver.report().error).toContain('configure failed');
 		expect(control.stopped).toEqual([]);
 	});
@@ -201,10 +201,17 @@ describe('vip driver (H18)', () => {
 			expectedKind: 'vip',
 			writes: () => control.writes,
 			apply: () => driver.desired(),
+			lastHealthyAllFail: 'withdraw',
 			lastHealthy: async () => {
-				const { driver: last, control: lastControl } = create(steeringContext(fleet([{ status: 'offline' }, { status: 'offline' }, { status: 'offline' }])));
+				// Same driver: serve healthily, then fail every node. A fresh driver would pass for any
+				// implementation (it has nothing to withdraw).
+				let nodes = fleet();
+				const context: SteeringDriverContext = { now: () => NOW, nodes: () => nodes, settings: () => ({}) as never };
+				const { driver: last } = create(context);
 				await last.desired();
-				return { withdrawn: last.report().withdrawn, records: lastControl.states.size ? last.report().records : [] };
+				nodes = fleet([{ status: 'offline' }, { status: 'offline' }, { status: 'offline' }]);
+				await last.desired();
+				return { withdrawn: last.report().withdrawn, records: last.report().records };
 			},
 			extraCases: [
 				{

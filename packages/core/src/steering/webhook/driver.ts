@@ -170,8 +170,16 @@ export class WebhookDriver implements SteeringDriver {
 			return;
 		}
 
-		const adopted = result.serving ?? next;
-		const refused = this.#lastHealthyRefusal(nodes, adopted) ?? (adopted.length === 0 && (previous?.length ?? 0) > 0 ? 'The webhook acknowledgement would withdraw the last healthy ingress; the previous set stays in place.' : null);
+		const adopted = [...new Set(result.serving ?? next)];
+		const outside = adopted.filter((id) => !next.includes(id));
+		const refused =
+			(outside.length > 0
+				? `The webhook acknowledgement named ${outside.join(', ')}, which is not in the intended healthy set; only a narrowing acknowledgement is accepted.`
+				: null) ??
+			this.#lastHealthyRefusal(nodes, adopted) ??
+			(adopted.length === 0 && next.length > 0
+				? 'The webhook acknowledgement would empty the serving set; the previous set stays in place.'
+				: null);
 		if (refused) {
 			this.#fail(fingerprint, now, refused, false);
 			this.#report = { withdrawn: [], added: [], records: [...next], written: 1, error: refused, nextAttemptAt: null };
@@ -292,7 +300,18 @@ export class WebhookDriver implements SteeringDriver {
 			return { ok: false, retryable: true, error: `The webhook at ${hostOf(config.url)} answered HTTP ${response.status}.` };
 		if (!response.ok) return { ok: false, retryable: false, error: `The webhook at ${hostOf(config.url)} answered HTTP ${response.status}.` };
 
-		const text = await readBounded(response, this.#options.maxResponseBytes ?? MAX_RESPONSE_BYTES);
+		let text: string | null;
+		try {
+			text = await readBounded(response, this.#options.maxResponseBytes ?? MAX_RESPONSE_BYTES);
+		} catch (error) {
+			// A body that stalls or aborts after the 200 is still a retryable delivery failure.
+			const name = error instanceof Error ? error.name : '';
+			return {
+				ok: false,
+				retryable: true,
+				error: `The webhook at ${hostOf(config.url)} answered but the acknowledgement could not be read (${name || 'read error'}).`,
+			};
+		}
 		if (text === null) return { ok: false, retryable: false, error: 'The webhook acknowledgement was larger than the accepted limit.' };
 		let body: unknown;
 		try {
