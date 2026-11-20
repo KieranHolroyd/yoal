@@ -3,7 +3,7 @@
 Branch `ha/w1-a-attach-agent`, merged with `ha/integration` at `1cd872e9` (merge commit
 `b593ba02`; the merge was clean — no conflicts). Everything below was run in this worktree.
 
-Final commit: `68e7c06332852bba130e25c24261f8431a92956c`
+Final commit: `d51b2911` (code, tests and this hand-off). If the branch tip is one commit later, it only corrects this line; `git log -1` is authoritative.
 
 ## 1. What was verified
 
@@ -139,4 +139,4 @@ belonging to lane B, C or D, `packages/contracts`, `packages/site-config/src/com
 
 Branch: `ha/w1-a-attach-agent` (not merged to `ha/integration`, not pushed).
 
-Final commit: `68e7c06332852bba130e25c24261f8431a92956c`
+Final commit: `d51b2911` (code, tests and this hand-off). If the branch tip is one commit later, it only corrects this line; `git log -1` is authoritative.
