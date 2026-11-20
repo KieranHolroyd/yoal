@@ -1,27 +1,19 @@
-import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
+import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import {
 	appVolumes,
 	databaseStudioSessions,
 	databases,
-	deployments,
-	environments,
 	nodeJoinTokens,
 	shareMounts,
 	nodes,
 	projects,
-	releases,
-	slugRedirects,
 	storageInstances,
-	serviceEndpoints,
 	nodeCertificates,
-	workloadReplicas,
 	workloads,
 	type nodes as nodesTable,
 } from '@yoal/db';
 import {
 	compareSemver,
-	UNAVAILABLE_UPSTREAM,
-	contentUrl,
 	parseSemver,
 	nodeHardwareSchema,
 	nodeLabelsSchema,
@@ -29,12 +21,9 @@ import {
 	nodeStorageStatusSchema,
 	nodeUpdateSchema,
 	nodeZoneSchema,
-	workloadReplicaId,
-	workloadSpecSchema,
 	type DesiredState,
 	type NodeHardware,
 	type NodeNetworkMode,
-	type ServiceEndpoint,
 	type ServiceProvider,
 	type NodeIdentityCertificate,
 	type NodeRole,
@@ -52,8 +41,6 @@ import {
 	type NodeUpdateTask,
 	type Principal,
 	type PlatformPermission,
-	type RouteSpec,
-	type WorkloadSpec,
 	IDENTITY_CAPABILITY,
 	selectIdentityNode,
 	KUBERNETES_CAPABILITY,
@@ -62,27 +49,19 @@ import {
 } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, UnauthorizedError, ValidationError } from './errors.ts';
-import { effectiveRuntime } from './runtime-tier.ts';
-import { reservedPortOwner } from './host-ports.ts';
-import { upstreamFor } from './workloads.ts';
-import { routeBlockReason, tcpPortWinners } from './route-guard.ts';
 import { allocateOverlayAddress, buildWireguardState, type OverlayNode } from './overlay.ts';
-import { effectiveAccessMode } from './access.ts';
 import { newId, randomToken, sha256Hex, parseJson } from './util.ts';
 import { IDENTITY_NODE_SETTING, identityDesiredForNode } from './identity-desired.ts';
-import type { ParsedConfig } from '@yoal/site-config';
+import { DesiredStateContext } from './desired-state/context.ts';
+import { RouteState } from './desired-state/routes.ts';
+import { EnvironmentRouteState } from './desired-state/environment-routes.ts';
+import { ReleaseState } from './desired-state/releases.ts';
+import { EndpointState } from './desired-state/endpoints.ts';
+import { DatabaseState } from './desired-state/databases.ts';
+import { IngressState } from './desired-state/ingress.ts';
 
 const JOIN_TTL_MS = 60 * 60 * 1000;
 
-/**
- * Where an unauthenticated visitor goes. Yoal Access has its own platform endpoint because it must
- * evaluate a policy and may redirect to an IdP or user pool before handing back a host-bound code.
- */
-function loginUrlFor(platformOrigin: string, mode: string, projectId: string): string {
-	return mode === 'access'
-		? `${platformOrigin}/api/v1/access/authorize?project=${projectId}`
-		: `${platformOrigin}/_yoal/site-login?project=${projectId}`;
-}
 /**
  * An agent is offline after 30 s without a heartbeat (DESIGN §9). The alert delay is a platform
  * policy (`nodeAlertMinutes`, Settings → Policies).
@@ -1037,96 +1016,9 @@ export class NodeService {
 		this.ctx.projects.bump();
 	}
 
-	/**
-	 * Provider-side overlay listeners for services this node hosts (C2), plus the listeners read
-	 * replicas on other nodes stream through (C7). The agent keeps one listener per port, so every
-	 * consumer of a port is merged into that listener's allowlist: emitting one provider per
-	 * consumer used to leave all but the last consumer node refused.
-	 */
+	/** Provider-side overlay listeners for services this node hosts (C2, C7); see `desired-state/endpoints.ts`. */
 	serviceProvidersForNode(nodeId: string): ServiceProvider[] {
-		const node = this.ctx.db.select().from(nodes).where(eq(nodes.id, nodeId)).get();
-		if (!node?.privateAddress) return [];
-		const rows = this.ctx.db
-			.select()
-			.from(serviceEndpoints)
-			.where(eq(serviceEndpoints.upstreamNodeId, nodeId))
-			.all();
-		const byPort = new Map<number, ServiceProvider>();
-		const add = (provider: ServiceProvider): void => {
-			const current = byPort.get(provider.listenPort);
-			if (!current) {
-				byPort.set(provider.listenPort, { ...provider, allowedClientFingerprints: [...provider.allowedClientFingerprints] });
-				return;
-			}
-			// Two services can never share a host port on one node, so the target agrees.
-			for (const fingerprint of provider.allowedClientFingerprints)
-				if (!current.allowedClientFingerprints.includes(fingerprint)) current.allowedClientFingerprints.push(fingerprint);
-		};
-		for (const row of rows) {
-			const targetPort =
-				row.serviceKind === 'database'
-					? (this.ctx.databaseReplicas.servicePort(row.serviceId) ??
-						this.ctx.db
-							.select({ port: databases.hostPort })
-							.from(databases)
-							.where(eq(databases.id, row.serviceId))
-							.get()?.port)
-					: this.ctx.db
-							.select({ port: storageInstances.hostPort })
-							.from(storageInstances)
-							.where(eq(storageInstances.id, row.serviceId))
-							.get()?.port;
-			if (!targetPort) continue;
-			const consumerCert = this.ctx.db
-				.select({ serial: nodeCertificates.serial })
-				.from(nodeCertificates)
-				.where(eq(nodeCertificates.nodeId, row.consumerNodeId))
-				.get();
-			add({
-				id: `svp_${row.id}`.slice(0, 100),
-				listenAddress: node.privateAddress,
-				listenPort: row.upstreamPort,
-				targetPort,
-				allowedClientFingerprints: consumerCert ? [consumerCert.serial] : [],
-			});
-		}
-		for (const provider of this.ctx.databaseReplicas.providersForNode(nodeId, node.privateAddress)) add(provider);
-		return [...byPort.values()]
-			.map((provider) => ({ ...provider, allowedClientFingerprints: [...provider.allowedClientFingerprints].sort() }))
-			.sort((a, b) => a.listenPort - b.listenPort);
-	}
-
-	/** Consumer-side loopback endpoints for this node's remote attachments (C2). */
-	private serviceEndpointsForNode(nodeId: string): ServiceEndpoint[] {
-		const rows = this.ctx.db
-			.select()
-			.from(serviceEndpoints)
-			.where(eq(serviceEndpoints.consumerNodeId, nodeId))
-			.all();
-		if (rows.length === 0) return [];
-		const nodesById = new Map(this.ctx.db.select().from(nodes).all().map((node) => [node.id, node]));
-		return rows
-			.map((row) => {
-				const upstream = nodesById.get(row.upstreamNodeId);
-				return {
-					id: row.id,
-					kind: row.serviceKind,
-					serviceId: row.serviceId,
-					localPort: row.localPort,
-					upstream: {
-						nodeId: row.upstreamNodeId,
-						address: upstream?.privateAddress ?? null,
-						port: row.upstreamPort,
-					},
-					tlsFingerprint:
-						this.ctx.db
-							.select({ serial: nodeCertificates.serial })
-							.from(nodeCertificates)
-							.where(eq(nodeCertificates.nodeId, row.upstreamNodeId))
-							.get()?.serial ?? null,
-				};
-			})
-			.sort((a, b) => a.localPort - b.localPort);
+		return new EndpointState(this.ctx).serviceProvidersForNode(nodeId);
 	}
 
 	/** Upsert the public node certificate; the private key never reaches this process. */
@@ -1196,464 +1088,32 @@ export class NodeService {
 	/**
 	 * Everything this node must converge to: releases, production and preview routes, redirects,
 	 * revocations. Built fresh on every pull and cached by the agent.
+	 *
+	 * Each concern is built by its own part in `./desired-state/` (routes and site config, releases
+	 * and workloads, endpoints, databases, ingress) over one shared `DesiredStateContext`. This
+	 * composes them, in the order the fields have always been built and emitted, and
+	 * `desired-state/golden.test.ts` pins the result.
 	 */
 	async desiredState(token: string): Promise<DesiredState> {
 		const node = this.authenticate(token);
-		const now = this.ctx.now();
-		const allNodes = this.ctx.db
-			.select({
-				id: nodes.id,
-				mode: nodes.mode,
-				publicAddress: nodes.publicAddress,
-				status: nodes.status,
-				capabilitiesJson: nodes.capabilitiesJson,
-			})
-			.from(nodes)
-			.all();
-		const edgeId = this.ctx.config.edgeNodeId ?? allNodes.find((row) => row.mode === 'edge')?.id ?? null;
-		const isEdge = node.id === edgeId || node.mode === 'edge';
-		const nodeById = new Map(allNodes.map((row) => [row.id, row]));
+		const state = new DesiredStateContext(this.ctx, node);
+		const { now, allNodes, edgeId, isEdge, nodeById } = state;
+		const routeState = new RouteState(state);
+		const ingress = new IngressState(state);
+		const releaseState = new ReleaseState(state);
+		const endpoints = new EndpointState(this.ctx);
 
-		// Apps are served from the node their workload was admitted to (`auto` and database pinning
-		// resolve at deploy time); the placement request is only the fallback before a deploy.
-		const workloadPlacements = this.ctx.db
-			.select({ projectId: workloads.projectId, nodeId: workloads.nodeId, movingFromNodeId: workloads.movingFromNodeId })
-			.from(workloads)
-			.all();
-		// During a surge move the old node still serves: the route follows only once the new copy
-		// has reported running and `moving_from_node_id` is cleared.
-		const workloadNodeByProject = new Map(
-			workloadPlacements.flatMap((row) =>
-				(row.movingFromNodeId ?? row.nodeId) ? [[row.projectId, (row.movingFromNodeId ?? row.nodeId)!] as const] : [],
-			),
-		);
-		/** Projects whose copy is starting here mid-move: this node needs the release before the route. */
-		const arrivingHere = new Set(
-			workloadPlacements.filter((row) => row.movingFromNodeId && row.nodeId === node.id).map((row) => row.projectId),
-		);
-		// Spread copies (C4), in index order so the upstream list is stable between pulls. A node
-		// appears once however many copies it holds: its own Caddy balances nothing locally.
-		const replicaNodesByProject = new Map<string, string[]>();
-		/** Nodes whose copy is up: the only ones an ingress should send traffic to. */
-		const readyNodesByProject = new Map<string, Set<string>>();
-		for (const replica of this.ctx.db
-			.select({
-				projectId: workloadReplicas.projectId,
-				nodeId: workloadReplicas.nodeId,
-				status: workloadReplicas.status,
-				appliedVersion: workloadReplicas.appliedVersion,
-			})
-			.from(workloadReplicas)
-			.orderBy(workloadReplicas.replicaIndex)
-			.all()) {
-			const list = replicaNodesByProject.get(replica.projectId) ?? [];
-			if (!list.includes(replica.nodeId)) list.push(replica.nodeId);
-			replicaNodesByProject.set(replica.projectId, list);
-			// A copy being restarted by a rollout leaves the upstreams before its node stops it.
-			if (replica.status === 'running' && replica.appliedVersion === null) {
-				const ready = readyNodesByProject.get(replica.projectId) ?? new Set<string>();
-				ready.add(replica.nodeId);
-				readyNodesByProject.set(replica.projectId, ready);
-			}
-		}
-		/** This node holds a copy of the project's workload, whichever index it is. */
-		const holdsCopy = (projectId: string): boolean => replicaNodesByProject.get(projectId)?.includes(node.id) ?? false;
-
-		const targetOf = (project: { id: string; runtime: string; runtimeName?: string | null; placement: string }): string | null =>
-			// Every node holding a copy serves the project itself: it needs the route and the release,
-			// not only the node `workloads.node_id` names (copy 0).
-			(effectiveRuntime(project) !== 'static' && holdsCopy(project.id) ? node.id : undefined) ??
-			(effectiveRuntime(project) !== 'static' ? workloadNodeByProject.get(project.id) : undefined) ??
-			(project.placement === 'edge' || project.placement === 'auto' ? edgeId : project.placement);
-
-		const projectRows = this.ctx.db
-			.select()
-			.from(projects)
-			.where(isNull(projects.deletedAt))
-			.all()
-			.filter((project) => {
-				const target = targetOf(project);
-				// Edge serves edge-placed projects locally and proxies worker-placed ones; a worker
-				// only serves the projects placed on it, or arriving on it.
-				return isEdge || target === node.id || arrivingHere.has(project.id);
-			});
-
-		const routes: RouteSpec[] = [];
-		/**
-		 * The edge-only part of each policy (service tokens, whether a person could still match and
-		 * whether the policy is enabled), read once per pull and shared by every route using it.
-		 */
-		const edgeSettings = new Map<string, ReturnType<CoreContext['accessPolicies']['edgeSettings']>>();
-		const accessEdge = (policyId: string | null) => {
-			if (!policyId) return {};
-			let settings = edgeSettings.get(policyId);
-			if (!settings) {
-				settings = this.ctx.accessPolicies.edgeSettings(policyId);
-				edgeSettings.set(policyId, settings);
-			}
-			return {
-				policyEnabled: settings.enabled,
-				serviceTokens: settings.serviceTokens,
-				hasPersonRules: settings.hasPersonRules,
-			};
-		};
-		const releaseShas = new Set<string>();
-		/** Route body per deployment, reused for that deployment's preview and environment routes. */
-		const baseByDeployment = new Map<string, Omit<RouteSpec, 'host' | 'access' | 'accessMode'>>();
-		/** Compose stacks per deployment: extra service hosts are emitted for the production pointer. */
-		const composeByDeployment = new Map<string, import('@yoal/contracts').ComposeSpec>();
-		const workloadByProject = new Map(
-			this.ctx.db
-				.select()
-				.from(workloads)
-				.all()
-				.filter((row) => row.nodeId === node.id || row.movingFromNodeId === node.id || holdsCopy(row.projectId))
-				.map((row) => [row.projectId, row]),
-		);
-
-		// Which app owns each loopback port on this node; any other claimant is not routed (D225).
-		const portWinners = tcpPortWinners([...workloadByProject.values()]);
-		/** Projects that serve HTTP at all (everything but workers); candidates for a default page. */
-		const siteProjectIds = new Set<string>();
-		for (const project of projectRows) {
-			const target = targetOf(project) ?? node.id;
-			const local = target === node.id;
-			const workload = workloadByProject.get(project.id);
-			// Parse the project's saved spec once: the worker test and a function route both need it.
-			const spec = workloadSpecOf(project);
-			// Workers (plan 21) have no route at all: no preview URL, no environment host. Their
-			// release is app code or a template manifest and must never be served as a static site;
-			// a process worker on this node still needs the release itself.
-			if (isWorkerProject(project, spec)) {
-				if (local && effectiveRuntime(project) === 'process') {
-					for (const deployment of this.ctx.db
-						.select({ releaseId: deployments.releaseId })
-						.from(deployments)
-						.where(and(eq(deployments.projectId, project.id), eq(deployments.status, 'active')))
-						.all()) {
-						const release = this.ctx.db
-							.select({ sha256: releases.sha256 })
-							.from(releases)
-							.where(eq(releases.id, deployment.releaseId))
-							.get();
-						if (release) releaseShas.add(release.sha256);
-					}
-				}
-				continue;
-			}
-			siteProjectIds.add(project.id);
-			// The last check before Caddy (D225): a local app route proxies only to its own running
-			// listener. Never to a port another app or the platform holds, and never by serving the
-			// app's release (its source) as static files while it has no upstream.
-			const block = local
-				? routeBlockReason({
-						runtime: effectiveRuntime(project),
-						workload: workload ?? null,
-						portWinners,
-						reserved: (port) => reservedPortOwner(this.ctx, port),
-					})
-				: null;
-			// Apps proxy to the workload on their node; the edge reaches a worker's Caddy over WireGuard.
-			const upstream = block
-				? UNAVAILABLE_UPSTREAM
-				: effectiveRuntime(project) !== 'static' && local
-					? (workload?.upstream ?? null)
-					: local
-						? null
-						: `http://${nodeById.get(target)?.publicAddress ?? '127.0.0.1:1'}`;
-			const rows = this.ctx.db
-				.select()
-				.from(deployments)
-				.where(and(eq(deployments.projectId, project.id), eq(deployments.status, 'active')))
-				.all();
-			for (const deployment of rows) {
-				const release = this.ctx.db.select().from(releases).where(eq(releases.id, deployment.releaseId)).get();
-				if (!release) continue;
-				if (local || arrivingHere.has(project.id)) releaseShas.add(release.sha256);
-				const config = this.configFor(deployment.configSnapshotId);
-				// A function's assets are part of *this deployment's* snapshot (rollback restores it),
-				// and they live in the release, so only the node holding the release serves them. The
-				// edge has no release and proxies here like any other worker-placed site (D110).
-				const deploymentSpec = workloadSpecOf({ workloadJson: deployment.workloadJson });
-				// A function dials its own socket (phase 4). Replica 0 keeps the workload id, so a
-				// single-host function uses `<workload-id>.sock`, matching the helper's socket unit.
-				// Read from this deployment's snapshot, so a rollback restores its own upstream.
-				const functionUpstream =
-					local && workload && deploymentSpec?.runtime === 'function'
-						? upstreamFor(workload.id, deploymentSpec)
-						: null;
-				const functionRoute =
-					local && deploymentSpec?.runtime === 'function'
-						? {
-								function: {
-									assetsDirectory: deploymentSpec.function?.assets?.directory ?? null,
-									runWorkerFirst: deploymentSpec.function?.assets?.runWorkerFirst ?? [],
-									// Phase 4: a stateless function with `replicas > 1` gets one socket per
-									// replica, in order, and the node's Caddy balances across them. Omitted
-									// for a single host, so that route is byte-identical to phase 1.
-									...(workload && deploymentSpec.replicas > 1
-										? {
-												upstreams: Array.from({ length: deploymentSpec.replicas }, (_, index) =>
-													upstreamFor(workloadReplicaId(workload.id, index), deploymentSpec),
-												),
-											}
-										: {}),
-								},
-							}
-						: {};
-				// Only an ingress balances across copies. A copy on this node is dialled directly (its
-				// socket or loopback port); the others through their node's Caddy over the overlay. A
-				// worker never fans out: it serves its own copy and nothing else.
-				const everyCopyNode = replicaNodesByProject.get(project.id) ?? [];
-				const ready = readyNodesByProject.get(project.id);
-				// Before any copy has reported (a first deploy) every node is listed, and the health
-				// check decides; after that only copies that are up take traffic.
-				const replicaNodes = ready?.size ? everyCopyNode.filter((nodeId) => ready.has(nodeId)) : everyCopyNode;
-				const replicaUpstreams =
-					isEdge && everyCopyNode.length > 1
-						? replicaNodes
-								.map((nodeId) =>
-									nodeId === node.id
-										? block
-											? null
-											: (functionUpstream ?? upstream)
-										: nodeById.get(nodeId)?.publicAddress
-											? `http://${nodeById.get(nodeId)!.publicAddress}`
-											: null,
-								)
-								.filter((address): address is string => Boolean(address))
-						: [];
-				const base = {
-					projectId: project.id,
-					slug: project.slug,
-					deploymentId: deployment.id,
-					release: release.sha256,
-					spa: config.config.spa,
-					cleanUrls: config.config.cleanUrls,
-					trailingSlash: config.config.trailingSlash,
-					notFound: config.config.notFound,
-					redirects: config.redirects,
-					headers: config.headers,
-					upstream: functionUpstream ?? upstream,
-					...(block && !(replicaUpstreams.length > 0 && everyCopyNode.length > 1) ? { unavailable: block } : {}),
-					...(replicaUpstreams.length > 0 && everyCopyNode.length > 1
-						? {
-							upstreams: replicaUpstreams,
-							...(deploymentSpec?.healthPath
-								? {
-										healthPath: deploymentSpec.healthPath,
-										healthIntervalSeconds: this.ctx.cluster.get().replicas.healthIntervalSeconds,
-									}
-								: {}),
-						}
-						: {}),
-					...functionRoute,
-				} satisfies Omit<RouteSpec, 'host' | 'access' | 'accessMode'>;
-				baseByDeployment.set(deployment.id, base);
-				if (deploymentSpec?.compose) composeByDeployment.set(deployment.id, deploymentSpec.compose);
-
-				// Every deployment always gets its immutable preview URL, whatever its environment.
-				const previewPolicyId = project.previewAccessPolicyId ?? null;
-				const previewAccessMode = effectiveAccessMode(project.previewAccess, previewPolicyId);
-				routes.push({
-					...base,
-					host: deployment.previewHost,
-					production: false,
-					accessMode: previewAccessMode,
-					access: {
-						mode: previewAccessMode,
-						siteKey: this.ctx.access.siteKeyFor(project, previewPolicyId),
-						loginUrl: loginUrlFor(this.ctx.config.platformOrigin, previewAccessMode, project.id),
-						policyId: previewPolicyId,
-						...accessEdge(previewPolicyId),
-					},
-				});
-			}
-		}
-
-		// Every environment with a pointer gets its own production route at the environment host
-		// (`<slug>.<domain>` for production, `<slug>--<env>.<domain>` otherwise, D13/D14). The v1
-		// flow is the production-only case of this, so behaviour there is unchanged.
-		const environmentRows =
-			projectRows.length > 0
-				? this.ctx.db
-						.select()
-						.from(environments)
-						.where(inArray(environments.projectId, projectRows.map((project) => project.id)))
-						.all()
-				: [];
-		const environmentsByProject = new Map<string, typeof environmentRows>();
-		for (const row of environmentRows) {
-			const list = environmentsByProject.get(row.projectId) ?? [];
-			list.push(row);
-			environmentsByProject.set(row.projectId, list);
-		}
-		const productionProjectIds = new Set<string>();
-		for (const project of projectRows) {
-			const rows = environmentsByProject.get(project.id) ?? [];
-			const seen = new Set(rows.map((row) => row.slug));
-			const candidates = [...rows];
-			// A project predating the environments table (or one whose production row was never
-			// materialised) still serves from the project pointer.
-			if (!seen.has('production') && project.productionDeploymentId)
-				candidates.push({
-					id: `implicit_${project.id}`,
-					orgId: project.orgId,
-					projectId: project.id,
-					name: 'Production',
-					slug: 'production',
-					isProduction: true,
-					access: project.productionAccess,
-					accessPolicyId: project.productionAccessPolicyId ?? null,
-					passwordHash: null,
-					deploymentId: project.productionDeploymentId,
-					createdAt: project.createdAt,
-					updatedAt: project.updatedAt,
-				});
-			for (const environment of candidates) {
-				const deploymentId =
-					environment.isProduction && !environment.deploymentId
-						? project.productionDeploymentId
-						: environment.deploymentId;
-				if (!deploymentId) continue;
-				const base = baseByDeployment.get(deploymentId);
-				if (!base) continue;
-				const environmentPolicyId = environment.isProduction
-					? (project.productionAccessPolicyId ?? null)
-					: (environment.accessPolicyId ?? null);
-				const accessMode = effectiveAccessMode(
-					environment.isProduction ? project.productionAccess : environment.access,
-					environmentPolicyId,
-				);
-				routes.push({
-					...base,
-					host: this.ctx.environments.hostFor(project, environment),
-					production: true,
-					accessMode,
-					access: {
-						mode: accessMode,
-						siteKey: this.ctx.access.siteKeyFor(project, environmentPolicyId),
-						loginUrl: loginUrlFor(this.ctx.config.platformOrigin, accessMode, project.id),
-						policyId: environmentPolicyId,
-						...accessEdge(environmentPolicyId),
-					},
-				});
-				// Compose: every other exposed service gets its own host on the production pointer.
-				// The project's own host always serves the primary route; a service's declared host
-				// must be a single label under the content domain so the wildcard certificate covers
-				// it. Per-service custom domains are a later, verified surface.
-				const compose = environment.isProduction ? composeByDeployment.get(deploymentId) : undefined;
-				if (compose) {
-					const target = targetOf(project) ?? node.id;
-					const local = target === node.id;
-					const nodeUpstream = `http://${nodeById.get(target)?.publicAddress ?? '127.0.0.1:1'}`;
-					const primary = compose.routes.find((route) => route.primary) ?? compose.routes[0];
-					const projectHost = this.ctx.environments.hostFor(project, environment);
-					for (const route of compose.routes) {
-						const declared = route.host?.toLowerCase().replace(/\.$/, '');
-						const underContent = declared?.endsWith(`.${this.ctx.config.contentDomain.toLowerCase()}`);
-						const host =
-							declared && underContent && !declared.slice(0, -(this.ctx.config.contentDomain.length + 1)).includes('.')
-								? declared
-								: `${project.slug}--${route.service}.${this.ctx.config.contentDomain}`;
-						if (route === primary && (!declared || host === projectHost)) continue;
-						routes.push({
-							...base,
-							host,
-							production: true,
-							accessMode,
-							upstream: local && route.hostPort ? `127.0.0.1:${route.hostPort}` : nodeUpstream,
-							healthPath: route.healthPath,
-							access: {
-								mode: accessMode,
-								siteKey: this.ctx.access.siteKeyFor(project, environmentPolicyId),
-								loginUrl: loginUrlFor(this.ctx.config.platformOrigin, accessMode, project.id),
-								policyId: environmentPolicyId,
-								...accessEdge(environmentPolicyId),
-							},
-						});
-					}
-				}
-				if (environment.isProduction) productionProjectIds.add(project.id);
-			}
-		}
-
-		// A project created in the dashboard and never deployed gets a default page at its production
-		// host instead of "No site here". Only the edge answers public traffic, and only while there is
-		// no production pointer at all: a pointer whose release is missing is a fault, not a new project.
-		const placeholders = isEdge
-			? projectRows
-					.filter(
-						(project) =>
-							siteProjectIds.has(project.id) &&
-							!productionProjectIds.has(project.id) &&
-							!project.productionDeploymentId &&
-							!(environmentsByProject.get(project.id) ?? []).some((row) => row.isProduction && row.deploymentId),
-					)
-					.map((project) => ({
-						host: `${project.slug}.${this.ctx.config.contentDomain}`,
-						projectId: project.id,
-						dashboardUrl: `${this.ctx.config.platformOrigin.replace(/\/+$/, '')}/projects/${project.slug}`,
-					}))
-			: [];
-
-		const releaseRows = this.ctx.db.select().from(releases).all().filter((row) => releaseShas.has(row.sha256));
-		const releaseSpecs = await Promise.all(
-			releaseRows.map(async (release) => ({
-				sha256: release.sha256,
-				sizeBytes: release.sizeBytes,
-				fileCount: release.fileCount,
-				precompressed: release.precompressed,
-				url: await this.ctx.objectStore.presignGet(release.objectKey, 3600),
-			})),
-		);
-		const productionUrl = (slug: string) =>
-			contentUrl(this.ctx.config.platformOrigin, `${slug}.${this.ctx.config.contentDomain}`);
-
-		const hostRedirects = this.ctx.db
-			.select({ fromSlug: slugRedirects.fromSlug, projectId: slugRedirects.projectId })
-			.from(slugRedirects)
-			.where(sql`${slugRedirects.expiresAt} > ${now}`)
-			.all()
-			.flatMap((row) => {
-				const target = projectRows.find((project) => project.id === row.projectId);
-				return target
-					? [
-							{
-								host: `${row.fromSlug}.${this.ctx.config.contentDomain}`,
-								to: productionUrl(target.slug),
-							},
-						]
-					: [];
-			});
-
-		// Managed databases ride the workload list as container workloads with a database profile.
-		const workloadRows = [
-			...this.ctx.workloads.desiredForNode(node.id),
-			...this.ctx.databases.desiredForNode(node.id),
-			// Postgres read replicas are their own database-profile workloads (C7).
-			...this.ctx.databaseReplicas.desiredForNode(node.id),
-			...this.ctx.storage.desiredForNode(node.id),
-			...this.ctx.brokers.desiredForNode(node.id),
-			// Kubernetes machines (docs/KUBERNETES.md).
-			...this.ctx.kubernetes.desiredForNode(node.id),
-			// The platform registry (docs/REGISTRY.md G1) on its node.
-			...this.ctx.registry.desiredForNode(node.id),
-		];
+		const deploymentRoutes = routeState.deploymentRoutes();
+		const { routes } = deploymentRoutes;
+		const environmentRoutes = new EnvironmentRouteState(state).environmentRoutes(deploymentRoutes);
+		const placeholders = ingress.placeholders(deploymentRoutes, environmentRoutes);
+		const releaseSpecs = await releaseState.releaseSpecs(deploymentRoutes.releaseShas);
+		const hostRedirects = routeState.hostRedirects();
+		const workloadRows = releaseState.workloads();
 		// Custom domains always clone the production route (stream B), so only projects with a
 		// production pointer are candidates; staging-only projects must not serve them.
-		const servedProjectIds = productionProjectIds;
-
-		// The native studio (D96) routes ride one internal gateway listener on the edge's loopback.
-		const publicAddressOf = (id: string) => nodeById.get(id)?.publicAddress ?? null;
-		const databaseGateway = {
-			listen: isEdge ? `127.0.0.1:${this.ctx.config.databaseGatewayPort ?? 8082}` : null,
-			routes: [
-				...this.ctx.databaseStudio.gatewayRoutes(node.id, isEdge, publicAddressOf),
-				// Container console fronts (D127) share the internal gateway with `console.internal` hosts.
-				...this.ctx.containerConsole.gatewayRoutes(node.id, isEdge, publicAddressOf),
-			],
-		};
+		const servedProjectIds = environmentRoutes.productionProjectIds;
+		const databaseGateway = ingress.databaseGateway();
 
 		// The separate user-pool identity process (IAM.md §11.2): one node per install. An operator
 		// pins it with the `identity.node_id` setting; otherwise the edge or the first online capable
@@ -1689,36 +1149,11 @@ export class NodeService {
 			hostRedirects,
 			placeholders,
 			workloads: workloadRows,
-			volumes: this.ctx.disks.desiredForNode(node.id),
-			shareMounts: this.ctx.shares.mountsForNode(node.id),
-			shareUnmounts: this.ctx.shares.unmountsForNode(node.id),
-			diskMounts: this.ctx.disks.mountsForNode(node.id),
-			diskUnmounts: this.ctx.disks.unmountsForNode(node.id),
-			volumeProfileTasks: this.ctx.disks.profileTasksForNode(node.id),
+			...releaseState.volumes(),
 			linkProbes: this.ctx.links.probesForNode(node.id),
 			linkTests: this.ctx.links.testsForNode(node.id),
-			// App-volume usage, purges and snapshot/restore tasks (docs/VOLUMES.md).
-			appVolumes: this.ctx.appVolumes.lifecycle.volumesForNode(node.id),
-			appVolumePurges: this.ctx.appVolumes.lifecycle.purgesForNode(node.id),
-			appVolumeTasks: await this.ctx.appVolumes.lifecycle.tasksForNode(node.id),
-			// Trashed databases plus the old copy a finished (or rolled-back) move left here.
-			databasePurges: [
-				...new Set([
-					...this.ctx.databases.purgesForNode(node.id),
-					...this.ctx.moves.purgesForNode(node.id),
-					// Removed replicas, promotion leftovers and fenced old primaries (C7).
-					...this.ctx.databaseReplicas.purgesForNode(node.id),
-				]),
-			].sort(),
-			databaseBackupTasks: await this.ctx.databases.backupTasksForNode(node.id),
-			databasePitrTasks: await this.ctx.databases.pitrTasksForNode(node.id),
-			databaseRotations: this.ctx.databases.rotationTasksForNode(node.id),
-			databaseCredentialTasks: this.ctx.databases.credentialTasksForNode(node.id),
-			databaseStudioPrincipals: this.ctx.databaseStudio.principals.tasksForNode(node.id),
-			databasePoolerRestarts: this.ctx.databases.poolerRestartTasksForNode(node.id),
-			databaseReplication: this.ctx.databaseReplicas.replicationTasksForNode(node.id),
-			databaseReplicaLinks: this.ctx.databaseReplicas.linksForNode(node.id),
-			databaseReplicaPromotions: this.ctx.databaseReplicas.promotionsForNode(node.id),
+			...(await releaseState.appVolumes()),
+			...(await new DatabaseState(state).tasks()),
 			storageGateway: this.ctx.storage.gatewayForNode(node.id, isEdge, (id) => nodeById.get(id)?.publicAddress ?? null),
 			studio: this.ctx.databaseStudio.desiredForNode(node.id),
 			databaseGateway,
@@ -1740,45 +1175,18 @@ export class NodeService {
 			mail: this.ctx.email.desiredForNode(node.id),
 			identity: node.id === identityNodeId ? identityDesiredForNode(this.ctx, node.id) : null,
 			domains: this.ctx.domains.desiredForProjects(servedProjectIds),
-			serviceEndpoints: this.serviceEndpointsForNode(node.id),
-			serviceProviders: this.serviceProvidersForNode(node.id),
+			serviceEndpoints: endpoints.serviceEndpointsForNode(node.id),
+			serviceProviders: endpoints.serviceProvidersForNode(node.id),
 			...(node.networkMode === 'external'
 				? {}
 				: { wireguard: buildWireguardState(node.id, this.overlayNodes(), this.ctx.cluster.get().overlay.cidr, this.ctx.cluster.get().overlay) }),
 		};
-	}
-
-	private configFor(snapshotId: string): ParsedConfig {
-		const row = this.ctx.sqlite
-			.query<{ site_config_json: string }, [string]>('SELECT site_config_json FROM config_snapshots WHERE id = ?')
-			.get(snapshotId);
-		return parseJson<ParsedConfig>(row?.site_config_json, {
-			config: { spa: false, cleanUrls: false, trailingSlash: 'ignore', notFound: null },
-			redirects: [],
-			headers: [],
-		});
 	}
 }
 
 function storageStatus(json: string | null): NodeStorageStatus | null {
 	const parsed = nodeStorageStatusSchema.safeParse(parseJson(json, null));
 	return parsed.success ? parsed.data : null;
-}
-
-/** The project's saved workload spec, or null when it has none (or it does not parse). */
-function workloadSpecOf(project: { workloadJson: string | null }): WorkloadSpec | null {
-	if (!project.workloadJson) return null;
-	const spec = workloadSpecSchema.safeParse(parseJson<unknown>(project.workloadJson, null));
-	return spec.success ? spec.data : null;
-}
-
-/** A project whose current spec is a worker (`ingress: "none"`, plan 21): it gets no route. */
-function isWorkerProject(
-	project: { runtime: string; runtimeName?: string | null },
-	spec: WorkloadSpec | null,
-): boolean {
-	if (effectiveRuntime(project) === 'static') return false;
-	return spec?.ingress === 'none';
 }
 
 function capabilities(json: string | null): string[] {
