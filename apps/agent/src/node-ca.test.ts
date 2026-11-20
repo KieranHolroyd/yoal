@@ -40,6 +40,9 @@ describe('NodeCaIdentity', () => {
 		expect(identity.request(undefined)).toBeNull();
 		expect(identity.request(trustWithoutLeaf('x'))).toBeNull();
 		expect(identity.material(undefined)).toBeNull();
+		// A node id that could reach `openssl -subj` or a URI SAN gets no CSR.
+		expect(new NodeCaIdentity(dir, '../evil').available()).toBe(false);
+		expect(new NodeCaIdentity(dir, 'nod a').available()).toBe(false);
 		// No key is generated while the node has no `nodeTrust` at all.
 		const capable = new NodeCaIdentity(dir, 'nod_a');
 		expect(capable.request(undefined)).toBeNull();

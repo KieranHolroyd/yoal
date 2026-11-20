@@ -55,7 +55,7 @@ import { WorkloadLogDrain } from './log-drain.ts';
 import { ReleaseManager, servesReleaseLocally } from './releases.ts';
 import { databaseTlsHeartbeat, WorkloadRuntime, workloadHeartbeat } from './runtime.ts';
 import { HardwareCollector } from './hardware.ts';
-import { ServiceForwarder } from './endpoints.ts';
+import { ServiceForwarder, wantsGateway } from './endpoints.ts';
 import { NodeCertificateManager } from './node-cert.ts';
 import { NodeCaIdentity } from './node-ca.ts';
 import { StatsCollector } from './stats.ts';
@@ -867,10 +867,9 @@ class AgentRuntime {
 		try {
 			// HA-PLAN H24 fields reach only an `endpoints-gateway` node with the flag on; without them
 			// this is the C2 call as before (no gateway binds, no CA material, no read endpoints).
-			const wantsGateway =
-				state.serviceEndpoints.some((endpoint) => endpoint.gatewayAddress) ||
-				(state.readEndpoints ?? []).some((endpoint) => endpoint.gatewayAddress);
-			if (wantsGateway && !this.endpointGuardReady) {
+			const wantsGatewayListeners =
+				wantsGateway(state.serviceEndpoints, state.readEndpoints ?? []);
+			if (wantsGatewayListeners && !this.endpointGuardReady) {
 				try {
 					await this.helper.endpointGuard();
 					this.endpointGuardReady = true;
@@ -1385,7 +1384,7 @@ class AgentRuntime {
 			actualStateVersion: this.actualStateVersion,
 			status: requestedStatus === 'draining' ? 'draining' : this.caddyOk ? 'online' : 'offline',
 			caddyOk: this.caddyOk,
-			capabilities: advertisedCapabilities(),
+			capabilities: advertisedCapabilities(undefined, undefined, this.nodeCa.available()),
 			stats,
 			...(hardware ? { hardware } : {}),
 			...(nodeCertificate ? { nodeCertificate } : {}),

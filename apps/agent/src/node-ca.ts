@@ -30,7 +30,6 @@ interface LeafCheck {
 	usable: boolean;
 	/** Normalized serial when usable, else null. */
 	serial: string | null;
-	notAfter: number;
 	/** `notAfter` minus the renewal window: the CSR starts when now passes this. */
 	renewAt: number;
 }
@@ -142,7 +141,7 @@ export class NodeCaIdentity {
 	 * CAs in the bundle, its URI SAN names this node, and it is inside its validity window.
 	 */
 	private inspect(certPem: string, keyPem: string, bundlePem: string): LeafCheck {
-		const unusable: LeafCheck = { usable: false, serial: null, notAfter: 0, renewAt: 0 };
+		const unusable: LeafCheck = { usable: false, serial: null, renewAt: 0 };
 		try {
 			const certificate = new X509Certificate(certPem);
 			const leafKey = certificate.publicKey.export({ type: 'spki', format: 'der' }) as Buffer;
@@ -159,7 +158,6 @@ export class NodeCaIdentity {
 			return {
 				usable,
 				serial: usable ? normalizeSerial(certificate.serialNumber) : null,
-				notAfter,
 				renewAt: notAfter - NODE_CERT_RENEW_BEFORE_DAYS * DAY_MS,
 			};
 		} catch {

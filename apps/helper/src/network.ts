@@ -1,5 +1,5 @@
 import { promises as fs } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, join } from 'node:path';
 import { defaultRunner, type CommandRunner } from './wireguard.ts';
 
 /**
@@ -27,8 +27,9 @@ export const OVERLAY_PROVIDER_PORTS: readonly OverlayPort[] = [
 ];
 
 /**
- * Consumer endpoint ports (HA-PLAN H24): primary and pool endpoints, then read endpoints. Mirrors
- * `endpointPortRange` and `readEndpointPortRange` in `@yoal/contracts` (a test pins them equal).
+ * Consumer endpoint ports (HA-PLAN H24): primary and pool endpoints, then read endpoints. Keep in
+ * step with `endpointPortRange` and `readEndpointPortRange` in `@yoal/contracts`; the helper does
+ * not depend on that package, so a unit test pins the literals the guard renders.
  */
 export const ENDPOINT_PORT_RANGES: readonly OverlayPort[] = [
 	[21000, 21999],
@@ -174,7 +175,7 @@ ${rules}
 	}
 
 	endpointGuardPath(): string {
-		return this.paths.configPath.replace(/yoal\.nft$/, 'yoal-endpoints.nft');
+		return join(dirname(this.paths.configPath), 'yoal-endpoints.nft');
 	}
 
 	renderEndpointGuard(): string {

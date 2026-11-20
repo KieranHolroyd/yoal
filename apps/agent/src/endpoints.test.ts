@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { createServer, connect, type Server } from 'node:net';
-import { ServiceForwarder, type NodeTrustMaterial } from './endpoints.ts';
+import { ServiceForwarder, wantsGateway, type NodeTrustMaterial } from './endpoints.ts';
 import { TestPki } from './test-pki.ts';
 
 const servers: Server[] = [];
@@ -225,6 +225,25 @@ describe('ServiceForwarder reloads (spike S10 restart bug)', () => {
 });
 
 describe('ServiceForwarder gateway address (HA-PLAN H24)', () => {
+	test('desired state wants a gateway bind only when an endpoint names one, so flag-off is a no-op', () => {
+		const plain = plainEndpoint('sep_w1', 21211, 1);
+		expect(wantsGateway([plain])).toBe(false);
+		expect(wantsGateway([])).toBe(false);
+		expect(wantsGateway([plain], [])).toBe(false);
+		expect(wantsGateway([{ ...plain, gatewayAddress: '10.89.0.1' }])).toBe(true);
+		const read = {
+			id: 'rep_w1',
+			kind: 'database' as const,
+			serviceId: 'db_w1',
+			role: 'read' as const,
+			localPort: 23211,
+			upstreams: [{ nodeId: 'nod_b', address: '127.0.0.1', port: 1, trust: 'pinned' as const, tlsFingerprint: null }],
+			version: 1,
+		};
+		expect(wantsGateway([], [read])).toBe(false);
+		expect(wantsGateway([], [{ ...read, gatewayAddress: '10.89.0.1' }])).toBe(true);
+	});
+
 	test('binds loopback only until the endpoint guard allows the gateway', async () => {
 		const target = await echoServer();
 		const port = await freePort();

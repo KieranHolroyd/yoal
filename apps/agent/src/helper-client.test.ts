@@ -244,3 +244,26 @@ describe('HelperClient', () => {
 		expect(Object.keys(bodies.at(-1)!).sort()).toEqual(['activation', 'workload']);
 	});
 });
+
+describe('endpoint guard client (HA-PLAN H24)', () => {
+	test('posts the fixed verb with no body, and surfaces a helper that lacks it', async () => {
+		const path = await socketPath();
+		const requests: Array<{ method: string; path: string; body: string }> = [];
+		let present = true;
+		const server = Bun.serve({
+			unix: path,
+			async fetch(request) {
+				const url = new URL(request.url);
+				requests.push({ method: request.method, path: url.pathname, body: await request.text() });
+				if (!present) return Response.json({ error: 'the endpoint guard is not available on this helper' }, { status: 404 });
+				return Response.json({ ok: true, table: 'inet yoal-endpoints' });
+			},
+		});
+		servers.push(server);
+		const client = new HelperClient(path, { apply: 1_000 });
+		await client.endpointGuard();
+		expect(requests.at(-1)).toEqual({ method: 'POST', path: '/v1/endpoints/guard', body: '' });
+		present = false;
+		await expect(client.endpointGuard()).rejects.toMatchObject({ status: 404 });
+	});
+});

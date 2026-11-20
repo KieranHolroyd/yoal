@@ -308,9 +308,9 @@ export interface WorkloadDesired {
 	 */
 	identity?: true;
 	/**
-	 * Container apps only (HA-PLAN H24): `AddHost=<host>:<address>` lines, so `db-<id>` resolves to
-	 * the node's container gateway, where the agent's endpoint forwarder listens. Validated by
-	 * `parseAddHosts`; the unit renderer writes only these two fields.
+	 * Container and compose apps (HA-PLAN H24): `AddHost=<host>:<address>` lines, so `db-<id>`
+	 * resolves to the node's container gateway, where the agent's endpoint forwarder listens.
+	 * Validated by `parseAddHosts`; the unit renderer writes only these two fields.
 	 */
 	addHosts?: ContainerAddHost[];
 }
@@ -1551,7 +1551,8 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 		workload.identity = true;
 	}
 	if (record.addHosts !== undefined) {
-		if (runtime !== 'container') throw new ValidationError('Only container workloads may set workload.addHosts');
+		if (runtime !== 'container' && runtime !== 'compose')
+			throw new ValidationError('Only container and compose workloads may set workload.addHosts');
 		if (database || objectStorage || broker || registry || kubernetes)
 			throw new ValidationError('Managed services do not take workload.addHosts');
 		const addHosts = parseAddHosts(record.addHosts);

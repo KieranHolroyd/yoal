@@ -83,3 +83,50 @@ describe('defaultRunner', () => {
 		expect(result.code).toBe(127);
 	});
 });
+
+describe('endpoint guard (HA-PLAN H24)', () => {
+	test('renders one table: loopback and the address-owning interface pass, everything else is dropped', () => {
+		const manager = new NetworkManager({ paths: { configPath: join(dir, 'render-guard', 'yoal.nft') } });
+		const rules = manager.renderEndpointGuard();
+		expect(rules).toContain('table inet yoal-endpoints');
+		expect(rules).toContain('iifname "lo" accept');
+		// The contract ranges the forwarder binds (primary/pool then read).
+		expect(rules).toContain('tcp dport { 21000-21999, 23000-23999 }');
+		expect(rules).toContain('fib daddr . iif type != local drop');
+		// One declare/delete/recreate pair, so a re-apply never stacks a second chain.
+		expect(rules.match(/delete table inet yoal-endpoints/g)?.length).toBe(1);
+	});
+
+	test('writes a separate file, checks it, then loads it', async () => {
+		const calls: string[][] = [];
+		const configPath = join(dir, 'apply-guard', 'yoal.nft');
+		const manager = new NetworkManager({ runner: runnerFor({}, calls), paths: { configPath } });
+		expect(await manager.applyEndpointGuard()).toEqual({ table: 'inet yoal-endpoints' });
+		const path = join(dir, 'apply-guard', 'yoal-endpoints.nft');
+		expect(manager.endpointGuardPath()).toBe(path);
+		expect(readFileSync(path, 'utf8')).toContain('table inet yoal-endpoints');
+		expect(calls).toContainEqual(['nft', '-c', '-f', path]);
+		expect(calls).toContainEqual(['nft', '-f', path]);
+		// The host's own filter table is never touched.
+		expect(calls.some((call) => call.includes(configPath))).toBe(false);
+	});
+
+	test('a file name that is not yoal.nft still keeps the guard in its own file', () => {
+		const manager = new NetworkManager({ paths: { configPath: join(dir, 'custom.nft') } });
+		expect(manager.endpointGuardPath()).toBe(join(dir, 'yoal-endpoints.nft'));
+	});
+
+	test('a failed syntax check applies nothing and reports it', async () => {
+		const calls: string[][] = [];
+		const manager = new NetworkManager({
+			runner: async (argv) => {
+				calls.push(argv);
+				if (argv[1] === '-c') return { code: 1, stdout: '', stderr: 'line 6: bad expression' };
+				return { code: 0, stdout: '', stderr: '' };
+			},
+			paths: { configPath: join(dir, 'fail-guard', 'yoal.nft') },
+		});
+		await expect(manager.applyEndpointGuard()).rejects.toThrow(/nftables check failed: line 6/);
+		expect(calls.some((call) => call[1] === '-f')).toBe(false);
+	});
+});

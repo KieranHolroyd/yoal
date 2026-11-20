@@ -610,3 +610,54 @@ describe('helper HTTP surface', () => {
 		await expect(fs.stat(config.socketPath)).rejects.toThrow();
 	});
 });
+
+describe('endpoint guard verb (HA-PLAN H24)', () => {
+	function guarded(apply: () => Promise<{ table: string }>) {
+		return createHandler(new FakeRuntime(), { version: '0.1.0', endpointGuard: { apply } });
+	}
+
+	test('applies the one fixed verb and takes no query or body', async () => {
+		let applied = 0;
+		const handler = guarded(async () => {
+			applied += 1;
+			return { table: 'inet yoal-endpoints' };
+		});
+		const ok = await handler(new Request('http://localhost/v1/endpoints/guard', { method: 'POST' }));
+		expect(ok.status).toBe(200);
+		expect(await ok.json()).toEqual({ ok: true, table: 'inet yoal-endpoints' });
+		expect(applied).toBe(1);
+		// Fixed verbs take structured input or none: a query or body is refused, never forwarded.
+		expect((await handler(new Request('http://localhost/v1/endpoints/guard?argv=sh', { method: 'POST' }))).status).toBe(400);
+		expect(
+			(
+				await handler(
+					new Request('http://localhost/v1/endpoints/guard', {
+						method: 'POST',
+						headers: { 'content-type': 'application/json' },
+						body: JSON.stringify({ command: 'sh -c id' }),
+					}),
+				)
+			).status,
+		).toBe(400);
+		expect(applied).toBe(1);
+	});
+
+	test('is POST-only', async () => {
+		const handler = guarded(async () => ({ table: 'inet yoal-endpoints' }));
+		expect((await handler(new Request('http://localhost/v1/endpoints/guard'))).status).toBe(405);
+	});
+
+	test('a helper that predates the guard answers 404, never a silent success', async () => {
+		const response = await handler()(new Request('http://localhost/v1/endpoints/guard', { method: 'POST' }));
+		expect(response.status).toBe(404);
+	});
+
+	test('an nftables failure is a 500 naming the check, so the agent keeps gateway binds off', async () => {
+		const handler = guarded(async () => {
+			throw new Error('nftables check failed: line 6');
+		});
+		const response = await handler(new Request('http://localhost/v1/endpoints/guard', { method: 'POST' }));
+		expect(response.status).toBe(500);
+		expect(await response.json()).toEqual({ error: 'nftables check failed: line 6' });
+	});
+});

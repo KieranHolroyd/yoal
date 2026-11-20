@@ -177,9 +177,9 @@ describe('workload.addHosts (HA-PLAN H24)', () => {
 		expect('addHosts' in parseWorkload({ ...container(), addHosts: [] })).toBe(false);
 	});
 
-	test('only container app workloads take AddHost entries', () => {
+	test('only container and compose app workloads take AddHost entries', () => {
 		expect(() => parseWorkload({ ...workloadInput(), addHosts: [{ host: 'db-db_1', address: '10.89.0.1' }] })).toThrow(
-			/Only container workloads/,
+			/Only container and compose workloads/,
 		);
 		expect(() => parseWorkload({ ...databaseInput(), addHosts: [{ host: 'db-db_1', address: '10.89.0.1' }] })).toThrow(
 			/Managed services/,

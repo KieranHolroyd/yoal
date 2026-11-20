@@ -1142,6 +1142,20 @@ describe('compose stacks (level 4)', () => {
 		expect(f.runner.calls).toContainEqual(['/usr/bin/systemctl', 'restart', '--no-block', 'yoal-workload-wld_compose1--db.service']);
 	});
 
+	test('every service inherits the stack’s AddHost entries, and none when the feature is off', async () => {
+		const f = await fixture();
+		const hosts = [{ host: 'db-db_1', address: '10.89.0.1' }];
+		await f.driver.apply(composeWorkload({ addHosts: hosts }), activation({ workloadId: 'wld_compose1' }));
+		const web = await fs.readFile(join(f.quadletDir, 'yoal-workload-wld_compose1--web.container'), 'utf8');
+		const db = await fs.readFile(join(f.quadletDir, 'yoal-workload-wld_compose1--db.container'), 'utf8');
+		expect(web).toContain('AddHost=db-db_1:10.89.0.1');
+		expect(db).toContain('AddHost=db-db_1:10.89.0.1');
+		// The same renderer with the field absent (flag off) emits no line at all.
+		await f.driver.apply(composeWorkload(), activation({ workloadId: 'wld_compose1' }));
+		const plain = await fs.readFile(join(f.quadletDir, 'yoal-workload-wld_compose1--web.container'), 'utf8');
+		expect(plain).not.toContain('AddHost=');
+	});
+
 	test('removes every service unit and its container', async () => {
 		const f = await fixture();
 		await f.driver.apply(composeWorkload(), activation({ workloadId: 'wld_compose1' }));

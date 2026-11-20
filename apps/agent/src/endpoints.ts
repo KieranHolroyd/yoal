@@ -416,6 +416,11 @@ export class ServiceForwarder {
 	}
 }
 
+/** Whether desired state asks the forwarder to bind a container gateway address at all. */
+export function wantsGateway(endpoints: readonly ServiceEndpoint[], readEndpoints: readonly ReadEndpoint[] = []): boolean {
+	return endpoints.some((endpoint) => endpoint.gatewayAddress) || readEndpoints.some((endpoint) => endpoint.gatewayAddress);
+}
+
 function serviceRoute(endpoint: ServiceEndpoint, gatewayAllowed: boolean): ConsumerRoute {
 	return {
 		port: endpoint.localPort,
