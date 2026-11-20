@@ -361,7 +361,8 @@ mail node (the unit sets the paths). None of them is secret: DKIM keys and crede
 - Ports 80/443 free. Domains are optional (§3.7); when you use them, point their DNS at this machine.
 - **Caddy and Podman are installed for you** (skip with `--skip-deps` / `YOAL_SKIP_DEPS=1` if you
   manage packages yourself):
-  - **Caddy**, when `caddy` is not on `PATH`: from the official Caddy apt repository
+  - **Caddy**, when the host has none (no `caddy` on `PATH` and no Caddy unit; a host whose proxy
+    is the release-managed `yoal-caddy.service` counts as having one): from the official Caddy apt repository
     (`dl.cloudsmith.io/public/caddy/stable`, verified by apt), then `caddy add-package
     github.com/caddy-dns/cloudflare` (built by caddyserver.com) for the wildcard HTTPS certificate,
     and `apt-mark hold caddy` so upgrades keep the module. The package's Caddyfile is kept as
@@ -376,7 +377,8 @@ mail node (the unit sets the paths). None of them is secret: DKIM keys and crede
     `Caddyfile.dist.<ms>` when that exists), so the backup keeps its mode and owner; the installer
     prints where it went, then enables and restarts `caddy.service`. Any other Caddyfile on an
     existing install is left alone with a warning, and a host whose proxy is `yoal-caddy.service`
-    (a converted Skiff host) is never given a second Caddy.
+    (a converted Skiff host) is never given a second Caddy: the installer enables or restarts
+    `caddy.service` only when it is the host's Caddy unit, on the control plane and on worker joins.
   - **Podman** (agent installs only): `podman uidmap passt netavark aardvark-dns`. Managed
     Postgres and RustFS run as rootful Quadlet containers (Podman 4.4+). Project and runner
     containers get a user namespace of their own, so the helper uses `uidmap` and adds a

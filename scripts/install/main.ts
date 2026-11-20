@@ -75,7 +75,15 @@ import { MAIL_UNIT, mailUnit } from '../systemd/mail.ts';
 import { IDENTITY_LITESTREAM_UNIT, IDENTITY_UNIT, identityLitestreamUnit, identityUnit } from '../systemd/identity.ts';
 import { agentUnit, CADDY_ACCESS_LOG, detectCaddyAdminSocket } from '../systemd/agent.ts';
 import { ensureCaddyRestartPolicy } from '../systemd/caddy.ts';
-import { controlPlaneCaddyfile, freshPackageCaddyfile, workerCaddyfile, type CaddyfileHost } from './caddyfile.ts';
+import {
+	caddyBinary,
+	controlPlaneCaddyfile,
+	enableStockCaddy,
+	freshPackageCaddyfile,
+	needsCaddyPackage,
+	workerCaddyfile,
+	type CaddyfileHost,
+} from './caddyfile.ts';
 import { CLI_COMMANDS, ensureHostCommands, RELEASE_COMMANDS } from './commands.ts';
 import { ensureMasterKey, finishMasterKeyMigration, revertMasterKeyMigration, type EnsureMasterKeyResult } from './master-key.ts';
 import { CLICKHOUSE_UNIT, clickhouseInstalled, ensureClickHouse, removeClickHouseUnit } from '../systemd/clickhouse.ts';
@@ -706,7 +714,9 @@ function installPrerequisites(): void {
 		return;
 	}
 	const installed = (name: string) => capture('dpkg-query', ['-W', '-f=${Status}', name])?.includes('install ok installed') ?? false;
-	const missingCaddy = !hasCommand('caddy');
+	// Not `command -v caddy` alone: a release-managed yoal-caddy.service host has its binary under
+	// /opt/yoal/current only, and the package would add a second Caddy there.
+	const missingCaddy = needsCaddyPackage(caddyfileHost());
 	const missingPodman = !options.noAgent && PODMAN_PACKAGES.some((name) => !installed(name));
 	const missingStorage = options.noAgent
 		? []
@@ -748,8 +758,7 @@ function installCaddy(): void {
 	// The package's Caddyfile serves a welcome page with the admin API on TCP. Yoal wants the admin
 	// API on a unix socket only (the agent pushes the real config through it).
 	freshPackageCaddyfile({ path: CADDYFILE, log });
-	run('systemctl', ['enable', 'caddy'], { allowFailure: true });
-	run('systemctl', ['restart', 'caddy'], { allowFailure: true });
+	enableStockCaddy(caddyfileHost(), { restart: true });
 
 	// Wildcard HTTPS for sites needs DNS-01. HTTP installs work without it, so a failed download
 	// (the module comes from caddyserver.com's build service) is a warning, not a stop.
@@ -759,7 +768,7 @@ function installCaddy(): void {
 		if (run('caddy', ['add-package', CADDY_DNS_MODULE], { allowFailure: true }).code === 0) {
 			// Keep apt from replacing the custom build on upgrade.
 			run('apt-mark', ['hold', 'caddy'], { allowFailure: true });
-			run('systemctl', ['restart', 'caddy'], { allowFailure: true });
+			enableStockCaddy(caddyfileHost(), { enable: false, restart: true });
 		} else
 			log(color.yellow(`warning: could not add ${CADDY_DNS_MODULE}; HTTPS for sites needs it (retry: sudo caddy add-package ${CADDY_DNS_MODULE})`));
 	}
@@ -932,10 +941,12 @@ async function preflight(): Promise<void> {
 			log(color.yellow('warning: the Podman Quadlet generator is missing; container workloads cannot start'));
 	}
 
-	for (const command of ['systemctl', 'journalctl', 'caddy']) {
+	for (const command of ['systemctl', 'journalctl']) {
 		if (!capture('sh', ['-c', `command -v ${command}`])) fail(`Required command not found: ${command}`);
 	}
-	const caddyBin = capture('sh', ['-c', 'command -v caddy'])!;
+	// On PATH, or the binary the host's Caddy unit runs (yoal-caddy.service: /opt/yoal/current).
+	const caddyBin = caddyBinary(caddyfileHost());
+	if (!caddyBin) fail('Required command not found: caddy');
 	const modules = capture(caddyBin, ['list-modules']) ?? '';
 	if (!modules.includes('dns.providers.cloudflare')) {
 		// Only the wildcard HTTPS certificate needs DNS-01; HTTP installs work with any Caddy.
@@ -1306,7 +1317,7 @@ function ensureCaddyAccess(): void {
 	const running = pid !== '' && pid !== '0';
 	if (running && gid !== null && !processHasGroup(status, gid)) {
 		log('restarting caddy so it picks up the yoal group');
-		run('systemctl', ['restart', 'caddy'], { allowFailure: true });
+		enableStockCaddy(caddyfileHost(), { enable: false, restart: true });
 	}
 }
 
@@ -1981,7 +1992,7 @@ async function joinWorker(join_: NonNullable<Options['join']>): Promise<void> {
 	step('systemd units');
 	// Nothing listens publicly until the overlay address is known.
 	workerCaddyfile({ ...caddyfileHost() });
-	run('systemctl', ['enable', 'caddy'], { allowFailure: true });
+	enableStockCaddy(caddyfileHost());
 	ensureCaddyAccess();
 	writeFileSync(join(SYSTEMD_DIR, 'yoal-agent.service'), agentUnit({ optDir: OPT_DIR, etcDir: ETC_DIR, varDir: VAR_DIR, runDir: RUN_DIR }));
 	writeFileSync(join(SYSTEMD_DIR, STUDIO_UNIT), studioUnit({ optDir: OPT_DIR, runDir: RUN_DIR, socketGroup: 'caddy' }));

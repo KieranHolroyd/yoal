@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { chmodSync, chownSync, copyFileSync, existsSync, linkSync, readFileSync, renameSync, statSync, writeFileSync } from 'node:fs';
-import { STOCK_CADDY_UNIT, caddyUnit } from '../systemd/caddy.ts';
+import { STOCK_CADDY_UNIT, caddyExecPath, caddyUnit } from '../systemd/caddy.ts';
 
 /**
  * The installer's bootstrap Caddyfile. Caddy's admin API is never on TCP (D7): the bootstrap file
@@ -99,12 +99,60 @@ function replace(host: CaddyfileHost, current: string, listen: string, bind?: st
 	host.run(['systemctl', 'restart', STOCK_CADDY_UNIT]);
 }
 
-/** The Caddy unit this host runs, preferring the release-managed one (systemd/caddy.ts). */
-function unitOf(host: CaddyfileHost): string | null {
-	return caddyUnit((cmd) => {
+/** `capture` in the shape systemd/caddy.ts expects. */
+function asRun(host: Pick<CaddyfileHost, 'capture'>) {
+	return (cmd: string[]) => {
 		const stdout = host.capture(cmd);
 		return { code: stdout === null ? 1 : 0, stdout: stdout ?? '', stderr: '' };
-	});
+	};
+}
+
+/** The Caddy unit this host runs, preferring the release-managed one (systemd/caddy.ts). */
+function unitOf(host: Pick<CaddyfileHost, 'capture'>): string | null {
+	return caddyUnit(asRun(host));
+}
+
+/**
+ * The Caddy binary: the one on PATH, else the one this host's Caddy unit runs. A release-managed
+ * `yoal-caddy.service` runs `/opt/yoal/current/caddy/caddy`, which is not on PATH.
+ */
+export function caddyBinary(host: Pick<CaddyfileHost, 'capture'>): string | null {
+	const onPath = host.capture(['sh', '-c', 'command -v caddy'])?.trim();
+	if (onPath) return onPath;
+	const unit = unitOf(host);
+	return unit ? caddyExecPath(unit, asRun(host)) : null;
+}
+
+/**
+ * Install the caddy package only on a host with no Caddy at all. A host whose proxy is
+ * `yoal-caddy.service` has no `caddy` on PATH; installing the package there would add and enable
+ * a second Caddy competing for :80 and :443 (F12, second review).
+ */
+export function needsCaddyPackage(host: Pick<CaddyfileHost, 'capture'>): boolean {
+	return unitOf(host) === null && caddyBinary(host) === null;
+}
+
+/**
+ * Enable and/or restart the packaged `caddy.service`, but only when it is this host's Caddy unit.
+ * `systemctl restart` starts a stopped unit, so on a `yoal-caddy.service` host either would start a
+ * second Caddy. True when anything ran.
+ */
+export function enableStockCaddy(
+	host: Pick<CaddyfileHost, 'capture' | 'run' | 'log' | 'dryRun'>,
+	options: { enable?: boolean; restart?: boolean } = {},
+): boolean {
+	const unit = unitOf(host);
+	if (unit !== STOCK_CADDY_UNIT) {
+		if (unit) host.log(`leaving ${STOCK_CADDY_UNIT} alone: this host's Caddy runs as ${unit}`);
+		return false;
+	}
+	if (host.dryRun) {
+		host.log(`would ${[options.enable !== false ? 'enable' : null, options.restart ? 'restart' : null].filter(Boolean).join(' and ')} ${STOCK_CADDY_UNIT}`);
+		return false;
+	}
+	if (options.enable !== false) host.run(['systemctl', 'enable', STOCK_CADDY_UNIT]);
+	if (options.restart) host.run(['systemctl', 'restart', STOCK_CADDY_UNIT]);
+	return true;
 }
 
 /**

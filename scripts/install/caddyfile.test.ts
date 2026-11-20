@@ -3,7 +3,16 @@ import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { adminOnUnixSocket, bootstrapCaddyfile, controlPlaneCaddyfile, workerCaddyfile, type CaddyfileHost } from './caddyfile.ts';
+import {
+	adminOnUnixSocket,
+	bootstrapCaddyfile,
+	caddyBinary,
+	controlPlaneCaddyfile,
+	enableStockCaddy,
+	needsCaddyPackage,
+	workerCaddyfile,
+	type CaddyfileHost,
+} from './caddyfile.ts';
 
 /**
  * HA-PLAN Wave 1 F12 and its review. With Caddy already installed, the installer kept the package's
@@ -27,7 +36,10 @@ afterEach(() => {
 });
 
 /** A host: its Caddyfile, which Caddy unit is loaded, and what dpkg says the package shipped. */
-function host(content: string | null, options: { unit?: 'caddy.service' | 'yoal-caddy.service' | null; shipped?: string | null; mode?: number } = {}) {
+function host(
+	content: string | null,
+	options: { unit?: 'caddy.service' | 'yoal-caddy.service' | null; shipped?: string | null; mode?: number; onPath?: string | null } = {},
+) {
 	const root = mkdtempSync(join(tmpdir(), 'yoal-caddyfile-'));
 	dir = root;
 	const path = join(root, 'Caddyfile');
@@ -37,6 +49,7 @@ function host(content: string | null, options: { unit?: 'caddy.service' | 'yoal-
 	}
 	const unit = options.unit === undefined ? 'caddy.service' : options.unit;
 	const shipped = options.shipped === undefined ? STOCK : options.shipped;
+	const onPath = options.onPath === undefined ? (unit === 'caddy.service' ? '/usr/bin/caddy' : null) : options.onPath;
 	const calls: string[][] = [];
 	const logs: string[] = [];
 	const deps: CaddyfileHost = {
@@ -45,6 +58,11 @@ function host(content: string | null, options: { unit?: 'caddy.service' | 'yoal-
 		capture: (cmd) => {
 			if (cmd[0] === 'systemctl' && cmd.includes('LoadState')) return cmd.at(-1) === unit ? 'loaded' : 'not-found';
 			if (cmd[0] === 'dpkg-query') return shipped === null ? null : ` ${path} ${md5(shipped)}\n /etc/caddy/other 0\n`;
+			if (cmd[0] === 'sh' && cmd.at(-1) === 'command -v caddy') return onPath;
+			if (cmd[0] === 'systemctl' && cmd.includes('ExecStart') && cmd.at(-1) === unit)
+				return unit === 'yoal-caddy.service'
+					? '{ path=/opt/yoal/current/caddy/caddy ; argv[]=/opt/yoal/current/caddy/caddy run --resume ; }'
+					: '{ path=/usr/bin/caddy ; argv[]=/usr/bin/caddy run --environ ; }';
 			return null;
 		},
 		log: (line) => void logs.push(line),
@@ -176,6 +194,42 @@ describe('worker join', () => {
 	});
 });
 
+describe('never a second Caddy (F12, second review)', () => {
+	test('a release-managed yoal-caddy.service host: no package install, its own binary, nothing enabled', () => {
+		// The binary lives only under /opt/yoal/current, so `command -v caddy` finds nothing.
+		const t = host(STOCK, { unit: 'yoal-caddy.service' });
+		expect(needsCaddyPackage(t.deps)).toBe(false);
+		expect(caddyBinary(t.deps)).toBe('/opt/yoal/current/caddy/caddy');
+		expect(enableStockCaddy(t.deps, { restart: true })).toBe(false);
+		expect(t.calls).toEqual([]);
+		expect(t.logs.join('\n')).toContain('yoal-caddy.service');
+	});
+
+	test('a host with no Caddy at all gets the package', () => {
+		const t = host(null, { unit: null, onPath: null });
+		expect(needsCaddyPackage(t.deps)).toBe(true);
+		expect(caddyBinary(t.deps)).toBeNull();
+		expect(enableStockCaddy(t.deps)).toBe(false);
+		expect(t.calls).toEqual([]);
+	});
+
+	test('a packaged caddy.service host: enabled (and restarted when asked), never reinstalled', () => {
+		const t = host(STOCK);
+		expect(needsCaddyPackage(t.deps)).toBe(false);
+		expect(caddyBinary(t.deps)).toBe('/usr/bin/caddy');
+		expect(enableStockCaddy(t.deps)).toBe(true);
+		expect(t.calls).toEqual([['systemctl', 'enable', 'caddy.service']]);
+		expect(enableStockCaddy(t.deps, { restart: true })).toBe(true);
+		expect(t.calls.slice(1)).toEqual(restarted);
+	});
+
+	test('a dry run enables nothing', () => {
+		const t = host(STOCK);
+		expect(enableStockCaddy({ ...t.deps, dryRun: true }, { restart: true })).toBe(false);
+		expect(t.calls).toEqual([]);
+	});
+});
+
 describe('installer wiring', () => {
 	test('main.ts uses these entry points and parses --replace-caddyfile', () => {
 		const main = readFileSync(new URL('./main.ts', import.meta.url), 'utf8');
@@ -183,5 +237,10 @@ describe('installer wiring', () => {
 		expect(main).toContain('workerCaddyfile({');
 		expect(main).toContain("has('--replace-caddyfile')");
 		expect(main).not.toContain('ensureNodeCaddyfile(');
+		// Every enable or restart of the packaged unit goes through enableStockCaddy, and the package
+		// is installed only when the host has no Caddy at all.
+		expect(main).not.toMatch(/run\('systemctl', \['(enable|restart)', 'caddy'\]/);
+		expect(main).toContain('needsCaddyPackage(');
+		expect(main).not.toContain("const missingCaddy = !hasCommand('caddy')");
 	});
 });
