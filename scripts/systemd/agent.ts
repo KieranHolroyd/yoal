@@ -72,7 +72,7 @@ Environment=YOAL_CADDY_ACCESS_LOG=${paths.caddyAccessLog ?? CADDY_ACCESS_LOG}
 ExecStart=${optDir}/current/agent/yoal-agent
 Restart=on-failure
 RestartSec=2
-TimeoutStopSec=20
+TimeoutStopSec=150
 KillSignal=SIGTERM
 LimitNOFILE=65535
 TasksMax=128

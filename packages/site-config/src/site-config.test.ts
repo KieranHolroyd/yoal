@@ -196,7 +196,7 @@ describe('compileSiteRoute', () => {
 		const subroutes = (input: SiteCompileInput) =>
 			(compileSiteRoute(input) as { handle: Array<{ routes: Sub[] }> }).handle[0]!.routes;
 		const authOf = (input: SiteCompileInput) => subroutes(input).find((sub) => JSON.stringify(sub.handle).includes('/_yoal/verify'));
-		const probeOf = (input: SiteCompileInput) => subroutes(input).find((sub) => JSON.stringify(sub.match ?? '').includes('remote_ip'));
+		const probeOf = (input: SiteCompileInput) => subroutes(input).find((sub) => JSON.stringify(sub.match ?? '').includes('client_ip'));
 		const protectedCopy: SiteCompileInput = {
 			...base,
 			accessMode: 'platform',
@@ -217,8 +217,8 @@ describe('compileSiteRoute', () => {
 					path: ['/healthz'],
 					// Caddy's `path` is case-insensitive; the anchored regexp is not.
 					path_regexp: { pattern: '^/healthz$' },
-					// The connection's own peer address, never a forwarded header.
-					remote_ip: { ranges: ['10.47.0.0/16'] },
+					// The resolved client address: the peer unless a trusted proxy supplied it.
+					client_ip: { ranges: ['10.47.0.0/16'] },
 				},
 			]);
 			// Matchers see a cleaned path, the proxy forwards the raw one (`/admin/../healthz`,
@@ -233,7 +233,7 @@ describe('compileSiteRoute', () => {
 				{ routes: [{ handle: [{ handler: 'static_response', status_code: '{http.reverse_proxy.status_code}' }] }] },
 			]);
 			expect(probe.handle).toHaveLength(2);
-			expect(JSON.stringify(probe)).not.toMatch(/client_ip|copy_response|X-Forwarded-For/);
+			expect(JSON.stringify(probe)).not.toMatch(/copy_response|X-Forwarded-For/);
 			// The access check itself has no exceptions any more.
 			expect(authOf(protectedCopy)!.match).toBeUndefined();
 		});

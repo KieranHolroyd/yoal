@@ -36,6 +36,15 @@ export interface IngressHealthDecision {
 /** The `ingress-set` capability: an agent that serves the full edge payload and the health endpoint. */
 export const INGRESS_SET_CAPABILITY = 'ingress-set';
 
+/** A CIDR range Caddy's `trusted_proxies` and the PROXY wrapper accept (IPv4 or IPv6). */
+export const CIDR_RANGE =
+	/^(?:(?:25[0-5]|2[0-4]\d|1?\d?\d)(?:\.(?:25[0-5]|2[0-4]\d|1?\d?\d)){3}\/(?:3[0-2]|[12]?\d)|[0-9a-fA-F:]+\/(?:12[0-8]|1[01]\d|[1-9]?\d))$/;
+export const cidrSchema = z
+	.string()
+	.min(1)
+	.max(64)
+	.regex(CIDR_RANGE, 'must be a CIDR range');
+
 export const ingressSettingsSchema = z
 	.object({
 		/** How long a draining ingress answers 503 before Caddy stops (H19). */
@@ -43,13 +52,40 @@ export const ingressSettingsSchema = z
 		/** The listener wrapper for a balancer in front (H19). */
 		proxyProtocol: z.enum(['off', 'v1', 'v2']).default('off'),
 		/** CIDRs whose forwarded client address is trusted. Empty means none. */
-		trustedProxies: z.array(z.string().min(1).max(64)).max(32).default([]),
+		trustedProxies: z.array(cidrSchema).max(32).default([]),
 		/** The plain HTTP port for L4 balancers (H19); null uses the reserved default. */
 		healthPort: z.number().int().min(1).max(65_535).nullable().default(null),
 	})
 	.strict();
 
 export type IngressSettings = z.infer<typeof ingressSettingsSchema>;
+
+/** `GET /.well-known/yoal/health` on every ingress, for any Host (HA-PLAN H19). */
+export const INGRESS_HEALTH_PATH = '/.well-known/yoal/health';
+/**
+ * The reserved plain-HTTP listener an L4 balancer probes (H19). Chosen in spike S9 and recorded in
+ * the host-port registry; `ingress.healthPort` overrides it.
+ */
+export const INGRESS_HEALTH_PORT = 8099;
+/**
+ * An ingress whose routes trail desired state by more than this is unready (CLUSTERING §7.1,
+ * "behind for 2 minutes"). Inside the window it keeps taking traffic: a reload is not an outage.
+ */
+export const INGRESS_DRIFT_WINDOW_MS = 120_000;
+
+/**
+ * The one-word answers the endpoint may give. Constant-size on the wire (the agent pads to 16
+ * bytes), so a probe learns readiness and nothing about the fleet (HA-PLAN §10).
+ */
+export const ingressHealthWords = {
+	ok: 'ok',
+	draining: 'draining',
+	caddy: 'caddy',
+	'desired-state': 'desired-state',
+	releases: 'releases',
+	certificates: 'certificates',
+} as const;
+export type IngressHealthWord = (typeof ingressHealthWords)[keyof typeof ingressHealthWords];
 
 /** One node that terminates ingress. The payload is the same on every member. */
 export interface IngressNodeView {
@@ -72,8 +108,10 @@ export interface IngressNodeView {
  * node in the ingress set, so a worker that gains the `ingress` role converges from desired state
  * instead of a hand-edited env file. Non-secret: the ACME email is public, the token is not.
  */
-export const ingressDesiredSchema = z
-	.object({
+export const ingressDesiredSchema = ingressSettingsSchema
+	.extend({
+		/** The fleet certificate fingerprint this node verifies (H20); null means it does not. */
+		certificateFingerprint: z.string().min(1).max(128).nullable().default(null),
 		/** Extra Caddy listeners for public traffic. The node's existing listen addresses stay. */
 		listeners: z.array(z.string().min(1).max(128)).max(8).default([]),
 		/** Terminate TLS with ACME. Null keeps today's env-driven behaviour. */

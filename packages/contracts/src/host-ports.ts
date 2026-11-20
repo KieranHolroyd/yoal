@@ -5,6 +5,7 @@ import { STUDIO_DEFAULT_PORT } from './database-studio.ts';
 import { endpointPortRange, readEndpointPortRange } from './endpoint.ts';
 import { FUNCTION_ANALYTICS_PORT } from './function.ts';
 import { IDENTITY_DEFAULT_PORT } from './identity.ts';
+import { INGRESS_HEALTH_PORT } from './ingress.ts';
 import { KUBERNETES_API_PORT_MIN, KUBERNETES_INGRESS_PORT_MAX } from './kubernetes.ts';
 import { STORAGE_PORT_MAX, STORAGE_PORT_MIN } from './object-storage.ts';
 import { REGISTRY_DEFAULT_PORT } from './registry.ts';
@@ -44,6 +45,7 @@ export const PLATFORM_HOST_PORTS: readonly ReservedPortRange[] = [
 	{ min: STUDIO_DEFAULT_PORT, max: STUDIO_DEFAULT_PORT, owner: 'the database studio' },
 	{ min: CONTAINER_CONSOLE_DEFAULT_PORT, max: CONTAINER_CONSOLE_DEFAULT_PORT, owner: 'the container console' },
 	{ min: FUNCTION_ANALYTICS_PORT, max: FUNCTION_ANALYTICS_PORT, owner: "the agent's analytics sink" },
+	{ min: INGRESS_HEALTH_PORT, max: INGRESS_HEALTH_PORT, owner: "the ingress health endpoint" },
 	{ min: WORKLOAD_IDENTITY_PORT, max: WORKLOAD_IDENTITY_PORT, owner: 'the workload identity endpoint' },
 	{ min: IDENTITY_DEFAULT_PORT, max: IDENTITY_DEFAULT_PORT, owner: 'the identity service' },
 	{ min: BROKER_PORT_MIN, max: BROKER_PORT_MAX, owner: 'managed brokers' },

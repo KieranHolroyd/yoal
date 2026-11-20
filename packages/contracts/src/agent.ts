@@ -1,4 +1,5 @@
 import { registryMirrorDesiredSchema } from './registry.ts';
+import { INGRESS_SET_CAPABILITY, ingressDesiredSchema, ingressHealthSchema } from './ingress.ts';
 import * as z from 'zod';
 import { nodeContainerConsoleDesiredSchema } from './container-console.ts';
 import { nodeStudioDesiredSchema } from './database-studio.ts';
@@ -28,7 +29,6 @@ import { IDENTITY_CAPABILITY, identityDesiredSchema, identityUnitStatusSchema } 
 import { workloadDesiredSchema, workloadStatuses } from './workload.ts';
 import { STORAGE_STS_CAPABILITY } from './object-storage.ts';
 import { databaseMetricBucketSchema, databaseSnapshotSchema } from './database.ts';
-import { INGRESS_SET_CAPABILITY, ingressDesiredSchema } from './ingress.ts';
 import { brokerMetricBucketSchema, brokerQueueSnapshotSchema } from './broker.ts';
 import {
 	kubernetesBackupResultSchema,
@@ -538,6 +538,11 @@ export const heartbeatSchema = z.object({
 	certificateFingerprint: z.string().max(128).nullable().optional(),
 	/** Progress and outcomes of `releaseCommands` since the last heartbeat (HA-PLAN H25). */
 	releaseCommandResults: z.array(releaseCommandResultSchema).max(20).optional(),
+	/**
+	 * What `GET /.well-known/yoal/health` currently answers (HA-PLAN H19). Sent by an ingress only;
+	 * the endpoint itself is served by Caddy from the agent's state file, so this is the fleet view.
+	 */
+	ingressHealth: ingressHealthSchema.optional(),
 	/**
 	 * Per-upstream request counters since the previous heartbeat (HA-PLAN H25 "Canary"), from this
 	 * node's own Caddy. Sent by an agent that declares `release-phase`.

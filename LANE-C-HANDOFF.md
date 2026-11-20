@@ -1,94 +1,123 @@
-# Lane C hand-off — W5 rollout and release command
+# Lane C hand-off — W8 edge health, lame duck, PROXY protocol, trusted proxies
 
-Branch `ha/w1-c-release`, base `ha/integration` @ `1cd872e9` (merged cleanly; no conflicts).
-The interrupted work (`bf0b4626`) was inspected, kept, and finished; it is not discarded.
-No migration was used (`0119_release_phase.sql` already covers `release_command_runs` and
-`deployment_canaries`); `0123` is untouched.
+Branch `ha/w2-c-edge-health`, base `ha/integration` `416996dd`. Code commit `f215f342`.
+No migration used: `0126` is untouched (the health endpoint and settings needed no new table).
+`VERSION` untouched; every commit used `--no-verify`.
 
 ## What ships
 
-- `packages/core/src/release-commands.ts` — the release-command scheduler and its I16 lease.
-  - `schedule()` one attempt per release id, leased to one node that holds a copy, is online and
-    declares `release-phase`, with a `startBy` deadline.
-  - `tick()` leases waiting runs and expires a silent lease as `timeout` after the latest moment the
-    command could still be running (`startBy` + skew + timeout + grace + stop grace + margin). A
-    timeout is never retried automatically.
-  - `gate()` → `none | pending | succeeded | failed`; `recordResults()` accepts only the node holding
-    the run, and a late result never revives a closed run; `tasksForNode()`/`releaseShasForNode()`
-    feed desired state; `activation()` serves the new release's env/secrets through
-    `WorkloadService.releaseActivation()`.
-- `packages/core/src/workloads.ts`
-  - `record()` queues a release command and holds every copy on the previous release until the gate
-    succeeds (including a first deploy, whose copies desired state withholds); a failed command
-    abandons the deployment by moving the pointers only (`abandonFailedRelease`), so no copy moves.
-  - `rolloutTick()` gates on the command, runs the canary copies first, judges them from the edge's
-    own per-upstream counters, and reverts on failure.
-  - `imagePrePullsForNode()`, `recordUpstreamCounters()`, per-app `resolvedSpread` in plan, scale,
-    move, balance and surge paths.
-- `packages/core/src/canary-judge.ts` — errors fail at once (the existing promote-spike rule),
-  latency on 2× and ≥250 ms, soak then pass, quiet app passes on readiness.
-- `packages/core/src/ha-level.ts` + `topology.ts` — L0–L3 computed from current placement (G24).
-- Wiring: `context.ts`/`index.ts` (service), `nodes.ts` (heartbeat results, desired-state
-  `releaseCommands`/`imagePrePulls`/release shas), `failover-service.ts` (scheduler tick before the
-  rollout tick), `deployments.ts` (`abandonFailedRelease`), control-plane agent route
-  `release-commands/<runId>` for the activation.
-- Contracts: only the already-committed `dd138b36` addition (heartbeat `upstreamCounters`,
-  desired-state `imagePrePulls`, capability-gate stripping). No further contract edits.
+- `packages/contracts/src/ingress.ts`
+  - `INGRESS_HEALTH_PATH`, `INGRESS_HEALTH_PORT` (8099, now reserved in the host-port registry),
+    `INGRESS_DRIFT_WINDOW_MS` (120 s, CLUSTERING §7.1), the six one-word answers.
+  - `ingressDesiredSchema`: the cluster settings plus lane B's optional
+    `certificateFingerprint`; `trustedProxies` are validated CIDRs at the schema, so a malformed
+    range never reaches a node.
+  - Desired state gains an optional `ingress` block and the heartbeat an optional
+    `ingressHealth` (the existing `ingressHealthSchema`).
+- `packages/site-config/src/compile.ts`
+  - `compileIngressProtection()`: health routes on the content server (443), the redirect server
+    (80) and a dedicated plain listener (`:8099` or `ingress.healthPort`); `Connection: close`
+    while the drain file exists; PROXY protocol wrapper (`allow` = trusted proxies,
+    `fallback_policy: ignore`); server-level `trusted_proxies` + `client_ip_headers` +
+    `trusted_proxies_strict`; a Caddy `grace_period` no shorter than the drain.
+  - Health answers are constant 16 bytes, host-agnostic, terminal, with `Server` deleted. Order:
+    `draining`, `caddy`, `desired-state`, `releases`, `certificates`, then 200 `ok`; no state file
+    means 503 `caddy` (the agent has not confirmed a config).
+  - The protected-copy health-probe exemption now matches Caddy's `client_ip` (resolved address),
+    not `remote_ip`.
+  - `compileCaddyConfig` accepts `httpListen`, so `YOAL_CADDY_LISTEN` is honoured with TLS on.
+- `apps/agent/src/ingress-health.ts` — pure decision: 200 only when Caddy is up, routes are at the
+  desired version or inside the drift window, every release the applied routes need is on disk,
+  and the loaded fingerprint (when the fleet has one) matches. Includes the one-word mapping.
+- `apps/agent/src/lame-duck.ts` — idempotent drain state machine: write 503 `draining` *before*
+  the wait; the caller stops only after `begin()` resolves; `reset()` restores serving.
+- `apps/agent/src/main.ts`
+  - Recomputes health every 5 s and before each heartbeat, writing exactly one state file; sends
+    `ingressHealth` in the heartbeat.
+  - SIGTERM/SIGINT drains an ingress for `drainSeconds` while Caddy keeps serving, then stops; the
+    node-update restart travels the same SIGTERM path, so the binary swap is preceded by the 503
+    window without changing the update runner.
+  - A reconcile that removes the `ingress` role drains on the old config first, then drops the
+    edge config; a failed converge leaves the old config serving.
+  - Reads the served leaf certificate's SHA-256 fingerprint (cached 60 s) for the certificate
+    condition; TLS managers and cert custody are untouched.
+  - `YOAL_CADDY_LISTEN` is split into secure content listeners and `:80` redirect listeners when
+    TLS is on; the default `:443,:80` renders exactly as before.
+- `apps/agent/src/caddy-config.ts` — wires the protection only when desired state carries
+  `ingress` (a worker's config is unchanged), keeps health probes out of analytics buckets, and the
+  Kubernetes allowlist now matches `client_ip`.
+- `packages/core/src/nodes.ts` / `cluster-config-service.ts` — the ingress settings ride desired
+  state to ingress nodes only; an ingress setting change bumps the watermark. Golden state was
+  regenerated with the additive block (28 lines on the edge nodes).
+- `scripts/systemd/agent.ts`, `scripts/systemd/yoal-agent.service` — `TimeoutStopSec` 20 → 150 so
+  the largest allowed drain (120 s) can finish before systemd kills the agent.
 
 ## Verified
 
-- `bun run check` — 0 errors (`@yoal/control-plane`: 0 errors, 1 pre-existing Svelte warning;
-  `iam lint: no new role/kind checks`).
-- `bun test` — **6176 pass, 73 skip, 0 fail**, 6249 tests in 562 files.
-- `bun test tests/ha` — 66 pass, 0 fail; `node_modules/.bin/tsc -p tests/ha` clean.
-- Focused: `release-phase.test.ts` (8), `release-commands.test.ts` (10), `canary-judge.test.ts`,
-  `ha-level.test.ts`, `scaling.test.ts` (27) — all green.
-- Behaviours asserted in tests:
-  - a failing release command leaves every copy on the old release and moves the pointer back;
-  - a first deploy with a release command renders no copy until the command succeeds;
-  - a success is never rerun, a failure frees the lease (attempt 2), two releases never run at once;
-  - an expired lease becomes `timeout`, and a late success under a partition neither revives the run
-    nor opens the gate;
-  - a canary 5xx spike fails before the other copies roll; a healthy canary passes after the soak and
-    the rest roll; a failed canary reverts the pointers in the same tick;
-  - `placement.spread: zone` overrides the cluster spread for one app;
-  - `imagePrePulls` is present for a capability node holding a copy and absent without the capability;
-  - flag-off: no release rows, today's rolling start, no `releaseCommands`/`imagePrePulls` in desired
-    state, and a release-phase field is refused.
+- `bun run check` — all packages 0 errors (control-plane keeps its pre-existing 1 Svelte warning);
+  `iam lint: no new role/kind checks`.
+- `bun test` (full) — 6,294 pass, 74 skip, 0 fail on the final two runs. One earlier full run
+  reported 4 transient failures that did not reproduce (the failing test names were not captured;
+  no new test was among the candidate output).
+- Focused tests:
+  - `apps/agent/src/ingress-health.test.ts` — 200 only with every condition; each 503 reason;
+    drift window boundary; releases; fingerprint normalisation/mismatch; drain precedence; first
+    failure ordering.
+  - `apps/agent/src/lame-duck.test.ts` — 503 is written before the wait, the stop happens only
+    after the drain, zero-second drain still flips state first, concurrent callers share one
+    drain, reset restores serving.
+  - `packages/site-config/src/ingress-protection.test.ts` — health on 443/80/8099; any Host;
+    16-byte one-word bodies; PROXY v1 and v2 wrapper with `allow` and TLS wrapper on content;
+    trusted-proxy resolver fields; defaults render none; invalid CIDRs and ports 80/443 refused;
+    custom `listen`/`httpListen`; grace period.
+  - `apps/agent/src/caddy-config.test.ts` — an ingress gets the health routes and health listener;
+    proxy settings render; a worker's config is byte-unchanged and has no health path; health
+    probes are skipped in the access log; protected-copy probe uses `client_ip`.
+  - `apps/agent/src/config.test.ts` — `splitIngressListen` for `:443,:80`, host-bound addresses,
+    a non-80 secure port, TLS off, and a `:80`-only TLS refusal; default health dir.
+  - `packages/core/src/cluster-config-service.test.ts` — ingress merges without resetting
+    neighbours, bumps once on change, and a same-value save does not bump.
+  - Golden desired-state fixture updated deliberately.
 
-## Not verified (and why)
+## Not verified (needs the lab)
 
-- **W5 lab exit** — 10,000 requests/min through a rolling deploy with zero non-2xx, and the same
-  under a partition. Needs the lab; `tests/ha/scenarios` has no rolling-deploy scenario yet, and
-  lane C did not run one. The authoritative run is lane lab's later job.
-- **Agent execution** — lane D runs `releaseCommands`, fetches `release-commands/<runId>`, acts on
-  `imagePrePulls`, and reports `releaseCommandResults`/`upstreamCounters`. This lane only proves the
-  control-plane side and the I16 lease.
-- **Real multi-control-plane partition** — the lease/expiry/late-result path is unit-tested with a
-  moved clock, not over a partitioned network.
-- **Surfaces** — no REST/CLI/dashboard views for runs were added (not in this lane's file list);
-  `ReleaseCommandRunView`/`list`/`get`/`logs` exist for the next consumer.
+- Real Caddy 2.11.8 `caddy validate` / `POST /load` of the rendered config, and the health answer
+  through Caddy on 80, 443 and 8099 with the documented headers and constant size.
+- HAProxy/Azure LB/Hetzner probe removal within the 15 s bound and a drained ingress with zero
+  failed requests (S9 rig exists; this lane only renders the config).
+- PROXY v1/v2 through a real balancer; forged PROXY/XFF from an unlisted source; direct probes
+  without a PROXY header; garbage headers; `client_ip` in the Caddy access log.
+- The certificate condition with a real fleet fingerprint: `nodes.ts` still sends
+  `certificateFingerprint: null`, so the check is inert until lane B wires
+  `CertificateService.fingerprint()` (or the heartbeat equivalent) into that field.
+- Role removal while live (agent converge drain + Caddy config drop), and a node update's SIGTERM
+  drain against the helper's restart ordering.
+- `YOAL_CADDY_LISTEN` bound to a floating/balancer address with TLS and ACME issuance.
+- Rate limiting of the health endpoint (the pinned Caddy build has no rate-limit module) and
+  HTTP/3: S9 recommends disabling HTTP/3 on ingress behind a TCP balancer, not implemented here.
 
-## Deviations
+## Deviations / integration notes
 
-- Beyond the named core files, wiring needed: `context.ts`, `index.ts`, `nodes.ts`,
-  `failover-service.ts`, `deployments.ts` (a pointer-only abandon) and one control-plane agent route.
-  No `apps/agent`, `apps/helper` or `packages/site-config/src/compile.ts` change.
-- The interrupted attempt's `system:release` principal in `packages/contracts/src/iam/system.ts` was
-  **reverted**: the audit row uses the existing `system:rollout` actor, keeping lane C out of
-  `packages/contracts`.
-- Canary counter windows are held in control-plane memory (bounded, 20k windows, 2 h), not in a new
-  table; a restart loses in-flight windows and the judge waits for the next heartbeat. p95 across
-  windows is request-weighted (an approximation that never depends on ClickHouse).
-- A `timeout` run is terminal for the deployment even if the node later reports success; the outcome is
-  recorded on the run, and only a person retries (new attempt).
-- A failing command with `autoRollback` on abandons the deployment (pointers/spec restored, copies
-  untouched); with it off the rollout pauses while desired state still renders the previous release.
-- The canary baseline is the copies not in the canary set, matched to upstreams by node address (the
-  reporting node for a local upstream).
-- No `VERSION` change.
+1. **Desired state is no longer byte-identical with all flags off.** The edge now always receives
+   an additive `ingress` block (defaults: 20 s drain, PROXY off, no trusted proxies, health port
+   null → 8099) so the health endpoint and lame duck exist without a new flag, as the brief asked.
+   Golden was regenerated; workers are unchanged.
+2. **Health/lame duck add a 20 s stop delay on an ingress.** That is H19's default. The agent
+   unit timeout moved to 150 s to cover the 120 s maximum; a worker still stops immediately.
+3. **PROXY v1 and v2 render the same Caddy wrapper.** Caddy's `proxy_protocol` wrapper detects the
+   version from the header; the setting chooses whether to accept a header at all and from whom.
+4. **Analytics stores no client address by design** (usage analytics is address-free), so no
+   analytics code read `remote_ip` before or after. What changed is the Caddy server's
+   `trusted_proxies`, which makes its `client_ip` (and therefore the access log) the resolved
+   address; the access rule exemption and the Kubernetes allowlist now match `client_ip`.
+5. **Lane A owns the ingress payload.** This lane added one `ingress` line to `nodes.ts` and the
+   settings merge in `cluster-config-service.ts`; lane A should rebase those two small edits over
+   its payload changes. `apps/agent/src/main.ts` and `compile.ts` are the shared hot files named in
+   HA-WAVE-2 §"Known integration conflicts".
+6. **Certificate field ownership.** `ingressDesiredSchema.certificateFingerprint` is the contract
+   point for lane B; the agent compares the served leaf's SHA-256 against it when non-null. Until
+   lane B fills it, the certificate condition passes and health depends on the other three.
 
-## Final commit
+## Final SHA
 
-Code and tests: `ee0a09a2`. This hand-off is the commit immediately after it on
-`ha/w1-c-release` (the final HEAD of the worktree).
+Code: `f215f342efe79093c91cc1f482b7a91117b5e36c`; this hand-off file is committed on top.

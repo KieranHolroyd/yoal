@@ -10,25 +10,31 @@ import {
 	RELEASE_PHASE_CAPABILITY,
 	WORKERD_INSTALL_DIR,
 	WORKERD_PINNED_VERSION,
+	ingressHealthWords,
 	workloadActivationSchema,
 	ingressActivationSchema,
 	type DesiredState,
 	type Heartbeat,
 	type IngressActivation,
+	type IngressDesired,
+	type IngressHealth,
 	type NodeStudioDesired,
 	type NodeContainerConsoleDesired,
 	type NodeStatus,
 	type VolumeInventory,
 	type WireguardStatus,
 	type WorkloadActivation,
+	INGRESS_SET_CAPABILITY,
 } from '@yoal/contracts';
 import type { TlsOptions } from '@yoal/site-config';
 import { startAnalyticsSink, type AnalyticsSink } from './analytics-sink.ts';
 import { CaddyAdmin } from './caddy.ts';
-import { CertProbe, certProbeTargets, tlsCertReader } from './certs.ts';
+import { CertProbe, certProbeTargets, tlsCertReader, tlsCertFingerprint } from './certs.ts';
 import { CERTIFICATE_REFRESH_MS, CertificateDelivery } from './certificates.ts';
+import { ingressHealth, ingressHealthWord } from './ingress-health.ts';
+import { LameDuck } from './lame-duck.ts';
 import { buildCaddyConfig, isProductionRoute, tlsSubjects } from './caddy-config.ts';
-import { loadConfig, type AgentConfig } from './config.ts';
+import { loadConfig, splitIngressListen, type AgentConfig } from './config.ts';
 import { controlSocketFetch } from './control-socket.ts';
 import { DatabaseBackupRunner } from './database-backups.ts';
 import { AppVolumeRunner } from './app-volumes.ts';
@@ -69,7 +75,7 @@ import { StorageStatsSampler, STORAGE_STATS_INTERVAL_MS } from './storage-stats.
 import { StorageReplicator } from './storage-replicator.ts';
 import { BROKER_STATS_INTERVAL_MS, BrokerStatsSampler } from './broker-stats.ts';
 import { KubernetesSync, kubernetesCapabilities, readKubernetesComponent } from './kubernetes.ts';
-import { DesiredStateStore, desiredStateEtag, desiredStateRequest } from './state.ts';
+import { atomicWriteFile, DesiredStateStore, desiredStateEtag, desiredStateRequest } from './state.ts';
 import { postTelemetryBatch, TelemetryClient } from './telemetry.ts';
 import { handleSiteRequest, normalizeHost, UsedTokenCache } from './verify.ts';
 import { IngressSecretsStore, ingressListeners } from './ingress.ts';
@@ -204,6 +210,17 @@ class AgentRuntime {
 	private readonly accessCache: AccessDecisionCache;
 
 	private caddyOk = false;
+	/** HA-PLAN H19: the settings Caddy renders while this node is an ingress; null as a worker. */
+	private ingress: IngressDesired | null = null;
+	/** The last config this agent applied, so releases and versions are judged against what serves. */
+	private appliedState: DesiredState | null = null;
+	/** The word Caddy currently reads from the health state directory. */
+	private healthWord: string | null = null;
+	private latestIngressHealth: IngressHealth | null = null;
+	/** Cached fingerprint of the certificate this node serves (a TLS handshake is not free). */
+	private fingerprintRead: { value: string | null; at: number } | null = null;
+	private readonly lameDuck: LameDuck;
+	private stopping = false;
 	private running = true;
 	private server: ReturnType<typeof Bun.serve> | null = null;
 	private readonly shutdownController = new AbortController();
@@ -247,6 +264,14 @@ class AgentRuntime {
 		// same ingress after an update (HA-PLAN H17).
 		this.usedTokens = new UsedTokenCache({ file: join(config.dataDir, 'redeemed-tokens.json') });
 		this.ingressSecretsStore = new IngressSecretsStore(config.dataDir);
+		// HA-PLAN H19 lame duck: 503 while still serving for `ingress.drainSeconds`, then stop.
+		this.lameDuck = new LameDuck({
+			drainSeconds: () => this.ingress?.drainSeconds ?? 0,
+			onChange: (draining) =>
+				draining
+					? this.writeIngressHealthWord(ingressHealthWords.draining)
+					: this.refreshIngressHealth(),
+		});
 		this.store = new DesiredStateStore(config.dataDir);
 		this.releases = new ReleaseManager(config.dataDir);
 		this.caddy = new CaddyAdmin(config.caddyAdminSocket);
@@ -474,10 +499,26 @@ class AgentRuntime {
 	}
 
 	beginShutdown(): void {
-		if (!this.running) return;
-		this.running = false;
-		this.shutdownController.abort();
-		this.resolveShutdown?.();
+		if (this.stopping) return;
+		this.stopping = true;
+		void this.drainThenStop();
+	}
+
+	/**
+	 * HA-PLAN H19/I15: an ingress answers `503 draining` for `ingress.drainSeconds` while it still
+	 * serves, then stops. A worker and a single-node install without ingress settings stop at once.
+	 */
+	private async drainThenStop(): Promise<void> {
+		try {
+			if (this.ingress) {
+				log('info', `Draining ingress for ${this.ingress.drainSeconds}s before stopping`);
+				await this.lameDuck.begin('shutdown');
+			}
+		} finally {
+			this.running = false;
+			this.shutdownController.abort();
+			this.resolveShutdown?.();
+		}
 	}
 
 	private async start(): Promise<void> {
@@ -497,6 +538,7 @@ class AgentRuntime {
 				await this.runLease.load();
 				this.desired = cached.state;
 				this.desiredEtag = cached.etag;
+				this.ingress = cached.state.ingress ?? null;
 				this.applyStudio(cached.state.studio);
 				this.applyConsole(cached.state.containerConsole);
 				this.mail.apply(cached.state.mail);
@@ -564,6 +606,7 @@ class AgentRuntime {
 			this.volumeProfileLoop(),
 			this.linkTestLoop(),
 			this.runLeaseLoop(),
+			this.ingressHealthLoop(),
 			this.databasePitrLoop(),
 			this.databaseRotationLoop(),
 			this.databaseCredentialLoop(),
@@ -925,6 +968,14 @@ class AgentRuntime {
 		const started = Date.now();
 		this.lastReconcileAttemptAt = started;
 
+		// HA-PLAN H19: a node losing the ingress role says goodbye before it stops serving, while
+		// the old config (routes, TLS, health) is still in place. A failed converge keeps that old
+		// config live and the drain continues, so the node is never offered traffic it cannot serve.
+		if (this.ingress && !state.ingress) {
+			log('info', `Ingress role removed: draining for ${this.ingress.drainSeconds}s before dropping the edge config`);
+			await this.lameDuck.begin('role-removal');
+		}
+
 		const specs = new Map(state.releases.map((release) => [release.sha256, release]));
 		// Worker-placed routes are proxied over WireGuard; their releases live on the worker. A
 		// function on this node has an upstream (its socket) but serves its assets from here.
@@ -1016,6 +1067,7 @@ class AgentRuntime {
 			log('warn', `Shared certificate activation failed; keeping the last delivery: ${errorText(error)}`);
 		});
 		const tls = this.config.tls || state.ingress?.tls ? this.tlsOptions(state) : undefined;
+		const listen = splitIngressListen(this.config.caddyListen, Boolean(tls));
 		const caddyConfig = buildCaddyConfig({
 			// An unhealthy identity unit falls back to the control plane's hosted/OIDC routes, so a
 			// restart loop cannot take every assigned pool offline (§11.2).
@@ -1026,7 +1078,13 @@ class AgentRuntime {
 			// With TLS enabled Caddy owns :443 and site-config adds the :80 redirect server. An
 			// ingress-set node keeps its private listener (a worker's overlay address) and adds the
 			// public one, so the routes other ingresses proxy to it still answer (HA-PLAN G5).
-			listen: ingressListeners(this.config.caddyListen, state.ingress?.listeners, Boolean(tls)),
+			// With TLS on, YOAL_CADDY_LISTEN's secure entries are honoured and its :80 entries become the
+			// redirect server (H19 "Listen addresses", W8 lane C).
+			listen: state.ingress?.listeners?.length
+				? ingressListeners(listen.content, state.ingress.listeners, Boolean(tls))
+				: listen.content,
+			// An empty list is meaningful with TLS: the operator asked for no :80 listener.
+			...(tls ? { httpListen: listen.http } : {}),
 			dataDir: this.config.dataDir,
 			agentSocket: this.config.agentSocket,
 			caddyAdminSocket: this.config.caddyAdminSocket,
@@ -1035,6 +1093,11 @@ class AgentRuntime {
 			// With the flag off the manager is null and the relay list empty: today's per-node ACME.
 			...(this.certificateDelivery.manager() ? { certificateManager: this.certificateDelivery.manager() } : {}),
 			...(this.certificateDelivery.relays().length > 0 ? { acmeRelays: this.certificateDelivery.relays() } : {}),
+			// H19 (W8): health routes, lame duck, PROXY and trusted proxies. `state.ingress` exists only
+			// on an INGRESS_SET member, so a single-node install renders none of it.
+			...(state.ingress
+				? { ingress: state.ingress, ingressHealthDir: this.config.ingressHealthDir }
+				: {}),
 			...(state.ingress?.platform ?? this.config.platformHost
 				? {
 						platform: state.ingress?.platform ?? {
@@ -1046,11 +1109,20 @@ class AgentRuntime {
 		});
 		const caddyJson = JSON.stringify(caddyConfig);
 		if (caddyJson !== this.appliedCaddyJson) {
-			await this.caddy.applyFullConfig(caddyConfig, this.shutdownController.signal);
-			this.appliedCaddyJson = caddyJson;
+			try {
+				await this.caddy.applyFullConfig(caddyConfig, this.shutdownController.signal);
+				this.appliedCaddyJson = caddyJson;
+			} catch (error) {
+				// The previous config may still be serving, but this agent cannot prove it is current.
+				this.caddyOk = false;
+				await this.refreshIngressHealth().catch(() => undefined);
+				throw error;
+			}
 		}
 
 		this.caddyOk = true;
+		this.appliedState = state;
+		this.ingress = state.ingress ?? null;
 		this.projectByHost = new Map(
 			state.routes.map((route) => [normalizeHost(route.host), route.projectId]),
 		);
@@ -1061,6 +1133,9 @@ class AgentRuntime {
 			'info',
 			`Converged v${state.version}: ${state.routes.length} routes, ${state.releases.length} releases in ${Date.now() - started}ms`,
 		);
+		await this.refreshIngressHealth().catch((error) => log('warn', `Ingress health update failed: ${errorText(error)}`));
+		// The drain finished and the edge config is gone: this node is a worker again.
+		if (!this.ingress && this.lameDuck.draining) await this.lameDuck.reset();
 
 		try {
 			await this.releases.gc(state);
@@ -1244,6 +1319,90 @@ class AgentRuntime {
 			}
 			await sleep(3_000, this.shutdownController.signal).catch(() => undefined);
 		}
+	}
+
+	/**
+	 * The health endpoint's state file (HA-PLAN H19). Recomputed every few seconds so the drift
+	 * window expires on its own even if nothing is reconciling, and written only when the word
+	 * changes so Caddy never reloads for it.
+	 */
+	private async ingressHealthLoop(): Promise<void> {
+		while (this.running) {
+			await this.refreshIngressHealth().catch((error) => log('warn', `Ingress health update failed: ${errorText(error)}`));
+			await sleep(5_000, this.shutdownController.signal).catch(() => undefined);
+		}
+	}
+
+	/** Compute this node's health and publish the word Caddy reads. No-op on a non-ingress. */
+	private async refreshIngressHealth(): Promise<void> {
+		if (!this.ingress) {
+			this.latestIngressHealth = null;
+			if (this.healthWord !== null) await this.writeIngressHealthWord(null);
+			return;
+		}
+		this.latestIngressHealth = await this.computeIngressHealth();
+		await this.writeIngressHealthWord(ingressHealthWord(this.latestIngressHealth));
+	}
+
+	private async computeIngressHealth(): Promise<IngressHealth> {
+		const applied = this.appliedState;
+		const missingReleases: string[] = [];
+		if (applied) {
+			for (const release of applied.releases) {
+				if (!(await this.releases.hasRelease(release.sha256))) missingReleases.push(release.sha256);
+			}
+		}
+		return ingressHealth({
+			draining: this.lameDuck.draining,
+			caddyOk: this.caddyOk,
+			desiredStateVersion: this.desired?.version ?? null,
+			appliedStateVersion: applied?.version ?? null,
+			lastConvergedAt: this.lastReconcileSuccessAt > 0 ? this.lastReconcileSuccessAt : null,
+			now: Date.now(),
+			missingReleases,
+			expectedCertificateFingerprint: this.ingress?.certificateFingerprint ?? null,
+			loadedCertificateFingerprint: await this.servedCertificateFingerprint(),
+		});
+	}
+
+	/** The certificate this node's Caddy serves, cached for a minute. Null when TLS is off. */
+	private async servedCertificateFingerprint(): Promise<string | null> {
+		if (!this.config.certProbe || !this.config.tls) return null;
+		const now = Date.now();
+		if (this.fingerprintRead && now - this.fingerprintRead.at < 60_000) return this.fingerprintRead.value;
+		const servername = this.desired ? this.contentDomain(this.desired) : this.config.contentDomain;
+		const value = servername ? await tlsCertFingerprint(this.config.certProbe, servername) : null;
+		this.fingerprintRead = { value, at: now };
+		return value;
+	}
+
+	/**
+	 * Atomically replace the one state file Caddy stats: write the new word first, then remove the
+	 * others, so a probe never lands in an empty directory and sees an invented reason.
+	 */
+	private healthWriteChain: Promise<void> = Promise.resolve();
+
+	/** Serialise word writes and never let a stale `ok` land while the node is draining. */
+	private writeIngressHealthWord(word: string | null): Promise<void> {
+		const effective = word === ingressHealthWords.ok && this.lameDuck.draining ? ingressHealthWords.draining : word;
+		const next = this.healthWriteChain.then(() => this.writeIngressHealthWordNow(effective));
+		this.healthWriteChain = next.catch(() => undefined);
+		return next;
+	}
+
+	private async writeIngressHealthWordNow(word: string | null): Promise<void> {
+		const dir = this.config.ingressHealthDir;
+		await fs.mkdir(dir, { recursive: true, mode: 0o755 }).catch(() => undefined);
+		if (word !== null && word !== this.healthWord) {
+			const path = join(dir, word);
+			await atomicWriteFile(path, '');
+			// Caddy runs as another user; the matcher only stats the path, but 0644 keeps it legible.
+			await fs.chmod(path, 0o644).catch(() => undefined);
+		}
+		for (const other of Object.values(ingressHealthWords)) {
+			if (other !== word) await fs.rm(join(dir, other), { force: true }).catch(() => undefined);
+		}
+		this.healthWord = word;
 	}
 
 	/**
@@ -1497,6 +1656,8 @@ class AgentRuntime {
 				if (requested) log('info', 'Requested a storage move from yoal-storage.service');
 			})
 			.catch((error: unknown) => log('warn', `Could not request a storage move: ${errorText(error)}`));
+		// The endpoint is Caddy's answer from the state file; refresh it so the fleet view matches.
+		await this.refreshIngressHealth().catch((error) => log('warn', `Ingress health update failed: ${errorText(error)}`));
 		const body: Heartbeat = {
 			nodeId: this.config.nodeId,
 			agentVersion: this.config.agentVersion,
@@ -1508,6 +1669,7 @@ class AgentRuntime {
 			// with the flag off, where Caddy issues per node.
 			certificateFingerprint: this.certificateDelivery.fingerprint(),
 			stats,
+			...(this.latestIngressHealth ? { ingressHealth: this.latestIngressHealth } : {}),
 			...(hardware ? { hardware } : {}),
 			...(nodeCertificate ? { nodeCertificate } : {}),
 			...(nodeCsr ? { nodeCsr } : {}),
@@ -2083,7 +2245,8 @@ export function advertisedCapabilities(
 	}
 	const capabilities: string[] = [...nodeCapabilities];
 	// This build runs release commands, honours readiness/drain/stop timeouts and reports results.
-	capabilities.push(RELEASE_PHASE_CAPABILITY);	if (python) capabilities.push(FUNCTIONS_PYTHON_CAPABILITY);
+	capabilities.push(RELEASE_PHASE_CAPABILITY);
+	if (python) capabilities.push(FUNCTIONS_PYTHON_CAPABILITY);
 	// Node.js process apps (D125) need the pinned node the installer links onto every unit's PATH.
 	if (existsSync(nodeBinary)) capabilities.push(PROCESS_NODE_CAPABILITY);
 	// The optional Kubernetes component (docs/KUBERNETES.md K2): only while its marker says it works.
@@ -2091,6 +2254,8 @@ export function advertisedCapabilities(
 	// HA-PLAN H24: gateway listeners, AddHost, read endpoints and install-CA trust. The forwarder
 	// and helper verbs ship in this build; the CSR needs openssl, as the C2 identity already does.
 	if (nodeCaAvailable) capabilities.push(ENDPOINTS_GATEWAY_CAPABILITY);
+	// This build serves the full edge payload and the health endpoint (W6/W8).
+	capabilities.push(INGRESS_SET_CAPABILITY);
 	return capabilities;
 }
 

@@ -173,6 +173,11 @@ describe('W6 ingress payload', () => {
 	test('a worker that gains the ingress role gets public listeners and TLS from desired state', async () => {
 		const state = await core.nodes.desiredState(nodes['edge-b']!.token);
 		expect(state.ingress).toEqual({
+			drainSeconds: 20,
+			proxyProtocol: 'off',
+			trustedProxies: [],
+			healthPort: null,
+			certificateFingerprint: null,
 			listeners: [':443'],
 			tls: { email: 'ops@example.com' },
 			platform: { host: 'control.test', upstream: 'https://edge-a.test' },

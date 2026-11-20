@@ -107,6 +107,27 @@ describe('cluster configuration', () => {
 		expect(() => core.cluster.update(owner, { endpoints: { portMin: 22000, portMax: 21000 } })).toThrow(/min < max/);
 	});
 
+	test('ingress settings merge, keep their neighbours, and bump desired state (HA-PLAN H19)', () => {
+		// Establish the watermark row: the first bump inserts 1 rather than incrementing.
+		core.projects.bump();
+		const before = core.nodes.stateVersion();
+		const updated = core.cluster.update(owner, {
+			ingress: { proxyProtocol: 'v2', trustedProxies: ['10.209.1.5/32'], drainSeconds: 30 },
+		});
+		expect(updated.ingress).toEqual({
+			drainSeconds: 30,
+			proxyProtocol: 'v2',
+			trustedProxies: ['10.209.1.5/32'],
+			healthPort: null,
+		});
+		expect(core.nodes.stateVersion()).toBeGreaterThan(before);
+		// Saving one key again resets nothing and bumps nothing.
+		const bumped = core.nodes.stateVersion();
+		expect(core.cluster.update(owner, { ingress: { drainSeconds: 30 } }).ingress).toEqual(updated.ingress);
+		expect(core.nodes.stateVersion()).toBe(bumped);
+		core.cluster.update(owner, { ingress: { proxyProtocol: 'off', trustedProxies: [], drainSeconds: 20 } });
+	});
+
 	test('only a platform admin reads it, and only their own session changes it', () => {
 		const member = buildPrincipal({ kind: 'user', userId: 'user_2', orgId: 'org_1', role: 'deployer' });
 		const orgOwner = buildPrincipal({ kind: 'user', userId: 'user_3', orgId: 'org_1', role: 'owner' });

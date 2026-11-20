@@ -83,7 +83,8 @@ export class IngressState extends DesiredStatePart {
 	/**
 	 * What a node in the ingress set renders for its public role (HA-PLAN H17/G5): extra public
 	 * listeners, TLS from ACME, and the platform route. Only while `INGRESS_SET` is on and for a
-	 * member, so a single-node install and a worker produce no field at all (golden-identical).
+	 * member, so a single-node install and a worker produce no field at all (golden-identical). This
+	 * is the only place `ingress` is rendered: lane C's health/lame-duck settings ride inside it.
 	 *
 	 * No secret rides here: the ACME email and CA are public, the Cloudflare token arrives through
 	 * the node-authenticated activation endpoint (`IngressSetService.activation`).
@@ -109,6 +110,13 @@ export class IngressState extends DesiredStatePart {
 				? `https://${relay}`
 				: null;
 		return {
+			// H19 (W8 lane C): drain, PROXY protocol, trusted proxies and the health port. Rendered only
+			// inside this flag-gated block, so a single-node install gets no health listener, no lame-duck
+			// drain on stop and no activation fetch (the single-node gate).
+			...this.ctx.cluster.get().ingress,
+			// H20 (W7 lane B): the fleet fingerprint this node verifies; null while SHARED_CERTIFICATES is
+			// off or before the first issuance.
+			certificateFingerprint: this.ctx.certificates.fingerprint(),
 			listeners: [...(tls ? [':443'] : []), ...(node.privateAddress ? [`${node.privateAddress}:8080`] : [])],
 			tls,
 			platform: platformHost && upstream ? { host: platformHost, upstream } : null,
