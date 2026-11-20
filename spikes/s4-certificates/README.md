@@ -175,3 +175,37 @@ of lego.
 - `creds.env` is sourced only inside the command that needs it; the token, zone ID and zone name are
   never printed, logged or committed (logs pass through a redactor; docs write `<zone>`).
 - Issued certificates, keys and the account key are deleted at the end.
+
+### Cloud rig
+
+`S4C_CREDS=/path/to/creds.env ./cloud.sh` (every step, 8 orders, about 20 min) or
+`./cloud.sh account lego-wild …`. Numbers land in `results-cloud.json` (git-ignored, redacted).
+On exit it sweeps the zone and deletes the account, certificates and keys.
+
+| File | Role |
+|---|---|
+| `images/caddy-cf.Dockerfile` | Yoal's Caddy exactly as `release.yml` builds it: 2.11.8, xcaddy v0.4.7, caddy-dns/cloudflare v0.2.4, no other module. Caddy 2.11.8 declares `go 1.26.0`, so `golang:1.24` builds it only through `GOTOOLCHAIN=auto` |
+| `cloud.ts` | Steps; a CONNECT proxy on the Mac's loopback that passes only `api.cloudflare.com:443` and can black it out (open tunnels closed, new ones closed unanswered); a watcher that lists our TXT records through the API every second; an authoritative-nameserver probe (`dig +norecurse` at every IPv4 address of the zone's nameservers every 250 ms); the staging guard; the order budget; sweep and wipe |
+| `cloud.sh` | One command: sources `creds.env` into the bun process only, runs the steps, always sweeps and wipes |
+
+### Result (2026-11-20)
+
+Numbers, verdict and what could not be tested: `docs/SPIKES.md`, section "S4 (cloud)". In short, DNS-01
+on Cloudflare works for both designs with the one `Zone:DNS:Edit` token (12–25 s to issue, TXT on
+every authoritative nameserver in under 4 s). **Both leave the TXT record behind** when the API is
+unreachable at cleanup. lego warns; Caddy is silent, because libdns/cloudflare v0.2.2 drops the
+lookup error. O1 is unchanged.
+
+### Deviations (cloud half)
+
+- `CF_ZONE_NAME` is a one-label subdomain inside the Cloudflare zone, not its apex. Records were
+  named `_acme-challenge.<label>.<zone>` with `<zone>` = `CF_ZONE_NAME`, as the brief says. The
+  apex and its nameservers came from the API, and the apex is redacted too (`<apex>`, `<sub>`).
+- HA-PLAN.md is not in this checkout; the question and measurements come from the brief.
+- Clients use public resolvers (`--dns 1.1.1.1 --dns 8.8.8.8`). OrbStack's container resolver times
+  out on lego's recursive check. Two lego orders were spent before this was fixed: no certificate, and
+  lego deleted both records.
+- **9 orders used of 10.** One Caddy order went to a watcher bug: a stale record from lego-5b set off
+  Caddy's 5b blackout before its first API call. That run is kept as Caddy's 5a first attempt and
+  was stopped at its cap. A full Caddy 5a run (two orders) and a lego retry were not run.
+- Criterion 1 for Caddy is judged on two orders: certmagic issues one certificate per name.
