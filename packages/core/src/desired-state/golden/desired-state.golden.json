@@ -1,11 +1,11 @@
 {
 	"single-node": {
 		"solo": {
-			"version": 62,
+			"version": 84,
 			"nodeId": "nod_588672b7687746748b108a01fa51bb17",
 			"agentVersion": "0.1.0",
 			"nodeUpdate": null,
-			"generatedAt": "2026-11-20T12:00:34.000Z",
+			"generatedAt": "2026-11-20T12:00:52.000Z",
 			"contentDomain": "sites.test",
 			"platformOrigin": "https://control.test",
 			"sliceMemoryMb": 8192,
@@ -20,63 +20,77 @@
 					"sizeBytes": 93,
 					"fileCount": 4,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/930102b771b0dbf841bc465fe33ba3b68e3faa81170555d9e22c1b799239e071.zip?exp=1795179634&sig=gRIPQ7IAdb0GyM6oG8-E5QQQFYY11cGc1dk4RLuL1ac"
+					"url": "https://control.test/api/objects/releases/930102b771b0dbf841bc465fe33ba3b68e3faa81170555d9e22c1b799239e071.zip?exp=1795179652&sig=7twj_4zNb7uIYUTvzoNy15uwV_H3cFfqCf3ZrkvTDQo"
 				},
 				{
 					"sha256": "25d859fd7f740d13b1a658c8a71504b2d5b9b9bb617515591ffff6ff95908987",
 					"sizeBytes": 100,
 					"fileCount": 4,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/25d859fd7f740d13b1a658c8a71504b2d5b9b9bb617515591ffff6ff95908987.zip?exp=1795179634&sig=tIiGa6GB7-1odkKgeYMIjkX-aFNVo6q8ePnkeFwBB58"
+					"url": "https://control.test/api/objects/releases/25d859fd7f740d13b1a658c8a71504b2d5b9b9bb617515591ffff6ff95908987.zip?exp=1795179652&sig=PdAGIPnQsfgJ1lHP8I8utp1ZmiE1R0Ccm5ldVLyAC8o"
 				},
 				{
 					"sha256": "8d03d1a6543b321fcdbcee98cd60f985fe1fbec2b04db80e7d7bef4259400fad",
 					"sizeBytes": 95,
 					"fileCount": 4,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/8d03d1a6543b321fcdbcee98cd60f985fe1fbec2b04db80e7d7bef4259400fad.zip?exp=1795179634&sig=UgNW6nbSkz-jaY29Hc5e32QgDEDo1_RwQqw7CPJ_0Y8"
+					"url": "https://control.test/api/objects/releases/8d03d1a6543b321fcdbcee98cd60f985fe1fbec2b04db80e7d7bef4259400fad.zip?exp=1795179652&sig=xnQWw6RpuwauZHose5cOLGN87qrn0dMHMkGGls61cs8"
 				},
 				{
 					"sha256": "c0ec1d61a33f8524be8a60c07222a20f8901215bc563bca15407c258571abcc8",
 					"sizeBytes": 14,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/c0ec1d61a33f8524be8a60c07222a20f8901215bc563bca15407c258571abcc8.zip?exp=1795179634&sig=i60OaAGcM_mFIfvWCVCqD3vIMwSdq4feG_XenNX4FR4"
-				},
-				{
-					"sha256": "74d546e08f74fb96dc87fdffae4746ca856143c3eba958b1fd5d35d4014ed8cc",
-					"sizeBytes": 20,
-					"fileCount": 1,
-					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/74d546e08f74fb96dc87fdffae4746ca856143c3eba958b1fd5d35d4014ed8cc.zip?exp=1795179634&sig=xNyKYzyrI4HIdwPN9yhuBvslR8zY9Ej8UMnvdUddIfM"
+					"url": "https://control.test/api/objects/releases/c0ec1d61a33f8524be8a60c07222a20f8901215bc563bca15407c258571abcc8.zip?exp=1795179652&sig=__e2_nbRrSYN5GVwxJ7k_5To53N10ECbvzAwzuKh-6c"
 				},
 				{
 					"sha256": "b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901",
 					"sizeBytes": 37,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901.zip?exp=1795179634&sig=GvRerz1vvJwU2OczJdZprPyB9DPiYZamXPEEbeeK_Zw"
+					"url": "https://control.test/api/objects/releases/b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901.zip?exp=1795179652&sig=wAsqMUkPtHlketifNyh8q1o_XUcTe3_Lcoj5plp4v2g"
 				},
 				{
 					"sha256": "24f219c3636456ba277834b45d2ba068ee22623d1cc4167a0d914740c08d23a9",
 					"sizeBytes": 1304,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/24f219c3636456ba277834b45d2ba068ee22623d1cc4167a0d914740c08d23a9.zip?exp=1795179634&sig=FBiVoABh_w-IoJ25PXIR92_fqRyZEn1-1x5qOqXJaNc"
+					"url": "https://control.test/api/objects/releases/24f219c3636456ba277834b45d2ba068ee22623d1cc4167a0d914740c08d23a9.zip?exp=1795179652&sig=Xec0pUJAAh4-U8Y8qVwqxdCO8b-oun07d3L3Flqm7dk"
 				},
 				{
 					"sha256": "520e3062fb3ce39a52de79fc76544eed02ae7dc38123f05a933d6369967ff20a",
 					"sizeBytes": 436,
 					"fileCount": 3,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/520e3062fb3ce39a52de79fc76544eed02ae7dc38123f05a933d6369967ff20a.zip?exp=1795179634&sig=PHqvlGmzDLoZDk-HEITmcMWT1K4wahW5TwX7-da-w_M"
+					"url": "https://control.test/api/objects/releases/520e3062fb3ce39a52de79fc76544eed02ae7dc38123f05a933d6369967ff20a.zip?exp=1795179652&sig=aDKrv_TgU75Ohah9q3Bim08sWxxjxz2rbV0dGFxm1YM"
 				},
 				{
 					"sha256": "81cf99c140b6fc48102d92122da05b4640caabba345ab428174467dc3309fd06",
 					"sizeBytes": 94,
 					"fileCount": 4,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/81cf99c140b6fc48102d92122da05b4640caabba345ab428174467dc3309fd06.zip?exp=1795179634&sig=3elvyqGAw9PT9NamdjrksCWgfLOkayzo1wnwEwC8sws"
+					"url": "https://control.test/api/objects/releases/81cf99c140b6fc48102d92122da05b4640caabba345ab428174467dc3309fd06.zip?exp=1795179652&sig=lVrT6rm-sKqwGOvvbaeM-kJFJZBvVVfbf1JVLxy_Iak"
+				},
+				{
+					"sha256": "5e7074b26de027675cced0545f2faa101ddcd0386934a0a8143dd6cfc9479b9f",
+					"sizeBytes": 100,
+					"fileCount": 3,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/5e7074b26de027675cced0545f2faa101ddcd0386934a0a8143dd6cfc9479b9f.zip?exp=1795179652&sig=CfsKKDo--l6XRG9xJHnb2PIpRRViUW7fQGS5b4jbbR0"
+				},
+				{
+					"sha256": "26ae5372d5409ed9a661ea92b9cf6003193883ce0ce65b4ebd1cb12a5b9103a1",
+					"sizeBytes": 23,
+					"fileCount": 1,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/26ae5372d5409ed9a661ea92b9cf6003193883ce0ce65b4ebd1cb12a5b9103a1.zip?exp=1795179652&sig=OLuJJjoY1comZhPRvliH3y9pIMv_BwpMNxa7JmVrV8I"
+				},
+				{
+					"sha256": "45ecdfb1cb7d27101e5d261daa0a69359644a89f3c0e6d6f9ca32d9cfa075e66",
+					"sizeBytes": 90,
+					"fileCount": 4,
+					"precompressed": true,
+					"url": "https://control.test/api/objects/releases/45ecdfb1cb7d27101e5d261daa0a69359644a89f3c0e6d6f9ca32d9cfa075e66.zip?exp=1795179652&sig=NIy5EkG4KSoE8XYETZi7yKgBflGR-vsmqD5ipn1pFn8"
 				}
 			],
 			"routes": [
@@ -115,7 +129,7 @@
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "l1JNrRghC6bXDqyBj38IyZUckmBu6kthKQ0xirep19A",
+						"siteKey": "hQ-F6MEayqCTNEIuxkPMpQbRq32MCHvinR7jxm70LMo",
 						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f450124ee5cf4aad83d6778824b5773b",
 						"policyId": null
 					}
@@ -155,7 +169,47 @@
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "l1JNrRghC6bXDqyBj38IyZUckmBu6kthKQ0xirep19A",
+						"siteKey": "hQ-F6MEayqCTNEIuxkPMpQbRq32MCHvinR7jxm70LMo",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f450124ee5cf4aad83d6778824b5773b",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_f450124ee5cf4aad83d6778824b5773b",
+					"slug": "journal",
+					"deploymentId": "dep_adce42f01b8044ada9652485f31ab98f",
+					"release": "45ecdfb1cb7d27101e5d261daa0a69359644a89f3c0e6d6f9ca32d9cfa075e66",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "journal--h01hggpdtb.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "hQ-F6MEayqCTNEIuxkPMpQbRq32MCHvinR7jxm70LMo",
 						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f450124ee5cf4aad83d6778824b5773b",
 						"policyId": null
 					}
@@ -195,7 +249,7 @@
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "l1JNrRghC6bXDqyBj38IyZUckmBu6kthKQ0xirep19A",
+						"siteKey": "hQ-F6MEayqCTNEIuxkPMpQbRq32MCHvinR7jxm70LMo",
 						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f450124ee5cf4aad83d6778824b5773b",
 						"policyId": null
 					}
@@ -399,6 +453,51 @@
 					}
 				},
 				{
+					"projectId": "prj_f038b4f024934e45a959b1c2ec959654",
+					"slug": "handbook",
+					"deploymentId": "dep_19eac9a57d014d7a8b4dc8294b8432d6",
+					"release": "5e7074b26de027675cced0545f2faa101ddcd0386934a0a8143dd6cfc9479b9f",
+					"spa": false,
+					"cleanUrls": true,
+					"trailingSlash": "always",
+					"notFound": "/404.html",
+					"redirects": [],
+					"headers": [],
+					"upstream": null,
+					"host": "handbook--1ydmjtkqd5.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "s4ttYjgHHcP8LOKhv7_1dVQkkZ2rpHSn9OoMdi9TH8w",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f038b4f024934e45a959b1c2ec959654",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_4864067e9f584027a7fe6d48506f32dd",
+					"slug": "shop-reserved",
+					"deploymentId": "dep_27ee697ec9324f458d9a578775a621fe",
+					"release": "b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal/route-unavailable.sock",
+					"unavailable": "Port 8083 is reserved for the database studio; the app cannot be served from it.",
+					"host": "shop-reserved--wrx2eb2mb8.sites.test",
+					"production": false,
+					"accessMode": "platform",
+					"access": {
+						"mode": "platform",
+						"siteKey": "l8qqTSjpzcMr60lwgKtVoENEmq7vTpoeFja4s6CSCyw",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_4864067e9f584027a7fe6d48506f32dd",
+						"policyId": null
+					}
+				},
+				{
 					"projectId": "prj_f450124ee5cf4aad83d6778824b5773b",
 					"slug": "journal",
 					"deploymentId": "dep_ab14657083304faa835a585fe70f7194",
@@ -433,7 +532,7 @@
 					"accessMode": "access",
 					"access": {
 						"mode": "access",
-						"siteKey": "l1JNrRghC6bXDqyBj38IyZUckmBu6kthKQ0xirep19A",
+						"siteKey": "hQ-F6MEayqCTNEIuxkPMpQbRq32MCHvinR7jxm70LMo",
 						"loginUrl": "https://control.test/api/v1/access/authorize?project=prj_f450124ee5cf4aad83d6778824b5773b",
 						"policyId": "apol_c60bc99807e84bec9c0be412fd55fe41",
 						"policyEnabled": true,
@@ -479,10 +578,59 @@
 					"upstream": null,
 					"host": "journal--staging.sites.test",
 					"production": true,
+					"accessMode": "access",
+					"access": {
+						"mode": "access",
+						"siteKey": "hQ-F6MEayqCTNEIuxkPMpQbRq32MCHvinR7jxm70LMo",
+						"loginUrl": "https://control.test/api/v1/access/authorize?project=prj_f450124ee5cf4aad83d6778824b5773b",
+						"policyId": "apol_c60bc99807e84bec9c0be412fd55fe41",
+						"policyEnabled": true,
+						"serviceTokens": [
+							{
+								"header": "x-deploy-token",
+								"tokenHash": "91cc3248ea93686bf3417d0be85c7dfe1ad9dd646b1dcf5bfe37d93c9c7126f1",
+								"action": "allow"
+							}
+						],
+						"hasPersonRules": true
+					}
+				},
+				{
+					"projectId": "prj_f450124ee5cf4aad83d6778824b5773b",
+					"slug": "journal",
+					"deploymentId": "dep_adce42f01b8044ada9652485f31ab98f",
+					"release": "45ecdfb1cb7d27101e5d261daa0a69359644a89f3c0e6d6f9ca32d9cfa075e66",
+					"spa": true,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [
+						{
+							"from": "/old",
+							"to": "/new",
+							"status": 301
+						},
+						{
+							"from": "/docs/*",
+							"to": "/guide/:splat",
+							"status": 302
+						}
+					],
+					"headers": [
+						{
+							"path": "/*",
+							"headers": {
+								"X-Frame-Options": "DENY"
+							}
+						}
+					],
+					"upstream": null,
+					"host": "journal--qa.sites.test",
+					"production": true,
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "l1JNrRghC6bXDqyBj38IyZUckmBu6kthKQ0xirep19A",
+						"siteKey": "hQ-F6MEayqCTNEIuxkPMpQbRq32MCHvinR7jxm70LMo",
 						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f450124ee5cf4aad83d6778824b5773b",
 						"policyId": null
 					}
@@ -693,6 +841,51 @@
 						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8183cdae5c53481498d0f4560a1d33db",
 						"policyId": null
 					}
+				},
+				{
+					"projectId": "prj_f038b4f024934e45a959b1c2ec959654",
+					"slug": "handbook",
+					"deploymentId": "dep_19eac9a57d014d7a8b4dc8294b8432d6",
+					"release": "5e7074b26de027675cced0545f2faa101ddcd0386934a0a8143dd6cfc9479b9f",
+					"spa": false,
+					"cleanUrls": true,
+					"trailingSlash": "always",
+					"notFound": "/404.html",
+					"redirects": [],
+					"headers": [],
+					"upstream": null,
+					"host": "handbook.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "s4ttYjgHHcP8LOKhv7_1dVQkkZ2rpHSn9OoMdi9TH8w",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f038b4f024934e45a959b1c2ec959654",
+						"policyId": null
+					}
+				},
+				{
+					"projectId": "prj_4864067e9f584027a7fe6d48506f32dd",
+					"slug": "shop-reserved",
+					"deploymentId": "dep_27ee697ec9324f458d9a578775a621fe",
+					"release": "b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901",
+					"spa": false,
+					"cleanUrls": false,
+					"trailingSlash": "ignore",
+					"notFound": null,
+					"redirects": [],
+					"headers": [],
+					"upstream": "unix//run/yoal/route-unavailable.sock",
+					"unavailable": "Port 8083 is reserved for the database studio; the app cannot be served from it.",
+					"host": "shop-reserved.sites.test",
+					"production": true,
+					"accessMode": "public",
+					"access": {
+						"mode": "public",
+						"siteKey": "l8qqTSjpzcMr60lwgKtVoENEmq7vTpoeFja4s6CSCyw",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_4864067e9f584027a7fe6d48506f32dd",
+						"policyId": null
+					}
 				}
 			],
 			"revocations": [
@@ -749,12 +942,12 @@
 					"id": "wld_3e4fd098068e4ba6b94964a6396b40b7",
 					"projectId": "prj_9819b54deccf4aa0a30bea7bae1ba80a",
 					"projectSlug": "queue",
-					"deploymentId": "dep_f6388f8708204820b40875b86042baea",
+					"deploymentId": "dep_a1c7273abd844494ac783c2991ab3828",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "process",
 					"status": "running",
-					"release": "74d546e08f74fb96dc87fdffae4746ca856143c3eba958b1fd5d35d4014ed8cc",
+					"release": "26ae5372d5409ed9a661ea92b9cf6003193883ce0ce65b4ebd1cb12a5b9103a1",
 					"command": [
 						"bun",
 						"run",
@@ -1016,6 +1209,29 @@
 					"identity": true
 				},
 				{
+					"id": "wld_adc3d0988cc3495699305ebb0786c600",
+					"projectId": "prj_4864067e9f584027a7fe6d48506f32dd",
+					"projectSlug": "shop-reserved",
+					"deploymentId": "dep_27ee697ec9324f458d9a578775a621fe",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": "b4c04ef42937427f1730a1ab1b5583918ba7612c6fa53ffe21b0d661539b0901",
+					"image": "ghcr.io/acme/shop:1",
+					"upstream": "127.0.0.1:8083",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 3002,
+					"healthPath": "/",
+					"socketActivation": true,
+					"activationVersion": "bf503ec6e3e315693b7154c346579138061c02bd8049b9802630d861fc3a0a99",
+					"env": {},
+					"secrets": [],
+					"dataSizeMb": null,
+					"identity": true
+				},
+				{
 					"id": "db_9fec8d680c024a6b9a5371ff766cd2a2",
 					"projectId": "db_9fec8d680c024a6b9a5371ff766cd2a2",
 					"projectSlug": "main",
@@ -1047,6 +1263,44 @@
 					},
 					"pooler": {
 						"port": 16432
+					}
+				},
+				{
+					"id": "db_be68ad8161834248a51f5fbe7a84526e",
+					"projectId": "db_be68ad8161834248a51f5fbe7a84526e",
+					"projectSlug": "pitr-db",
+					"deploymentId": "db_be68ad8161834248a51f5fbe7a84526e",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": null,
+					"image": "ghcr.io/kieranholroyd/yoal-postgres-pitr:18-1",
+					"upstream": "127.0.0.1:15437",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 15437,
+					"healthPath": "/",
+					"socketActivation": false,
+					"activationVersion": "0a0b17464d6c334c05d5d773381dfb4e38f027822fe08c33e615824f82046ebd",
+					"env": {
+						"POSTGRES_USER": "pitr_db",
+						"POSTGRES_DB": "pitr_db",
+						"PGDATA": "/data/pgdata"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"database": {
+						"engine": "postgres",
+						"version": "18",
+						"pitr": {
+							"stanza": "db_be68ad8161834248a51f5fbe7a84526e",
+							"archiveTimeoutSeconds": 60
+						},
+						"tls": true
+					},
+					"pooler": {
+						"port": 16437
 					}
 				},
 				{
@@ -1105,8 +1359,24 @@
 				}
 			],
 			"volumes": [],
-			"shareMounts": [],
-			"shareUnmounts": [],
+			"shareMounts": [
+				{
+					"id": "shm_0b22a5ecc4ce4726a0cd244884005c1b",
+					"name": "media-nfs",
+					"protocol": "nfs",
+					"server": "10.0.0.5",
+					"exportPath": "/mnt/media",
+					"readOnly": true,
+					"credentials": false,
+					"generation": "1"
+				}
+			],
+			"shareUnmounts": [
+				{
+					"id": "shm_ad1331f2d3d74782836e7c2a66021b69",
+					"name": "archive"
+				}
+			],
 			"diskMounts": [],
 			"diskUnmounts": [],
 			"volumeProfileTasks": [],
@@ -1121,10 +1391,48 @@
 				"db_de5a9c170c9b4918b51cdd755cd23632",
 				"db_dfb8223631484d2382e157c70d4ee0da"
 			],
-			"databaseBackupTasks": [],
-			"databasePitrTasks": [],
-			"databaseRotations": [],
-			"databaseCredentialTasks": [],
+			"databaseBackupTasks": [
+				{
+					"id": "bkp_22faa47bcb6142c597a438739b031674",
+					"action": "backup",
+					"databaseId": "db_9fec8d680c024a6b9a5371ff766cd2a2",
+					"databaseName": "main",
+					"engine": "postgres",
+					"backupId": null,
+					"objectKey": "database-backups/org_1/db_9fec8d680c024a6b9a5371ff766cd2a2/bkp_22faa47bcb6142c597a438739b031674.dump",
+					"url": "https://control.test/api/objects/database-backups/org_1/db_9fec8d680c024a6b9a5371ff766cd2a2/bkp_22faa47bcb6142c597a438739b031674.dump?exp=1795179652&sig=mchrYpE7b1meLL4Ynww3l_k6pKB_TzeBW7_C5OrfNys",
+					"format": "pg_dump-custom"
+				}
+			],
+			"databasePitrTasks": [
+				{
+					"id": "pitr_783871c55e8c4b94b886d8bbb3cf2e57",
+					"action": "basebackup",
+					"databaseId": "db_be68ad8161834248a51f5fbe7a84526e",
+					"databaseName": "pitr_db",
+					"engine": "postgres",
+					"stanza": "db_be68ad8161834248a51f5fbe7a84526e",
+					"baseBackupType": "full",
+					"targetDatabaseId": null,
+					"targetTime": null
+				}
+			],
+			"databaseRotations": [
+				{
+					"id": "rot_0d295806bbcd4204a2f90b6b88956628",
+					"databaseId": "db_9fec8d680c024a6b9a5371ff766cd2a2",
+					"role": "owner"
+				}
+			],
+			"databaseCredentialTasks": [
+				{
+					"id": "dbc_218be6c6cd6a4c8c80fba3830a60bd02",
+					"databaseId": "db_9fec8d680c024a6b9a5371ff766cd2a2",
+					"action": "grant",
+					"role": "app",
+					"username": "yoal_app_243da9d3"
+				}
+			],
 			"databaseStudioPrincipals": [
 				{
 					"databaseId": "db_9fec8d680c024a6b9a5371ff766cd2a2",
@@ -1202,11 +1510,11 @@
 	},
 	"edge-and-two-workers": {
 		"edge": {
-			"version": 36,
-			"nodeId": "nod_19eac9a57d014d7a8b4dc8294b8432d6",
+			"version": 46,
+			"nodeId": "nod_9876633285164cfc9259ce6171eaf6a5",
 			"agentVersion": "0.1.0",
 			"nodeUpdate": null,
-			"generatedAt": "2026-11-20T12:00:55.000Z",
+			"generatedAt": "2026-11-20T12:01:18.000Z",
 			"contentDomain": "sites.test",
 			"platformOrigin": "https://control.test",
 			"sliceMemoryMb": 8192,
@@ -1221,28 +1529,28 @@
 					"sizeBytes": 18,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99.zip?exp=1795179655&sig=z3ks9WUZz8gpp4wMe6tfD6LVV2gmxmkDrMWHELeJ6co"
+					"url": "https://control.test/api/objects/releases/580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99.zip?exp=1795179678&sig=hupahN2_iZOxNEPllZYjiNX0ymh1UFlJc6lN3aUdV58"
 				},
 				{
 					"sha256": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
 					"sizeBytes": 26,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f.zip?exp=1795179655&sig=zT8uPxkoBQrjq_0_fITB9G8ItehvvoAvrlo193wIjvk"
+					"url": "https://control.test/api/objects/releases/fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f.zip?exp=1795179678&sig=BmgNFuKNyjIkMqoGdvnTDk2VYoeHUYdbEqoQfXJCGPg"
 				},
 				{
 					"sha256": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
 					"sizeBytes": 37,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf.zip?exp=1795179655&sig=WrNS4jMHO-y6ASbuIRoZ54ePV1qb--CS3eSTB_9qEbI"
+					"url": "https://control.test/api/objects/releases/c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf.zip?exp=1795179678&sig=n2LTglkL5ZIcaHywkoNZjEh3DU2WS4Vt-isKdWzNf9Q"
 				}
 			],
 			"routes": [
 				{
-					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
-					"slug": "docs",
-					"deploymentId": "dep_7100a171905046cd9a4b6c8fd2e484e0",
+					"projectId": "prj_13d9fac6651e48d3b1f9d6ea8dcbcab9",
+					"slug": "manual",
+					"deploymentId": "dep_80a3fd6c5f8e443f96985516dc701f85",
 					"release": "1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491",
 					"spa": true,
 					"cleanUrls": false,
@@ -1269,20 +1577,20 @@
 						}
 					],
 					"upstream": "http://worker-a.internal:8080",
-					"host": "docs--2qm0tb5xzj.sites.test",
+					"host": "docs--yq50t0r1wy.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "JaOHGbObI2S1mG3jbi63knnmte5E_IOE8Pb6CTi9MWE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_7037b9d7d1ac41fdabc25d78070033ba",
+						"siteKey": "G1l2_tH77EOzNGytkSvz7hNu4NA8MvXuCGRqMnH5EYc",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_13d9fac6651e48d3b1f9d6ea8dcbcab9",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"slug": "web",
-					"deploymentId": "dep_59891ae3caff43248a6d1da86e58c901",
+					"deploymentId": "dep_e1110511215e4141bb26ffeffea02c47",
 					"release": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
 					"spa": false,
 					"cleanUrls": false,
@@ -1290,27 +1598,27 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
 					"upstreams": [
 						"http://worker-a.internal:8080",
-						"unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock"
+						"unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock"
 					],
 					"healthPath": "/healthz",
 					"healthIntervalSeconds": 5,
-					"host": "web--5yjzw7c376.sites.test",
+					"host": "web--93anpv926f.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"siteKey": "61pd9ZxrveT56mJe_mtfmVF5iFOdYiUGwZEeGaEPF_o",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37078766cf8d456b95fa44e0a3c394b4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"slug": "web",
-					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"deploymentId": "dep_9f9e1fa390b44d2c8741873eadd35b3b",
 					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
 					"spa": false,
 					"cleanUrls": false,
@@ -1318,27 +1626,27 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
 					"upstreams": [
 						"http://worker-a.internal:8080",
-						"unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock"
+						"unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock"
 					],
 					"healthPath": "/healthz",
 					"healthIntervalSeconds": 5,
-					"host": "web--cqrckke1az.sites.test",
+					"host": "web--mwmca64bpy.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"siteKey": "61pd9ZxrveT56mJe_mtfmVF5iFOdYiUGwZEeGaEPF_o",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37078766cf8d456b95fa44e0a3c394b4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"projectId": "prj_37c8f3c59bc545b187804b596ecd7786",
 					"slug": "shop",
-					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"deploymentId": "dep_2481d827e24c48e69c963c09685845e6",
 					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
 					"spa": false,
 					"cleanUrls": false,
@@ -1353,20 +1661,20 @@
 					],
 					"healthPath": "/",
 					"healthIntervalSeconds": 5,
-					"host": "shop--w009xg1ewy.sites.test",
+					"host": "shop--ny8yyy933w.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"siteKey": "54Yt0Pq0C9OWOUJrju-MixKvg92_2o123Tal4JuuJTc",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37c8f3c59bc545b187804b596ecd7786",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"projectId": "prj_54345454d0074c07b85a3a8542e747e4",
 					"slug": "fresh-copies",
-					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"deploymentId": "dep_c1e737fd9bc34e3a94aa8b9020364037",
 					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
 					"spa": false,
 					"cleanUrls": false,
@@ -1381,20 +1689,20 @@
 					],
 					"healthPath": "/ready",
 					"healthIntervalSeconds": 5,
-					"host": "fresh-copies--06mdpw5hg4.sites.test",
+					"host": "fresh-copies--da8snwhcpg.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"siteKey": "lB_xJ5b4eZ5XK7LdDq2SOy6c21t91Ag00LXxLqifsK8",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_54345454d0074c07b85a3a8542e747e4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"projectId": "prj_e2daa40b276f45db980df0f9b93c4e96",
 					"slug": "mover",
-					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"deploymentId": "dep_536071e3769f43c9a71294e3fa0b1239",
 					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
 					"spa": false,
 					"cleanUrls": false,
@@ -1403,20 +1711,20 @@
 					"redirects": [],
 					"headers": [],
 					"upstream": "http://worker-a.internal:8080",
-					"host": "mover--m24ytq2qvx.sites.test",
+					"host": "mover--xqwmtcjp4g.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"siteKey": "KETq1d6i9FAy4_7_0xJ7enQ2GEDP0hqGJw-oJfyC9K0",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e2daa40b276f45db980df0f9b93c4e96",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
-					"slug": "docs",
-					"deploymentId": "dep_7100a171905046cd9a4b6c8fd2e484e0",
+					"projectId": "prj_13d9fac6651e48d3b1f9d6ea8dcbcab9",
+					"slug": "manual",
+					"deploymentId": "dep_80a3fd6c5f8e443f96985516dc701f85",
 					"release": "1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491",
 					"spa": true,
 					"cleanUrls": false,
@@ -1443,20 +1751,20 @@
 						}
 					],
 					"upstream": "http://worker-a.internal:8080",
-					"host": "docs.sites.test",
+					"host": "manual.sites.test",
 					"production": true,
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "JaOHGbObI2S1mG3jbi63knnmte5E_IOE8Pb6CTi9MWE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_7037b9d7d1ac41fdabc25d78070033ba",
+						"siteKey": "G1l2_tH77EOzNGytkSvz7hNu4NA8MvXuCGRqMnH5EYc",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_13d9fac6651e48d3b1f9d6ea8dcbcab9",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"slug": "web",
-					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"deploymentId": "dep_9f9e1fa390b44d2c8741873eadd35b3b",
 					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
 					"spa": false,
 					"cleanUrls": false,
@@ -1464,10 +1772,10 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
 					"upstreams": [
 						"http://worker-a.internal:8080",
-						"unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock"
+						"unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock"
 					],
 					"healthPath": "/healthz",
 					"healthIntervalSeconds": 5,
@@ -1476,15 +1784,15 @@
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"siteKey": "61pd9ZxrveT56mJe_mtfmVF5iFOdYiUGwZEeGaEPF_o",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37078766cf8d456b95fa44e0a3c394b4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"projectId": "prj_37c8f3c59bc545b187804b596ecd7786",
 					"slug": "shop",
-					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"deploymentId": "dep_2481d827e24c48e69c963c09685845e6",
 					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
 					"spa": false,
 					"cleanUrls": false,
@@ -1504,15 +1812,15 @@
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"siteKey": "54Yt0Pq0C9OWOUJrju-MixKvg92_2o123Tal4JuuJTc",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37c8f3c59bc545b187804b596ecd7786",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"projectId": "prj_54345454d0074c07b85a3a8542e747e4",
 					"slug": "fresh-copies",
-					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"deploymentId": "dep_c1e737fd9bc34e3a94aa8b9020364037",
 					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
 					"spa": false,
 					"cleanUrls": false,
@@ -1532,15 +1840,15 @@
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"siteKey": "lB_xJ5b4eZ5XK7LdDq2SOy6c21t91Ag00LXxLqifsK8",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_54345454d0074c07b85a3a8542e747e4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"projectId": "prj_e2daa40b276f45db980df0f9b93c4e96",
 					"slug": "mover",
-					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"deploymentId": "dep_536071e3769f43c9a71294e3fa0b1239",
 					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
 					"spa": false,
 					"cleanUrls": false,
@@ -1554,27 +1862,32 @@
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"siteKey": "KETq1d6i9FAy4_7_0xJ7enQ2GEDP0hqGJw-oJfyC9K0",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e2daa40b276f45db980df0f9b93c4e96",
 						"policyId": null
 					}
 				}
 			],
 			"revocations": [],
-			"hostRedirects": [],
+			"hostRedirects": [
+				{
+					"host": "docs.sites.test",
+					"to": "https://manual.sites.test"
+				}
+			],
 			"placeholders": [
 				{
 					"host": "draft.sites.test",
-					"projectId": "prj_e7f83ee3afb3428e95f92ea90dad1eeb",
+					"projectId": "prj_32916e74386a4c55822552295f729a96",
 					"dashboardUrl": "https://control.test/projects/draft"
 				}
 			],
 			"workloads": [
 				{
-					"id": "wld_9505b4a218fa4004ae226fac2912aad6-r2",
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"id": "wld_1dd8cb55c7f24cc083f3deeefa7a5e8f-r2",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"projectSlug": "web",
-					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"deploymentId": "dep_9f9e1fa390b44d2c8741873eadd35b3b",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "process",
@@ -1585,13 +1898,13 @@
 						"run",
 						"start"
 					],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
 					"memoryMb": 256,
 					"cpus": 1,
 					"port": 3000,
 					"healthPath": "/healthz",
 					"socketActivation": true,
-					"activationVersion": "9aebf3af090a483c463fc11a881a485938676c8849298d6c6b2a4725a80c937d",
+					"activationVersion": "e11f3fa9c2d7bbe99abcc77bd4e88012234650105b04682bb50b72f946a0a0e3",
 					"env": {
 						"NODE_ENV": "production"
 					},
@@ -1603,10 +1916,10 @@
 					}
 				},
 				{
-					"id": "wld_dd34deed2e8e4004945b10e9cf5c035d-r2",
-					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"id": "wld_9a7ebe205ab245828f20e006e9f5db4b-r2",
+					"projectId": "prj_37c8f3c59bc545b187804b596ecd7786",
 					"projectSlug": "shop",
-					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"deploymentId": "dep_2481d827e24c48e69c963c09685845e6",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "container",
@@ -1637,12 +1950,12 @@
 			"volumeProfileTasks": [],
 			"linkProbes": [
 				{
-					"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+					"nodeId": "nod_2be00e74758a492f974fce5690b0d578",
 					"address": "10.47.1.3",
 					"port": 8080
 				},
 				{
-					"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+					"nodeId": "nod_80b01a31d10f42caa4b6b881d01ca176",
 					"address": "10.47.1.4",
 					"port": 8080
 				}
@@ -1665,7 +1978,7 @@
 				"listen": "127.0.0.1:8081",
 				"routes": [
 					{
-						"host": "s3-453d33cb3c3c494381087b156cfe43bc.storage.internal",
+						"host": "s3-afbc7ea7e4d74932a1b37d15620311d8.storage.internal",
 						"upstream": "http://worker-b.internal:8080"
 					}
 				]
@@ -1678,20 +1991,20 @@
 				"listen": "127.0.0.1:8082",
 				"routes": [
 					{
-						"host": "n-node4d8b08da94341c68d4ac12b1d6d8b91.studio.internal",
+						"host": "n-nod80b01a31d10f42caa4b6b881d01ca176.studio.internal",
 						"upstream": "http://worker-b.internal:8080"
 					},
 					{
-						"host": "n-nod19eac9a57d014d7a8b4dc8294b8432d6.console.internal",
-						"upstream": "127.0.0.1:8084"
-					},
-					{
-						"host": "n-nod8ee75bcf0c014a07b0983a30d0c8e7e3.console.internal",
+						"host": "n-nod2be00e74758a492f974fce5690b0d578.console.internal",
 						"upstream": "http://worker-a.internal:8080"
 					},
 					{
-						"host": "n-node4d8b08da94341c68d4ac12b1d6d8b91.console.internal",
+						"host": "n-nod80b01a31d10f42caa4b6b881d01ca176.console.internal",
 						"upstream": "http://worker-b.internal:8080"
+					},
+					{
+						"host": "n-nod9876633285164cfc9259ce6171eaf6a5.console.internal",
+						"upstream": "127.0.0.1:8084"
 					}
 				]
 			},
@@ -1709,7 +2022,7 @@
 			"kubernetesBackupTasks": [],
 			"mail": null,
 			"identity": {
-				"generation": 2050462547,
+				"generation": 322492872,
 				"host": "auth.sites.test",
 				"upstream": "127.0.0.1:8788",
 				"pools": []
@@ -1717,35 +2030,35 @@
 			"domains": [
 				{
 					"host": "docs.example.com",
-					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
+					"projectId": "prj_13d9fac6651e48d3b1f9d6ea8dcbcab9",
 					"kind": "custom",
 					"redirectTo": null
 				}
 			],
 			"serviceEndpoints": [
 				{
-					"id": "sep_nod_19eac9a57d014d7a8b4dc8294b8432d6_database_db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"id": "sep_nod_9876633285164cfc9259ce6171eaf6a5_database_db_00e1764a4c3d4aa9a50d4dd2bc520608",
 					"kind": "database",
-					"serviceId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"serviceId": "db_00e1764a4c3d4aa9a50d4dd2bc520608",
 					"localPort": 21000,
 					"upstream": {
-						"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+						"nodeId": "nod_80b01a31d10f42caa4b6b881d01ca176",
 						"address": "10.47.1.4",
 						"port": 15432
 					},
-					"tlsFingerprint": "6e0be922932c63eb40f2d80c99d03fe5895c150a6383fda5cda8c080aee56ff8"
+					"tlsFingerprint": "fd3262f899161fb7d676b246d151c82b14a08d3034e8f19a779e442ac0f05d2a"
 				},
 				{
-					"id": "sep_nod_19eac9a57d014d7a8b4dc8294b8432d6_database_dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"id": "sep_nod_9876633285164cfc9259ce6171eaf6a5_database_dbr_07ee931d2b54455db7c385543406bda1",
 					"kind": "database",
-					"serviceId": "dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"serviceId": "dbr_07ee931d2b54455db7c385543406bda1",
 					"localPort": 21001,
 					"upstream": {
-						"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+						"nodeId": "nod_2be00e74758a492f974fce5690b0d578",
 						"address": "10.47.1.3",
 						"port": 15432
 					},
-					"tlsFingerprint": "971142cf8e3654f7759d6337773cbbbbadaad0f0ec31b7bb0b96eee29e29973d"
+					"tlsFingerprint": "0f237394bfb6bd089ae7d6f42597c3ad7c862c176af2829f1a96c24e5724947e"
 				}
 			],
 			"serviceProviders": [],
@@ -1757,7 +2070,7 @@
 				"listenPort": 51820,
 				"peers": [
 					{
-						"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+						"nodeId": "nod_2be00e74758a492f974fce5690b0d578",
 						"publicKey": "gU58sadpj1MvXazt0oePiiT1Ms7Mw51vs7iRjgWBhI4=",
 						"endpoint": "worker-a.internal:51820",
 						"allowedIps": [
@@ -1766,7 +2079,7 @@
 						"persistentKeepalive": 0
 					},
 					{
-						"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+						"nodeId": "nod_80b01a31d10f42caa4b6b881d01ca176",
 						"publicKey": "4khK9MUvIDPxNGOP2xO7H8Boot2SjP3AJMePg56lEq4=",
 						"endpoint": "worker-b.internal:51820",
 						"allowedIps": [
@@ -1780,11 +2093,11 @@
 			}
 		},
 		"worker-a": {
-			"version": 36,
-			"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+			"version": 46,
+			"nodeId": "nod_2be00e74758a492f974fce5690b0d578",
 			"agentVersion": "0.1.0",
 			"nodeUpdate": null,
-			"generatedAt": "2026-11-20T12:00:55.000Z",
+			"generatedAt": "2026-11-20T12:01:18.000Z",
 			"contentDomain": "sites.test",
 			"platformOrigin": "https://control.test",
 			"sliceMemoryMb": 8192,
@@ -1799,49 +2112,49 @@
 					"sizeBytes": 92,
 					"fileCount": 4,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491.zip?exp=1795179655&sig=uepOWf50n-n7PUGoLBmPsxAUkwFU7IIRzobWFXoH6q8"
+					"url": "https://control.test/api/objects/releases/1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491.zip?exp=1795179678&sig=LvR8FfSPeHyEwgAlSOmwDV-mZa62ZLQUqk1ymb_qsKE"
 				},
 				{
 					"sha256": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
 					"sizeBytes": 18,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99.zip?exp=1795179655&sig=z3ks9WUZz8gpp4wMe6tfD6LVV2gmxmkDrMWHELeJ6co"
+					"url": "https://control.test/api/objects/releases/580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99.zip?exp=1795179678&sig=hupahN2_iZOxNEPllZYjiNX0ymh1UFlJc6lN3aUdV58"
 				},
 				{
 					"sha256": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
 					"sizeBytes": 26,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f.zip?exp=1795179655&sig=zT8uPxkoBQrjq_0_fITB9G8ItehvvoAvrlo193wIjvk"
+					"url": "https://control.test/api/objects/releases/fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f.zip?exp=1795179678&sig=BmgNFuKNyjIkMqoGdvnTDk2VYoeHUYdbEqoQfXJCGPg"
 				},
 				{
 					"sha256": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
 					"sizeBytes": 37,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf.zip?exp=1795179655&sig=WrNS4jMHO-y6ASbuIRoZ54ePV1qb--CS3eSTB_9qEbI"
+					"url": "https://control.test/api/objects/releases/c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf.zip?exp=1795179678&sig=n2LTglkL5ZIcaHywkoNZjEh3DU2WS4Vt-isKdWzNf9Q"
 				},
 				{
 					"sha256": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
 					"sizeBytes": 20,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7.zip?exp=1795179655&sig=d4kr04roRhbxY3h5l7n40kqvFSf6jHGHFpmFd6zaQcA"
+					"url": "https://control.test/api/objects/releases/c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7.zip?exp=1795179678&sig=CC26821Nixkn8-ZNvLzObKQ1Y133eukq2pyDbtSOYpw"
 				},
 				{
 					"sha256": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
 					"sizeBytes": 20,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a.zip?exp=1795179655&sig=Eaz__fCVMadxoArHZh-NA1kGzUcjWZtjrdAsojh5v0k"
+					"url": "https://control.test/api/objects/releases/820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a.zip?exp=1795179678&sig=0nXtxkC-eE6VZIoJGj6agoGoaXUQPHksPfkj69da0tI"
 				}
 			],
 			"routes": [
 				{
-					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
-					"slug": "docs",
-					"deploymentId": "dep_7100a171905046cd9a4b6c8fd2e484e0",
+					"projectId": "prj_13d9fac6651e48d3b1f9d6ea8dcbcab9",
+					"slug": "manual",
+					"deploymentId": "dep_80a3fd6c5f8e443f96985516dc701f85",
 					"release": "1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491",
 					"spa": true,
 					"cleanUrls": false,
@@ -1868,20 +2181,20 @@
 						}
 					],
 					"upstream": null,
-					"host": "docs--2qm0tb5xzj.sites.test",
+					"host": "docs--yq50t0r1wy.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "JaOHGbObI2S1mG3jbi63knnmte5E_IOE8Pb6CTi9MWE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_7037b9d7d1ac41fdabc25d78070033ba",
+						"siteKey": "G1l2_tH77EOzNGytkSvz7hNu4NA8MvXuCGRqMnH5EYc",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_13d9fac6651e48d3b1f9d6ea8dcbcab9",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"slug": "web",
-					"deploymentId": "dep_59891ae3caff43248a6d1da86e58c901",
+					"deploymentId": "dep_e1110511215e4141bb26ffeffea02c47",
 					"release": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
 					"spa": false,
 					"cleanUrls": false,
@@ -1889,21 +2202,21 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
-					"host": "web--5yjzw7c376.sites.test",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
+					"host": "web--93anpv926f.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"siteKey": "61pd9ZxrveT56mJe_mtfmVF5iFOdYiUGwZEeGaEPF_o",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37078766cf8d456b95fa44e0a3c394b4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"slug": "web",
-					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"deploymentId": "dep_9f9e1fa390b44d2c8741873eadd35b3b",
 					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
 					"spa": false,
 					"cleanUrls": false,
@@ -1911,21 +2224,21 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
-					"host": "web--cqrckke1az.sites.test",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
+					"host": "web--mwmca64bpy.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"siteKey": "61pd9ZxrveT56mJe_mtfmVF5iFOdYiUGwZEeGaEPF_o",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37078766cf8d456b95fa44e0a3c394b4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"projectId": "prj_37c8f3c59bc545b187804b596ecd7786",
 					"slug": "shop",
-					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"deploymentId": "dep_2481d827e24c48e69c963c09685845e6",
 					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
 					"spa": false,
 					"cleanUrls": false,
@@ -1934,20 +2247,20 @@
 					"redirects": [],
 					"headers": [],
 					"upstream": "127.0.0.1:3000",
-					"host": "shop--w009xg1ewy.sites.test",
+					"host": "shop--ny8yyy933w.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"siteKey": "54Yt0Pq0C9OWOUJrju-MixKvg92_2o123Tal4JuuJTc",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37c8f3c59bc545b187804b596ecd7786",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"projectId": "prj_54345454d0074c07b85a3a8542e747e4",
 					"slug": "fresh-copies",
-					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"deploymentId": "dep_c1e737fd9bc34e3a94aa8b9020364037",
 					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
 					"spa": false,
 					"cleanUrls": false,
@@ -1955,21 +2268,21 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
-					"host": "fresh-copies--06mdpw5hg4.sites.test",
+					"upstream": "unix//run/yoal-workloads/prj_54345454d0074c07b85a3a8542e747e4.sock",
+					"host": "fresh-copies--da8snwhcpg.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"siteKey": "lB_xJ5b4eZ5XK7LdDq2SOy6c21t91Ag00LXxLqifsK8",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_54345454d0074c07b85a3a8542e747e4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"projectId": "prj_e2daa40b276f45db980df0f9b93c4e96",
 					"slug": "mover",
-					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"deploymentId": "dep_536071e3769f43c9a71294e3fa0b1239",
 					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
 					"spa": false,
 					"cleanUrls": false,
@@ -1977,21 +2290,21 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_1899462c7d064f74becb512f2c38459d.sock",
-					"host": "mover--m24ytq2qvx.sites.test",
+					"upstream": "unix//run/yoal-workloads/prj_e2daa40b276f45db980df0f9b93c4e96.sock",
+					"host": "mover--xqwmtcjp4g.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"siteKey": "KETq1d6i9FAy4_7_0xJ7enQ2GEDP0hqGJw-oJfyC9K0",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e2daa40b276f45db980df0f9b93c4e96",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
-					"slug": "docs",
-					"deploymentId": "dep_7100a171905046cd9a4b6c8fd2e484e0",
+					"projectId": "prj_13d9fac6651e48d3b1f9d6ea8dcbcab9",
+					"slug": "manual",
+					"deploymentId": "dep_80a3fd6c5f8e443f96985516dc701f85",
 					"release": "1241449b0e53328b254544372f48385842caf7a1d127c07a1603425b87f0b491",
 					"spa": true,
 					"cleanUrls": false,
@@ -2018,20 +2331,20 @@
 						}
 					],
 					"upstream": null,
-					"host": "docs.sites.test",
+					"host": "manual.sites.test",
 					"production": true,
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "JaOHGbObI2S1mG3jbi63knnmte5E_IOE8Pb6CTi9MWE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_7037b9d7d1ac41fdabc25d78070033ba",
+						"siteKey": "G1l2_tH77EOzNGytkSvz7hNu4NA8MvXuCGRqMnH5EYc",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_13d9fac6651e48d3b1f9d6ea8dcbcab9",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"slug": "web",
-					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"deploymentId": "dep_9f9e1fa390b44d2c8741873eadd35b3b",
 					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
 					"spa": false,
 					"cleanUrls": false,
@@ -2039,21 +2352,21 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
 					"host": "web.sites.test",
 					"production": true,
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"siteKey": "61pd9ZxrveT56mJe_mtfmVF5iFOdYiUGwZEeGaEPF_o",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37078766cf8d456b95fa44e0a3c394b4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"projectId": "prj_37c8f3c59bc545b187804b596ecd7786",
 					"slug": "shop",
-					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"deploymentId": "dep_2481d827e24c48e69c963c09685845e6",
 					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
 					"spa": false,
 					"cleanUrls": false,
@@ -2067,15 +2380,15 @@
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"siteKey": "54Yt0Pq0C9OWOUJrju-MixKvg92_2o123Tal4JuuJTc",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37c8f3c59bc545b187804b596ecd7786",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"projectId": "prj_54345454d0074c07b85a3a8542e747e4",
 					"slug": "fresh-copies",
-					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"deploymentId": "dep_c1e737fd9bc34e3a94aa8b9020364037",
 					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
 					"spa": false,
 					"cleanUrls": false,
@@ -2083,21 +2396,21 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"upstream": "unix//run/yoal-workloads/prj_54345454d0074c07b85a3a8542e747e4.sock",
 					"host": "fresh-copies.sites.test",
 					"production": true,
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"siteKey": "lB_xJ5b4eZ5XK7LdDq2SOy6c21t91Ag00LXxLqifsK8",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_54345454d0074c07b85a3a8542e747e4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"projectId": "prj_e2daa40b276f45db980df0f9b93c4e96",
 					"slug": "mover",
-					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"deploymentId": "dep_536071e3769f43c9a71294e3fa0b1239",
 					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
 					"spa": false,
 					"cleanUrls": false,
@@ -2105,27 +2418,32 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_1899462c7d064f74becb512f2c38459d.sock",
+					"upstream": "unix//run/yoal-workloads/prj_e2daa40b276f45db980df0f9b93c4e96.sock",
 					"host": "mover.sites.test",
 					"production": true,
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"siteKey": "KETq1d6i9FAy4_7_0xJ7enQ2GEDP0hqGJw-oJfyC9K0",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e2daa40b276f45db980df0f9b93c4e96",
 						"policyId": null
 					}
 				}
 			],
 			"revocations": [],
-			"hostRedirects": [],
+			"hostRedirects": [
+				{
+					"host": "docs.sites.test",
+					"to": "https://manual.sites.test"
+				}
+			],
 			"placeholders": [],
 			"workloads": [
 				{
-					"id": "wld_9505b4a218fa4004ae226fac2912aad6",
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"id": "wld_1dd8cb55c7f24cc083f3deeefa7a5e8f",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"projectSlug": "web",
-					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"deploymentId": "dep_9f9e1fa390b44d2c8741873eadd35b3b",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "process",
@@ -2136,13 +2454,13 @@
 						"run",
 						"start"
 					],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
 					"memoryMb": 256,
 					"cpus": 1,
 					"port": 3000,
 					"healthPath": "/healthz",
 					"socketActivation": true,
-					"activationVersion": "9aebf3af090a483c463fc11a881a485938676c8849298d6c6b2a4725a80c937d",
+					"activationVersion": "e11f3fa9c2d7bbe99abcc77bd4e88012234650105b04682bb50b72f946a0a0e3",
 					"env": {
 						"NODE_ENV": "production"
 					},
@@ -2154,10 +2472,10 @@
 					}
 				},
 				{
-					"id": "wld_dd34deed2e8e4004945b10e9cf5c035d",
-					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"id": "wld_9a7ebe205ab245828f20e006e9f5db4b",
+					"projectId": "prj_37c8f3c59bc545b187804b596ecd7786",
 					"projectSlug": "shop",
-					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"deploymentId": "dep_2481d827e24c48e69c963c09685845e6",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "container",
@@ -2180,10 +2498,10 @@
 					}
 				},
 				{
-					"id": "wld_80feb8764281462ab55242b3e60eedef",
-					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"id": "wld_76c571dbe3d54e4b90a9885efa401b7a",
+					"projectId": "prj_54345454d0074c07b85a3a8542e747e4",
 					"projectSlug": "fresh-copies",
-					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"deploymentId": "dep_c1e737fd9bc34e3a94aa8b9020364037",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "process",
@@ -2194,7 +2512,7 @@
 						"run",
 						"start"
 					],
-					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"upstream": "unix//run/yoal-workloads/prj_54345454d0074c07b85a3a8542e747e4.sock",
 					"memoryMb": 128,
 					"cpus": 1,
 					"port": 3000,
@@ -2212,10 +2530,10 @@
 					}
 				},
 				{
-					"id": "wld_053073115d8645d2860e6bef2973517a",
-					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"id": "wld_74356211e1944f1c8f60f7fac6d48945",
+					"projectId": "prj_e2daa40b276f45db980df0f9b93c4e96",
 					"projectSlug": "mover",
-					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"deploymentId": "dep_536071e3769f43c9a71294e3fa0b1239",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "process",
@@ -2226,7 +2544,7 @@
 						"run",
 						"start"
 					],
-					"upstream": "unix//run/yoal-workloads/prj_1899462c7d064f74becb512f2c38459d.sock",
+					"upstream": "unix//run/yoal-workloads/prj_e2daa40b276f45db980df0f9b93c4e96.sock",
 					"memoryMb": 256,
 					"cpus": 1,
 					"port": 3000,
@@ -2241,10 +2559,10 @@
 					"identity": true
 				},
 				{
-					"id": "db_dbr_6ced675ba60f4984a6bffb6f901f56f8",
-					"projectId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"id": "db_dbr_07ee931d2b54455db7c385543406bda1",
+					"projectId": "db_00e1764a4c3d4aa9a50d4dd2bc520608",
 					"projectSlug": "orders",
-					"deploymentId": "dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"deploymentId": "dbr_07ee931d2b54455db7c385543406bda1",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "container",
@@ -2257,7 +2575,7 @@
 					"port": 15432,
 					"healthPath": "/",
 					"socketActivation": false,
-					"activationVersion": "a824b0f13f904d46a9db13a8fd770ca75fe517128e3b921ef880283c749d4631",
+					"activationVersion": "3ec023d4e4caf4aa2aa8f8280b447852338037efb3f585652cb9335d8395f1a0",
 					"env": {
 						"POSTGRES_USER": "orders",
 						"POSTGRES_DB": "orders",
@@ -2270,7 +2588,7 @@
 						"version": "17",
 						"tls": true,
 						"replica": {
-							"slot": "yoal_dbr_6ced675ba60f4984a6bffb6f901f56f8"
+							"slot": "yoal_dbr_07ee931d2b54455db7c385543406bda1"
 						}
 					}
 				}
@@ -2283,12 +2601,12 @@
 			"volumeProfileTasks": [],
 			"linkProbes": [
 				{
-					"nodeId": "nod_19eac9a57d014d7a8b4dc8294b8432d6",
+					"nodeId": "nod_9876633285164cfc9259ce6171eaf6a5",
 					"address": "10.47.1.2",
 					"port": 8080
 				},
 				{
-					"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+					"nodeId": "nod_80b01a31d10f42caa4b6b881d01ca176",
 					"address": "10.47.1.4",
 					"port": 8080
 				}
@@ -2297,7 +2615,9 @@
 			"appVolumes": [],
 			"appVolumePurges": [],
 			"appVolumeTasks": [],
-			"databasePurges": [],
+			"databasePurges": [
+				"db_15ee377fee1a4e13a1c2560518a9381c"
+			],
 			"databaseBackupTasks": [],
 			"databasePitrTasks": [],
 			"databaseRotations": [],
@@ -2307,14 +2627,14 @@
 			"databaseReplication": [],
 			"databaseReplicaLinks": [
 				{
-					"workloadId": "db_dbr_6ced675ba60f4984a6bffb6f901f56f8",
-					"databaseId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"workloadId": "db_dbr_07ee931d2b54455db7c385543406bda1",
+					"databaseId": "db_00e1764a4c3d4aa9a50d4dd2bc520608",
 					"upstream": {
 						"kind": "remote",
-						"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+						"nodeId": "nod_80b01a31d10f42caa4b6b881d01ca176",
 						"address": "10.47.1.4",
 						"port": 15432,
-						"tlsFingerprint": "6e0be922932c63eb40f2d80c99d03fe5895c150a6383fda5cda8c080aee56ff8"
+						"tlsFingerprint": "fd3262f899161fb7d676b246d151c82b14a08d3034e8f19a779e442ac0f05d2a"
 					}
 				}
 			],
@@ -2331,7 +2651,7 @@
 				"listen": null,
 				"routes": [
 					{
-						"host": "n-nod8ee75bcf0c014a07b0983a30d0c8e7e3.console.internal",
+						"host": "n-nod2be00e74758a492f974fce5690b0d578.console.internal",
 						"upstream": "127.0.0.1:8084"
 					}
 				]
@@ -2353,34 +2673,34 @@
 			"domains": [
 				{
 					"host": "docs.example.com",
-					"projectId": "prj_7037b9d7d1ac41fdabc25d78070033ba",
+					"projectId": "prj_13d9fac6651e48d3b1f9d6ea8dcbcab9",
 					"kind": "custom",
 					"redirectTo": null
 				}
 			],
 			"serviceEndpoints": [
 				{
-					"id": "sep_nod_8ee75bcf0c014a07b0983a30d0c8e7e3_database_db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"id": "sep_nod_2be00e74758a492f974fce5690b0d578_database_db_00e1764a4c3d4aa9a50d4dd2bc520608",
 					"kind": "database",
-					"serviceId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"serviceId": "db_00e1764a4c3d4aa9a50d4dd2bc520608",
 					"localPort": 21000,
 					"upstream": {
-						"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+						"nodeId": "nod_80b01a31d10f42caa4b6b881d01ca176",
 						"address": "10.47.1.4",
 						"port": 15432
 					},
-					"tlsFingerprint": "6e0be922932c63eb40f2d80c99d03fe5895c150a6383fda5cda8c080aee56ff8"
+					"tlsFingerprint": "fd3262f899161fb7d676b246d151c82b14a08d3034e8f19a779e442ac0f05d2a"
 				}
 			],
 			"serviceProviders": [
 				{
-					"id": "svp_sep_nod_e4d8b08da94341c68d4ac12b1d6d8b91_database_dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"id": "svp_sep_nod_80b01a31d10f42caa4b6b881d01ca176_database_dbr_07ee931d2b54455db7c385543406bda1",
 					"listenAddress": "10.47.1.3",
 					"listenPort": 15432,
 					"targetPort": 15432,
 					"allowedClientFingerprints": [
-						"6e0be922932c63eb40f2d80c99d03fe5895c150a6383fda5cda8c080aee56ff8",
-						"ce0b1cca833c3725a57f2ab115a8cb9b0823f9d0036cc0cdbcb6720b6ef44b4a"
+						"17c6b49f7a706f3857a0ab2994178a0545af5b7d47ec146da190949bd8826eba",
+						"fd3262f899161fb7d676b246d151c82b14a08d3034e8f19a779e442ac0f05d2a"
 					]
 				}
 			],
@@ -2392,7 +2712,7 @@
 				"listenPort": 51820,
 				"peers": [
 					{
-						"nodeId": "nod_19eac9a57d014d7a8b4dc8294b8432d6",
+						"nodeId": "nod_9876633285164cfc9259ce6171eaf6a5",
 						"publicKey": "nCJyQvZSRfBbSJc5lWnt1e/j0zeChTrVd/G3TMfPifM=",
 						"endpoint": "edge.internal:51820",
 						"allowedIps": [
@@ -2407,11 +2727,11 @@
 			}
 		},
 		"worker-b": {
-			"version": 36,
-			"nodeId": "nod_e4d8b08da94341c68d4ac12b1d6d8b91",
+			"version": 46,
+			"nodeId": "nod_80b01a31d10f42caa4b6b881d01ca176",
 			"agentVersion": "0.1.0",
 			"nodeUpdate": null,
-			"generatedAt": "2026-11-20T12:00:55.000Z",
+			"generatedAt": "2026-11-20T12:01:18.000Z",
 			"contentDomain": "sites.test",
 			"platformOrigin": "https://control.test",
 			"sliceMemoryMb": 8192,
@@ -2426,42 +2746,42 @@
 					"sizeBytes": 18,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99.zip?exp=1795179655&sig=z3ks9WUZz8gpp4wMe6tfD6LVV2gmxmkDrMWHELeJ6co"
+					"url": "https://control.test/api/objects/releases/580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99.zip?exp=1795179678&sig=hupahN2_iZOxNEPllZYjiNX0ymh1UFlJc6lN3aUdV58"
 				},
 				{
 					"sha256": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
 					"sizeBytes": 26,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f.zip?exp=1795179655&sig=zT8uPxkoBQrjq_0_fITB9G8ItehvvoAvrlo193wIjvk"
+					"url": "https://control.test/api/objects/releases/fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f.zip?exp=1795179678&sig=BmgNFuKNyjIkMqoGdvnTDk2VYoeHUYdbEqoQfXJCGPg"
 				},
 				{
 					"sha256": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
 					"sizeBytes": 37,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf.zip?exp=1795179655&sig=WrNS4jMHO-y6ASbuIRoZ54ePV1qb--CS3eSTB_9qEbI"
+					"url": "https://control.test/api/objects/releases/c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf.zip?exp=1795179678&sig=n2LTglkL5ZIcaHywkoNZjEh3DU2WS4Vt-isKdWzNf9Q"
 				},
 				{
 					"sha256": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
 					"sizeBytes": 20,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7.zip?exp=1795179655&sig=d4kr04roRhbxY3h5l7n40kqvFSf6jHGHFpmFd6zaQcA"
+					"url": "https://control.test/api/objects/releases/c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7.zip?exp=1795179678&sig=CC26821Nixkn8-ZNvLzObKQ1Y133eukq2pyDbtSOYpw"
 				},
 				{
 					"sha256": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
 					"sizeBytes": 20,
 					"fileCount": 1,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a.zip?exp=1795179655&sig=Eaz__fCVMadxoArHZh-NA1kGzUcjWZtjrdAsojh5v0k"
+					"url": "https://control.test/api/objects/releases/820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a.zip?exp=1795179678&sig=0nXtxkC-eE6VZIoJGj6agoGoaXUQPHksPfkj69da0tI"
 				}
 			],
 			"routes": [
 				{
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"slug": "web",
-					"deploymentId": "dep_59891ae3caff43248a6d1da86e58c901",
+					"deploymentId": "dep_e1110511215e4141bb26ffeffea02c47",
 					"release": "fa083f5e991efc0c16004ffc7690556553e675e414db8b4eb3b743281935882f",
 					"spa": false,
 					"cleanUrls": false,
@@ -2469,21 +2789,21 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
-					"host": "web--5yjzw7c376.sites.test",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
+					"host": "web--93anpv926f.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"siteKey": "61pd9ZxrveT56mJe_mtfmVF5iFOdYiUGwZEeGaEPF_o",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37078766cf8d456b95fa44e0a3c394b4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"slug": "web",
-					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"deploymentId": "dep_9f9e1fa390b44d2c8741873eadd35b3b",
 					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
 					"spa": false,
 					"cleanUrls": false,
@@ -2491,21 +2811,21 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
-					"host": "web--cqrckke1az.sites.test",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
+					"host": "web--mwmca64bpy.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"siteKey": "61pd9ZxrveT56mJe_mtfmVF5iFOdYiUGwZEeGaEPF_o",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37078766cf8d456b95fa44e0a3c394b4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"projectId": "prj_37c8f3c59bc545b187804b596ecd7786",
 					"slug": "shop",
-					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"deploymentId": "dep_2481d827e24c48e69c963c09685845e6",
 					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
 					"spa": false,
 					"cleanUrls": false,
@@ -2514,20 +2834,20 @@
 					"redirects": [],
 					"headers": [],
 					"upstream": "127.0.0.1:3000",
-					"host": "shop--w009xg1ewy.sites.test",
+					"host": "shop--ny8yyy933w.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"siteKey": "54Yt0Pq0C9OWOUJrju-MixKvg92_2o123Tal4JuuJTc",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37c8f3c59bc545b187804b596ecd7786",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"projectId": "prj_54345454d0074c07b85a3a8542e747e4",
 					"slug": "fresh-copies",
-					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"deploymentId": "dep_c1e737fd9bc34e3a94aa8b9020364037",
 					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
 					"spa": false,
 					"cleanUrls": false,
@@ -2535,21 +2855,21 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
-					"host": "fresh-copies--06mdpw5hg4.sites.test",
+					"upstream": "unix//run/yoal-workloads/prj_54345454d0074c07b85a3a8542e747e4.sock",
+					"host": "fresh-copies--da8snwhcpg.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"siteKey": "lB_xJ5b4eZ5XK7LdDq2SOy6c21t91Ag00LXxLqifsK8",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_54345454d0074c07b85a3a8542e747e4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"projectId": "prj_e2daa40b276f45db980df0f9b93c4e96",
 					"slug": "mover",
-					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"deploymentId": "dep_536071e3769f43c9a71294e3fa0b1239",
 					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
 					"spa": false,
 					"cleanUrls": false,
@@ -2558,20 +2878,20 @@
 					"redirects": [],
 					"headers": [],
 					"upstream": "http://worker-a.internal:8080",
-					"host": "mover--m24ytq2qvx.sites.test",
+					"host": "mover--xqwmtcjp4g.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"siteKey": "KETq1d6i9FAy4_7_0xJ7enQ2GEDP0hqGJw-oJfyC9K0",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e2daa40b276f45db980df0f9b93c4e96",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"slug": "web",
-					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"deploymentId": "dep_9f9e1fa390b44d2c8741873eadd35b3b",
 					"release": "580c315c24c6a7caec7a85b4d72c5f7555af504be63c06775f6eedb411b59f99",
 					"spa": false,
 					"cleanUrls": false,
@@ -2579,21 +2899,21 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
 					"host": "web.sites.test",
 					"production": true,
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "iwaJ0JrvkYI_dOP_yeTgY1NuW9_x6jZ29Xi2-BjsRkg",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_ca62e83fa9f245538b7ecf32d5fbc272",
+						"siteKey": "61pd9ZxrveT56mJe_mtfmVF5iFOdYiUGwZEeGaEPF_o",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37078766cf8d456b95fa44e0a3c394b4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"projectId": "prj_37c8f3c59bc545b187804b596ecd7786",
 					"slug": "shop",
-					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"deploymentId": "dep_2481d827e24c48e69c963c09685845e6",
 					"release": "c264b705ef3ec6b537c3743bf74377c019296801aca901b02575ce64d2f782cf",
 					"spa": false,
 					"cleanUrls": false,
@@ -2607,15 +2927,15 @@
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "3_oHeoKwdYACGYM-vRIlc7mHb3eeO04jXx3AAa92pOE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+						"siteKey": "54Yt0Pq0C9OWOUJrju-MixKvg92_2o123Tal4JuuJTc",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_37c8f3c59bc545b187804b596ecd7786",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"projectId": "prj_54345454d0074c07b85a3a8542e747e4",
 					"slug": "fresh-copies",
-					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"deploymentId": "dep_c1e737fd9bc34e3a94aa8b9020364037",
 					"release": "c465d0ed5ab82574936426c4c47224cc24a5d6bd4901d12e21db38095af24de7",
 					"spa": false,
 					"cleanUrls": false,
@@ -2623,21 +2943,21 @@
 					"notFound": null,
 					"redirects": [],
 					"headers": [],
-					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"upstream": "unix//run/yoal-workloads/prj_54345454d0074c07b85a3a8542e747e4.sock",
 					"host": "fresh-copies.sites.test",
 					"production": true,
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "VHwQhzhtbqT4QP2guG22p6pVgQRwizcbDUBsSNkvdjk",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_8b439a6914d54778aff19f593b24a1a9",
+						"siteKey": "lB_xJ5b4eZ5XK7LdDq2SOy6c21t91Ag00LXxLqifsK8",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_54345454d0074c07b85a3a8542e747e4",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"projectId": "prj_e2daa40b276f45db980df0f9b93c4e96",
 					"slug": "mover",
-					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"deploymentId": "dep_536071e3769f43c9a71294e3fa0b1239",
 					"release": "820373c4246048f7000981a5c7db362d1cd586432c2058059507b0cf7139fd1a",
 					"spa": false,
 					"cleanUrls": false,
@@ -2651,8 +2971,8 @@
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "ShEt25Jsex5AhHdv_w85rxmyGEVEl5pjsllxyt8uWJo",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_1899462c7d064f74becb512f2c38459d",
+						"siteKey": "KETq1d6i9FAy4_7_0xJ7enQ2GEDP0hqGJw-oJfyC9K0",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e2daa40b276f45db980df0f9b93c4e96",
 						"policyId": null
 					}
 				}
@@ -2662,10 +2982,10 @@
 			"placeholders": [],
 			"workloads": [
 				{
-					"id": "wld_9505b4a218fa4004ae226fac2912aad6-r1",
-					"projectId": "prj_ca62e83fa9f245538b7ecf32d5fbc272",
+					"id": "wld_1dd8cb55c7f24cc083f3deeefa7a5e8f-r1",
+					"projectId": "prj_37078766cf8d456b95fa44e0a3c394b4",
 					"projectSlug": "web",
-					"deploymentId": "dep_eac796e8e2fb4a9084b3974fdd370f8e",
+					"deploymentId": "dep_9f9e1fa390b44d2c8741873eadd35b3b",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "process",
@@ -2676,13 +2996,13 @@
 						"run",
 						"start"
 					],
-					"upstream": "unix//run/yoal-workloads/prj_ca62e83fa9f245538b7ecf32d5fbc272.sock",
+					"upstream": "unix//run/yoal-workloads/prj_37078766cf8d456b95fa44e0a3c394b4.sock",
 					"memoryMb": 256,
 					"cpus": 1,
 					"port": 3000,
 					"healthPath": "/healthz",
 					"socketActivation": true,
-					"activationVersion": "3600170de94b82f7cbf3c2d3c6d7073f30dbab5d31bfe765185383df8779094b",
+					"activationVersion": "70158678e99217498b651736dddb53702b85503f43b58643ced7138290b1b01a",
 					"env": {
 						"NODE_ENV": "production"
 					},
@@ -2694,10 +3014,10 @@
 					}
 				},
 				{
-					"id": "wld_dd34deed2e8e4004945b10e9cf5c035d-r1",
-					"projectId": "prj_9f7a5a42ddfe414783e7e8e3e7da385f",
+					"id": "wld_9a7ebe205ab245828f20e006e9f5db4b-r1",
+					"projectId": "prj_37c8f3c59bc545b187804b596ecd7786",
 					"projectSlug": "shop",
-					"deploymentId": "dep_d0ea6dafe72d44b38def5016bde9d74d",
+					"deploymentId": "dep_2481d827e24c48e69c963c09685845e6",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "container",
@@ -2720,10 +3040,10 @@
 					}
 				},
 				{
-					"id": "wld_80feb8764281462ab55242b3e60eedef-r1",
-					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"id": "wld_76c571dbe3d54e4b90a9885efa401b7a-r1",
+					"projectId": "prj_54345454d0074c07b85a3a8542e747e4",
 					"projectSlug": "fresh-copies",
-					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"deploymentId": "dep_c1e737fd9bc34e3a94aa8b9020364037",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "process",
@@ -2734,7 +3054,7 @@
 						"run",
 						"start"
 					],
-					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"upstream": "unix//run/yoal-workloads/prj_54345454d0074c07b85a3a8542e747e4.sock",
 					"memoryMb": 128,
 					"cpus": 1,
 					"port": 3000,
@@ -2752,10 +3072,10 @@
 					}
 				},
 				{
-					"id": "wld_80feb8764281462ab55242b3e60eedef-r2",
-					"projectId": "prj_8b439a6914d54778aff19f593b24a1a9",
+					"id": "wld_76c571dbe3d54e4b90a9885efa401b7a-r2",
+					"projectId": "prj_54345454d0074c07b85a3a8542e747e4",
 					"projectSlug": "fresh-copies",
-					"deploymentId": "dep_166aacb291664906b6ed84f5f6804708",
+					"deploymentId": "dep_c1e737fd9bc34e3a94aa8b9020364037",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "process",
@@ -2766,7 +3086,7 @@
 						"run",
 						"start"
 					],
-					"upstream": "unix//run/yoal-workloads/prj_8b439a6914d54778aff19f593b24a1a9.sock",
+					"upstream": "unix//run/yoal-workloads/prj_54345454d0074c07b85a3a8542e747e4.sock",
 					"memoryMb": 128,
 					"cpus": 1,
 					"port": 3000,
@@ -2784,10 +3104,10 @@
 					}
 				},
 				{
-					"id": "wld_053073115d8645d2860e6bef2973517a",
-					"projectId": "prj_1899462c7d064f74becb512f2c38459d",
+					"id": "wld_74356211e1944f1c8f60f7fac6d48945",
+					"projectId": "prj_e2daa40b276f45db980df0f9b93c4e96",
 					"projectSlug": "mover",
-					"deploymentId": "dep_1a661efa35c248e5abce309ef7c2e543",
+					"deploymentId": "dep_536071e3769f43c9a71294e3fa0b1239",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "process",
@@ -2798,7 +3118,7 @@
 						"run",
 						"start"
 					],
-					"upstream": "unix//run/yoal-workloads/prj_1899462c7d064f74becb512f2c38459d.sock",
+					"upstream": "unix//run/yoal-workloads/prj_e2daa40b276f45db980df0f9b93c4e96.sock",
 					"memoryMb": 256,
 					"cpus": 1,
 					"port": 3000,
@@ -2813,10 +3133,10 @@
 					"identity": true
 				},
 				{
-					"id": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
-					"projectId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"id": "db_00e1764a4c3d4aa9a50d4dd2bc520608",
+					"projectId": "db_00e1764a4c3d4aa9a50d4dd2bc520608",
 					"projectSlug": "orders",
-					"deploymentId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"deploymentId": "db_00e1764a4c3d4aa9a50d4dd2bc520608",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "container",
@@ -2829,7 +3149,7 @@
 					"port": 15432,
 					"healthPath": "/",
 					"socketActivation": false,
-					"activationVersion": "5a72cc16fc4132729a0f4dca2a0b87136e8dc9808e3c30e4b8213adccb80fa7a",
+					"activationVersion": "2ffabc68986c62d176fd9b08613f767cd5207c3c2fc0994bbd3e646465969141",
 					"env": {
 						"POSTGRES_USER": "orders",
 						"POSTGRES_DB": "orders",
@@ -2847,10 +3167,44 @@
 					}
 				},
 				{
-					"id": "st_453d33cb3c3c494381087b156cfe43bc",
-					"projectId": "st_453d33cb3c3c494381087b156cfe43bc",
+					"id": "db_15ee377fee1a4e13a1c2560518a9381c",
+					"projectId": "db_15ee377fee1a4e13a1c2560518a9381c",
+					"projectSlug": "ledger",
+					"deploymentId": "db_15ee377fee1a4e13a1c2560518a9381c",
+					"orgId": "org_1",
+					"networkName": "yoal-org-org_1",
+					"runtime": "container",
+					"status": "running",
+					"release": null,
+					"image": "docker.io/library/postgres:17-alpine",
+					"upstream": "127.0.0.1:15433",
+					"memoryMb": 256,
+					"cpus": 1,
+					"port": 15433,
+					"healthPath": "/",
+					"socketActivation": false,
+					"activationVersion": "cebb759c35bcdfcb3b1a179631d6dd9625c662379237cd9061d24d056e81c00b",
+					"env": {
+						"POSTGRES_USER": "ledger",
+						"POSTGRES_DB": "ledger",
+						"PGDATA": "/data/pgdata"
+					},
+					"secrets": [],
+					"dataSizeMb": null,
+					"database": {
+						"engine": "postgres",
+						"version": "17",
+						"tls": true
+					},
+					"pooler": {
+						"port": 16433
+					}
+				},
+				{
+					"id": "st_afbc7ea7e4d74932a1b37d15620311d8",
+					"projectId": "st_afbc7ea7e4d74932a1b37d15620311d8",
 					"projectSlug": "assets",
-					"deploymentId": "st_453d33cb3c3c494381087b156cfe43bc",
+					"deploymentId": "st_afbc7ea7e4d74932a1b37d15620311d8",
 					"orgId": "org_1",
 					"networkName": "yoal-org-org_1",
 					"runtime": "container",
@@ -2863,7 +3217,7 @@
 					"port": 19000,
 					"healthPath": "/health",
 					"socketActivation": false,
-					"activationVersion": "49bb5361f0a0b542098a09c2ac2c92e461ec3cba4661c4c445fcc0321513ace3",
+					"activationVersion": "c1b1c56e4cbccca40024b7e9f1da93b4dd4710eea818bd0300da0dddf69dcfdb",
 					"env": {
 						"RUSTFS_VOLUMES": "/data",
 						"RUSTFS_ADDRESS": ":9000",
@@ -2896,7 +3250,7 @@
 						],
 						"users": [],
 						"deleteBuckets": [],
-						"keysVersion": "145eb5e19fc7649a9be46a91914324c6c598e85f550e92988bc2d47322696246",
+						"keysVersion": "cea45fe4861abef7c5bc6dc7be56ad804505548f673bf2804ddfa777694102a3",
 						"replication": []
 					}
 				}
@@ -2909,12 +3263,12 @@
 			"volumeProfileTasks": [],
 			"linkProbes": [
 				{
-					"nodeId": "nod_19eac9a57d014d7a8b4dc8294b8432d6",
+					"nodeId": "nod_9876633285164cfc9259ce6171eaf6a5",
 					"address": "10.47.1.2",
 					"port": 8080
 				},
 				{
-					"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+					"nodeId": "nod_2be00e74758a492f974fce5690b0d578",
 					"address": "10.47.1.3",
 					"port": 8080
 				}
@@ -2930,17 +3284,17 @@
 			"databaseCredentialTasks": [],
 			"databaseStudioPrincipals": [
 				{
-					"databaseId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"databaseId": "db_00e1764a4c3d4aa9a50d4dd2bc520608",
 					"generation": 1
 				}
 			],
 			"databasePoolerRestarts": [],
 			"databaseReplication": [
 				{
-					"databaseId": "db_1cd87d82ae8b42d4ab0852fd4a369e85",
-					"version": "f6c542144a39e38f49b486468726752de81a7f7d349c675922c9be4062c2af72",
+					"databaseId": "db_00e1764a4c3d4aa9a50d4dd2bc520608",
+					"version": "a73d735cc443cb612b26c5ebf41cfb789e88cdd98b00d26e0940242ec82f6bed",
 					"slots": [
-						"yoal_dbr_6ced675ba60f4984a6bffb6f901f56f8"
+						"yoal_dbr_07ee931d2b54455db7c385543406bda1"
 					]
 				}
 			],
@@ -2950,7 +3304,7 @@
 				"listen": null,
 				"routes": [
 					{
-						"host": "s3-453d33cb3c3c494381087b156cfe43bc.storage.internal",
+						"host": "s3-afbc7ea7e4d74932a1b37d15620311d8.storage.internal",
 						"upstream": "127.0.0.1:19000"
 					}
 				]
@@ -2958,18 +3312,18 @@
 			"studio": {
 				"port": 8083,
 				"sessions": [
-					"dss_H0XdrWFf5JJW0GDl2pnr5lO7"
+					"dss_XOGPFXo9ncZnRoIWVqA5Xsu6"
 				]
 			},
 			"databaseGateway": {
 				"listen": null,
 				"routes": [
 					{
-						"host": "n-node4d8b08da94341c68d4ac12b1d6d8b91.studio.internal",
+						"host": "n-nod80b01a31d10f42caa4b6b881d01ca176.studio.internal",
 						"upstream": "127.0.0.1:8083"
 					},
 					{
-						"host": "n-node4d8b08da94341c68d4ac12b1d6d8b91.console.internal",
+						"host": "n-nod80b01a31d10f42caa4b6b881d01ca176.console.internal",
 						"upstream": "127.0.0.1:8084"
 					}
 				]
@@ -2991,27 +3345,27 @@
 			"domains": [],
 			"serviceEndpoints": [
 				{
-					"id": "sep_nod_e4d8b08da94341c68d4ac12b1d6d8b91_database_dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"id": "sep_nod_80b01a31d10f42caa4b6b881d01ca176_database_dbr_07ee931d2b54455db7c385543406bda1",
 					"kind": "database",
-					"serviceId": "dbr_6ced675ba60f4984a6bffb6f901f56f8",
+					"serviceId": "dbr_07ee931d2b54455db7c385543406bda1",
 					"localPort": 21000,
 					"upstream": {
-						"nodeId": "nod_8ee75bcf0c014a07b0983a30d0c8e7e3",
+						"nodeId": "nod_2be00e74758a492f974fce5690b0d578",
 						"address": "10.47.1.3",
 						"port": 15432
 					},
-					"tlsFingerprint": "971142cf8e3654f7759d6337773cbbbbadaad0f0ec31b7bb0b96eee29e29973d"
+					"tlsFingerprint": "0f237394bfb6bd089ae7d6f42597c3ad7c862c176af2829f1a96c24e5724947e"
 				}
 			],
 			"serviceProviders": [
 				{
-					"id": "svp_sep_nod_8ee75bcf0c014a07b0983a30d0c8e7e3_database_db_1cd87d82ae8b42d4ab0852fd4a369e85",
+					"id": "svp_sep_nod_2be00e74758a492f974fce5690b0d578_database_db_00e1764a4c3d4aa9a50d4dd2bc520608",
 					"listenAddress": "10.47.1.4",
 					"listenPort": 15432,
 					"targetPort": 15432,
 					"allowedClientFingerprints": [
-						"971142cf8e3654f7759d6337773cbbbbadaad0f0ec31b7bb0b96eee29e29973d",
-						"ce0b1cca833c3725a57f2ab115a8cb9b0823f9d0036cc0cdbcb6720b6ef44b4a"
+						"0f237394bfb6bd089ae7d6f42597c3ad7c862c176af2829f1a96c24e5724947e",
+						"17c6b49f7a706f3857a0ab2994178a0545af5b7d47ec146da190949bd8826eba"
 					]
 				}
 			],
@@ -3023,7 +3377,7 @@
 				"listenPort": 51820,
 				"peers": [
 					{
-						"nodeId": "nod_19eac9a57d014d7a8b4dc8294b8432d6",
+						"nodeId": "nod_9876633285164cfc9259ce6171eaf6a5",
 						"publicKey": "nCJyQvZSRfBbSJc5lWnt1e/j0zeChTrVd/G3TMfPifM=",
 						"endpoint": "edge.internal:51820",
 						"allowedIps": [
@@ -3041,10 +3395,10 @@
 	"configured-edge": {
 		"first": {
 			"version": 7,
-			"nodeId": "nod_74dc746c4a8644cbb61e7b56c7095609",
+			"nodeId": "nod_97c780c3b646487bb63c445bfdc7fc69",
 			"agentVersion": "0.1.0",
 			"nodeUpdate": null,
-			"generatedAt": "2026-11-20T12:00:58.000Z",
+			"generatedAt": "2026-11-20T12:01:21.000Z",
 			"contentDomain": "sites.test",
 			"platformOrigin": "https://control.test",
 			"sliceMemoryMb": 8192,
@@ -3056,9 +3410,9 @@
 			"releases": [],
 			"routes": [
 				{
-					"projectId": "prj_e9434af5565b4942a60fa0c1ea8cc633",
+					"projectId": "prj_f625b38c14504dcc9d31788cdc0b3bcd",
 					"slug": "site",
-					"deploymentId": "dep_e09853315ff44e8db580624f2fced1ba",
+					"deploymentId": "dep_d318473d44d04735adf3c0793268dbf5",
 					"release": "cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a",
 					"spa": true,
 					"cleanUrls": false,
@@ -3085,20 +3439,20 @@
 						}
 					],
 					"upstream": "http://second.internal:8080",
-					"host": "site--33kcpfhf2t.sites.test",
+					"host": "site--94pzf0qvts.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "-VAExroiBAYYetXfYPCk2Ze4wTwYF9Uh0RE_POzhxkE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e9434af5565b4942a60fa0c1ea8cc633",
+						"siteKey": "k-3TVuQLUGu9zwTVX2uRVkAeZkO8IvLrodonN8NCrHw",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f625b38c14504dcc9d31788cdc0b3bcd",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_e9434af5565b4942a60fa0c1ea8cc633",
+					"projectId": "prj_f625b38c14504dcc9d31788cdc0b3bcd",
 					"slug": "site",
-					"deploymentId": "dep_e09853315ff44e8db580624f2fced1ba",
+					"deploymentId": "dep_d318473d44d04735adf3c0793268dbf5",
 					"release": "cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a",
 					"spa": true,
 					"cleanUrls": false,
@@ -3130,8 +3484,8 @@
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "-VAExroiBAYYetXfYPCk2Ze4wTwYF9Uh0RE_POzhxkE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e9434af5565b4942a60fa0c1ea8cc633",
+						"siteKey": "k-3TVuQLUGu9zwTVX2uRVkAeZkO8IvLrodonN8NCrHw",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f625b38c14504dcc9d31788cdc0b3bcd",
 						"policyId": null
 					}
 				}
@@ -3141,7 +3495,7 @@
 			"placeholders": [
 				{
 					"host": "pending.sites.test",
-					"projectId": "prj_9a7ebe205ab245828f20e006e9f5db4b",
+					"projectId": "prj_2ec3a30c107a4f93ad4aafea9aa15512",
 					"dashboardUrl": "https://control.test/projects/pending"
 				}
 			],
@@ -3199,10 +3553,10 @@
 		},
 		"second": {
 			"version": 7,
-			"nodeId": "nod_f2af730b26634a6ca9906a5cd5dcb5f8",
+			"nodeId": "nod_17cf3bf85d12441991a52fb7d1995aa1",
 			"agentVersion": "0.1.0",
 			"nodeUpdate": null,
-			"generatedAt": "2026-11-20T12:00:58.000Z",
+			"generatedAt": "2026-11-20T12:01:21.000Z",
 			"contentDomain": "sites.test",
 			"platformOrigin": "https://control.test",
 			"sliceMemoryMb": 8192,
@@ -3217,14 +3571,14 @@
 					"sizeBytes": 103,
 					"fileCount": 4,
 					"precompressed": true,
-					"url": "https://control.test/api/objects/releases/cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a.zip?exp=1795179658&sig=DYIuKG-XePdYkDMFjG8TnhoA7J-8qByUSx3-PAHLbBw"
+					"url": "https://control.test/api/objects/releases/cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a.zip?exp=1795179681&sig=buN7L5dCLuHV8-L36a7VApLGM2B1bDgffgy4qKHyp8Q"
 				}
 			],
 			"routes": [
 				{
-					"projectId": "prj_e9434af5565b4942a60fa0c1ea8cc633",
+					"projectId": "prj_f625b38c14504dcc9d31788cdc0b3bcd",
 					"slug": "site",
-					"deploymentId": "dep_e09853315ff44e8db580624f2fced1ba",
+					"deploymentId": "dep_d318473d44d04735adf3c0793268dbf5",
 					"release": "cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a",
 					"spa": true,
 					"cleanUrls": false,
@@ -3251,20 +3605,20 @@
 						}
 					],
 					"upstream": null,
-					"host": "site--33kcpfhf2t.sites.test",
+					"host": "site--94pzf0qvts.sites.test",
 					"production": false,
 					"accessMode": "platform",
 					"access": {
 						"mode": "platform",
-						"siteKey": "-VAExroiBAYYetXfYPCk2Ze4wTwYF9Uh0RE_POzhxkE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e9434af5565b4942a60fa0c1ea8cc633",
+						"siteKey": "k-3TVuQLUGu9zwTVX2uRVkAeZkO8IvLrodonN8NCrHw",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f625b38c14504dcc9d31788cdc0b3bcd",
 						"policyId": null
 					}
 				},
 				{
-					"projectId": "prj_e9434af5565b4942a60fa0c1ea8cc633",
+					"projectId": "prj_f625b38c14504dcc9d31788cdc0b3bcd",
 					"slug": "site",
-					"deploymentId": "dep_e09853315ff44e8db580624f2fced1ba",
+					"deploymentId": "dep_d318473d44d04735adf3c0793268dbf5",
 					"release": "cddbf091bf5af6afda16c82e320b6b6bdc244164785c05cd3044be0968a0f78a",
 					"spa": true,
 					"cleanUrls": false,
@@ -3296,8 +3650,8 @@
 					"accessMode": "public",
 					"access": {
 						"mode": "public",
-						"siteKey": "-VAExroiBAYYetXfYPCk2Ze4wTwYF9Uh0RE_POzhxkE",
-						"loginUrl": "https://control.test/_yoal/site-login?project=prj_e9434af5565b4942a60fa0c1ea8cc633",
+						"siteKey": "k-3TVuQLUGu9zwTVX2uRVkAeZkO8IvLrodonN8NCrHw",
+						"loginUrl": "https://control.test/_yoal/site-login?project=prj_f625b38c14504dcc9d31788cdc0b3bcd",
 						"policyId": null
 					}
 				}
@@ -3307,7 +3661,7 @@
 			"placeholders": [
 				{
 					"host": "pending.sites.test",
-					"projectId": "prj_9a7ebe205ab245828f20e006e9f5db4b",
+					"projectId": "prj_2ec3a30c107a4f93ad4aafea9aa15512",
 					"dashboardUrl": "https://control.test/projects/pending"
 				}
 			],
@@ -3359,7 +3713,7 @@
 			"kubernetesBackupTasks": [],
 			"mail": null,
 			"identity": {
-				"generation": 3403115143,
+				"generation": 3850181296,
 				"host": "auth.sites.test",
 				"upstream": "127.0.0.1:8788",
 				"pools": []

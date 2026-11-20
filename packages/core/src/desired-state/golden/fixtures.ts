@@ -74,6 +74,7 @@ Date.now = () => clock.now;
 // ---- fleets --------------------------------------------------------------------------------
 const { createDb } = await import('@yoal/db');
 const { DEFAULT_FEATURES, nodeCapabilities, workloadReplicaId } = await import('@yoal/contracts');
+type Heartbeat = import('@yoal/contracts').Heartbeat;
 const { buildPrincipal } = await import('../../orgs.ts');
 const { createCore } = await import('../../index.ts');
 const { LocalObjectStore } = await import('../../object-store.ts');
@@ -143,7 +144,7 @@ function fingerprint(id: string): string {
 
 type WorkloadReport = { id: string; status: 'running' | 'starting'; restarts: number };
 
-function beat(f: Fleet, name: string, workloads: WorkloadReport[] = []): void {
+function beat(f: Fleet, name: string, workloads: WorkloadReport[] = [], extra: Partial<Heartbeat> = {}): void {
 	const { id, token } = f.node[name]!;
 	f.core.nodes.heartbeat(token, {
 		nodeId: id,
@@ -156,6 +157,7 @@ function beat(f: Fleet, name: string, workloads: WorkloadReport[] = []): void {
 		releases: [],
 		workloads,
 		nodeCertificate: { certPem: 'pem', fingerprint: fingerprint(id), expiresAt: new Date(clock.now + 86_400_000).toISOString() },
+		...extra,
 	});
 }
 
@@ -306,6 +308,17 @@ function close(f: Fleet): void {
 async function singleNode(): Promise<Record<string, unknown>> {
 	const f = fleet(['solo'], DEFAULT_FEATURES, false);
 	const { core } = f;
+	// A PITR repository, so a database can turn PITR on (the flag is on by default).
+	(core.ctx.config as { pitrRepository?: unknown }).pitrRepository = {
+		kind: 's3',
+		endpoint: 'https://s3.example.test',
+		bucket: 'yoal-pitr',
+		region: 'us-east-1',
+		pathPrefix: 'yoal/pitr',
+		forcePathStyle: true,
+		accessKeyId: 'access-key',
+		secretAccessKey: 'golden-secret-key',
+	};
 
 	// A static site with a preview, a staging environment, a custom domain and a renamed slug.
 	await create(f, 'blog', 'static', 'edge');
@@ -337,7 +350,7 @@ async function singleNode(): Promise<Record<string, unknown>> {
 
 	// A worker (no route) and a container app.
 	await processApp(f, 'queue', { ingress: 'none', memoryMb: 128 });
-	await deploy(f, 'queue', 'console.log("queue")');
+	const firstQueueDeploy = await deploy(f, 'queue', 'console.log("queue")');
 	await create(f, 'shop', 'container');
 	tick();
 	await core.deployments.deployImage(principal, project(f, 'shop'), { image: 'ghcr.io/acme/shop:1', promote: true });
@@ -404,6 +417,73 @@ async function singleNode(): Promise<Record<string, unknown>> {
 		core.databases.delete(principal, name);
 		core.databases.purgeNow(principal, name);
 	}
+
+	// Non-default site config: clean URLs, an enforced trailing slash and a custom 404 page.
+	await create(f, 'handbook', 'static', 'edge');
+	tick();
+	await core.uploads.deployInline(
+		principal,
+		project(f, 'handbook'),
+		[
+			file('index.html', '<h1>Handbook</h1>'),
+			file('404.html', '<h1>Not here</h1>'),
+			file('yoal.json', JSON.stringify({ cleanUrls: true, trailingSlash: 'always', notFound: '/404.html' })),
+		],
+		{ promote: true },
+	);
+
+	// Yoal Access on a non-production environment: the staging host carries its own policy.
+	tick();
+	core.accessPolicies.assign(principal, project(f, 'journal'), {
+		scope: 'environment',
+		environmentId: core.environments.requireRow(project(f, 'journal'), 'staging').id,
+		policyId: policy.id,
+	});
+
+	// A deployed project in the trash: it keeps its pointer but serves nothing.
+	await create(f, 'retired', 'static', 'edge');
+	await deploySite(f, 'retired', 'Retired');
+	tick();
+	await core.projects.softDelete(principal, 'retired');
+
+	// The worker deploys again and its first deployment is marked failed (its release is kept, where
+	// a deleted deployment's release is collected): only the active deployment's release is shipped.
+	await deploy(f, 'queue', 'console.log("queue v2")');
+	f.sqlite.run(`UPDATE deployments SET status = 'failed' WHERE id = ?`, [firstQueueDeploy.id]);
+
+	// A second non-production environment with no policy of its own: its own access mode applies.
+	tick();
+	core.environments.create(principal, project(f, 'journal'), { name: 'QA', access: 'public' });
+	await deploySite(f, 'journal', 'QA', { environment: 'qa' });
+
+	// An app dialled on a port the platform reserves (the studio's), as an old row could be: unavailable.
+	await create(f, 'shop-reserved', 'container');
+	tick();
+	core.workloads.setSpec(principal, project(f, 'shop-reserved'), { runtime: 'container', image: 'ghcr.io/acme/shop:1', port: 3002 } as never);
+	await core.deployments.deployImage(principal, project(f, 'shop-reserved'), { image: 'ghcr.io/acme/shop:1', promote: true });
+	f.sqlite.run(`UPDATE workloads SET upstream = '127.0.0.1:8083' WHERE project_id = ?`, [project(f, 'shop-reserved').id]);
+
+	// Database tasks, one of each kind: a backup, a PITR base backup, a rotation and a named credential.
+	tick();
+	core.databases.createBackup(principal, 'main');
+	tick();
+	core.databases.create(principal, { name: 'pitr-db', version: '18', placement: f.node.solo!.id });
+	core.databases.setPitrPolicy(principal, 'pitr-db', { enabled: true });
+	tick();
+	core.databases.rotateCredentials(principal, 'main', { role: 'owner' });
+	tick();
+	core.databases.createCredential(principal, 'main', { role: 'app', purpose: 'web app' });
+
+	// Network shares: one mounting, one mounted and now unmounting.
+	tick();
+	core.shares.create(principal, { name: 'media-nfs', protocol: 'nfs', server: '10.0.0.5', exportPath: '/mnt/media' });
+	core.shares.mount(principal, 'media-nfs', { node: 'solo' });
+	tick();
+	core.shares.create(principal, { name: 'archive', protocol: 'nfs', server: '10.0.0.6', exportPath: '/mnt/archive' });
+	const archiveMount = core.shares.mount(principal, 'archive', { node: 'solo' }).mounts[0]!.id;
+	beat(f, 'solo', [], { shareMounts: [{ id: archiveMount, mounted: true, error: null }] });
+	tick();
+	core.shares.unmount(principal, 'archive', f.node.solo!.id);
 
 	const result = await states(f);
 	close(f);
@@ -487,6 +567,34 @@ async function edgeAndWorkers(): Promise<Record<string, unknown>> {
 	tick();
 	const moved = core.scheduling.move(principal, 'mover', { node: moverTo });
 	if (moved.mode !== 'surge') throw new Error(`expected a surge move, got ${moved.mode}`);
+
+	// A database moved from worker-a to worker-b: dumped, restored, and now purging the old copy.
+	tick();
+	const ledger = core.databases.create(principal, { name: 'ledger', placement: f.node['worker-a']!.id });
+	beat(f, 'worker-a', [{ id: ledger.id, status: 'running', restarts: 0 }]);
+	tick();
+	core.moves.moveDatabase(principal, 'ledger', { node: f.node['worker-b']!.id });
+	beat(f, 'worker-a', [{ id: ledger.id, status: 'running', restarts: 0 }]);
+	const moveRow = () =>
+		f.sqlite
+			.query<{ phase: string; backupId: string | null }, [string]>(
+				'SELECT phase, backup_id AS backupId FROM database_moves WHERE database_id = ? ORDER BY created_at DESC LIMIT 1',
+			)
+			.get(ledger.id)!;
+	const { backupId } = moveRow();
+	tick();
+	beat(f, 'worker-a', [], {
+		databaseBackupResults: [{ taskId: backupId!, action: 'backup', databaseId: ledger.id, backupId: null, status: 'ok', sizeBytes: 1234 }],
+	});
+	tick();
+	beat(f, 'worker-b', [], {
+		databaseBackupResults: [{ taskId: `restore:${ledger.id}`, action: 'restore', databaseId: ledger.id, backupId, status: 'ok' }],
+	});
+	if (moveRow().phase !== 'purging') throw new Error(`expected the ledger move to be purging, got ${moveRow().phase}`);
+
+	// A worker-placed site renamed: the redirect goes only to nodes that serve the project.
+	tick();
+	await core.projects.update(principal, 'docs', { slug: 'manual' });
 
 	const result = await states(f);
 	close(f);
