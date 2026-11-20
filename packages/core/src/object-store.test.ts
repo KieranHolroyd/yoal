@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -73,8 +74,14 @@ function fakeS3(options: { bucket?: string; headStatus?: number } = {}) {
 		}
 
 		if (request.method === 'PUT') {
-			objects.set(key, body ?? new Uint8Array());
-			return new Response(null, { status: 200 });
+			const data = body ?? new Uint8Array();
+			const existing = objects.get(key);
+			const ifMatch = request.headers.get('if-match');
+			const ifNoneMatch = request.headers.get('if-none-match');
+			if (ifNoneMatch === '*' && existing) return new Response(null, { status: 412 });
+			if (ifMatch !== null && (!existing || ifMatch !== etagOf(existing))) return new Response(null, { status: 412 });
+			objects.set(key, data);
+			return new Response(null, { status: 200, headers: { etag: etagOf(data), date: new Date().toUTCString() } });
 		}
 
 		if (request.method === 'DELETE') {
@@ -100,13 +107,19 @@ function fakeS3(options: { bucket?: string; headStatus?: number } = {}) {
 			}
 			const data = objects.get(key);
 			if (!data) return new Response('missing', { status: 404 });
-			return new Response(data, { headers: { 'content-length': String(data.byteLength) } });
+			return new Response(data, {
+				headers: { 'content-length': String(data.byteLength), etag: etagOf(data), date: new Date().toUTCString() },
+			});
 		}
 
 		return new Response(null, { status: 405 });
 	}) as typeof fetch;
 
 	return { fetchImpl, calls, objects };
+}
+
+function etagOf(data: Uint8Array): string {
+	return `"${createHash('sha256').update(data).digest('hex').slice(0, 32)}"`;
 }
 
 function escapeXml(value: string): string {
@@ -304,8 +317,9 @@ describe('S3ObjectStore', () => {
 		const fake = fakeS3();
 		const result = await s3(fake).testConnection();
 		expect(result.ok).toBe(true);
-		expect(result.checks).toEqual({ head: true, put: true, list: true, delete: true });
-		expect(fake.calls.map((call) => call.method)).toEqual(['HEAD', 'GET', 'PUT', 'GET', 'DELETE']);
+		expect(result.checks).toEqual({ head: true, put: true, list: true, delete: true, conditional: true });
+		expect(result.conditionalWrites).toBe('supported');
+		expect(new Set(fake.calls.map((call) => call.method))).toEqual(new Set(['HEAD', 'GET', 'PUT', 'DELETE']));
 	});
 
 	test('testConnection reports a clear failure on bad credentials', async () => {

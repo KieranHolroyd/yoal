@@ -3,6 +3,7 @@ import { backupTargets, databaseBackups, databases } from '@yoal/db';
 import {
 	backupTargetCreateSchema,
 	backupTargetUpdateSchema,
+	objectStoreCredentialsSchema,
 	objectStoreKindIssue,
 	objectStoreTargetSchema,
 	type BackupTargetCredentials,
@@ -10,12 +11,14 @@ import {
 	type BackupTargetTestResult,
 	type BackupTargetView,
 	type DatabaseBackupLocation,
+	type ObjectStoreCredentials,
 	type Principal,
 } from '@yoal/contracts';
 import { join } from 'node:path';
 import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
+import { createObjectStore } from './object-store-factory.ts';
 import { LocalObjectStore, S3ObjectStore, type ObjectStore } from './object-store.ts';
 import { newId, parseJson } from './util.ts';
 
@@ -63,11 +66,14 @@ export interface BackupTargetDeleteOptions {
 
 /** Location snapshot stored in `database_backups.location_json`. Never holds credentials. */
 export interface BackupLocationSnapshot {
-	kind: 'platform' | 'local' | 's3';
+	kind: 'platform' | 'local' | 's3' | 'azure' | 'gcs';
 	orgId?: string | null;
 	path?: string | null;
 	endpoint?: string | null;
+	/** S3 or GCS bucket; for Azure, the container. */
 	bucket?: string | null;
+	/** Azure storage account (the location URI names it). */
+	account?: string | null;
 	region?: string | null;
 	pathPrefix?: string | null;
 }
@@ -137,14 +143,13 @@ export class BackupTargetService {
 	create(principal: Principal, raw: unknown, options: BackupTargetCreateOptions = {}): BackupTargetMutationResult {
 		this.requireMutationsEnabled();
 		const parsed = backupTargetCreateSchema.parse(raw);
-		// HA-PLAN W3: Azure and GCS are refused while their flag is off; lane E builds them.
+		// HA-PLAN W3: Azure and GCS are opt-in; a target is refused while its flag is off.
 		if (parsed.kind === 'azure' || parsed.kind === 'gcs') {
 			const refused = objectStoreKindIssue(parsed.kind, {
 				OBJECT_STORE_AZURE: featureEnabled(this.ctx.config, 'OBJECT_STORE_AZURE'),
 				OBJECT_STORE_GCS: featureEnabled(this.ctx.config, 'OBJECT_STORE_GCS'),
 			});
 			if (refused) throw new ValidationError(refused);
-			throw new CoreError('not_implemented', `not implemented (HA Wave 1 lane E): ${parsed.kind} backup targets`, 501);
 		}
 		const input = parsed;
 		const platform = options.platform === true;
@@ -180,27 +185,62 @@ export class BackupTargetService {
 						createdAt: now,
 						updatedAt: now,
 					}
-				: {
-						id,
-						orgId,
-						name: input.name,
-						kind: 's3' as const,
-						// 0120 (HA-PLAN W3): which object store; existing rows were backfilled the same way.
-						storeKind: 's3' as const,
-						path: null,
-						endpoint: input.endpoint ?? null,
-						bucket: input.bucket,
-						region: input.region,
-						pathPrefix: input.pathPrefix,
-						forcePathStyle: input.forcePathStyle,
-						accessKeySealed: this.seal(orgId, input.accessKeyId),
-						secretSealed: this.seal(orgId, input.secretAccessKey),
-						writeOnly: input.writeOnly,
-						objectLock: input.objectLock,
-						status: 'pending' as const,
-						createdAt: now,
-						updatedAt: now,
-					};
+				: input.kind === 'azure' || input.kind === 'gcs'
+					? {
+							id,
+							orgId,
+							name: input.name,
+							// 0120 (HA-PLAN W3): kind stays 's3' ("an object store"); store_kind says which.
+							kind: 's3' as const,
+							storeKind: input.kind,
+							path: null,
+							// Null so a control plane from before 0120 fails closed instead of signing S3 requests.
+							endpoint: null,
+							bucket: null,
+							region: null,
+							pathPrefix: input.pathPrefix,
+							forcePathStyle: true,
+							accessKeySealed: null,
+							secretSealed: this.seal(
+								orgId,
+								JSON.stringify(
+									input.kind === 'azure'
+										? { kind: 'azure', ...(input.accountKey ? { accountKey: input.accountKey } : { sasToken: input.sasToken }) }
+										: { kind: 'gcs', serviceAccountJson: input.serviceAccountJson },
+								),
+							),
+							storeOptionsJson: JSON.stringify(
+								input.kind === 'azure'
+									? { account: input.account, container: input.container, endpoint: input.endpoint ?? null }
+									: { bucket: input.bucket, endpoint: input.endpoint ?? null },
+							),
+							writeOnly: input.writeOnly,
+							objectLock: input.immutable,
+							status: 'pending' as const,
+							createdAt: now,
+							updatedAt: now,
+						}
+					: {
+							id,
+							orgId,
+							name: input.name,
+							kind: 's3' as const,
+							// 0120 (HA-PLAN W3): which object store; existing rows were backfilled the same way.
+							storeKind: 's3' as const,
+							path: null,
+							endpoint: input.endpoint ?? null,
+							bucket: input.bucket,
+							region: input.region,
+							pathPrefix: input.pathPrefix,
+							forcePathStyle: input.forcePathStyle,
+							accessKeySealed: this.seal(orgId, input.accessKeyId),
+							secretSealed: this.seal(orgId, input.secretAccessKey),
+							writeOnly: input.writeOnly,
+							objectLock: input.objectLock,
+							status: 'pending' as const,
+							createdAt: now,
+							updatedAt: now,
+						};
 		this.ctx.db.insert(backupTargets).values(values).run();
 		const view = this.toView(this.requireRow(id));
 		const reconnected = this.reconnectOrphans(view);
@@ -213,10 +253,10 @@ export class BackupTargetService {
 				name: input.name,
 				kind: input.kind,
 				platform,
-				endpoint: input.kind === 's3' ? (input.endpoint ?? null) : null,
-				bucket: input.kind === 's3' ? input.bucket : null,
+				endpoint: input.kind === 'local' ? null : (input.endpoint ?? null),
+				bucket: input.kind === 's3' ? input.bucket : input.kind === 'gcs' ? input.bucket : input.kind === 'azure' ? input.container : null,
 				writeOnly: input.writeOnly,
-				objectLock: input.kind === 's3' ? input.objectLock : false,
+				objectLock: input.kind === 's3' ? input.objectLock : input.kind === 'local' ? false : input.immutable,
 				reconnectedBackups: reconnected,
 			},
 			result: 'ok',
@@ -243,10 +283,25 @@ export class BackupTargetService {
 				input.secretAccessKey !== undefined
 			)
 				throw new ValidationError('A local target only has a name, path and write-only setting.');
+		} else if (row.storeKind === 'azure' || row.storeKind === 'gcs') {
+			if (
+				input.path !== undefined ||
+				input.endpoint !== undefined ||
+				input.bucket !== undefined ||
+				input.region !== undefined ||
+				input.pathPrefix !== undefined ||
+				input.forcePathStyle !== undefined ||
+				input.objectLock !== undefined ||
+				input.accessKeyId !== undefined ||
+				input.secretAccessKey !== undefined
+			)
+				throw new ValidationError(
+					`A ${row.storeKind} target only has a name and write-only setting. Create a new target to change its location or credentials.`,
+				);
 		} else if (input.path !== undefined) {
 			throw new ValidationError('An S3 target has no local path.');
 		}
-		if ((input.accessKeyId === undefined) !== (input.secretAccessKey === undefined))
+		if (row.storeKind !== 'azure' && row.storeKind !== 'gcs' && (input.accessKeyId === undefined) !== (input.secretAccessKey === undefined))
 			throw new ValidationError('Supply both accessKeyId and secretAccessKey to rotate credentials.');
 		const moved = (['path', 'endpoint', 'bucket', 'pathPrefix'] as const).filter(
 			(field) => input[field] !== undefined && (input[field] ?? null) !== (row[field] ?? null),
@@ -426,9 +481,15 @@ export class BackupTargetService {
 				`/api/backup-targets/${encodeURIComponent(target.id)}/objects/`,
 			);
 		}
-		if (target.kind === 'azure' || target.kind === 'gcs')
-			throw new CoreError('not_implemented', `not implemented (HA Wave 1 lane E): ${target.kind} backup targets`, 501);
 		const row = this.ctx.db.select().from(backupTargets).where(eq(backupTargets.id, target.id)).get();
+		if (target.kind === 'azure' || target.kind === 'gcs') {
+			if (!row?.secretSealed) throw new ValidationError(`This ${target.kind} backup target has no stored credentials.`);
+			if (!target.store) throw new ValidationError(`This ${target.kind} backup target has no stored location.`);
+			const credentials = parseStoredCredentials(this.open(row.orgId, row.secretSealed));
+			if (credentials.kind !== target.kind)
+				throw new ValidationError(`This ${target.kind} backup target has credentials for ${credentials.kind}.`);
+			return createObjectStore(target.store, credentials, { fetch: this.ctx.config.storageFetch });
+		}
 		if (!row?.accessKeySealed || !row.secretSealed)
 			throw new ValidationError('This S3 backup target has no stored credentials.');
 		if (!target.bucket) throw new ValidationError('An S3 backup target needs a bucket.');
@@ -488,16 +549,7 @@ export class BackupTargetService {
 			return { available: true, store: this.ctx.objectStore, target: null, writeOnly: false, location: recorded.location };
 		const live = this.toView(recorded.row);
 		const snapshot = recorded.snapshot;
-		const target: BackupTargetView =
-			snapshot && snapshot.kind === live.kind
-				? {
-						...live,
-						path: snapshot.path ?? live.path,
-						endpoint: snapshot.endpoint !== undefined ? snapshot.endpoint : live.endpoint,
-						bucket: snapshot.bucket ?? live.bucket,
-						pathPrefix: snapshot.pathPrefix ?? live.pathPrefix,
-					}
-				: live;
+		const target: BackupTargetView = snapshot && snapshot.kind === live.kind ? targetWithSnapshot(live, snapshot) : live;
 		return { available: true, store: this.objectStore(target), target: live, writeOnly: live.writeOnly, location: recorded.location };
 	}
 
@@ -654,7 +706,7 @@ export class BackupTargetService {
 			message += ' Warning: the key can delete objects, so it is not actually write-only.';
 		if (target.writeOnly && ok && target.kind === 'local')
 			message += ' Warning: a local directory cannot enforce write-only; use filesystem permissions.';
-		if (target.objectLock && raw.objectLock === false && target.kind === 's3')
+		if (target.objectLock && raw.objectLock === false)
 			message += ' Warning: object lock is recorded on the target but the bucket does not report it.';
 		return {
 			ok,
@@ -798,23 +850,64 @@ function countLabel(count: number, noun: string): string {
 }
 
 function snapshotOf(target: BackupTargetView): BackupLocationSnapshot {
-	if (target.kind === 'azure' || target.kind === 'gcs')
-		throw new CoreError('not_implemented', `not implemented (HA Wave 1 lane E): ${target.kind} backup locations`, 501);
+	const store = target.store;
 	return {
 		kind: target.kind,
 		orgId: target.orgId,
 		path: target.path,
-		endpoint: target.endpoint,
-		bucket: target.bucket,
+		endpoint: target.kind === 'azure' || target.kind === 'gcs' ? (store?.endpoint ?? null) : target.endpoint,
+		bucket: target.kind === 'azure' ? store?.kind === 'azure' ? store.container : null : target.kind === 'gcs' && store?.kind === 'gcs' ? store.bucket : target.bucket,
+		account: store?.kind === 'azure' ? store.account : null,
 		region: target.region,
-		pathPrefix: target.pathPrefix,
+		pathPrefix: target.kind === 'azure' || target.kind === 'gcs' ? (store?.pathPrefix ?? '') : target.pathPrefix,
 	};
+}
+
+/**
+ * The live view with the recorded location laid over it. Credentials and write-only stay live (the
+ * row is the only place they exist); the Azure/GCS `store` follows the snapshot so a target whose
+ * endpoint changed does not move a backup.
+ */
+function targetWithSnapshot(live: BackupTargetView, snapshot: BackupLocationSnapshot): BackupTargetView {
+	const target: BackupTargetView = {
+		...live,
+		path: snapshot.path ?? live.path,
+		endpoint: snapshot.endpoint !== undefined ? snapshot.endpoint : live.endpoint,
+		bucket: snapshot.bucket ?? live.bucket,
+		pathPrefix: snapshot.pathPrefix ?? live.pathPrefix,
+	};
+	if (live.store?.kind === 'azure' && snapshot.kind === 'azure')
+		return {
+			...target,
+			store: {
+				...live.store,
+				account: snapshot.account ?? live.store.account,
+				container: snapshot.bucket ?? live.store.container,
+				endpoint: snapshot.endpoint !== undefined ? snapshot.endpoint : live.store.endpoint,
+				pathPrefix: snapshot.pathPrefix ?? live.store.pathPrefix,
+			},
+		};
+	if (live.store?.kind === 'gcs' && snapshot.kind === 'gcs')
+		return {
+			...target,
+			store: {
+				...live.store,
+				bucket: snapshot.bucket ?? live.store.bucket,
+				endpoint: snapshot.endpoint !== undefined ? snapshot.endpoint : live.store.endpoint,
+				pathPrefix: snapshot.pathPrefix ?? live.store.pathPrefix,
+			},
+		};
+	return target;
 }
 
 /** What makes two locations the same place: kind, directory or endpoint+bucket, and prefix. */
 function locationIdentity(snapshot: BackupLocationSnapshot): string {
 	const prefix = (snapshot.pathPrefix ?? '').replace(/^\/+|\/+$/g, '');
 	if (snapshot.kind === 'local') return `local|${(snapshot.path ?? '').replace(/\/+$/, '')}|${prefix}`;
+	if (snapshot.kind === 'azure')
+		return `azure|${snapshot.account ?? ''}|${snapshot.bucket ?? ''}|${(snapshot.endpoint ?? '').replace(/\/+$/, '')}|${prefix}`;
+	if (snapshot.kind === 'gcs')
+		return `gcs|${(snapshot.endpoint ?? 'https://storage.googleapis.com').replace(/\/+$/, '')}|${snapshot.bucket ?? ''}|${prefix}`;
 	if (snapshot.kind === 's3')
 		return `s3|${(snapshot.endpoint ?? `aws:${snapshot.region ?? 'us-east-1'}`).replace(/\/+$/, '')}|${snapshot.bucket ?? ''}|${prefix}`;
 	return 'platform';
@@ -829,7 +922,25 @@ export function locationUri(snapshot: BackupLocationSnapshot, key: string, platf
 		const where = snapshot.endpoint ?? `AWS ${snapshot.region ?? 'us-east-1'}`;
 		return `s3://${snapshot.bucket ?? '?'}/${keyed} (${where})`;
 	}
+	if (snapshot.kind === 'azure') {
+		const where = snapshot.endpoint ?? 'Azure Blob Storage';
+		return `azure://${snapshot.account ?? '?'}/${snapshot.bucket ?? '?'}/${keyed} (${where})`;
+	}
+	if (snapshot.kind === 'gcs') {
+		const where = snapshot.endpoint ?? 'Google Cloud Storage';
+		return `gs://${snapshot.bucket ?? '?'}/${keyed} (${where})`;
+	}
 	return `${PLATFORM_STORE_NAME} (${platformKind}): ${key}`;
+}
+
+function parseStoredCredentials(secret: string): ObjectStoreCredentials {
+	let raw: unknown;
+	try {
+		raw = JSON.parse(secret);
+	} catch {
+		throw new ValidationError('This backup target has an unreadable stored credential.');
+	}
+	return objectStoreCredentialsSchema.parse(raw);
 }
 
 function errorMessage(error: unknown): string {

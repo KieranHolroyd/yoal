@@ -6,6 +6,13 @@ import { dirname, join, normalize, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { hmac, randomToken, safeEqual } from './util.ts';
+import { runConnectionProbe, type ConditionalWriteSupport } from './object-store/probe.ts';
+import {
+	objectStoreTimeout,
+	stallGuardedDownload,
+	stallGuardedUpload,
+	withDeadline,
+} from './object-store/timeouts.ts';
 
 /**
  * Artifact storage (DESIGN §10, D25). S3-compatible endpoints (R2, MinIO, RustFS, Garage) are
@@ -33,6 +40,8 @@ export interface ObjectStoreTestChecks {
 	put: boolean;
 	list: boolean;
 	delete: boolean;
+	/** The active conditional-write probe passed (absent when it was not run). */
+	conditional?: boolean;
 }
 
 export interface ObjectStoreTestResult {
@@ -45,6 +54,14 @@ export interface ObjectStoreTestResult {
 	versioning?: boolean | null;
 	/** Bucket object-lock, when the backend can report it. Null means unknown/unsupported. */
 	objectLock?: boolean | null;
+	/**
+	 * The active conditional-write probe (`probeConditionalWrites`): what the HA arbiter needs.
+	 * Absent for stores that cannot be probed (local). It never decides `ok`: a backup target does
+	 * not need compare-and-swap.
+	 */
+	conditionalWrites?: ConditionalWriteSupport;
+	/** Why the probe did not report `supported`. */
+	conditionalDetail?: string;
 }
 
 export interface ObjectStore {
@@ -77,8 +94,13 @@ export interface ObjectStore {
 }
 
 /**
- * A read that carries what a compare-and-swap needs: the ETag and the store's own clock (the
- * `Date` header), which the HA lease trusts instead of the local wall clock (CLUSTERING §6.3).
+ * A read that carries what a compare-and-swap needs: the object's version and the store's own
+ * clock (the `Date` header), which the HA lease trusts instead of the local wall clock
+ * (CLUSTERING §6.3).
+ *
+ * `etag` is an opaque version token: the strong ETag for `s3` and `azure`, the object generation
+ * for `gcs`. A backend returns null rather than a token it cannot compare exactly (a weak `W/`
+ * ETag), so a caller fails closed instead of looping on a `If-Match` that never matches.
  */
 export interface VersionedRead {
 	status: number;
@@ -93,7 +115,10 @@ export interface VersionedRead {
 export type WriteCondition = { ifMatch: string } | { ifNoneMatch: '*' };
 
 export interface ConditionalWrite {
-	/** 200 won; 409/412 lost the race; 501 means the store has no conditional PUT. */
+	/**
+	 * 200 won (every backend maps its own success code, such as Azure's 201, to 200); 409/412 lost
+	 * the race; 501 means the store has no conditional PUT.
+	 */
 	status: number;
 	etag: string | null;
 	serverDate: number | null;
@@ -357,6 +382,11 @@ export interface S3Options {
 	accessKeyId: string;
 	secretAccessKey: string;
 	sessionToken?: string;
+	/**
+	 * Per-request timeout (ms). A buffered call must finish inside it; a streamed body is aborted
+	 * when the store makes no progress for this long (`object-store/timeouts.ts`). Default 15 s.
+	 */
+	timeoutMs?: number;
 	/** Test seam; production uses the global fetch. */
 	fetch?: typeof fetch;
 }
@@ -371,14 +401,27 @@ export interface R2Options {
 	endpoint?: string;
 	region?: string;
 	forcePathStyle?: boolean;
+	timeoutMs?: number;
 	fetch?: typeof fetch;
 }
 
 type StreamingRequestInit = RequestInit & { duplex?: 'half' };
 
 /**
+ * A strong validator, or null. A weak ETag (`W/"…"`) is never usable with `If-Match`: R2 answers a
+ * gzip-encoded GET with one, and an `If-Match` on it never matches (Wave 0 S3), so a caller holding
+ * it would lose every compare-and-swap forever. Returning null makes the caller fail closed.
+ */
+export function strongEtag(value: string | null): string | null {
+	if (!value) return null;
+	const trimmed = value.trim();
+	return trimmed && !/^w\//i.test(trimmed) ? trimmed : null;
+}
+
+/**
  * S3-compatible object store. Speaks the same ListObjectsV2 and presign dialects as R2, MinIO,
  * RustFS and Garage. Upload/download bodies stay streams; no arrayBuffer on the streaming paths.
+ * Every request has a timeout (`timeoutMs`).
  */
 export class S3ObjectStore implements ObjectStore, ConditionalStore {
 	readonly kind = 's3' as const;
@@ -388,6 +431,7 @@ export class S3ObjectStore implements ObjectStore, ConditionalStore {
 	private readonly forcePathStyle: boolean;
 	private readonly fetchImpl: typeof fetch;
 	private readonly prefix: string;
+	private readonly timeoutMs: number;
 
 	constructor(options: S3Options) {
 		this.endpoint = options.endpoint.replace(/\/+$/, '');
@@ -395,6 +439,7 @@ export class S3ObjectStore implements ObjectStore, ConditionalStore {
 		this.forcePathStyle = options.forcePathStyle ?? true;
 		this.prefix = (options.prefix ?? '').replace(/^\/+|\/+$/g, '');
 		this.fetchImpl = options.fetch ?? fetch;
+		this.timeoutMs = objectStoreTimeout(options.timeoutMs);
 		this.client = new AwsClient({
 			accessKeyId: options.accessKeyId,
 			secretAccessKey: options.secretAccessKey,
@@ -435,9 +480,19 @@ export class S3ObjectStore implements ObjectStore, ConditionalStore {
 	}
 
 	/** Sign and dispatch. `sign` is used instead of `AwsClient.fetch` so requests are not retried after a body stream was consumed. */
-	private async send(url: URL, init: StreamingRequestInit = {}): Promise<Response> {
+	private async send(url: URL, init: StreamingRequestInit = {}, signal?: AbortSignal): Promise<Response> {
 		const request = await this.client.sign(url.toString(), init);
-		return this.fetchImpl(request);
+		return signal ? this.fetchImpl(request, { signal }) : this.fetchImpl(request);
+	}
+
+	/** A buffered request: `read` consumes the response inside the same deadline. */
+	private request<T>(
+		operation: string,
+		url: URL,
+		init: StreamingRequestInit,
+		read: (response: Response) => Promise<T>,
+	): Promise<T> {
+		return withDeadline(`S3 ${operation}`, this.timeoutMs, async (signal) => read(await this.send(url, init, signal)));
 	}
 
 	async put(key: string, data: Uint8Array, contentType?: string): Promise<void> {
@@ -445,17 +500,21 @@ export class S3ObjectStore implements ObjectStore, ConditionalStore {
 	}
 
 	async putStream(key: string, body: ObjectStoreBody, contentType?: string, size?: number): Promise<void> {
+		// S3 refuses a PUT without Content-Length (411 on MinIO and AWS), so an upload of unknown
+		// size goes through multipart, unless it turns out to fit in one part.
+		if (size === undefined) return this.putUnknownSize(key, body, contentType);
 		const headers: Record<string, string> = {};
 		if (contentType) headers['content-type'] = contentType;
-		if (size !== undefined) headers['content-length'] = String(size);
+		headers['content-length'] = String(size);
 		const stream = bodyToReadableStream(body);
 		try {
-			const response = await this.send(this.url(key), {
-				method: 'PUT',
-				body: stream as unknown as RequestInit['body'],
-				headers,
-				duplex: 'half',
-			});
+			const response = await stallGuardedUpload(`S3 PUT ${key}`, this.timeoutMs, stream, (guarded, signal) =>
+				this.send(
+					this.url(key),
+					{ method: 'PUT', body: guarded as unknown as RequestInit['body'], headers, duplex: 'half' },
+					signal,
+				),
+			);
 			if (!response.ok)
 				throw new Error(`S3 PUT ${key} failed: ${response.status} ${await response.text().catch(() => '')}`.trim());
 		} catch (error) {
@@ -466,38 +525,131 @@ export class S3ObjectStore implements ObjectStore, ConditionalStore {
 		}
 	}
 
+	/**
+	 * A stream of unknown length: one buffered PUT when it fits in a part, otherwise a multipart
+	 * upload of `S3_MULTIPART_PART_BYTES` parts (at most one part in memory). Each part is a
+	 * buffered request with the normal deadline; a failure aborts the upload so no parts linger.
+	 */
+	private async putUnknownSize(key: string, body: ObjectStoreBody, contentType?: string): Promise<void> {
+		const parts = chunkedParts(bodyToAsyncIterable(body), S3_MULTIPART_PART_BYTES);
+		const first = await parts.next();
+		const firstPart = first.done ? new Uint8Array(0) : first.value;
+		const second = first.done ? first : await parts.next();
+		if (second.done) {
+			await this.putBuffered(key, firstPart, contentType);
+			return;
+		}
+		const url = this.url(key);
+		url.searchParams.set('uploads', '');
+		const uploadId = await this.request(`CreateMultipartUpload ${key}`, url, {
+			method: 'POST',
+			headers: contentType ? { 'content-type': contentType } : {},
+		}, async (response) => {
+			const text = await response.text();
+			if (!response.ok) throw new Error(`S3 PUT ${key} failed: ${response.status} ${text}`.trim());
+			const id = xmlTag(text, 'UploadId');
+			if (!id) throw new Error(`S3 PUT ${key} failed: no UploadId in CreateMultipartUpload`);
+			return unescapeXml(id);
+		});
+		const etags: string[] = [];
+		try {
+			const upload = async (data: Uint8Array) => {
+				const number = etags.length + 1;
+				const partUrl = this.url(key);
+				partUrl.searchParams.set('partNumber', String(number));
+				partUrl.searchParams.set('uploadId', uploadId);
+				etags.push(
+					await this.request(`UploadPart ${key} #${number}`, partUrl, {
+						method: 'PUT',
+						body: data as unknown as RequestInit['body'],
+						headers: { 'content-length': String(data.byteLength) },
+					}, async (response) => {
+						const text = await response.text().catch(() => '');
+						const etag = response.headers.get('etag');
+						if (!response.ok || !etag) throw new Error(`S3 PUT ${key} part ${number} failed: ${response.status} ${text}`.trim());
+						return etag;
+					}),
+				);
+			};
+			await upload(firstPart);
+			await upload(second.value);
+			for (let next = await parts.next(); !next.done; next = await parts.next()) await upload(next.value);
+			const completeUrl = this.url(key);
+			completeUrl.searchParams.set('uploadId', uploadId);
+			const xml = `<CompleteMultipartUpload>${etags
+				.map((etag, index) => `<Part><PartNumber>${index + 1}</PartNumber><ETag>${escapeXml(etag)}</ETag></Part>`)
+				.join('')}</CompleteMultipartUpload>`;
+			const data = new TextEncoder().encode(xml);
+			await this.request(`CompleteMultipartUpload ${key}`, completeUrl, {
+				method: 'POST',
+				body: data,
+				headers: { 'content-type': 'application/xml', 'content-length': String(data.byteLength) },
+			}, async (response) => {
+				const text = await response.text();
+				// S3 can answer 200 and put the error in the body.
+				if (!response.ok || /<Error>/.test(text)) throw new Error(`S3 PUT ${key} failed to complete: ${response.status} ${text}`.trim());
+			});
+		} catch (error) {
+			const abortUrl = this.url(key);
+			abortUrl.searchParams.set('uploadId', uploadId);
+			await this.request(`AbortMultipartUpload ${key}`, abortUrl, { method: 'DELETE' }, async (response) => {
+				await response.body?.cancel().catch(() => undefined);
+			}).catch(() => undefined);
+			await parts.return?.(undefined);
+			throw error;
+		}
+	}
+
+	private async putBuffered(key: string, data: Uint8Array, contentType?: string): Promise<void> {
+		const headers: Record<string, string> = { 'content-length': String(data.byteLength) };
+		if (contentType) headers['content-type'] = contentType;
+		await this.request(`PUT ${key}`, this.url(key), { method: 'PUT', body: data as unknown as RequestInit['body'], headers }, async (response) => {
+			if (!response.ok)
+				throw new Error(`S3 PUT ${key} failed: ${response.status} ${await response.text().catch(() => '')}`.trim());
+			await response.body?.cancel().catch(() => undefined);
+		});
+	}
+
 	async get(key: string): Promise<Uint8Array> {
-		const response = await this.send(this.url(key));
-		if (!response.ok) throw new Error(`S3 GET ${key} failed: ${response.status}`);
-		return new Uint8Array(await response.arrayBuffer());
+		return this.request(`GET ${key}`, this.url(key), {}, async (response) => {
+			if (!response.ok) {
+				await response.body?.cancel().catch(() => undefined);
+				throw new Error(`S3 GET ${key} failed: ${response.status}`);
+			}
+			return new Uint8Array(await response.arrayBuffer());
+		});
 	}
 
 	async getStream(key: string): Promise<ObjectStoreStream> {
-		const response = await this.send(this.url(key));
-		if (!response.ok) throw new Error(`S3 GET ${key} failed: ${response.status}`);
+		const response = await stallGuardedDownload(`S3 GET ${key}`, this.timeoutMs, (signal) => this.send(this.url(key), {}, signal));
+		if (!response.ok) {
+			await response.body?.cancel().catch(() => undefined);
+			throw new Error(`S3 GET ${key} failed: ${response.status}`);
+		}
 		const length = Number(response.headers.get('content-length'));
 		return {
 			body: response.body ?? emptyStream(),
-			size: response.body && Number.isFinite(length) ? length : null,
+			size: response.body && response.headers.get('content-length') !== null && Number.isFinite(length) ? length : null,
 		};
 	}
 
 	async delete(key: string): Promise<void> {
-		const response = await this.send(this.url(key), { method: 'DELETE' });
-		if (!response.ok && response.status !== 404)
-			throw new Error(`S3 DELETE ${key} failed: ${response.status}`);
+		await this.request(`DELETE ${key}`, this.url(key), { method: 'DELETE' }, async (response) => {
+			await response.body?.cancel().catch(() => undefined);
+			if (!response.ok && response.status !== 404) throw new Error(`S3 DELETE ${key} failed: ${response.status}`);
+		});
 	}
 
 	async exists(key: string): Promise<boolean> {
-		const response = await this.send(this.url(key), { method: 'HEAD' });
-		return response.ok;
+		return this.request(`HEAD ${key}`, this.url(key), { method: 'HEAD' }, async (response) => response.ok);
 	}
 
 	async size(key: string): Promise<number | null> {
-		const response = await this.send(this.url(key), { method: 'HEAD' });
-		if (!response.ok) return null;
-		const length = Number(response.headers.get('content-length'));
-		return Number.isFinite(length) ? length : null;
+		return this.request(`HEAD ${key}`, this.url(key), { method: 'HEAD' }, async (response) => {
+			if (!response.ok) return null;
+			const length = Number(response.headers.get('content-length'));
+			return Number.isFinite(length) ? length : null;
+		});
 	}
 
 	async *list(prefix: string): AsyncIterable<StoredObject> {
@@ -509,9 +661,10 @@ export class S3ObjectStore implements ObjectStore, ConditionalStore {
 			url.searchParams.set('prefix', searchPrefix);
 			url.searchParams.set('max-keys', '1000');
 			if (token) url.searchParams.set('continuation-token', token);
-			const response = await this.send(url);
-			if (!response.ok) throw new Error(`S3 LIST ${prefix} failed: ${response.status} ${await response.text()}`);
-			const page = parseListObjects(await response.text());
+			const page = await this.request(`LIST ${prefix}`, url, {}, async (response) => {
+				if (!response.ok) throw new Error(`S3 LIST ${prefix} failed: ${response.status} ${await response.text()}`);
+				return parseListObjects(await response.text());
+			});
 			if (this.prefix) {
 				for (const object of page.objects)
 					yield {
@@ -525,14 +678,25 @@ export class S3ObjectStore implements ObjectStore, ConditionalStore {
 		} while (token);
 	}
 
+	/**
+	 * `Accept-Encoding: identity` so the store never compresses the body: a compressed response
+	 * carries a weak ETag (R2), which no `If-Match` will ever match (Wave 0 S3). A weak ETag that
+	 * arrives anyway is returned as null.
+	 */
 	async readVersioned(key: string): Promise<VersionedRead> {
-		const response = await this.send(this.url(key), { headers: { 'cache-control': 'no-cache' } });
-		const serverDate = parseHttpDate(response.headers.get('date'));
-		if (!response.ok) {
-			await response.body?.cancel().catch(() => undefined);
-			return { status: response.status, body: null, etag: null, serverDate };
-		}
-		return { status: 200, body: await response.text(), etag: response.headers.get('etag'), serverDate };
+		return this.request(
+			`GET ${key}`,
+			this.url(key),
+			{ headers: { 'cache-control': 'no-cache', 'accept-encoding': 'identity' } },
+			async (response) => {
+				const serverDate = parseHttpDate(response.headers.get('date'));
+				if (!response.ok) {
+					await response.body?.cancel().catch(() => undefined);
+					return { status: response.status, body: null, etag: null, serverDate };
+				}
+				return { status: 200, body: await response.text(), etag: strongEtag(response.headers.get('etag')), serverDate };
+			},
+		);
 	}
 
 	async writeConditional(key: string, body: string, condition: WriteCondition): Promise<ConditionalWrite> {
@@ -542,13 +706,14 @@ export class S3ObjectStore implements ObjectStore, ConditionalStore {
 			'content-length': String(data.byteLength),
 			...('ifMatch' in condition ? { 'if-match': condition.ifMatch } : { 'if-none-match': condition.ifNoneMatch }),
 		};
-		const response = await this.send(this.url(key), { method: 'PUT', body: data, headers });
-		await response.body?.cancel().catch(() => undefined);
-		return {
-			status: response.status,
-			etag: response.ok ? response.headers.get('etag') : null,
-			serverDate: parseHttpDate(response.headers.get('date')),
-		};
+		return this.request(`PUT ${key}`, this.url(key), { method: 'PUT', body: data, headers }, async (response) => {
+			await response.body?.cancel().catch(() => undefined);
+			return {
+				status: response.status,
+				etag: response.ok ? strongEtag(response.headers.get('etag')) : null,
+				serverDate: parseHttpDate(response.headers.get('date')),
+			};
+		});
 	}
 
 	private async presign(method: 'GET' | 'PUT', key: string, ttlSeconds: number): Promise<string> {
@@ -568,50 +733,47 @@ export class S3ObjectStore implements ObjectStore, ConditionalStore {
 		return this.presign('GET', key, ttlSeconds);
 	}
 
-	async testConnection(): Promise<ObjectStoreTestResult> {
-		const started = Date.now();
-		const checks: ObjectStoreTestChecks = { head: false, put: false, list: false, delete: false };
-		const key = `yoal/healthcheck/${randomUUID()}.txt`;
-		let versioning: boolean | null = null;
-		let objectLock: boolean | null = null;
-		try {
-			const head = await this.send(this.bucketUrl(), { method: 'HEAD' });
-			if (!head.ok) throw new Error(`S3 HEAD bucket ${this.bucket} failed: ${head.status}`);
-			checks.head = true;
-			const lock = head.headers.get('x-amz-bucket-object-lock-enabled');
-			if (lock !== null) objectLock = lock === 'true';
-			try {
-				const url = this.bucketUrl();
-				url.searchParams.set('versioning', '');
-				const response = await this.send(url);
-				if (response.ok) versioning = /<Status>\s*Enabled\s*<\/Status>/i.test(await response.text());
-			} catch {
-				// Versioning is a nice-to-have; a key without GetBucketVersioning still backs up.
-			}
-			const data = new TextEncoder().encode(`yoal connection test ${new Date().toISOString()}\n`);
-			await this.putStream(key, bytesAsStream(data), 'text/plain', data.byteLength);
-			checks.put = true;
-			for await (const object of this.list('yoal/healthcheck/')) {
-				if (object.key === key) {
-					checks.list = true;
-					break;
+	/**
+	 * Bucket HEAD (with object lock and versioning when the store reports them), put, list and
+	 * delete, then the active conditional-write probe (`probeConditionalWrites`).
+	 */
+	async testConnection(options: { skipConditional?: boolean } = {}): Promise<ObjectStoreTestResult> {
+		return runConnectionProbe({
+			kind: this.kind,
+			store: this,
+			skipConditional: options.skipConditional,
+			head: async () => {
+				const head = await this.request(`HEAD bucket ${this.bucket}`, this.bucketUrl(), { method: 'HEAD' }, async (response) => response);
+				if (!head.ok) throw new Error(`S3 HEAD bucket ${this.bucket} failed: ${head.status}`);
+				const lock = head.headers.get('x-amz-bucket-object-lock-enabled');
+				let objectLock: boolean | null = lock === null ? null : lock === 'true';
+				let versioning: boolean | null = null;
+				try {
+					const url = this.bucketUrl();
+					url.searchParams.set('versioning', '');
+					versioning = await this.request('GET bucket versioning', url, {}, async (response) =>
+						response.ok ? /<Status>\s*Enabled\s*<\/Status>/i.test(await response.text()) : null,
+					);
+				} catch {
+					// Versioning is a nice-to-have; a key without GetBucketVersioning still backs up.
 				}
-			}
-			await this.delete(key);
-			checks.delete = true;
-			return { ok: true, kind: this.kind, latencyMs: Date.now() - started, checks, versioning, objectLock };
-		} catch (error) {
-			await this.delete(key).catch(() => undefined);
-			return {
-				ok: false,
-				kind: this.kind,
-				latencyMs: Date.now() - started,
-				checks,
-				error: errorMessage(error),
-				versioning,
-				objectLock,
-			};
-		}
+				if (objectLock === null) {
+					try {
+						const url = this.bucketUrl();
+						url.searchParams.set('object-lock', '');
+						objectLock = await this.request('GET bucket object-lock', url, {}, async (response) => {
+							if (response.ok) return /<ObjectLockEnabled>\s*Enabled\s*<\/ObjectLockEnabled>/i.test(await response.text());
+							const text = await response.text().catch(() => '');
+							// AWS and MinIO answer 404 ObjectLockConfigurationNotFoundError on a bucket without it.
+							return response.status === 404 && /ObjectLockConfigurationNotFound/i.test(text) ? false : null;
+						});
+					} catch {
+						// Same: object lock is reported when the key may read it.
+					}
+				}
+				return { versioning, objectLock };
+			},
+		});
 	}
 }
 
@@ -626,6 +788,34 @@ export class R2ObjectStore extends S3ObjectStore {
 			forcePathStyle: options.forcePathStyle ?? true,
 		});
 	}
+}
+
+/** Part size for S3 multipart uploads of unknown length (S3 needs at least 5 MiB but the last). */
+export const S3_MULTIPART_PART_BYTES = 8 * 1024 * 1024;
+
+/** Re-chunk a byte stream into parts of exactly `size` bytes (the last may be shorter). */
+export async function* chunkedParts(source: AsyncIterable<Uint8Array>, size: number): AsyncGenerator<Uint8Array> {
+	let buffer = new Uint8Array(size);
+	let filled = 0;
+	for await (const chunk of source) {
+		let offset = 0;
+		while (offset < chunk.byteLength) {
+			const take = Math.min(size - filled, chunk.byteLength - offset);
+			buffer.set(chunk.subarray(offset, offset + take), filled);
+			filled += take;
+			offset += take;
+			if (filled === size) {
+				yield buffer;
+				buffer = new Uint8Array(size);
+				filled = 0;
+			}
+		}
+	}
+	if (filled > 0) yield buffer.subarray(0, filled);
+}
+
+function escapeXml(value: string): string {
+	return value.replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;');
 }
 
 function parseHttpDate(value: string | null): number | null {

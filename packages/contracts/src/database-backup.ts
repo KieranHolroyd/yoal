@@ -123,7 +123,8 @@ export interface DatabaseBackupLocation {
 	id: string | null;
 	/** Target name when the backup was taken. */
 	name: string;
-	kind: 'platform' | 'local' | 's3';
+	/** `azure` and `gcs` are HA-PLAN W3 object-store backends (Wave 1 lane E). */
+	kind: 'platform' | 'local' | 's3' | 'azure' | 'gcs';
 	/** Exact object location, e.g. `s3://bucket/prefix/key (https://endpoint)` or `file:///dir/key`. */
 	location: string;
 	/** False when the recorded target was deleted: Yoal can no longer reach the object. */

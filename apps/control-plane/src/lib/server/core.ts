@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { building } from '$app/env';
 import {
 	ConsoleEmailTransport,
@@ -5,6 +6,7 @@ import {
 	LocalObjectStore,
 	R2ObjectStore,
 	SmsNotifier,
+	createObjectStore,
 	SmtpEmailTransport,
 	TelemetryStore,
 	TwilioSmsTransport,
@@ -18,9 +20,11 @@ import {
 import {
 	alertEmail,
 	alertSms,
+	azureStore,
 	clickhouseEnv,
 	dataDir,
 	edgeNodeId,
+	gcsStore,
 	masterKey,
 	storageGatewayPort,
 	storageGatewayUrl,
@@ -41,10 +45,38 @@ import { platformVersion } from './version';
 import { pushNotifier } from './push';
 import { updateSource } from './self-update';
 
+/**
+ * The platform object store: local by default, R2/S3 as before, Azure Blob or GCS for W3 installs.
+ * Its secrets live in yoal.env with every other platform credential; the store itself is built
+ * once here, before the service layer starts.
+ */
 const objectStore =
 	objectStoreKind === 'r2' && r2
 		? new R2ObjectStore(r2)
-		: new LocalObjectStore(`${dataDir}/objects`, platformOrigin, objectStoreSecret);
+		: objectStoreKind === 'azure' && azureStore
+			? createObjectStore(
+					{ kind: 'azure', account: azureStore.account, container: azureStore.container, endpoint: azureStore.endpoint ?? null, pathPrefix: '', immutability: null },
+					azureStore.accountKey
+						? { kind: 'azure', accountKey: azureStore.accountKey }
+						: azureStore.sasToken
+							? { kind: 'azure', sasToken: azureStore.sasToken }
+							: (() => {
+									throw new Error('YOAL_OBJECT_STORE=azure needs YOAL_AZURE_ACCOUNT_KEY or YOAL_AZURE_SAS_TOKEN.');
+								})(),
+				)
+			: objectStoreKind === 'gcs' && gcsStore
+				? createObjectStore(
+						{ kind: 'gcs', bucket: gcsStore.bucket, endpoint: gcsStore.endpoint ?? null, pathPrefix: '', immutability: null },
+						{
+							kind: 'gcs',
+							serviceAccountJson: (() => {
+								if (!gcsStore.credentialsFile)
+									throw new Error('YOAL_OBJECT_STORE=gcs needs YOAL_GCS_CREDENTIALS_FILE.');
+								return readFileSync(gcsStore.credentialsFile, 'utf8');
+							})(),
+						},
+					)
+				: new LocalObjectStore(`${dataDir}/objects`, platformOrigin, objectStoreSecret);
 
 const emailTransport = smtp ? new SmtpEmailTransport(smtp) : new ConsoleEmailTransport();
 const notifiers: Notifier[] = [];
