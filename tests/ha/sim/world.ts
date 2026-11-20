@@ -13,8 +13,10 @@
  *   I1s  a contender acts only while the store names it, unreleased, at its epoch;
  *   I2   the stored epoch never decreases, rises by exactly 1 per new holder, and no contender's
  *        view of it goes down within one process lifetime;
- *   I13  a contender acts at most one TTL after the store applied its last proof (renewal,
- *        takeover or bootstrap): a primary that cannot prove its lease stops within its window.
+ *   I13  a contender acts at most `i13BoundMs(profile)` after the store applied its last proof
+ *        (renewal, takeover or bootstrap): fenceAfterMs on its own clock plus the longest the
+ *        profile lets a response lag behind the store (one return leg and one freeze), capped at
+ *        the TTL. A primary that cannot prove its lease stops within that window.
  * "Acting" is `holds()` on a live, unfrozen process that is not mid-release (release() requires
  * the caller to have stopped writes first, so the sim stops acting before calling it).
  */
@@ -49,13 +51,18 @@ export interface LeaseModule {
 	}) => LeaseLike;
 }
 
+/** How a node-targeted fault picks its node (see `Profile.targeting`). */
+export type FaultTarget = 'random' | 'holder' | 'previous';
+
 export interface Fault {
 	id: number;
 	at: number;
 	kind: FaultKind;
+	/** The random node; `holder` and `previous` faults fall back to it when they have no better one. */
 	node: number;
+	target: FaultTarget;
 	durationMs: number;
-	/** Kind-specific number: max leg, status, delta, probability ×1000, target node. */
+	/** Kind-specific number: max leg, status, delta, probability ×1000, frontend offset. */
 	value: number;
 	flag: boolean;
 }
@@ -202,6 +209,30 @@ function parse(body: string): { epoch: number; holderNodeId: string; released: b
 	}
 }
 
+/** Fault kinds that act on one node (and so can be aimed at the holder). */
+const NODE_FAULTS: ReadonlySet<FaultKind> = new Set<FaultKind>([
+	'partition',
+	'slow',
+	'freeze',
+	'crash',
+	'store-5xx',
+	'put-throttle',
+	'lost-response',
+	'clock-step',
+	'stale-reads',
+]);
+
+/**
+ * The I13 bound for a profile: the documented fenceAfterMs on the slowest allowed monotonic clock,
+ * plus the longest a response can reach the process after the store applied it (one return leg
+ * and one freeze), capped at the TTL (the bound the lease promises whatever the world does).
+ */
+export function i13BoundMs(profile: Profile): number {
+	const fence = Math.ceil(profile.spec.fenceAfterMs / (1 - profile.driftPpm * 1e-6));
+	const lag = Math.max(profile.maxSlowLegMs, profile.normalLegMs[1]) + profile.maxFreezeMs;
+	return Math.min(profile.spec.ttlMs, fence + lag + 1);
+}
+
 /** Fault kinds that act on one node pick it; the others ignore `node`. */
 export function generateFaults(seed: number, profile: Profile, contenders: number): Fault[] {
 	const rng = new Rng(seed, 1);
@@ -219,8 +250,18 @@ export function generateFaults(seed: number, profile: Profile, contenders: numbe
 				break;
 			}
 		}
-		const at = rng.int(10_000, profile.faultWindowMs);
+		let at = rng.int(10_000, profile.faultWindowMs);
 		const node = rng.int(0, contenders - 1);
+		const targetRoll = rng.float();
+		const followGap = rng.int(0, profile.targeting.followGapMs);
+		let target: FaultTarget = 'random';
+		if (NODE_FAULTS.has(kind)) {
+			if (targetRoll < profile.targeting.holder) target = 'holder';
+			else if (targetRoll < profile.targeting.holder + profile.targeting.previous && faults.length > 0) {
+				target = 'previous';
+				at = Math.min(profile.faultWindowMs, (faults.at(-1) as Fault).at + followGap);
+			}
+		}
 		let durationMs = rng.logInt(1_000, 90_000);
 		let value = 0;
 		let flag = rng.chance(0.5);
@@ -251,6 +292,11 @@ export function generateFaults(seed: number, profile: Profile, contenders: numbe
 				value = (rng.chance(0.6) ? -1 : 1) * rng.logInt(500, profile.maxClockStepMs);
 				durationMs = 0;
 				break;
+			case 'store-clock-step':
+				// flag: the whole store steps to a new offset; otherwise one frontend (node = its index).
+				value = frontendOffset(rng, profile);
+				durationMs = 0;
+				break;
 			case 'gate':
 				flag = !rng.chance(0.7); // usually closes the promotion gate
 				break;
@@ -270,9 +316,18 @@ export function generateFaults(seed: number, profile: Profile, contenders: numbe
 			default:
 				break;
 		}
-		faults.push({ id, at, kind, node, durationMs, value, flag });
+		faults.push({ id, at, kind, node, target, durationMs, value, flag });
 	}
 	return faults.sort((a, b) => a.at - b.at || a.id - b.id);
+}
+
+/** A frontend clock offset within the profile's skew bound, favouring its extremes. */
+function frontendOffset(rng: Rng, profile: Profile): number {
+	const max = Math.max(0, profile.storeSkewMs - profile.storeJitterMs);
+	const roll = rng.float();
+	if (roll < 0.3) return -max;
+	if (roll < 0.6) return max;
+	return rng.int(-max, max);
 }
 
 export function contenderCount(seed: number, profile: Profile): number {
@@ -312,10 +367,14 @@ export class World {
 	#store409Until = 0;
 	#store409P = 0;
 	#noDateUntil = 0;
-	#storeOffset: number;
+	/** Each store frontend's clock offset from true time. */
+	#frontends: number[] = [];
+	#frontendRng: Rng;
 	/** Store-apply time of the last write naming each node id as an unreleased holder. */
 	#lastProof = new Map<string, number>();
-	#ttlMs = 30_000;
+	readonly i13BoundMs: number;
+	/** The node each injected fault hit, for `previous`-targeted faults. */
+	#hit = new Map<number, number>();
 	#healAt: number;
 
 	constructor(options: RunOptions) {
@@ -328,7 +387,9 @@ export class World {
 		this.faults = options.keep ? all.filter((f) => options.keep?.has(f.id)) : all;
 		const clocks = new Rng(options.seed, 2);
 		this.#rng = new Rng(options.seed, 3);
-		this.#storeOffset = clocks.int(-2_000, 2_000);
+		for (let i = 0; i < Math.max(1, options.profile.storeFrontends); i++) this.#frontends.push(frontendOffset(clocks, options.profile));
+		this.#frontendRng = new Rng(options.seed, 4);
+		this.i13BoundMs = i13BoundMs(options.profile);
 		this.#healAt = options.profile.faultWindowMs + 150_000;
 		for (let i = 0; i < n; i++) {
 			const drift = (clocks.float() * 2 - 1) * options.profile.driftPpm * 1e-6;
@@ -382,10 +443,12 @@ export class World {
 		return 1_700_000_000_000 + this.T + c.wallOffset;
 	}
 
+	/** The `Date` of one response: a random frontend's clock, jittered, truncated to the second. */
 	#storeDate(): number | null {
 		if (this.T < this.#noDateUntil) return null;
-		const jitter = this.#rng.int(-this.profile.storeJitterMs, this.profile.storeJitterMs);
-		return Math.floor((1_700_000_000_000 + this.T + this.#storeOffset + jitter) / 1000) * 1000;
+		const offset = this.#frontends[this.#frontendRng.int(0, this.#frontends.length - 1)] ?? 0;
+		const jitter = this.#frontendRng.int(-this.profile.storeJitterMs, this.profile.storeJitterMs);
+		return Math.floor((1_700_000_000_000 + this.T + offset + jitter) / 1000) * 1000;
 	}
 
 	// ── logging ────────────────────────────────────────────────────────────
@@ -412,7 +475,6 @@ export class World {
 			monotonic: () => this.#mono(c),
 			wallClock: () => this.#wall(c),
 		});
-		this.#ttlMs = c.lease.policy.ttlMs;
 		c.alive = true;
 		c.running = false;
 		c.waiting = false;
@@ -582,7 +644,7 @@ export class World {
 		);
 		if (!next.released) {
 			this.#lastProof.set(next.holderNodeId, this.T);
-			this.#queue.push(this.T + this.#ttlMs, () => undefined); // I13 deadline probe
+			this.#queue.push(this.T + this.i13BoundMs, () => undefined); // I13 deadline probe
 		}
 		if (prev) {
 			if (next.epoch < prev.epoch) this.#fail('I2', `the stored epoch went down from ${prev.epoch} to ${next.epoch}`);
@@ -633,10 +695,10 @@ export class World {
 					`${c.id} acts as primary at epoch ${status.epoch} while the store names ${stored ? `${stored.holderNodeId} at epoch ${stored.epoch}${stored.released ? ' (released)' : ''}` : 'nobody'}`,
 				);
 			const proof = this.#lastProof.get(c.id);
-			if (proof === undefined || this.T - proof >= this.#ttlMs)
+			if (proof === undefined || this.T - proof >= this.i13BoundMs)
 				this.#fail(
 					'I13',
-					`${c.id} acts as primary ${proof === undefined ? 'with no applied proof' : `${((this.T - proof) / 1000).toFixed(3)} s after its last applied proof`} (TTL ${this.#ttlMs / 1000} s)`,
+					`${c.id} acts as primary ${proof === undefined ? 'with no applied proof' : `${((this.T - proof) / 1000).toFixed(3)} s after its last applied proof`} (bound ${this.i13BoundMs / 1000} s)`,
 				);
 		}
 		if (acting.length > 1)
@@ -686,9 +748,26 @@ export class World {
 		this.#scheduleTicks(c, this.T + this.#rng.int(0, 2_000));
 	}
 
+	/** The node a fault hits: the store's holder, the previous fault's node, or its random node. */
+	#targetOf(f: Fault): number {
+		if (f.target === 'holder') {
+			const current = this.#versions.at(-1);
+			const holder = current ? parse(current.body)?.holderNodeId : undefined;
+			const index = this.contenders.findIndex((c) => c.id === holder);
+			if (index >= 0) return index;
+		}
+		if (f.target === 'previous') {
+			const previous = this.#hit.get(f.id - 1);
+			if (previous !== undefined) return previous;
+		}
+		return f.node;
+	}
+
 	#inject(f: Fault): void {
-		const c = this.contenders[f.node] as Contender;
-		const path = this.#paths[f.node] as PathState;
+		const node = this.#targetOf(f);
+		this.#hit.set(f.id, node);
+		const c = this.contenders[node] as Contender;
+		const path = this.#paths[node] as PathState;
 		const until = this.T + f.durationMs;
 		const secs = `${(f.durationMs / 1000).toFixed(1)} s`;
 		switch (f.kind) {
@@ -744,6 +823,19 @@ export class World {
 				c.wallOffset += f.value;
 				this.#log(c.id, `fault #${f.id}: wall clock stepped ${f.value > 0 ? '+' : ''}${(f.value / 1000).toFixed(3)} s`);
 				break;
+			case 'store-clock-step': {
+				// Every frontend stays within the profile's skew bound of true time.
+				const max = Math.max(0, this.profile.storeSkewMs - this.profile.storeJitterMs);
+				if (f.flag) {
+					const delta = f.value - (this.#frontends[0] ?? 0);
+					this.#frontends = this.#frontends.map((o) => Math.max(-max, Math.min(max, o + delta)));
+				} else this.#frontends[f.node % this.#frontends.length] = f.value;
+				this.#log(
+					'store',
+					`fault #${f.id}: ${f.flag ? 'store clock' : `frontend ${f.node % this.#frontends.length} clock`} stepped; frontend offsets now ${this.#frontends.map((o) => `${o > 0 ? '+' : ''}${(o / 1000).toFixed(3)}`).join(' ')} s`,
+				);
+				break;
+			}
 			case 'gate':
 				c.mayTakeOver = f.flag;
 				c.gateUntil = Math.max(c.gateUntil, until);
@@ -780,7 +872,7 @@ export class World {
 				break;
 			}
 			case 'force-promote': {
-				const target = this.contenders[f.node] as Contender;
+				const target = c;
 				this.#queue.push(this.T + f.value, () => {
 					if (!target.alive || target.lease.status().role === 'fenced' || target.lease.status().role === 'primary') {
 						this.#log('op', `fault #${f.id}: forced promotion of ${target.id} skipped`);

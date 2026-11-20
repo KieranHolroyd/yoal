@@ -7,6 +7,7 @@
  *   bun tests/ha/sim/run.ts --runs 1 --seed 42 --verbose    # the same, every request shown
  *   bun tests/ha/sim/run.ts --seed 42 --runs 1 --keep 3,7   # replay a shrunk schedule exactly
  *   bun tests/ha/sim/run.ts --module planted --runs 500 --expect-violation
+ *   bun tests/ha/sim/run.ts --module mutant:fence-29s --runs 2000   # fixtures/mutants.ts
  *   bun tests/ha/sim/run.ts --profile adversarial --runs 500   # outside the lease's assumptions
  *
  * Seeds run from --seed (default 1) to --seed + --runs − 1. Each failing seed is shrunk to a minimal
@@ -15,7 +16,7 @@
  */
 import { parseArgs } from 'node:util';
 import { describeFault, formatTrace, loadModule, profileNamed, runBatch, shrink } from './harness.ts';
-import { contenderCount, generateFaults, runOnce } from './world.ts';
+import { contenderCount, generateFaults, i13BoundMs, runOnce } from './world.ts';
 
 const { values: flags } = parseArgs({
 	options: {
@@ -45,7 +46,7 @@ const maxLines = Number(flags['max-lines']);
 const replayBase = `bun tests/ha/sim/run.ts --module ${flags.module} --profile ${profile.name}${contenders ? ` --contenders ${contenders}` : ''}`;
 
 console.log(`ha-sim: ${path}`);
-console.log(`profile ${profile.name}, seeds ${firstSeed}..${firstSeed + runs - 1}`);
+console.log(`profile ${profile.name} (I13 bound ${i13BoundMs(profile) / 1000} s), seeds ${firstSeed}..${firstSeed + runs - 1}`);
 
 if (flags.keep !== undefined || flags.trace || (runs === 1 && flags.verbose)) {
 	// Exact replay of one seed (optionally with a shrunk fault set).

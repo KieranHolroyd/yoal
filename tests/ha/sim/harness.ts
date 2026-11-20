@@ -1,5 +1,6 @@
 /** Batch runs, shrinking and trace printing for the lease simulator. */
 import { fileURLToPath } from 'node:url';
+import { MUTANTS, materializeMutant } from './fixtures/mutants.ts';
 import { PROFILES, type Profile } from './profiles.ts';
 import { fnv1a } from './rng.ts';
 import { type Fault, type LeaseModule, type RunResult, type TraceEvent, contenderCount, generateFaults, runOnce } from './world.ts';
@@ -9,8 +10,11 @@ export const MODULES: Record<string, string> = {
 	planted: fileURLToPath(new URL('./fixtures/ha-lease-planted.ts', import.meta.url)),
 };
 
+export { MUTANTS };
+
+/** `real`, `planted`, `mutant:<name>` (fixtures/mutants.ts) or a path. */
 export async function loadModule(name: string): Promise<{ path: string; module: LeaseModule }> {
-	const path = MODULES[name] ?? name;
+	const path = name.startsWith('mutant:') ? materializeMutant(name.slice('mutant:'.length)) : (MODULES[name] ?? name);
 	const module = (await import(path)) as LeaseModule;
 	if (typeof module.ControlLease !== 'function') throw new Error(`${path} does not export ControlLease`);
 	return { path, module };
@@ -89,7 +93,7 @@ export async function shrink(options: { seed: number; module: LeaseModule; profi
 }
 
 export function describeFault(f: Fault): string {
-	const node = `n${f.node}`;
+	const node = f.target === 'random' ? `n${f.node}` : `${f.target}(else n${f.node})`;
 	const secs = `${(f.durationMs / 1000).toFixed(1)}s`;
 	switch (f.kind) {
 		case 'partition':
@@ -98,6 +102,8 @@ export function describeFault(f: Fault): string {
 			return `#${f.id} @${(f.at / 1000).toFixed(3)}s slow link ${node} legs≤${f.value}ms ${secs}`;
 		case 'clock-step':
 			return `#${f.id} @${(f.at / 1000).toFixed(3)}s wall clock step ${node} ${(f.value / 1000).toFixed(3)}s`;
+		case 'store-clock-step':
+			return `#${f.id} @${(f.at / 1000).toFixed(3)}s ${f.flag ? 'store clock' : `store frontend ${f.node}`} steps to ${(f.value / 1000).toFixed(3)}s off`;
 		default:
 			return `#${f.id} @${(f.at / 1000).toFixed(3)}s ${f.kind} ${node} ${secs}${f.value ? ` value=${f.value}` : ''}`;
 	}
