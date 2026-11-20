@@ -250,6 +250,32 @@ describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () =
 		expect(ids.slice(at + 1, at + 1 + wave1.length)).toEqual(wave1);
 	});
 
+	test('0121 backfills existing endpoints as primary and allows a pool row beside one', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		sqlite.run('CREATE TABLE yoal_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+		for (const migration of migrations) {
+			if (Number(migration.id.slice(0, 4)) > 120) continue;
+			sqlite.run(migration.sql);
+			sqlite.run('INSERT INTO yoal_migrations (id, applied_at) VALUES (?, ?)', [migration.id, 1]);
+		}
+		sqlite.run(
+			`INSERT INTO service_endpoints (id, consumer_node_id, service_kind, service_id, local_port, upstream_node_id, upstream_port, created_at, updated_at)
+			 VALUES ('sep_old', 'nod_a', 'database', 'db_1', 21000, 'nod_b', 15432, 1, 1)`,
+		);
+		const ran = migrate(sqlite);
+		expect(ran).toContain('0121_service_endpoint_roles.sql');
+		expect(sqlite.query('SELECT role, version FROM service_endpoints WHERE id = ?').get('sep_old')).toEqual({
+			role: 'primary',
+			version: 0,
+		});
+		sqlite.run(
+			`INSERT INTO service_endpoints (id, consumer_node_id, service_kind, service_id, role, local_port, upstream_node_id, upstream_port, version, created_at, updated_at)
+			 VALUES ('sep_pool', 'nod_a', 'database', 'db_1', 'pool', 21001, 'nod_b', 6432, 0, 1, 1)`,
+		);
+		expect(sqlite.query('SELECT COUNT(*) AS n FROM service_endpoints').get()).toEqual({ n: 2 });
+		sqlite.close();
+	});
+
 	test('apply on a fresh database', () => {
 		const sqlite = new Database(':memory:', { create: true, strict: true });
 		const ran = migrate(sqlite);
