@@ -307,6 +307,54 @@ export interface WorkloadDesired {
 	 * `/var/run/yoal/token`. Only the marker travels in desired state; the token is activation.
 	 */
 	identity?: true;
+	/**
+	 * Container apps only (HA-PLAN H24): `AddHost=<host>:<address>` lines, so `db-<id>` resolves to
+	 * the node's container gateway, where the agent's endpoint forwarder listens. Validated by
+	 * `parseAddHosts`; the unit renderer writes only these two fields.
+	 */
+	addHosts?: ContainerAddHost[];
+}
+
+export interface ContainerAddHost {
+	host: string;
+	address: string;
+}
+
+/** Most `AddHost` lines one container takes; mirrors the contract. */
+export const MAX_ADD_HOSTS = 64;
+/**
+ * An `AddHost` name: one lowercase DNS label for a managed service alias (`db-<id>`, `db-<id>-pool`,
+ * `s3-<id>`), never an arbitrary name an app or the registry relies on.
+ */
+const ADD_HOST_PATTERN = /^(?:db|s3)-[a-z0-9](?:[a-z0-9_-]{0,58}[a-z0-9])?$/;
+
+/** `a.b.c.d` in 10/8, 172.16/12, 192.168/16 or 100.64/10: a container gateway, never a public address. */
+export function isPrivateIpv4(value: string): boolean {
+	const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
+	if (!match) return false;
+	const octets = match.slice(1).map(Number);
+	if (octets.some((octet, index) => octet > 255 || String(octet) !== match[index + 1])) return false;
+	const [a, b] = octets as [number, number, number, number];
+	return a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+}
+
+/** Validate `workload.addHosts` (HA-PLAN H24). Duplicate names are refused, not merged. */
+export function parseAddHosts(value: unknown): ContainerAddHost[] {
+	if (!Array.isArray(value)) throw new ValidationError('workload.addHosts must be an array');
+	if (value.length > MAX_ADD_HOSTS) throw new ValidationError(`workload.addHosts takes at most ${MAX_ADD_HOSTS} entries`);
+	const seen = new Set<string>();
+	return value.map((entry, index) => {
+		const record = assertRecord(entry, `workload.addHosts[${index}]`);
+		const host = record.host;
+		const address = record.address;
+		if (typeof host !== 'string' || !ADD_HOST_PATTERN.test(host))
+			throw new ValidationError(`workload.addHosts[${index}].host must be a managed service alias (db-<id>, s3-<id>)`);
+		if (typeof address !== 'string' || !isPrivateIpv4(address))
+			throw new ValidationError(`workload.addHosts[${index}].address must be a private IPv4 gateway address`);
+		if (seen.has(host)) throw new ValidationError(`workload.addHosts names ${host} twice`);
+		seen.add(host);
+		return { host, address };
+	});
 }
 
 /**
@@ -1501,6 +1549,13 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 			throw new ValidationError('Managed services do not get a workload identity');
 		if (workload.runner) throw new ValidationError('Ephemeral runners do not get a workload identity');
 		workload.identity = true;
+	}
+	if (record.addHosts !== undefined) {
+		if (runtime !== 'container') throw new ValidationError('Only container workloads may set workload.addHosts');
+		if (database || objectStorage || broker || registry || kubernetes)
+			throw new ValidationError('Managed services do not take workload.addHosts');
+		const addHosts = parseAddHosts(record.addHosts);
+		if (addHosts.length > 0) workload.addHosts = addHosts;
 	}
 	const volumes = parseWorkloadVolumes(record.volumes);
 	if (volumes.length > 0) workload.volumes = volumes;

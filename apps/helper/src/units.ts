@@ -896,6 +896,10 @@ export function renderContainerUnit(options: ContainerUnitOptions): string {
 		lines.push(`PublishPort=127.0.0.1:${workload.port}:${workload.port}`);
 	lines.push(`Network=${networkUnitName(workloadNetworkName(workload))}`);
 	for (const alias of options.networkAliases ?? []) lines.push(`NetworkAlias=${alias}`);
+	// HA-PLAN H24: `db-<id>` resolves to the node's container gateway, where the agent's endpoint
+	// forwarder listens, wherever the database runs. Both fields were validated by `parseAddHosts`;
+	// an /etc/hosts entry wins over the network's DNS alias for the same name.
+	for (const entry of workload.addHosts ?? []) lines.push(`AddHost=${entry.host}:${entry.address}`);
 	lines.push(`EnvironmentFile=${options.envFile}`);
 	// Container root is not host root: every container gets its own range of the `containers`
 	// subordinate ids (see userns.ts), so uid 0 inside maps to an unprivileged host uid. `U` hands

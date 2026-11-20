@@ -1213,6 +1213,8 @@ export class SystemdDriver {
 				deploymentId: workload.deploymentId,
 				...(workload.orgId ? { orgId: workload.orgId } : {}),
 				...(workload.networkName ? { networkName: workload.networkName } : {}),
+				// Every compose service shares the project's attachments, so each gets its AddHost lines.
+				...(workload.addHosts ? { addHosts: workload.addHosts } : {}),
 				runtime: 'container',
 				status: workload.status,
 				release: null,

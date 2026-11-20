@@ -96,7 +96,8 @@ export async function runHelper(options: RunHelperOptions = {}): Promise<void> {
 		systemctlPath: config.systemctlPath,
 		log: (level, message) => log(level, `node update: ${message}`),
 	});
-	const wireguard = new WireguardManager({ firewall: new NetworkManager() });
+	const firewall = new NetworkManager();
+	const wireguard = new WireguardManager({ firewall });
 	containers = new ContainerConsole({
 		podmanPath: config.podmanPath,
 		systemctlPath: config.systemctlPath,
@@ -110,6 +111,7 @@ export async function runHelper(options: RunHelperOptions = {}): Promise<void> {
 		...(extension?.routes ? { extraRoutes: extension.routes } : {}),
 		nodeUpdate,
 		wireguard,
+		endpointGuard: { apply: () => firewall.applyEndpointGuard() },
 		shares: new ShareMounter(),
 		disks: new DiskMounter(),
 		volumeProfiler: driver.volumeProfiler(),

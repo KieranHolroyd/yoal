@@ -465,6 +465,16 @@ export class HelperClient
 		return { publicKey: body.publicKey };
 	}
 
+	/**
+	 * Install the endpoint guard (HA-PLAN H24): an nftables table that drops new connections to the
+	 * endpoint port ranges unless they arrive on loopback or on the interface that owns the
+	 * destination address, so a gateway listener is reachable only from its own container bridge.
+	 * Idempotent; takes no input.
+	 */
+	async endpointGuard(): Promise<void> {
+		await this.request('POST', '/v1/endpoints/guard', undefined, WIREGUARD_TIMEOUT_MS);
+	}
+
 	/** Apply the control plane's overlay state to the kernel interface (C1). */
 	async wireguardApply(state: WireguardState): Promise<{ peers: number }> {
 		const body = asRecord(

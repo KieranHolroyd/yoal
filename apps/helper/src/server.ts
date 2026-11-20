@@ -161,6 +161,8 @@ export interface HandlerOptions {
 	};
 	/** Managed overlay verbs (C1); absent on a helper that predates the overlay. */
 	wireguard?: WireguardApi;
+	/** The endpoint guard nftables table (HA-PLAN H24); absent = 404. */
+	endpointGuard?: { apply(): Promise<{ table: string }> };
 	/** Profiling of a registered disk (docs/STORAGE.md §5.1); absent = 404. */
 	volumeProfiler?: { profile(request: VolumeProfileRequest): Promise<VolumeProfileResult> };
 	/** Share mount verbs (C3); absent on a helper that predates cluster shares. */
@@ -262,6 +264,14 @@ export function createHandler(
 				if (method !== 'GET') return methodNotAllowed('GET');
 				if (url.search) throw new ValidationError('node update guard takes no query parameters');
 				return json({ ok: true, ...(await options.nodeUpdate.guardStatus()) });
+			}
+
+			// --- endpoint guard (HA-PLAN H24): one fixed nftables table, no input -------------
+			if (path === '/v1/endpoints/guard') {
+				if (!options.endpointGuard) return json({ error: 'the endpoint guard is not available on this helper' }, 404);
+				if (method !== 'POST') return methodNotAllowed('POST');
+				assertNoVerbInput({ search: url.search, body: await readText(request, maxBodyBytes) });
+				return json({ ok: true, ...(await options.endpointGuard.apply()) });
 			}
 
 			// --- managed overlay (C1): keygen, apply, status; no shell and no passthrough ----
@@ -904,7 +914,7 @@ export interface RunningHelper {
 export async function startHelperServer(
 	config: HelperConfig,
 	runtime: HelperRuntime,
-	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler' | 'extraRoutes'> = {},
+	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'endpointGuard' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler' | 'extraRoutes'> = {},
 ): Promise<RunningHelper> {
 	const directory = dirname(config.socketPath);
 	const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;

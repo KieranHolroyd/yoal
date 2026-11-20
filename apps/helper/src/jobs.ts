@@ -321,6 +321,8 @@ export function renderContainerJobArgs(options: ContainerJobOptions): string[] {
 		`--env-file=${join(options.jobDir, 'env')}`,
 		`--volume=${options.dataDir}:/data`,
 	];
+	// HA-PLAN H24: the run reaches `db-<id>` the way its app does (validated by `parseAddHosts`).
+	for (const entry of workload.addHosts ?? []) podman.push(`--add-host=${entry.host}:${entry.address}`);
 	for (const mount of options.volumeMounts) podman.push(`--volume=${mount.hostPath}:${mount.mountPath}${mount.readOnly ? ':ro' : ''}`);
 	if (options.secrets.length > 0) {
 		// The run's own copies; `U` hands them to the container uid, and they are deleted after.

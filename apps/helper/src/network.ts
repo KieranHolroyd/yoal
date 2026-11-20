@@ -26,6 +26,15 @@ export const OVERLAY_PROVIDER_PORTS: readonly OverlayPort[] = [
 	[19000, 19999],
 ];
 
+/**
+ * Consumer endpoint ports (HA-PLAN H24): primary and pool endpoints, then read endpoints. Mirrors
+ * `endpointPortRange` and `readEndpointPortRange` in `@yoal/contracts` (a test pins them equal).
+ */
+export const ENDPOINT_PORT_RANGES: readonly OverlayPort[] = [
+	[21000, 21999],
+	[23000, 23999],
+];
+
 export interface NetworkPaths {
 	interface: string;
 	wireguardPort: number;
@@ -139,6 +148,44 @@ table inet yoal-k8s {
 \tchain postrouting {
 \t\ttype nat hook postrouting priority srcnat - 10; policy accept;
 ${rules}
+\t}
+}
+`;
+	}
+
+	/**
+	 * The endpoint guard (HA-PLAN H24). The agent's forwarder listens on loopback and, for
+	 * containers, on each container network's gateway address (`10.89.0.1`). Linux accepts a packet
+	 * for any local address on any interface, so without this a container on another org's bridge,
+	 * or a host on the underlay that routes the gateway subnet at this node, could reach a gateway
+	 * listener. The rule drops a new connection to an endpoint port unless it arrives on loopback or
+	 * on the interface that owns its destination address (`fib daddr . iif`). It names no address or
+	 * bridge, so it never needs re-rendering when Podman renumbers. Its own table, applied whatever
+	 * firewall backend the host uses (like `yoal-k8s`). Idempotent; takes no input.
+	 */
+	async applyEndpointGuard(): Promise<{ table: string }> {
+		const path = this.endpointGuardPath();
+		await fs.mkdir(dirname(path), { recursive: true, mode: 0o755 });
+		await fs.writeFile(path, this.renderEndpointGuard(), { mode: 0o644 });
+		const check = await this.runner([this.paths.nftPath, '-c', '-f', path]);
+		if (check.code !== 0) throw new Error(`nftables check failed: ${check.stderr.trim()}`);
+		await this.expect([this.paths.nftPath, '-f', path], 'nftables endpoint guard');
+		return { table: 'inet yoal-endpoints' };
+	}
+
+	endpointGuardPath(): string {
+		return this.paths.configPath.replace(/yoal\.nft$/, 'yoal-endpoints.nft');
+	}
+
+	renderEndpointGuard(): string {
+		const ports = ENDPOINT_PORT_RANGES.map((port) => portSpec(port, '-')).join(', ');
+		return `table inet yoal-endpoints
+delete table inet yoal-endpoints
+table inet yoal-endpoints {
+\tchain input {
+\t\ttype filter hook input priority -10; policy accept;
+\t\tiifname "lo" accept
+\t\tct state new tcp dport { ${ports} } fib daddr . iif type != local drop
 \t}
 }
 `;

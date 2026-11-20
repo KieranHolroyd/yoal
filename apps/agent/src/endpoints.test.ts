@@ -85,3 +85,202 @@ describe('ServiceForwarder', () => {
 		await expect(readOnce(21113, 'x')).rejects.toBeTruthy();
 	});
 });
+
+// ---------------------------------------------------------------- HA-PLAN H24 (lane A)
+
+async function freePort(): Promise<number> {
+	const probe = createServer();
+	await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve));
+	const address = probe.address();
+	await new Promise<void>((resolve) => probe.close(() => resolve()));
+	if (!address || typeof address === 'string') throw new Error('no port');
+	return address.port;
+}
+
+/** An echo server that prefixes replies with its name, so a test can tell upstreams apart. */
+async function namedServer(name: string): Promise<number> {
+	const server = createServer((socket) => socket.on('data', (data) => socket.write(`${name}:${String(data)}`)));
+	servers.push(server);
+	await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+	return (server.address() as { port: number }).port;
+}
+
+/** Open a connection and keep it; `say` writes and waits for one reply. */
+function hold(port: number, host = '127.0.0.1'): Promise<{ say(message: string): Promise<string>; socket: ReturnType<typeof connect> }> {
+	return new Promise((resolve, reject) => {
+		const socket = connect({ host, port });
+		socket.setEncoding('utf8');
+		socket.once('error', reject);
+		socket.once('connect', () =>
+			resolve({
+				socket,
+				say: (message) =>
+					new Promise((done, fail) => {
+						socket.once('data', (data) => done(String(data)));
+						socket.once('error', fail);
+						socket.once('close', () => fail(new Error('closed')));
+						socket.write(message);
+					}),
+			}),
+		);
+	});
+}
+
+function plainEndpoint(id: string, localPort: number, upstreamPort: number, extra: Record<string, unknown> = {}) {
+	return {
+		id,
+		kind: 'database' as const,
+		serviceId: `db_${id}`,
+		localPort,
+		upstream: { nodeId: 'nod_b', address: '127.0.0.1', port: upstreamPort },
+		tlsFingerprint: null,
+		...extra,
+	};
+}
+
+describe('ServiceForwarder reloads (spike S10 restart bug)', () => {
+	test('an unchanged converge rebinds nothing', async () => {
+		const target = await echoServer();
+		const port = await freePort();
+		const forwarder = new ServiceForwarder();
+		forwarders.push(forwarder);
+		const endpoints = [plainEndpoint('sep_r1', port, target)];
+		const provider = { id: 'svc_r1', listenAddress: '127.0.0.1', listenPort: await freePort(), targetPort: target, allowedClientFingerprints: [] };
+		expect(forwarder.converge(endpoints, [provider])).toMatchObject({ started: 2, stopped: 0 });
+		// Before the fix the stored signature never equalled the compared one: every converge
+		// closed and reopened every consumer listener (and every plain provider listener).
+		expect(forwarder.converge(endpoints, [provider])).toEqual({ started: 0, stopped: 0, updated: 0 });
+	});
+
+	test('a re-pointed upstream is swapped in place: open sessions stay, new ones follow', async () => {
+		const a = await namedServer('a');
+		const b = await namedServer('b');
+		const port = await freePort();
+		const forwarder = new ServiceForwarder();
+		forwarders.push(forwarder);
+		forwarder.converge([plainEndpoint('sep_r2', port, a)], []);
+		await Bun.sleep(30);
+		const open = await hold(port);
+		expect(await open.say('1')).toBe('a:1');
+		expect(forwarder.converge([plainEndpoint('sep_r2', port, b)], [])).toEqual({ started: 0, stopped: 0, updated: 1 });
+		expect(await readOnce(port, '2')).toBe('b:2');
+		expect(await open.say('3')).toBe('a:3');
+		open.socket.destroy();
+	});
+
+	test('a newer version that moves the upstream cuts the old sessions (failover)', async () => {
+		const a = await namedServer('a');
+		const b = await namedServer('b');
+		const port = await freePort();
+		const forwarder = new ServiceForwarder();
+		forwarders.push(forwarder);
+		forwarder.converge([plainEndpoint('sep_r3', port, a, { version: 1 })], []);
+		await Bun.sleep(30);
+		const open = await hold(port);
+		expect(await open.say('1')).toBe('a:1');
+		const closed = new Promise<void>((resolve) => open.socket.once('close', () => resolve()));
+		forwarder.converge([plainEndpoint('sep_r3', port, b, { version: 2 })], []);
+		await closed;
+		expect(await readOnce(port, '2')).toBe('b:2');
+	});
+
+	test('100 reloads with sessions open and new connections arriving: none refused', async () => {
+		const target = await echoServer();
+		const other = await namedServer('other');
+		const port = await freePort();
+		const churnPort = await freePort();
+		const forwarder = new ServiceForwarder();
+		forwarders.push(forwarder);
+		const base = plainEndpoint('sep_load', port, target, { version: 1 });
+		forwarder.converge([base], []);
+		await Bun.sleep(30);
+		const idle = await Promise.all(Array.from({ length: 10 }, () => hold(port)));
+		let refused = 0;
+		let served = 0;
+		const dialer = setInterval(() => {
+			readOnce(port, 'ping').then(
+				(reply) => (reply === 'ping' ? (served += 1) : (refused += 1)),
+				() => (refused += 1),
+			);
+		}, 50);
+		for (let reload = 0; reload < 100; reload += 1) {
+			// Another service comes and goes and re-points; this endpoint's own record is re-sent
+			// unchanged, and the trust material changes generation, as a real reload would.
+			const churn = reload % 2 === 0 ? [plainEndpoint('sep_churn', churnPort, other + (reload % 3))] : [];
+			forwarder.converge([base, ...churn], [], { trust: null, gatewayAllowed: reload % 4 === 0 });
+			await Bun.sleep(50);
+		}
+		clearInterval(dialer);
+		await Bun.sleep(200);
+		expect(refused).toBe(0);
+		expect(served).toBeGreaterThanOrEqual(80);
+		for (const [index, session] of idle.entries()) expect(await session.say(`idle${index}`)).toBe(`idle${index}`);
+		for (const session of idle) session.socket.destroy();
+	}, 20_000);
+});
+
+describe('ServiceForwarder gateway address (HA-PLAN H24)', () => {
+	test('binds loopback only until the endpoint guard allows the gateway', async () => {
+		const target = await echoServer();
+		const port = await freePort();
+		const forwarder = new ServiceForwarder();
+		forwarders.push(forwarder);
+		const endpoint = plainEndpoint('sep_g1', port, target, { gatewayAddress: '10.89.0.1' });
+		forwarder.converge([endpoint], [], { gatewayAllowed: false });
+		await Bun.sleep(30);
+		expect(forwarder.listening()[port]).toEqual(['127.0.0.1']);
+		expect(await readOnce(port, 'lo')).toBe('lo');
+	});
+
+	test('a gateway address that does not exist yet is retried, and loopback keeps serving', async () => {
+		const target = await echoServer();
+		const port = await freePort();
+		const logs: string[] = [];
+		const forwarder = new ServiceForwarder({ log: (_level, message) => logs.push(message) });
+		forwarders.push(forwarder);
+		// TEST-NET-3: never configured on a test host, so the bind fails like a bridge not up yet.
+		const endpoint = plainEndpoint('sep_g2', port, target, { gatewayAddress: '203.0.113.7' });
+		forwarder.converge([endpoint], [], { gatewayAllowed: true });
+		forwarder.converge([endpoint], [], { gatewayAllowed: true });
+		await Bun.sleep(100);
+		expect(forwarder.listening()[port]).toEqual(['127.0.0.1']);
+		expect(await readOnce(port, 'still')).toBe('still');
+		// Logged once per failure, not once per converge.
+		expect(logs.filter((line) => line.includes('203.0.113.7')).length).toBe(1);
+	});
+
+	test.skipIf(process.platform !== 'linux')('listens on the gateway address too, same port, and drops it when unset', async () => {
+		const target = await echoServer();
+		const port = await freePort();
+		const forwarder = new ServiceForwarder();
+		forwarders.push(forwarder);
+		const endpoint = plainEndpoint('sep_g3', port, target, { gatewayAddress: '127.0.0.2' });
+		forwarder.converge([endpoint], [], { gatewayAllowed: true });
+		await Bun.sleep(50);
+		expect(forwarder.listening()[port]).toEqual(['127.0.0.1', '127.0.0.2']);
+		expect((await hold(port, '127.0.0.2')).say('gw')).resolves.toBe('gw');
+		forwarder.converge([plainEndpoint('sep_g3', port, target)], [], { gatewayAllowed: true });
+		await Bun.sleep(50);
+		expect(forwarder.listening()[port]).toEqual(['127.0.0.1']);
+	});
+});
+
+describe('ServiceForwarder read endpoints (HA-PLAN H24)', () => {
+	test('balances over the replicas and falls back to the last upstream', async () => {
+		const r1 = await namedServer('r1');
+		const r2 = await namedServer('r2');
+		const primary = await namedServer('p');
+		const dead = await freePort();
+		const port = await freePort();
+		const forwarder = new ServiceForwarder();
+		forwarders.push(forwarder);
+		const upstream = (nodeId: string, upstreamPort: number) => ({ nodeId, address: '127.0.0.1', port: upstreamPort, trust: 'pinned' as const, tlsFingerprint: null });
+		const read = (upstreams: ReturnType<typeof upstream>[]) => ({ id: 'rep_1', kind: 'database' as const, serviceId: 'db_1', role: 'read' as const, localPort: port, upstreams, version: 0 });
+		forwarder.converge([], [], { readEndpoints: [read([upstream('n1', r1), upstream('n2', r2), upstream('n0', primary)])] });
+		await Bun.sleep(30);
+		const replies = [await readOnce(port, 'x'), await readOnce(port, 'x'), await readOnce(port, 'x'), await readOnce(port, 'x')];
+		expect(replies.sort()).toEqual(['r1:x', 'r1:x', 'r2:x', 'r2:x']);
+		forwarder.converge([], [], { readEndpoints: [read([upstream('n1', dead), upstream('n0', primary)])] });
+		expect(await readOnce(port, 'y')).toBe('p:y');
+	});
+});

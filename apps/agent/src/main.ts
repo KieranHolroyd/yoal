@@ -4,6 +4,7 @@ import {
 	desiredStateSchema,
 	heartbeatSchema,
 	nodeCapabilities,
+	ENDPOINTS_GATEWAY_CAPABILITY,
 	FUNCTIONS_PYTHON_CAPABILITY,
 	PROCESS_NODE_CAPABILITY,
 	WORKERD_INSTALL_DIR,
@@ -56,6 +57,7 @@ import { databaseTlsHeartbeat, WorkloadRuntime, workloadHeartbeat } from './runt
 import { HardwareCollector } from './hardware.ts';
 import { ServiceForwarder } from './endpoints.ts';
 import { NodeCertificateManager } from './node-cert.ts';
+import { NodeCaIdentity } from './node-ca.ts';
 import { StatsCollector } from './stats.ts';
 import { StorageReconciler, STORAGE_RECONCILE_INTERVAL_MS } from './storage-admin.ts';
 import { StorageRequester } from './storage.ts';
@@ -116,6 +118,10 @@ class AgentRuntime {
 	private readonly hardware: HardwareCollector;
 	private readonly serviceForwarder: ServiceForwarder;
 	private readonly nodeCertificate: NodeCertificateManager;
+	/** The install-CA key, CSR and leaf (HA-PLAN H24 "Trust"); idle until desired state has `nodeTrust`. */
+	private readonly nodeCa: NodeCaIdentity;
+	/** Set once the helper's endpoint guard is in place; gateway listeners wait for it. */
+	private endpointGuardReady = false;
 	private wireguardStatus: WireguardStatus | null = null;
 	/** The helper's WireGuard public key, once fetched; the private key never leaves the helper. */
 	private wireguardPublicKey: string | null = null;
@@ -224,6 +230,7 @@ class AgentRuntime {
 		this.stats = new StatsCollector(config.dataDir);
 		this.hardware = new HardwareCollector();
 		this.nodeCertificate = new NodeCertificateManager(config.dataDir, config.nodeId);
+		this.nodeCa = new NodeCaIdentity(config.dataDir, config.nodeId, { log: (level, message) => log(level, message) });
 		this.serviceForwarder = new ServiceForwarder({
 			log: (level, message) => log(level, message),
 			...(this.nodeCertificate.ensure() ? { certificate: this.nodeCertificate.ensure()! } : {}),
@@ -858,7 +865,24 @@ class AgentRuntime {
 
 		// Consumer loopback endpoints and provider overlay listeners (C2). Harmless when empty.
 		try {
-			this.serviceForwarder.converge(state.serviceEndpoints, state.serviceProviders);
+			// HA-PLAN H24 fields reach only an `endpoints-gateway` node with the flag on; without them
+			// this is the C2 call as before (no gateway binds, no CA material, no read endpoints).
+			const wantsGateway =
+				state.serviceEndpoints.some((endpoint) => endpoint.gatewayAddress) ||
+				(state.readEndpoints ?? []).some((endpoint) => endpoint.gatewayAddress);
+			if (wantsGateway && !this.endpointGuardReady) {
+				try {
+					await this.helper.endpointGuard();
+					this.endpointGuardReady = true;
+				} catch (error) {
+					log('warn', `Endpoint guard not applied, gateway listeners stay off: ${errorText(error)}`);
+				}
+			}
+			this.serviceForwarder.converge(state.serviceEndpoints, state.serviceProviders, {
+				...(state.readEndpoints ? { readEndpoints: state.readEndpoints } : {}),
+				trust: this.nodeCa.material(state.nodeTrust),
+				gatewayAllowed: this.endpointGuardReady,
+			});
 		} catch (error) {
 			log('error', `Service endpoint converge failed: ${errorText(error)}`);
 		}
@@ -1291,6 +1315,8 @@ class AgentRuntime {
 		const stats = await this.stats.collect();
 		const hardware = await this.hardware.collect();
 		const nodeCertificate = this.nodeCertificate.ensure();
+		// Only while desired state carries `nodeTrust` (flag on, capability advertised).
+		const nodeCsr = this.nodeCa.request(this.desired?.nodeTrust);
 		if (this.desired?.wireguard && Date.now() - this.wireguardStatusAt > 30_000) {
 			try {
 				this.wireguardStatus = await this.helper.wireguardStatus();
@@ -1363,6 +1389,7 @@ class AgentRuntime {
 			stats,
 			...(hardware ? { hardware } : {}),
 			...(nodeCertificate ? { nodeCertificate } : {}),
+			...(nodeCsr ? { nodeCsr } : {}),
 			...(this.desired?.wireguard && this.wireguardStatus ? { wireguard: this.wireguardStatus } : {}),
 			...(this.desired?.wireguard && this.wireguardPublicKey ? { wireguardPublicKey: this.wireguardPublicKey } : {}),
 			releases: this.releases.listReleases(),
@@ -1924,6 +1951,7 @@ if (import.meta.main) {
 export function advertisedCapabilities(
 	pyodideDir: string = process.env.YOAL_PYODIDE_CACHE_DIR ?? `${WORKERD_INSTALL_DIR}/${WORKERD_PINNED_VERSION}/pyodide`,
 	nodeBinary: string = process.env.YOAL_NODE_PATH ?? '/usr/local/bin/node',
+	nodeCaAvailable: boolean = Bun.which('openssl') !== null,
 ): string[] {
 	let python = false;
 	try {
@@ -1937,6 +1965,9 @@ export function advertisedCapabilities(
 	if (existsSync(nodeBinary)) capabilities.push(PROCESS_NODE_CAPABILITY);
 	// The optional Kubernetes component (docs/KUBERNETES.md K2): only while its marker says it works.
 	capabilities.push(...kubernetesCapabilities(readKubernetesComponent()));
+	// HA-PLAN H24: gateway listeners, AddHost, read endpoints and install-CA trust. The forwarder
+	// and helper verbs ship in this build; the CSR needs openssl, as the C2 identity already does.
+	if (nodeCaAvailable) capabilities.push(ENDPOINTS_GATEWAY_CAPABILITY);
 	return capabilities;
 }
 
