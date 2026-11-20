@@ -183,6 +183,11 @@ export interface HandlerOptions {
 	jobs?: JobApi;
 	/** Pipeline job containers (docs/PIPELINES.md W5/W6); absent on a helper that predates them. */
 	pipelineJobs?: PipelineJobApi;
+	/**
+	 * Routes a test-only entry point adds in front of the fixed verbs (null = not mine, fall through).
+	 * The release entry (`main.ts`) never sets it, so a release helper has none.
+	 */
+	extraRoutes?: (request: Request, url: URL) => Promise<Response | null>;
 }
 
 class BodyTooLargeError extends Error {}
@@ -204,6 +209,11 @@ export function createHandler(
 			if (path === '/healthz') {
 				if (method !== 'GET' && method !== 'HEAD') return methodNotAllowed('GET');
 				return json({ ok: true, version: options.version });
+			}
+
+			if (options.extraRoutes) {
+				const handled = await options.extraRoutes(request, url);
+				if (handled) return handled;
 			}
 
 			if (path === '/v1/registry/mirror') {
@@ -894,7 +904,7 @@ export interface RunningHelper {
 export async function startHelperServer(
 	config: HelperConfig,
 	runtime: HelperRuntime,
-	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler'> = {},
+	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler' | 'extraRoutes'> = {},
 ): Promise<RunningHelper> {
 	const directory = dirname(config.socketPath);
 	const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;

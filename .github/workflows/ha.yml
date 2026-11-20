@@ -1,0 +1,193 @@
+name: HA
+
+# High-availability test lanes (docs/HA-PLAN.md W1 and §7, docs/CLUSTERING.md §19.5).
+#
+#   ha-sim          every PR and main push: the deterministic lease/failover simulation
+#   ha-integration  PRs and main pushes touching HA paths: the four-node nested-container lab
+#                   (tests/lab), the fault verbs and the kill-node-b scenario with the checker
+#
+# Actions are pinned by commit SHA (the tag is in the comment beside each).
+#   ha-chaos        nightly on the self-hosted `yoal-lab` runner (VM lane); placeholder
+#   ha-soak         weekly 24 h soak on `yoal-lab`; placeholder
+#
+# No secrets: the lab is self-contained (its own control plane, MinIO and a throwaway owner).
+# Invariant tests are never retried (CLUSTERING §19.5 flake policy): a second-attempt pass is a fail.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  schedule:
+    - cron: '17 2 * * *' # nightly chaos
+    - cron: '41 3 * * 6' # weekly soak (Saturday)
+  workflow_dispatch:
+    inputs:
+      lane:
+        description: Lane to run by hand
+        type: choice
+        options: [integration, chaos, soak]
+        default: integration
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ha-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  BUN_VERSION: '1.4.4'
+
+jobs:
+  changes:
+    name: HA paths changed
+    runs-on: ubuntu-latest
+    outputs:
+      ha: ${{ steps.filter.outputs.ha }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: 0
+      - id: filter
+        shell: bash
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            pull_request)
+              base="$(git merge-base HEAD "${{ github.event.pull_request.base.sha }}")" ;;
+            push)
+              # The push's own range; a new branch or a force push has no usable `before`: run.
+              base="${{ github.event.before }}"
+              if [ -z "$base" ] || [ "$base" = "0000000000000000000000000000000000000000" ] || ! git cat-file -e "$base^{commit}" 2>/dev/null; then
+                echo "ha=true" >> "$GITHUB_OUTPUT"
+                exit 0
+              fi ;;
+            *)
+              echo "ha=true" >> "$GITHUB_OUTPUT"
+              exit 0 ;;
+          esac
+          git diff --name-only "$base" HEAD > /tmp/changed-files
+          if grep -Eq '^(apps/agent/|apps/helper/|apps/control-plane/src/lib/server/|packages/core/|packages/contracts/|packages/site-config/|scripts/install/|scripts/systemd/|tests/lab/|tests/ha/|\.github/workflows/ha\.yml)' /tmp/changed-files; then
+            echo "ha=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ha=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  ha-sim:
+    name: ha-sim (deterministic simulation)
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+      - name: Simulate the lease and failover state machines (seeded, 2000 runs)
+        run: bun tests/ha/sim/run.ts --runs 2000
+
+  ha-integration:
+    name: ha-integration (nested-container lab)
+    needs: changes
+    if: >-
+      ((github.event_name == 'pull_request' || github.event_name == 'push') && needs.changes.outputs.ha == 'true') ||
+      (github.event_name == 'workflow_dispatch' && inputs.lane == 'integration')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 75
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ~/.bun/install/cache
+          key: bun-${{ runner.os }}-${{ hashFiles('bun.lock') }}
+          restore-keys: bun-${{ runner.os }}-
+      - run: bun install --frozen-lockfile
+
+      - name: Host kernel modules the lab nodes use (they share the runner's kernel)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq "linux-modules-extra-$(uname -r)" || true
+          for module in wireguard sch_netem sch_prio cls_u32 nf_tables loop overlay; do
+            sudo modprobe "$module" || echo "::warning::could not load $module"
+          done
+          df -h /
+          docker info --format 'cgroup v{{.CgroupVersion}} {{.CgroupDriver}}, {{.NCPU}} CPUs, {{.MemTotal}} bytes'
+
+      - name: lab up (four nodes + s3lab, Yoal installed from this checkout)
+        run: bun tests/lab/lab.ts up
+
+      - name: Fault verbs against a lab node (apply and auto-revert each)
+        run: bun tests/lab/verify-faults.ts --out "$RUNNER_TEMP/ha/faults.json"
+
+      # Edge bypassed: the scenario's own balancer to each copy, so the copy failover path is
+      # measured even while the edge run below is invalid.
+      - name: Scenario kill-node-b, direct to each copy (edge bypassed)
+        run: bun tests/ha/scenarios/kill-node-b.ts --target direct --duration-s 240 --kill-after-s 30 --out "$RUNNER_TEMP/ha/kill-node-b-direct"
+
+      # Through the edge. Exit 2 (invalid) while lab-b's copy takes no traffic through the edge: the
+      # edge health check sends no app Host (packages/site-config/src/compile.ts).
+      - name: Scenario kill-node-b through the edge
+        run: bun tests/ha/scenarios/kill-node-b.ts --duration-s 240 --kill-after-s 30 --out "$RUNNER_TEMP/ha/kill-node-b"
+
+      - name: Lab diagnostics
+        if: always()
+        run: |
+          mkdir -p "$RUNNER_TEMP/ha"
+          bun tests/lab/lab.ts status --json > "$RUNNER_TEMP/ha/status.json" || true
+          for node in lab-a lab-b lab-c lab-ctl; do
+            docker exec "yoal-w0-$node" journalctl --no-pager -u 'yoal-*' -u caddy --since '-90min' > "$RUNNER_TEMP/ha/journal-$node.txt" 2>&1 || true
+          done
+          cp -r tests/lab/.out "$RUNNER_TEMP/ha/lab-out" 2>/dev/null || true
+
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: ha-integration
+          path: ${{ runner.temp }}/ha
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: lab down
+        if: always()
+        run: bun tests/lab/lab.ts down
+
+  # The VM lane (tests/lab/vm) needs a machine that can run nested VMs and stay up for hours: a
+  # self-hosted runner labelled `yoal-lab`. Until one is registered these jobs are skipped; set the
+  # repository variable YOAL_LAB_RUNNER=true once it exists (a variable, not a secret).
+  ha-chaos:
+    name: ha-chaos (nightly, VM lab)
+    if: >-
+      vars.YOAL_LAB_RUNNER == 'true' &&
+      ((github.event_name == 'schedule' && github.event.schedule == '17 2 * * *') ||
+       (github.event_name == 'workflow_dispatch' && inputs.lane == 'chaos'))
+    runs-on: [self-hosted, yoal-lab]
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Placeholder
+        run: |
+          echo "ha-chaos: the fault catalogue (HA-PLAN §7.2) x20 on the VM lab lands with W2+."
+          echo "Today: bun tests/lab/lab.ts up && bun tests/ha/scenarios/kill-node-b.ts"
+
+  ha-soak:
+    name: ha-soak (weekly, 24 h)
+    if: >-
+      vars.YOAL_LAB_RUNNER == 'true' &&
+      ((github.event_name == 'schedule' && github.event.schedule == '41 3 * * 6') ||
+       (github.event_name == 'workflow_dispatch' && inputs.lane == 'soak'))
+    runs-on: [self-hosted, yoal-lab]
+    timeout-minutes: 1500
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - name: Placeholder
+        run: |
+          echo "ha-soak: 24 h of random faults with the checker (HA-PLAN §7.1) lands with W18."

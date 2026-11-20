@@ -1,0 +1,9 @@
+# Bootstrap config written by the Yoal installer. The Yoal agent replaces it at runtime
+# through the admin socket below; this only serves until the agent starts.
+{
+	admin unix//var/lib/caddy/admin.sock|0660
+}
+
+:80 {
+	respond "Yoal is starting." 503
+}
