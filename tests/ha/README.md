@@ -8,7 +8,7 @@ HA-PLAN §4 W1 (bullets 3–4). Two tools:
 | `checker/app/` | The **checker app** it talks to, deployable on Yoal as a process or container app with a Postgres database attached. |
 | `sim/` | The **deterministic simulator** for `ControlLease` (`packages/core/src/ha-lease.ts`). |
 
-`bun test tests/ha` runs all unit tests in about 3 s. tests/ha is not a workspace package; type-check
+`bun test tests/ha` runs all unit tests in about 3–4 s. tests/ha is not a workspace package; type-check
 it with `node_modules/.bin/tsc -p tests/ha` (not part of `bun run check`). zod comes from
 `packages/contracts`' install through `checker/zod.ts`.
 
@@ -17,7 +17,7 @@ it with `node_modules/.bin/tsc -p tests/ha` (not part of `bun run check`). zod c
 ```sh
 bun tests/ha/checker/cli.ts --url http://<ingress> [--host <Host header>] --duration-s 300 --rate 20 \
   --seed 7 [--observe obs.jsonl] --out report.json [--log requests.json] \
-  [--timeout-ms 5000] [--rpo-ms 0] [--db-lease-ttl-ms 30000]
+  [--timeout-ms 5000] [--rpo-ms 0] [--db-lease-ttl-ms 30000] [--lease-ttl-ms 30000]
 ```
 
 Open-loop at `--rate` requests per second, for the whole run: two `POST /w` (new row n) then one
@@ -33,10 +33,15 @@ lostAcknowledgedWrites, duplicateSingletonRuns, invariants{I1…I7, I11…I16: {
 - `requests`/`failedRequests` count the run's writes and reads, not the final verification. A request
   fails when it does not answer 200; `failedByStatus` keys are the status, or `network` / `timeout`.
 - `longestWriteGapMs`: the longest interval with no acknowledged write, from run start to run end.
-- `lostAcknowledgedWrites`: acknowledged rows the final read answers 404.
-- `duplicateSingletonRuns`: extra starts per (job, run), counted from the app's records and from
-  `singleton` observations separately (never summed). App records from before the run (more than 60 s
-  before it started) are ignored, since the table outlives one run.
+- `lostAcknowledgedWrites`: acknowledged rows the final verification did not read back intact: 404,
+  different content, or still failing (or never read) when the 30 s retry budget ran out. These are
+  the rows I6 fails, less any it forgives inside `--rpo-ms`.
+- `duplicateSingletonRuns`: extra starts per (job, run), with the app's records and the `singleton`
+  observations merged: each observed start is matched to a distinct app record of the same copy
+  (the observation's `copy`), else the same node, else one that names neither, and only an unmatched
+  one adds a start. So per copy the larger view counts, and different copies add up. A lab names
+  copies and nodes as the app does (`x-checker-copy`; `CHECKER_NODE` / `YOAL_NODE_ID`). App records
+  from before the run (more than 60 s before it started) are ignored, since the table outlives one run.
 
 ### The app
 
@@ -65,21 +70,27 @@ scheduled occurrence share a run id.
 bad lines are reported on stderr and skipped. Unknown fields are kept. An invariant with no relevant
 observation is `not-observed`, never `pass`.
 
+**Sample lifetime.** A `lease {holds:true}` (I1) or an accepting `db-role {role:'primary'}` (I3) is
+evidence for one lease TTL (the observation's `ttlMs`, else `--lease-ttl-ms` / `--db-lease-ttl-ms`,
+30 s), so the lab re-reports a held state at least once per TTL (every lease tick does). A later
+`holds:false` / non-primary role, or `fault {fault:'crash'|'kill'|'stop'|'power-off'|'reboot'|'node-down',
+state:'start'}` on that node, ends it sooner. A holder that crashed is not a holder forever.
+
 | Inv. | Reads | Fails when |
 |---|---|---|
-| I1 | `lease {epoch, holds}` from each control node (scope `control`, the default); `write-attempt {target:'control', epoch, accepted}` | two nodes `holds:true` at once; control writes accepted by two nodes in one epoch |
+| I1 | `lease {epoch, holds, ttlMs?}` from each control node (scope `control`, the default); `write-attempt {target:'control', epoch, accepted}` | two nodes `holds:true` at once (each sample current, see above); control writes accepted by two nodes in one epoch. Only `holds:false` samples: `not-observed` |
 | I2 | `epoch {epoch, source?}`; node `lease {epoch}`; `lease` from node `arbiter` `{epoch, holder}` | a node's epoch (per source) goes down; the arbiter's epoch goes down, changes holder without +1, or names two holders |
-| I3 | `db-role {database, generation, role, acceptingWrites?}` | two primaries in one generation; two nodes primary and accepting writes at once |
-| I4 | the app's `/singletons`; `singleton {job, run, event?:'start'}` | a (job, run) started twice |
+| I3 | `db-role {database, generation, role, acceptingWrites?, ttlMs?}` | two primaries in one generation; two nodes primary and accepting writes at once (each sample current) |
+| I4 | the app's `/singletons`; `singleton {job, run, event?:'start', copy?}` | a (job, run) started twice, the two sources merged per copy |
 | I5 | `mount {volume, mode:'rw'\|'ro'\|'none'}` (kind added to the contract); `write-attempt {target:'volume', volume, accepted}` | a volume rw on two nodes; a write from a node without the rw mount |
 | I6 | the checker's own log; `db-role {role:'primary', promotion}` for `--rpo-ms` | an acknowledged row is gone, differs, or cannot be verified (losses within `--rpo-ms` before a promotion are noted, not failed) |
 | I7 | `fence {component?, fenced}`; `write-attempt {target, accepted}` | a fenced node accepts a write for the fenced component. Observed only once a write is attempted on a fenced node |
 | I11 | `fault {fault:'control-down' or target:'control', state:'start'\|'end', id?}`; the checker's log | a request inside a control-down window fails while no other fault is open |
 | I12 | `lease` from `arbiter` `{scope:'database', database, syncSet}`; `db-role {role:'primary', promotion:'auto'}` | an automatic promotion outside the latest recorded synchronous set, or with none recorded |
-| I13 | member `lease {scope:'database', database, holds, ttlMs?}` (each confirmed renewal); `write-attempt {target:'database', accepted}` or `db-role {role:'primary', acceptingWrites:true}` | a member accepts writes more than one TTL after its last `holds:true` |
-| I14 | `ingress {ready?, inRotation?}` (ready = can serve: routes converged, releases present, certificates loaded; a lame-duck ingress is still ready); `route {converged}` without `copy` | an ingress in rotation while not ready or not converged |
+| I13 | member `lease {scope:'database', database, holds, ttlMs?}` (each confirmed renewal); `write-attempt {target:'database', accepted}` or `db-role {role:'primary', acceptingWrites:true}` | for a database with any member lease reported: a node accepts its writes more than one TTL after its last `holds:true`, or without ever holding it (a rogue writer, member or not) |
+| I14 | `ingress {ready?, inRotation?}` (ready = can serve: routes converged, releases present, certificates loaded; a lame-duck ingress is still ready); `route {converged}` without `copy` | an ingress in rotation while not ready, never reported ready (once the lab reports readiness for any ingress), or not converged |
 | I15 | `route {copy, event:'added'\|'started'\|'removed'\|'stopped'}`; the `x-checker-copy` of each response | a copy stopped while still in the upstreams; a request that started after the copy left the upstreams reached it |
-| I16 | `release-command {release, event:'start'\|'end'\|'rollout-start', ok?}`; app singletons with job `release:<id>` | a release command started twice; a rollout started before a successful end |
+| I16 | `release-command {release, event:'start'\|'end'\|'rollout-start', ok?, copy?}`; app singletons with job `release:<id>` | a release command started twice (sources merged per copy, as I4); a rollout started before a successful end |
 
 **Not observable from outside today.** Yoal has no control epoch (the lease is unused), no database
 member lease, no synchronous set, no ingress readiness, no release phase and no volume mount
@@ -105,24 +116,33 @@ bun tests/ha/sim/run.ts --runs 2000                    # ha-sim CI: the real lea
 bun tests/ha/sim/run.ts --seed 42 --trace              # replay one seed and print its trace
 bun tests/ha/sim/run.ts --seed 42 --runs 1 --keep 3,7  # replay a shrunk fault schedule
 bun tests/ha/sim/run.ts --module planted --runs 500 --expect-violation
+bun tests/ha/sim/run.ts --module mutant:fence-29s --runs 2000 --expect-violation   # see Mutants
 bun tests/ha/sim/run.ts --profile adversarial --runs 2000   # outside the lease's assumptions
 ```
 
 Seeds run from `--seed` (1) to `--seed + --runs − 1`. A failing seed is shrunk (greedy delta debugging
 over its fault list) and printed with its replay command and trace. A seed replays exactly: one
 seeded PRNG for the schedule, one for clocks, one for runtime draws, and a discrete-event loop that
-resumes the lease's `await`s only when it delivers a response. Other flags: `--module real|planted|<path>`,
+resumes the lease's `await`s only when it delivers a response. Other flags: `--module real|planted|mutant:<name>|<path>`,
 `--contenders n`, `--verbose` (every request), `--no-shrink`, `--max-report`, `--max-lines`, `--show-stalls`.
 
 **World.** 2–4 contenders, each a `ControlLease` from the module under test, with its own monotonic
 clock (rate drift) and wall clock (offset, NTP steps); a store with one linearizable object and
-conditional PUT (412 on a stale ETag); store `Date` headers jittered between frontends and truncated
-to the second; a network with per-leg delays. Faults: partitions (refused or black-holed), slow links,
-process freezes (SIGSTOP), crashes and restarts, store 5xx before or after applying a write, PUT
-throttling (503 on PUTs only), lost responses after the store acted, 501 episodes, spurious 409s,
-wall-clock steps, promotion-gate changes, planned switchovers (`release()`, with writes stopped first)
-and break-glass `forcePromote()` (after stopping every node that thinks it is primary). An operator
-re-seeds fenced nodes after 20–180 s; at 600 s everything heals; runs are 780 s simulated.
+conditional PUT (412 on a stale ETag); three store frontends behind one endpoint, each request served
+by a random one, whose `Date` clocks sit anywhere within the policy's skew tolerance (±5 s, favouring
+the extremes, so two frontends differ by up to 10 s), jittered ±400 ms and truncated to the second; a
+network with per-leg delays. Faults: partitions (refused or black-holed), slow links, process freezes
+(SIGSTOP), crashes and restarts, store 5xx before or after applying a write, PUT throttling (503 on
+PUTs only), lost responses after the store acted, 501 episodes, spurious 409s, node wall-clock steps,
+store clock steps (one frontend, or the whole store, to a new offset still within ±5 s),
+promotion-gate changes, planned switchovers (`release()`, with writes stopped first) and break-glass
+`forcePromote()` (after stopping every node that thinks it is primary). An operator re-seeds fenced
+nodes after 20–180 s; at 600 s everything heals; runs are 780 s simulated.
+
+**Targeting.** A node fault (partition, slow, freeze, crash, 5xx, throttle, lost responses, clock
+step, stale reads) aims at the node the store names as holder when it starts (half of them), at the
+node the fault before it hit, 0–15 s later (a quarter: a partition then a clock step, a slow link then
+a freeze), or at a random node. Fault lists print the mode, e.g. `holder(else n1)`.
 
 **Properties**, after every event and at every proof deadline. *Acting* means `holds()` on a live,
 unfrozen process that is not mid-release.
@@ -132,35 +152,69 @@ unfrozen process that is not mid-release.
 | I1 | at most one contender acts at any instant (no fencing margin is granted) |
 | I1s | a contender acts only while the store names it, unreleased, at its epoch |
 | I2 | the stored epoch never decreases and rises by exactly 1 per new holder; no process sees its epoch go down |
-| I13 | a contender acts at most one TTL (30 s) after the store *applied* its last renewal, takeover or bootstrap (the I7/I13 fence-window shape) |
+| I13 | a contender acts at most *the I13 bound* after the store *applied* its last renewal, takeover or bootstrap (the I7/I13 fence-window shape) |
+
+The I13 bound comes from the profile and the documented policy (`DOCUMENTED_POLICY` in
+`profiles.ts`, never the module's own, so a mutant cannot loosen its judge): `fenceAfterMs / (1 −
+drift)` + the longest return leg + the longest freeze + 1 ms, capped at the TTL. Default: 20 002 +
+4 000 + 5 000 + 1 = **29.004 s**; adversarial: 30 s (the cap).
 
 Liveness (a primary exists at the end, after the heal) is reported, never failed.
 
 **Profiles.** `default` holds the assumptions the lease's 20 s / 40 s argument needs: a response is
 acted on within 10 s of the store applying it (legs ≤ 4 s, freezes ≤ 5 s and never chained), ≤ 100 ppm
-drift, requests time out (10 s), a linearizable store, and an honest operator. `adversarial` drops
-them: legs to 20 s, freezes to 90 s, 1000 ppm drift, no request timeout (as `S3ObjectStore` has
-none today), stale reads and responses without a `Date`.
+drift, store frontends within the skew tolerance (±5 s: the "TTL + twice the skew" in
+`takeoverAfterMs`), requests time out (10 s), a linearizable store, and an honest operator.
+`adversarial` drops them: legs to 20 s, freezes to 90 s, 1000 ppm drift, frontends up to ±15 s, no
+request timeout (as `S3ObjectStore` has none today), stale reads and responses without a `Date`.
 
 **Planted bug.** `sim/fixtures/ha-lease-planted.ts` is ha-lease.ts with one line added: a primary's
 GET of its own record counts as a confirmed renewal. With PUTs throttled it keeps passing `holds()`
-past its last applied renewal. The default profile catches it first at seed 25 (29 of seeds 1–500),
-shrunk to one fault (`put-throttle n0 82.7 s`); `sim/sim.test.ts` asserts both outcomes on seeds 1–200.
+past its last applied renewal. The default profile catches it first at seed 8 (201 of seeds 1–2000),
+shrunk to one fault (`put-throttle holder 50.4 s`); `sim/sim.test.ts` asserts both outcomes on seeds 1–200.
+
+**Mutants.** `sim/fixtures/mutants.ts` builds variants of the current ha-lease.ts by exact text
+replacement (a replacement that stops matching throws, so a mutant never silently becomes the real
+code); `--module mutant:<name>` runs one. Default profile, seeds 1–2000:
+
+| Mutant | Caught | First seed | Property |
+|---|---|---|---|
+| planted (fixture above) | 201 / 2000 | 8 | I13 |
+| `no-observe-wait`: takeover skips the 40 s unchanged-ETag wait | 7 / 2000 | 169 | I1s |
+| `takeover-31s`: `takeoverAfterMs` 31 s | 0 / 2000 | — | not catchable here, see below |
+| `fence-29s`: `fenceAfterMs` 29 s | 823 / 2000 | 2 | I13 |
+| `holds-ignores-fence`: `holds()` checks the role only | 24 / 2000 | 40 | I13 |
+| `fence-wall-clock`: the fence timer runs on the wall clock | 14 / 2000 | 27 | I13 |
+
+`sim.test.ts` asserts each first catch (and that `takeover-31s` passes); the full sweep is
+`bun tests/ha/sim/run.ts --module mutant:<name> --runs 2000`. `takeover-31s` is safe under the default
+assumptions, by construction: a standby starts its unchanged-ETag clock when it first reads a version,
+which is after the store applied it, and the old holder stops acting by apply + 29.004 s (the I13
+bound). Any wait above that bound is safe in this world. The documented 40 s is slack for response
+lag beyond the profile's 9 s: the real lease stays safe for lag up to 20 s, the 31 s mutant only up to
+11 s, which only a profile outside the documented assumptions (a 10 s request timeout, ≤ 5 s freezes)
+can show.
 
 **Findings about the real ha-lease.ts** (not fixed here):
 
-1. *Stale leader after a freeze* (adversarial, I1s, e.g. seed 7477, `--keep 5,2,9,6`): `lastConfirmedAt`
-   is stamped when the renewal's 200 is processed, not when the request was sent. A primary frozen
-   for 68 s between the store applying a renewal and the process reading the 200 resumes, sets
-   `lastConfirmedAt = now`, and acts at epoch 1 for up to 20 s while another node has held epoch 2
-   since 406 s. Any response lag over 20 s (freeze, GC pause, a slow link with no request timeout) does
-   this; over 10 s breaks the one-TTL bound (I13, seed 66). Stamping the monotonic time before the
-   request (or before the read) closes it; `S3ObjectStore` also needs a request timeout.
-2. *A node never retakes a lease that names it* (liveness, default profile, 88 of 2000 seeds; every
+1. *Stale leader after a freeze* (adversarial, I1s, e.g.
+   `bun tests/ha/sim/run.ts --profile adversarial --runs 1 --seed 3371 --keep 6,7`): `lastConfirmedAt`
+   is stamped when the renewal's 200 is processed, not when the request was sent. A primary on a slow
+   link, frozen for 47 s between the store applying a renewal (180.7 s) and the process reading the
+   200, resumes at 229 s, sets `lastConfirmedAt = now`, and acts at epoch 1 for up to 20 s while
+   another node has held epoch 2 since 224.4 s. Any response lag over 20 s (freeze, GC pause, a slow
+   link with no request timeout) does this; over 10 s breaks the one-TTL bound (I13, adversarial seed
+   140). Stamping the monotonic time before the request (or before the read) closes it;
+   `S3ObjectStore` also needs a request timeout. That fix does **not** cover a pause between `holds()`
+   and the write it admits: a process that passes `holds()`, then stalls (GC, SIGSTOP, a slow disk)
+   past its fence window, still writes as a deposed primary. Only the write's target checking the
+   epoch (a fencing token: the writer sends its epoch, the target refuses one below the highest it
+   has seen) closes that, and the simulator, which judges `holds()` at an instant, cannot see it.
+2. *A node never retakes a lease that names it* (liveness, default profile, 78 of 2000 seeds; every
    stall is this): when the lease names this node but the process is not `primary` at that epoch
    (restarted after its lease expired, re-seeded after a fence, or its own takeover's response was
    lost), `tick()` follows it as "an earlier term" and returns before the takeover branch. Another
    node can take over; this one never can. With one control node, or one promotable node, there is no
    primary until `forcePromote()`. Replay: `bun tests/ha/sim/run.ts --contenders 1 --seed 1 --trace`.
-3. *Stale reads move a follower's epoch backwards* (adversarial, I2, seed 21): `status().epoch` takes
+3. *Stale reads move a follower's epoch backwards* (adversarial, I2, seed 283): `status().epoch` takes
    whatever the last read said. Agents must keep the highest epoch themselves (§6.3 says they do).

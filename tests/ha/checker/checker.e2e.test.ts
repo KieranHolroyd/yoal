@@ -5,7 +5,7 @@ import { join } from 'node:path';
 import { createHandler, memoryStore, type Store } from './app/server.ts';
 import { runChecker, singletonsOfRun } from './client.ts';
 import { reportSchema } from './report.ts';
-import { summarize } from './summarize.ts';
+import { longestWriteGapMs, summarize } from './summarize.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'yoal-ha-checker-'));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
@@ -30,11 +30,17 @@ describe('checker against the checker app (memory store)', () => {
 			const log = await runChecker({ url: `http://127.0.0.1:${server.port}`, host: 'checker.lab.test', durationS: 1, rate: 60, seed: 3 });
 			const report = summarize(log, []);
 			expect(reportSchema.safeParse(report).success).toBe(true);
-			expect(report.acknowledgedWrites).toBeGreaterThan(20);
+			// No wall-clock thresholds: how many requests fit in 1 s depends on the machine's load.
+			// Every write the checker sent was acknowledged and read back; the gap matches its log.
+			const writes = log.requests.filter((r) => r.kind === 'write');
+			expect(writes.length).toBeGreaterThan(0);
+			expect(report.acknowledgedWrites).toBe(writes.length);
+			expect(log.requests.filter((r) => r.kind === 'verify')).toHaveLength(writes.length);
 			expect(report.failedRequests).toBe(0);
 			expect(report.lostAcknowledgedWrites).toBe(0);
 			expect(report.invariants.I6.status).toBe('pass');
-			expect(report.longestWriteGapMs).toBeLessThan(1_000);
+			expect(report.longestWriteGapMs).toBe(longestWriteGapMs(log));
+			expect(report.longestWriteGapMs).toBeLessThanOrEqual(log.endedAt - log.startedAt);
 			expect(log.requests.every((r) => r.copy === 'web-1' && r.node === 'lab-a')).toBe(true);
 			expect([...hosts]).toEqual(['checker.lab.test']);
 		} finally {

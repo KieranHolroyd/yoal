@@ -7,7 +7,8 @@
  *     --duration-s 300 --rate 20 --seed 7 --observe /tmp/obs.jsonl --out report.json
  *
  * Exit 0 when no invariant fails, 1 when one does, 2 on a usage or I/O error.
- * Extra flags: --timeout-ms (per request, 5000), --rpo-ms (I6, 0), --db-lease-ttl-ms (I13, 30000),
+ * Extra flags: --timeout-ms (per request, 5000), --rpo-ms (I6, 0), --db-lease-ttl-ms (I3/I13, 30000),
+ * --lease-ttl-ms (I1: how long one control lease sample counts, 30000),
  * --log <file> (write the raw request log as JSON).
  */
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
@@ -40,6 +41,7 @@ try {
 			'timeout-ms': { type: 'string' },
 			'rpo-ms': { type: 'string' },
 			'db-lease-ttl-ms': { type: 'string' },
+			'lease-ttl-ms': { type: 'string' },
 		},
 		strict: true,
 	}).values;
@@ -86,6 +88,7 @@ if (flags.observe) {
 const report = summarize(log, observations.observations, {
 	rpoMs: number('rpo-ms', 0),
 	dbLeaseTtlMs: number('db-lease-ttl-ms', 30_000),
+	controlLeaseTtlMs: number('lease-ttl-ms', 30_000),
 });
 writeFileSync(out, `${JSON.stringify(report, null, 2)}\n`);
 if (flags.log) writeFileSync(flags.log, `${JSON.stringify(log)}\n`);

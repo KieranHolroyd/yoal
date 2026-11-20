@@ -17,8 +17,10 @@ export interface InvariantInput {
 export interface InvariantOptions {
 	/** I6: the database's stated RPO. 0 (sync) means no acknowledged write may be lost. */
 	rpoMs?: number;
-	/** I13: TTL of the database member lease when an observation does not carry `ttlMs`. */
+	/** I13 (and I3's sample lifetime): TTL of the database member lease when an observation has no `ttlMs`. */
 	dbLeaseTtlMs?: number;
+	/** I1: TTL of the control lease, how long one `holds:true` sample counts when it has no `ttlMs`. */
+	controlLeaseTtlMs?: number;
 }
 
 type Check = (input: InvariantInput) => InvariantResult;
@@ -53,26 +55,55 @@ class Verdict {
 }
 
 const at = (t: number) => `t=${new Date(t).toISOString()}`;
+
+/** Fault kinds that end every state a node reported: its process is gone. */
+const CRASH_FAULTS = new Set(['crash', 'kill', 'stop', 'power-off', 'reboot', 'node-down']);
+
+/** The node a `fault {state:'start'}` observation says crashed, or undefined. */
+function crashedNode(o: Observation): string | undefined {
+	if (o.kind !== 'fault' || str(o, 'state') !== 'start' || !CRASH_FAULTS.has(str(o, 'fault') ?? '')) return undefined;
+	return o.node;
+}
 const ofKind = (obs: Observation[], kind: Observation['kind']) => obs.filter((o) => o.kind === kind);
 const scopeOf = (o: Observation) => str(o, 'scope') ?? 'control';
 
 // ── I1: at most one control-plane writer per epoch ────────────────────────────
 
-export const checkI1: Check = ({ observations }) => {
+/**
+ * A `holds:true` (or primary) sample is evidence for one lease TTL (`ttlMs` on the sample, or the
+ * option); a later `holds:false` or a crash fault on the node ends it sooner. A lab re-reports a held
+ * state at least once per TTL (every lease tick does).
+ */
+function expire<T extends { until: number }>(state: Map<string, T>, now: number): void {
+	for (const [key, sample] of state) if (sample.until < now) state.delete(key);
+}
+
+export const checkI1: Check = ({ observations, options }) => {
 	const v = new Verdict();
-	const holds = new Map<string, { epoch: number | undefined; t: number }>();
+	const ttl = options?.controlLeaseTtlMs ?? 30_000;
+	const holds = new Map<string, { epoch: number | undefined; t: number; until: number }>();
 	let maxTogether = 0;
+	let samples = 0;
 	for (const o of observations) {
+		expire(holds, o.t);
+		const crashed = crashedNode(o);
+		if (crashed !== undefined) {
+			holds.delete(crashed);
+			continue;
+		}
 		if (o.kind !== 'lease' || scopeOf(o) !== 'control' || o.node === 'arbiter') continue;
 		const h = bool(o, 'holds');
 		if (h === undefined) continue;
-		v.saw();
-		if (h) holds.set(o.node, { epoch: num(o, 'epoch'), t: o.t });
-		else holds.delete(o.node);
+		samples++;
+		if (h) {
+			v.saw(); // only a holder is evidence: a stream of holds:false proves nothing about I1
+			holds.set(o.node, { epoch: num(o, 'epoch'), t: o.t, until: o.t + (num(o, 'ttlMs') ?? ttl) });
+		} else holds.delete(o.node);
 		maxTogether = Math.max(maxTogether, holds.size);
 		if (holds.size > 1)
-			v.fail(`${at(o.t)}: ${[...holds].map(([node, s]) => `${node}@epoch ${s.epoch ?? '?'}`).join(' and ')} hold the control lease at once`);
+			v.fail(`${at(o.t)}: ${[...holds].map(([node, s]) => `${node}@epoch ${s.epoch ?? '?'} (sampled ${at(s.t)})`).join(' and ')} hold the control lease at once`);
 	}
+	if (samples > 0 && !v.observed) v.note(`${samples} control lease samples, none holding`);
 	const writersByEpoch = new Map<number, Set<string>>();
 	for (const o of ofKind(observations, 'write-attempt')) {
 		if (str(o, 'target') !== 'control' || bool(o, 'accepted') !== true) continue;
@@ -125,11 +156,19 @@ export const checkI2: Check = ({ observations }) => {
 
 // ── I3: at most one primary per database generation ───────────────────────────
 
-export const checkI3: Check = ({ observations }) => {
+export const checkI3: Check = ({ observations, options }) => {
 	const v = new Verdict();
+	const ttl = options?.dbLeaseTtlMs ?? 30_000;
 	const primariesByGeneration = new Map<string, Set<string>>();
-	const accepting = new Map<string, Map<string, number>>(); // database → node → generation
-	for (const o of ofKind(observations, 'db-role')) {
+	const accepting = new Map<string, Map<string, { generation: number; until: number }>>(); // database → node → sample
+	for (const o of observations) {
+		for (const nodes of accepting.values()) expire(nodes, o.t);
+		const crashed = crashedNode(o);
+		if (crashed !== undefined) {
+			for (const nodes of accepting.values()) nodes.delete(crashed);
+			continue;
+		}
+		if (o.kind !== 'db-role') continue;
 		const database = str(o, 'database');
 		const role = str(o, 'role');
 		if (!database || !role) continue;
@@ -142,12 +181,12 @@ export const checkI3: Check = ({ observations }) => {
 			set.add(o.node);
 			primariesByGeneration.set(key, set);
 		}
-		const nodes = accepting.get(database) ?? new Map<string, number>();
-		if (isPrimary && bool(o, 'acceptingWrites') !== false) nodes.set(o.node, generation ?? -1);
+		const nodes = accepting.get(database) ?? new Map<string, { generation: number; until: number }>();
+		if (isPrimary && bool(o, 'acceptingWrites') !== false) nodes.set(o.node, { generation: generation ?? -1, until: o.t + (num(o, 'ttlMs') ?? ttl) });
 		else nodes.delete(o.node);
 		accepting.set(database, nodes);
 		if (nodes.size > 1)
-			v.fail(`${at(o.t)}: ${database} has ${nodes.size} primaries accepting writes: ${[...nodes].map(([n, g]) => `${n}@gen ${g}`).join(', ')}`);
+			v.fail(`${at(o.t)}: ${database} has ${nodes.size} primaries accepting writes: ${[...nodes].map(([n, s]) => `${n}@gen ${s.generation}`).join(', ')}`);
 	}
 	for (const [key, nodes] of primariesByGeneration)
 		if (nodes.size > 1) v.fail(`${key}: primary on ${[...nodes].join(' and ')}`);
@@ -156,29 +195,72 @@ export const checkI3: Check = ({ observations }) => {
 
 // ── I4: a singleton runs at most once ─────────────────────────────────────────
 
-function singletonCounts(runs: SingletonRun[], observations: Observation[]): Map<string, { app: number; observed: number; where: Set<string> }> {
-	const counts = new Map<string, { app: number; observed: number; where: Set<string> }>();
-	const bump = (job: string, run: string, source: 'app' | 'observed', where: string) => {
-		const key = `${job} run ${run}`;
-		const c = counts.get(key) ?? { app: 0, observed: 0, where: new Set<string>() };
-		c[source]++;
-		c.where.add(where);
-		counts.set(key, c);
-	};
-	for (const r of runs) bump(r.job, r.run, 'app', r.copy ?? r.node ?? '?');
+/**
+ * Starts per key, merged across the app's records and the observations. The two sources are two
+ * views of the same starts: each observed start is matched to a distinct app record of the same
+ * copy (an observation's `copy`), else of the same node, else to one that names neither; only an
+ * unmatched observation adds a start. So per copy the count is the larger of the two views, and
+ * different copies add up. A lab names copies and nodes the way the app does (`x-checker-copy`,
+ * `CHECKER_NODE` / `YOAL_NODE_ID`).
+ */
+class StartCounter {
+	readonly #keys = new Map<string, { app: { node?: string; copy?: string; used: boolean }[]; observed: { node: string; copy?: string }[] }>();
+
+	#entry(key: string) {
+		const entry = this.#keys.get(key) ?? { app: [], observed: [] };
+		this.#keys.set(key, entry);
+		return entry;
+	}
+
+	addApp(key: string, node: string | undefined, copy: string | undefined): void {
+		this.#entry(key).app.push({ node, copy, used: false });
+	}
+
+	addObserved(key: string, node: string, copy: string | undefined): void {
+		this.#entry(key).observed.push({ node, copy });
+	}
+
+	/** key → total starts and where they ran. */
+	totals(): Map<string, { starts: number; where: string[] }> {
+		const out = new Map<string, { starts: number; where: string[] }>();
+		for (const [key, { app, observed }] of this.#keys) {
+			for (const a of app) a.used = false;
+			const where = new Set(app.map((a) => a.copy ?? a.node ?? '?'));
+			let unmatched = 0;
+			for (const o of observed) {
+				const free = app.filter((a) => !a.used);
+				const match =
+					(o.copy !== undefined ? free.find((a) => a.copy === o.copy) : undefined) ??
+					free.find((a) => (o.copy === undefined || a.copy === undefined) && a.node === o.node) ??
+					free.find((a) => a.node === undefined && (o.copy === undefined || a.copy === undefined));
+				if (match) match.used = true;
+				else {
+					unmatched++;
+					where.add(o.copy ?? o.node);
+				}
+			}
+			out.set(key, { starts: app.length + unmatched, where: [...where] });
+		}
+		return out;
+	}
+}
+
+function singletonCounts(runs: SingletonRun[], observations: Observation[]): Map<string, { starts: number; where: string[] }> {
+	const counter = new StartCounter();
+	for (const r of runs) counter.addApp(`${r.job} run ${r.run}`, r.node, r.copy);
 	for (const o of ofKind(observations, 'singleton')) {
 		const job = str(o, 'job');
 		const run = str(o, 'run');
 		const event = str(o, 'event') ?? 'start';
-		if (job && run && event === 'start') bump(job, run, 'observed', o.node);
+		if (job && run && event === 'start') counter.addObserved(`${job} run ${run}`, o.node, str(o, 'copy'));
 	}
-	return counts;
+	return counter.totals();
 }
 
-/** Extra starts beyond the first, per (job, run); the app's records and observations are counted separately, never summed. */
+/** Extra starts beyond the first, per (job, run), with the app's records and observations merged per copy. */
 export function duplicateSingletonRuns(log: CheckerLog, observations: Observation[]): number {
 	let extra = 0;
-	for (const c of singletonCounts(log.singletonRuns, observations).values()) extra += Math.max(c.app, c.observed, 1) - 1;
+	for (const c of singletonCounts(log.singletonRuns, observations).values()) extra += Math.max(c.starts, 1) - 1;
 	return extra;
 }
 
@@ -187,8 +269,7 @@ export const checkI4: Check = ({ log, observations }) => {
 	const counts = singletonCounts(log.singletonRuns, observations);
 	for (const [key, c] of counts) {
 		v.saw();
-		const starts = Math.max(c.app, c.observed);
-		if (starts > 1) v.fail(`${key} started ${starts} times (on ${[...c.where].join(', ')})`);
+		if (c.starts > 1) v.fail(`${key} started ${c.starts} times (on ${c.where.join(', ')})`);
 	}
 	return v.result(`${counts.size} singleton runs, each started once`);
 };
@@ -357,21 +438,30 @@ export const checkI13: Check = ({ observations, options }) => {
 	const v = new Verdict();
 	const defaultTtl = options?.dbLeaseTtlMs ?? 30_000;
 	const proofs = new Map<string, { t: number; ttl: number }>(); // node/database → last proof
-	const members = new Set<string>();
+	// A database is judged once the lab reports member leases for it at all; from then on a node that
+	// accepts its writes without ever holding the lease (a rogue writer) fails, member or not.
+	const leased = new Set<string>();
+	for (const o of observations) {
+		const database = str(o, 'database');
+		if (database && o.kind === 'lease' && scopeOf(o) === 'database' && o.node !== 'arbiter') leased.add(database);
+	}
 	let checked = 0;
 	for (const o of observations) {
 		const database = str(o, 'database');
 		if (!database) continue;
 		const key = `${o.node}/${database}`;
 		if (o.kind === 'lease' && scopeOf(o) === 'database' && o.node !== 'arbiter') {
-			members.add(key);
 			if (bool(o, 'holds') === true) proofs.set(key, { t: o.t, ttl: num(o, 'ttlMs') ?? defaultTtl });
 			continue;
 		}
 		const accepting =
 			(o.kind === 'write-attempt' && str(o, 'target') === 'database' && bool(o, 'accepted') === true) ||
 			(o.kind === 'db-role' && str(o, 'role') === 'primary' && bool(o, 'acceptingWrites') === true);
-		if (!accepting || !members.has(key)) continue;
+		if (!accepting) continue;
+		if (!leased.has(database)) {
+			v.note(`${at(o.t)}: ${o.node} accepted ${database} writes, but no member lease is reported for ${database}`);
+			continue;
+		}
 		checked++;
 		v.saw();
 		const proof = proofs.get(key);
@@ -387,6 +477,10 @@ export const checkI13: Check = ({ observations, options }) => {
 export const checkI14: Check = ({ observations }) => {
 	const v = new Verdict();
 	const state = new Map<string, { ready?: boolean; inRotation?: boolean; converged?: boolean }>();
+	// Readiness is judged only when the lab reports it; then an ingress in rotation before it ever
+	// reported ready fails (unknown is not ready).
+	const readinessReported = observations.some((o) => o.kind === 'ingress' && bool(o, 'ready') !== undefined);
+	let unjudged = 0;
 	for (const o of observations) {
 		if (o.kind !== 'ingress' && !(o.kind === 'route' && !str(o, 'copy') && bool(o, 'converged') !== undefined)) continue;
 		const s = state.get(o.node) ?? {};
@@ -398,10 +492,18 @@ export const checkI14: Check = ({ observations }) => {
 		} else s.converged = bool(o, 'converged');
 		state.set(o.node, s);
 		if (s.inRotation !== true) continue;
+		if (!readinessReported) {
+			if (s.converged === false) v.fail(`${at(o.t)}: ingress ${o.node} is in rotation but routes not converged`);
+			else unjudged++;
+			continue;
+		}
 		v.saw();
-		if (s.ready === false || s.converged === false)
-			v.fail(`${at(o.t)}: ingress ${o.node} is in rotation but ${s.ready === false ? 'not ready' : 'routes not converged'}`);
+		if (s.ready !== true || s.converged === false)
+			v.fail(
+				`${at(o.t)}: ingress ${o.node} is in rotation but ${s.ready === false ? 'not ready' : s.ready === undefined ? 'never reported ready' : 'routes not converged'}`,
+			);
 	}
+	if (unjudged > 0) v.note(`${unjudged} in-rotation samples not judged: the lab reports no ingress readiness`);
 	return v.result(`${state.size} ingresses, never in rotation while unable to serve`);
 };
 
@@ -444,20 +546,19 @@ export const checkI15: Check = ({ log, observations }) => {
 
 export const checkI16: Check = ({ log, observations }) => {
 	const v = new Verdict();
-	const starts = new Map<string, number>();
+	const starts = new StartCounter(); // per release, the app's records and observations merged per copy
 	const outcome = new Map<string, boolean>();
 	for (const r of log.singletonRuns) {
 		if (!r.job.startsWith('release:')) continue;
-		const release = r.job.slice('release:'.length);
 		v.saw();
-		starts.set(`app:${release}`, (starts.get(`app:${release}`) ?? 0) + 1);
+		starts.addApp(r.job.slice('release:'.length), r.node, r.copy);
 	}
 	for (const o of ofKind(observations, 'release-command')) {
 		const release = str(o, 'release');
 		const event = str(o, 'event');
 		if (!release || !event) continue;
 		v.saw();
-		if (event === 'start') starts.set(release, (starts.get(release) ?? 0) + 1);
+		if (event === 'start') starts.addObserved(release, o.node, str(o, 'copy'));
 		else if (event === 'end') outcome.set(release, bool(o, 'ok') === true);
 		else if (event === 'rollout-start') {
 			const ok = outcome.get(release);
@@ -465,8 +566,9 @@ export const checkI16: Check = ({ log, observations }) => {
 			else if (!ok) v.fail(`${at(o.t)}: rollout of ${release} started after its release command failed`);
 		}
 	}
-	for (const [key, count] of starts) if (count > 1) v.fail(`release command for ${key.replace(/^app:/, '')} ran ${count} times`);
-	return v.result(`${starts.size} release commands, each run once, no rollout without a successful one`);
+	const totals = starts.totals();
+	for (const [release, c] of totals) if (c.starts > 1) v.fail(`release command for ${release} ran ${c.starts} times (on ${c.where.join(', ')})`);
+	return v.result(`${totals.size} release commands, each run once, no rollout without a successful one`);
 };
 
 export const CHECKS: Record<InvariantId, Check> = {

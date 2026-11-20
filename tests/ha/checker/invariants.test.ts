@@ -28,6 +28,7 @@ const CASES: Record<InvariantId, { violation: () => [CheckerLog, Observation[]];
 			log(),
 			[
 				obs(1, 'lease', 'a', { epoch: 3, holds: true }),
+				obs(30, 'lease', 'a', { epoch: 3, holds: true }), // a renews
 				obs(40, 'lease', 'b', { epoch: 4, holds: true }), // a never stopped: two holders
 				obs(45, 'lease', 'a', { epoch: 3, holds: false }),
 			],
@@ -250,6 +251,81 @@ describe('checker invariants (CLUSTERING §19.1 I1–I7, HA-PLAN §1.3 I11–I16
 		expect(CHECKS.I6({ log: log([req('write', 1, 1), req('verify', 1, 121, 503)]), observations: [] }).status).toBe('fail');
 	});
 
+	test('I1 and I3: a crashed holder is not a holder forever (sample TTL, crash faults)', () => {
+		// a holds epoch 1 at t=0 and crashes; b holds epoch 2 at t=60 s. Correct history.
+		const lease = (t: number, node: string, epoch: number) => obs(t, 'lease', node, { epoch, holds: true });
+		expect(CHECKS.I1({ log: log(), observations: [lease(0, 'a', 1), lease(60, 'b', 2)] }).status).toBe('pass');
+		// The lab saw the crash: b may hold at once.
+		const crash = obs(5, 'fault', 'a', { fault: 'crash', state: 'start' });
+		expect(CHECKS.I1({ log: log(), observations: [lease(0, 'a', 1), crash, lease(20, 'b', 2)] }).status).toBe('pass');
+		// No crash, a's sample still current: two holders.
+		expect(CHECKS.I1({ log: log(), observations: [lease(0, 'a', 1), lease(20, 'b', 2)] }).status).toBe('fail');
+		// A sample's own ttlMs wins over the default.
+		const short = obs(0, 'lease', 'a', { epoch: 1, holds: true, ttlMs: 10_000 });
+		expect(CHECKS.I1({ log: log(), observations: [short, lease(20, 'b', 2)] }).status).toBe('pass');
+		expect(CHECKS.I1({ log: log(), observations: [lease(0, 'a', 1), lease(20, 'b', 2)], options: { controlLeaseTtlMs: 10_000 } }).status).toBe('pass');
+
+		const primary = (t: number, node: string, generation: number) =>
+			obs(t, 'db-role', node, { database: 'app', generation, role: 'primary', acceptingWrites: true });
+		expect(CHECKS.I3({ log: log(), observations: [primary(0, 'a', 1), primary(60, 'b', 2)] }).status).toBe('pass');
+		expect(CHECKS.I3({ log: log(), observations: [primary(0, 'a', 1), crash, primary(20, 'b', 2)] }).status).toBe('pass');
+		expect(CHECKS.I3({ log: log(), observations: [primary(0, 'a', 1), primary(20, 'b', 2)] }).status).toBe('fail');
+	});
+
+	test('I1 with only holds:false samples is not-observed, not pass', () => {
+		const o = [obs(1, 'lease', 'a', { epoch: 1, holds: false }), obs(2, 'lease', 'b', { epoch: 1, holds: false })];
+		const result = CHECKS.I1({ log: log(), observations: o });
+		expect(result.status).toBe('not-observed');
+		expect(result.evidence).toEqual(['2 control lease samples, none holding']);
+	});
+
+	test('I4 and I16 merge the app and the observations per copy instead of taking the larger source', () => {
+		// The app saw copy a:1 start, the lab saw copy b:1 start: two starts, though each source has one.
+		const app = [{ job: 'nightly', run: '1', node: 'a', copy: 'a:1', at: s(1) }];
+		const twoCopies = [obs(2, 'singleton', 'b', { job: 'nightly', run: '1', copy: 'b:1' })];
+		expect(CHECKS.I4({ log: log([], app), observations: twoCopies }).status).toBe('fail');
+		expect(duplicateSingletonRuns(log([], app), twoCopies)).toBe(1);
+		// The same start seen by both (by copy, or by node when the observation has no copy) counts once.
+		for (const same of [{ copy: 'a:1' }, {}]) {
+			const o = [obs(1, 'singleton', 'a', { job: 'nightly', run: '1', ...same })];
+			expect(CHECKS.I4({ log: log([], app), observations: o }).status).toBe('pass');
+			expect(duplicateSingletonRuns(log([], app), o)).toBe(0);
+		}
+		// Two starts on one copy in either source still count as two.
+		const twice = [obs(1, 'singleton', 'a', { job: 'nightly', run: '1', copy: 'a:1' }), obs(3, 'singleton', 'a', { job: 'nightly', run: '1', copy: 'a:1' })];
+		expect(duplicateSingletonRuns(log([], app), twice)).toBe(1);
+
+		const release = [{ job: 'release:r9', run: '1', node: 'a', copy: 'a:1', at: s(1) }];
+		const elsewhere = [obs(2, 'release-command', 'b', { release: 'r9', event: 'start', copy: 'b:1' })];
+		expect(CHECKS.I16({ log: log([], release), observations: elsewhere }).status).toBe('fail');
+		const same = [obs(1, 'release-command', 'a', { release: 'r9', event: 'start' })];
+		expect(CHECKS.I16({ log: log([], release), observations: same }).status).toBe('pass');
+	});
+
+	test('I13 catches a rogue writer that never held the lease, once member leases are reported', () => {
+		const o = [
+			obs(1, 'lease', 'a', { scope: 'database', database: 'app', holds: true, ttlMs: 30_000 }),
+			obs(5, 'write-attempt', 'c', { target: 'database', database: 'app', accepted: true }),
+		];
+		const result = CHECKS.I13({ log: log(), observations: o });
+		expect(result.status).toBe('fail');
+		expect(result.evidence[0]).toContain('c accepted app writes without ever proving its lease');
+		// No member lease reported for the database at all: not judged, and said so.
+		const unleased = CHECKS.I13({ log: log(), observations: [o[1] as Observation] });
+		expect(unleased.status).toBe('not-observed');
+		expect(unleased.evidence[0]).toContain('no member lease is reported');
+	});
+
+	test('I14 does not treat an ingress that never reported ready as ready', () => {
+		const o = [obs(1, 'ingress', 'a', { ready: true, inRotation: true }), obs(2, 'ingress', 'b', { inRotation: true })];
+		const result = CHECKS.I14({ log: log(), observations: o });
+		expect(result.status).toBe('fail');
+		expect(result.evidence[0]).toContain('ingress b is in rotation but never reported ready');
+		// A lab that reports no readiness at all leaves I14 unjudged.
+		const blind = CHECKS.I14({ log: log(), observations: [obs(2, 'ingress', 'b', { inRotation: true })] });
+		expect(blind.status).toBe('not-observed');
+	});
+
 	test('I11 does not blame the control plane for a request that failed during another fault', () => {
 		const l = log([req('write', 1, 15, 502)]);
 		const o = [
@@ -263,6 +339,26 @@ describe('checker invariants (CLUSTERING §19.1 I1–I7, HA-PLAN §1.3 I11–I16
 });
 
 describe('checker report', () => {
+	test('lostAcknowledgedWrites counts 404s, different content and rows still failing after the budget, as I6 does', () => {
+		const l = log([
+			req('write', 1, 1),
+			req('write', 2, 2),
+			req('write', 3, 3),
+			req('write', 4, 4),
+			req('write', 5, 5),
+			req('verify', 1, 121),
+			req('verify', 2, 121, 404),
+			req('verify', 3, 121, 200, { match: false }),
+			req('verify', 4, 121, 503),
+			req('verify', 4, 151, 0, { error: 'timeout' }), // the last attempt, at the end of the budget
+			// row 5 never read back
+		]);
+		const report = summarize(l, []);
+		expect(report.lostAcknowledgedWrites).toBe(4);
+		expect(report.invariants.I6.status).toBe('fail');
+		expect(report.invariants.I6.evidence.filter((e) => e.startsWith('write n='))).toHaveLength(4);
+	});
+
 	test('summarize produces a schema-valid report with the run numbers', () => {
 		const l = log([
 			req('write', 1, 1),
