@@ -132,4 +132,7 @@ Behaviour asserted by the focused tests:
 
 ## 5. Final commit
 
-- Code + tests + this hand-off: the tip of `ha/w2-e-dns`; SHA reported in the lane's final message.
+- Code, tests and the driver: `1b682f3e7b8d6ea7e6d0c49dd8c4b68e640b3275`
+  (`feat(ha): W8 dns-failover driver with Cloudflare records`).
+- This hand-off was updated in one docs-only commit on top; the branch tip is reported in the
+  lane's final message. No merge to main, no VERSION bump.
