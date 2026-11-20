@@ -307,6 +307,8 @@ export interface WorkloadDesired {
 	 * `/var/run/yoal/token`. Only the marker travels in desired state; the token is activation.
 	 */
 	identity?: true;
+	/** HA-PLAN H25: systemd's `TimeoutStopSec` for this copy; absent keeps today's fixed 30 s. */
+	stopTimeoutSeconds?: number;
 }
 
 /**
@@ -1441,8 +1443,7 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 	const workload: WorkloadDesired = {
 		id,
 		...(orgId ? { orgId } : {}),
-		...(networkName ? { networkName } : {}),
-		projectId: assertId(record.projectId, 'workload.projectId'),
+		...(networkName ? { networkName } : {}),		projectId: assertId(record.projectId, 'workload.projectId'),
 		projectSlug: assertSlug(record.projectSlug, 'workload.projectSlug'),
 		deploymentId: assertId(record.deploymentId, 'workload.deploymentId'),
 		runtime,
@@ -1510,6 +1511,11 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 		if (!database && !objectStorage && !broker && !kubernetes)
 			throw new ValidationError('workload.volumeId is only valid for a database, objectStorage, broker or kubernetes workload');
 		workload.volumeId = volumeId;
+	}
+	if (record.stopTimeoutSeconds !== undefined) {
+		if (database || objectStorage || broker || registry || kubernetes)
+			throw new ValidationError('workload.stopTimeoutSeconds is only valid for apps');
+		workload.stopTimeoutSeconds = assertInteger(record.stopTimeoutSeconds, 'workload.stopTimeoutSeconds', 1, 3_600);
 	}
 	return workload;
 }

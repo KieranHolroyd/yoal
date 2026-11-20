@@ -74,6 +74,8 @@ export interface WorkloadRuntimeOptions {
 	/** May a workload with this run-lease TTL run right now? Defaults to always (no lease clock). */
 	runLeaseValid?: (ttlSeconds: number) => boolean;
 	sleep?: (ms: number, signal: AbortSignal) => Promise<void>;
+	/** Clock for drain deadlines (tests inject one); defaults to `Date.now`. */
+	now?: () => number;
 	log?: WorkloadLog;
 	/** Delay before an unchanged desired state is retried after a workload failure. */
 	retryDelayMs?: number;
@@ -177,6 +179,13 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	private readonly purgedKubernetesPending = new Set<string>();
 	private retryAt = 0;
 	private pendingFailure = false;
+	private readonly now: () => number;
+	/**
+	 * HA-PLAN H25: when each workload that left desired state may finally be stopped. The prior
+	 * desired-state version already removed it from every ingress's upstream list, so the delay is
+	 * what lets in-flight requests finish. Empty while `drainSeconds` is absent (flag off).
+	 */
+	private readonly drainDeadlines = new Map<string, number>();
 	/** Desired workloads from the last converge, for the runner recycler (plan 21). */
 	private desiredById = new Map<string, WorkloadDesired>();
 	/** Runner replicas whose container exited after a job and need a fresh JIT config. */
@@ -206,6 +215,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 			options.probeHealth ??
 			((workload, signal) => probeWorkloadHealth(workload, this.socketDir, signal));
 		this.sleep = options.sleep ?? sleep;
+		this.now = options.now ?? Date.now;
 		this.log = options.log ?? (() => undefined);
 		this.retryDelayMs = options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS;
 		this.statePath = options.statePath ?? null;
@@ -469,7 +479,13 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 			(workload) => workload.status !== 'stopped' && !(workload.runLease && !this.runLeaseValid(workload.runLease.ttlSeconds)),
 		);
 		const desiredIds = new Set(desired.map((workload) => workload.id));
+		// The copy's drain value comes from the last desired state that still listed it: this state
+		// has already removed it from the upstreams, which is exactly when the drain begins.
+		const drainSecondsOf = new Map(
+			[...this.desiredById].map(([id, workload]) => [id, workload.drainSeconds ?? 0] as const),
+		);
 		this.desiredById = new Map(desired.map((workload) => [workload.id, workload]));
+		for (const id of desiredIds) this.drainDeadlines.delete(id);
 		for (const id of [...this.recycleDue]) if (!desiredIds.has(id)) this.recycleDue.delete(id);
 		for (const id of [...this.runnerAppliedAt.keys()]) if (!desiredIds.has(id)) this.runnerAppliedAt.delete(id);
 		// Anything listed at all, stopped included, is never purged.
@@ -490,11 +506,30 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 		// Remove workloads that left this node before touching the slice or new units.
 		for (const id of [...this.applied.keys()]) {
 			if (desiredIds.has(id)) continue;
+			// HA-PLAN H25: the desired state that dropped this copy has already taken it out of
+			// every ingress's upstream list. Keep the unit alive for `drainSeconds` so requests
+			// already routed to it finish; only then stop it. Absent or zero means today's stop.
+			const existing = this.drainDeadlines.get(id);
+			if (existing !== undefined) {
+				if (this.now() < existing) {
+					this.scheduleRetryAt(existing);
+					continue;
+				}
+			} else {
+				const drainMs = (drainSecondsOf.get(id) ?? 0) * 1_000;
+				if (drainMs > 0) {
+					const until = this.now() + drainMs;
+					this.drainDeadlines.set(id, until);
+					this.scheduleRetryAt(until);
+					continue;
+				}
+			}
 			try {
 				await this.helper.remove(id);
 				this.applied.delete(id);
 				this.reports.delete(id);
 				this.unhealthy.delete(id);
+				this.drainDeadlines.delete(id);
 				this.dirty = true;
 				this.log('info', `Removed workload ${id}`);
 			} catch (error) {
@@ -510,7 +545,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 
 		if (desired.length === 0) {
 			if (purgeFailed) this.scheduleRetry();
-			else this.pendingFailure = false;
+			else if (this.drainDeadlines.size === 0) this.pendingFailure = false;
 			return;
 		}
 		if (signal.aborted) return;
@@ -552,7 +587,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 			(workload) => !this.applied.has(workload.id) || this.reports.get(workload.id)?.status === 'failed',
 		);
 		if (failed || purgeFailed) this.scheduleRetry();
-		else this.pendingFailure = false;
+		else if (this.drainDeadlines.size === 0) this.pendingFailure = false;
 	}
 
 	/**
@@ -790,7 +825,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 			} else if (workload.ingress !== 'none') {
 				this.log(
 					'warn',
-					`Workload ${id} (${workload.projectSlug}) did not answer ${workload.database || workload.broker ? `on 127.0.0.1:${workload.port}` : workload.objectStorage ? STORAGE_HEALTH_PATH : workload.healthPath} yet; reporting starting`,
+					`Workload ${id} (${workload.projectSlug}) did not answer ${workload.database || workload.broker ? `on 127.0.0.1:${workload.port}` : workload.objectStorage ? STORAGE_HEALTH_PATH : (workload.readinessPath ?? workload.healthPath)} yet; reporting starting`,
 				);
 			}
 		} catch (error) {
@@ -859,8 +894,13 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	}
 
 	private scheduleRetry(): void {
+		this.scheduleRetryAt(Date.now() + this.retryDelayMs);
+	}
+
+	/** Retry once the drain deadline passes, without tightening a failure backoff already sooner. */
+	private scheduleRetryAt(at: number): void {
 		this.pendingFailure = true;
-		this.retryAt = Date.now() + this.retryDelayMs;
+		this.retryAt = this.retryAt === 0 ? at : Math.min(this.retryAt, at);
 	}
 
 	/**
@@ -982,7 +1022,11 @@ export async function probeWorkloadHealth(
 	// Agent machines publish nothing; on another node the server's port is not theirs to probe.
 	if (workload.kubernetes?.role === 'agent') return true;
 	if (workload.kubernetes) return probeKubernetesApi(workload.port, signal, fetcher);
-	const healthPath = workload.objectStorage ? STORAGE_HEALTH_PATH : workload.healthPath;
+	// HA-PLAN H25: `readinessPath` gates traffic and is what the copy reports ready on;
+	// `healthPath` stays liveness (systemd restarts on exit, never on a failed HTTP probe).
+	const healthPath = workload.objectStorage
+		? STORAGE_HEALTH_PATH
+		: (workload.readinessPath ?? workload.healthPath);
 	// A function host is socket-activated like a process app, but its socket is named after the
 	// desired-state id: the workload id for replica 0, `<id>-r<n>` for the rest (phase 4). A process
 	// app keeps the project socket the helper has always created.

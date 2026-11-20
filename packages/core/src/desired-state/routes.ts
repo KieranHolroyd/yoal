@@ -184,6 +184,10 @@ export class RouteState extends DesiredStatePart {
 					headers: config.headers,
 					upstream: functionUpstream ?? upstream,
 					...(block && !(replicaUpstreams.length > 0 && everyCopyNode.length > 1) ? { unavailable: block } : {}),
+					// HA-PLAN H25: the edge's active check uses readiness when the app sets one;
+					// `healthPath` stays the liveness path. Omitted when unset, so flag-off desired
+					// state is byte-for-byte unchanged.
+					...(deploymentSpec?.readinessPath ? { readinessPath: deploymentSpec.readinessPath } : {}),
 					...(replicaUpstreams.length > 0 && everyCopyNode.length > 1
 						? {
 							upstreams: replicaUpstreams,

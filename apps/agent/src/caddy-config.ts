@@ -76,7 +76,12 @@ export function routeRoot(route: RouteSpec, dataDir: string, contentDomain: stri
 
 export function toSiteCompileInput(
 	route: RouteSpec,
-	options: Pick<CompileAgentConfigOptions, 'dataDir' | 'agentSocket'> & { contentDomain?: string; healthProbeCidr?: string | null },
+	options: Pick<CompileAgentConfigOptions, 'dataDir' | 'agentSocket'> & {
+		contentDomain?: string;
+		healthProbeCidr?: string | null;
+		/** HA-PLAN H25: the app's drain window, so Caddy keeps in-flight requests on removal. */
+		drainSeconds?: number;
+	},
 ): SiteCompileInput {
 	if (!isSafeProjectId(route.projectId))
 		throw new Error(`Invalid project id in desired state: ${route.projectId}`);
@@ -100,8 +105,11 @@ export function toSiteCompileInput(
 		...(route.upstreams?.length ? { upstreams: route.upstreams } : {}),
 		...(route.healthPath ? { healthPath: route.healthPath } : {}),
 		...(route.healthPath && route.healthIntervalSeconds ? { healthIntervalSeconds: route.healthIntervalSeconds } : {}),
+		// HA-PLAN H25: active checks use readiness when the control plane rendered one.
+		...(route.readinessPath ? { readinessPath: route.readinessPath } : {}),
+		...(options.drainSeconds !== undefined ? { drainSeconds: options.drainSeconds } : {}),
 		// Ingresses probe a protected copy's health path over the overlay with no session (F7).
-		...(route.healthPath && options.healthProbeCidr ? { healthProbeCidr: options.healthProbeCidr } : {}),
+		...(options.healthProbeCidr && (route.healthPath || route.readinessPath) ? { healthProbeCidr: options.healthProbeCidr } : {}),
 	};
 }
 
@@ -545,6 +553,13 @@ function caddySocketAddress(socketPath: string): string {
  */
 export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<string, unknown> {
 	const entries: SiteEntry[] = [];
+	// HA-PLAN H25: the app's drain window is on its workload; the route needs it for Caddy's
+	// connection draining. A project with no local copy (a remote upstream on this ingress) has
+	// no entry, and the route renders exactly as before.
+	const drainByProject = new Map<string, number>();
+	for (const workload of options.state.workloads) {
+		if (workload.drainSeconds !== undefined) drainByProject.set(workload.projectId, workload.drainSeconds);
+	}
 	const toEntry = (route: RouteSpec): SiteCompileInput => {
 		const site = toSiteCompileInput(route, {
 			...options,
@@ -552,6 +567,7 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 			// Only a managed overlay has a CIDR. A bring-your-own network exempts nothing: its desired
 			// state does not list the ingress addresses (a known gap, OPS.md §7.3).
 			healthProbeCidr: options.state.wireguard?.mode !== 'external' ? (options.state.wireguard?.cidr ?? null) : null,
+			...(drainByProject.has(route.projectId) ? { drainSeconds: drainByProject.get(route.projectId) } : {}),
 		});
 		entries.push({ site, route });
 		return site;

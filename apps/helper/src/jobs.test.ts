@@ -53,7 +53,7 @@ function workloadInput(overrides: Record<string, unknown> = {}): Record<string, 
 	};
 }
 
-function requestInput(overrides: { run?: Record<string, unknown>; workload?: Record<string, unknown>; activation?: Record<string, unknown> } = {}) {
+function requestInput(overrides: { run?: Record<string, unknown>; workload?: Record<string, unknown>; activation?: Record<string, unknown>; release?: boolean } = {}) {
 	return {
 		run: { runId: RUN, command: ['bun', 'scripts/migrate.ts', '--to', 'latest version'], timeoutSeconds: 600, ...overrides.run },
 		workload: workloadInput(overrides.workload),
@@ -64,6 +64,7 @@ function requestInput(overrides: { run?: Record<string, unknown>; workload?: Rec
 			files: { TLS_KEY: '-----BEGIN KEY-----' },
 			...overrides.activation,
 		},
+		...(overrides.release === undefined ? {} : { release: overrides.release }),
 	};
 }
 
@@ -94,6 +95,8 @@ describe('request validation', () => {
 		];
 		for (const [overrides, message] of bad) expect(() => parseJobRequest(requestInput(overrides))).toThrow(message);
 		expect(() => parseJobRequest({ ...requestInput(), extra: 1 })).toThrow(/request.extra is not allowed/);
+		expect(() => parseJobRequest({ ...requestInput(), release: 'yes' })).toThrow(/request.release must be a boolean/);
+		expect(parseJobRequest(requestInput({ release: true })).release).toBe(true);
 		expect(assertJobCommand(['/opt/app/bin/migrate', '$HOME', '50%'])).toEqual(['/opt/app/bin/migrate', '$HOME', '50%']);
 	});
 });
@@ -205,6 +208,7 @@ describe('rendering', () => {
 			podmanPath: '/usr/bin/podman',
 			dataDir: '/var/lib/yoal-workloads/wld_abc123',
 			apparmorProfile: null,
+			appContainer: true,
 		});
 		const podman = args.slice(args.indexOf('--') + 1);
 		expect(args.slice(0, args.indexOf('--'))).toContain('--property=Delegate=yes');
@@ -227,6 +231,35 @@ describe('rendering', () => {
 		// Shared data is mounted as is: no `U` (chown) and no private SELinux relabel.
 		expect(podman.filter((arg) => arg.startsWith('--volume=') && !arg.includes('/run/yoal-secrets')).some((arg) => /:(Z|U)|,U/.test(arg))).toBe(false);
 		expect(podman.slice(-5)).toEqual(['ghcr.io/acme/api:1', 'bun', 'scripts/migrate.ts', '--to', 'latest version']);
+	});
+
+	test('a release command with no running copy gets its own user namespace and owns writable mounts', () => {
+		const { run, workload } = parseJobRequest(
+			requestInput({ workload: { runtime: 'container', image: 'ghcr.io/acme/api:2', release: null, socketActivation: false }, release: true }),
+		);
+		const args = renderContainerJobArgs({
+			run,
+			workload,
+			jobDir: `/run/yoal-workloads/jobs/${RUN}`,
+			secrets: [],
+			volumeMounts: [
+				{ hostPath: '/data/vol_1', mountPath: '/var/lib/app', readOnly: false },
+				{ hostPath: '/data/vol_2', mountPath: '/var/lib/read', readOnly: true },
+			],
+			expandFlag: true,
+			systemdRunPath: '/usr/bin/systemd-run',
+			podmanPath: '/usr/bin/podman',
+			dataDir: '/var/lib/yoal-workloads/wld_abc123',
+			apparmorProfile: null,
+			appContainer: false,
+		});
+		const podman = args.slice(args.indexOf('--') + 1);
+		expect(podman).toContain('--userns=auto:size=65536');
+		expect(podman).not.toContain('--userns=container:yoal-workload-wld_abc123');
+		expect(podman).toContain('--volume=/var/lib/yoal-workloads/wld_abc123:/data:U');
+		expect(podman).toContain('--volume=/data/vol_1:/var/lib/app:U');
+		// A read-only mount is never re-owned: it may have another writer.
+		expect(podman).toContain('--volume=/data/vol_2:/var/lib/read:ro');
 	});
 });
 
@@ -371,6 +404,19 @@ describe('JobDriver', () => {
 			driver.start(parseJobRequest(requestInput({ workload: { runtime: 'container', image: 'nginx:1', release: null, socketActivation: false } }))),
 		).rejects.toThrow(/not running on this node/);
 		expect(await fs.stat(join(root, 'run', 'jobs', RUN)).catch(() => null)).toBeNull();
+
+		// A release command is the exception: it runs before the first copy exists.
+		const release = await driver.start(
+			parseJobRequest(
+				requestInput({
+					workload: { runtime: 'container', image: 'nginx:1', release: null, socketActivation: false },
+					release: true,
+				}),
+			),
+		);
+		expect(release.outcome).toBe('running');
+		const started = runner.calls.find((argv) => argv[0] === '/usr/bin/systemd-run' && argv[1] !== '--version')!;
+		expect(started).toContain('--userns=auto:size=65536');
 	});
 
 	test('systemd before 254 gets escaped arguments', async () => {

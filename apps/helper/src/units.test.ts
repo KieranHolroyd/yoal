@@ -91,8 +91,22 @@ describe('process unit', () => {
 		expect(unit).not.toContain('sh -c');
 	});
 
-	test('sets loopback PORT/HOST when not socket-activated', () => {
-		const unit = renderProcessUnit({
+	test('the app stop timeout replaces the fixed 30 s only when the release phase sets it', () => {
+		const render = (overrides: Record<string, unknown> = {}, stopTimeoutSeconds?: number) =>
+			renderProcessUnit({
+				workload: workload(overrides),
+				releaseDir: '/srv/yoal/releases/' + SHA,
+				envFile: '/run/yoal-workloads/wld_abc123/env',
+				secrets: [],
+				command: ['bun', 'run', 'start'],
+				envNames: ['NODE_ENV'],
+				...(stopTimeoutSeconds !== undefined ? { stopTimeoutSeconds } : {}),
+			});
+		expect(render()).toContain('TimeoutStopSec=30');
+		expect(render({}, 5)).toContain('TimeoutStopSec=5');
+	});
+
+	test('sets loopback PORT/HOST when not socket-activated', () => {		const unit = renderProcessUnit({
 			workload: workload({ socketActivation: false }),
 			releaseDir: '/srv/yoal/releases/' + SHA,
 			envFile: '/run/yoal-workloads/wld_abc123/env',
@@ -225,6 +239,18 @@ describe('container unit', () => {
 		expect(unit).toContain('Network=yoal-workloads.network');
 		expect(unit).not.toContain('NetworkAlias=');
 		expect(unit).not.toContain('User=');
+	});
+
+	test('a stop timeout is rendered only when the app sets one', () => {
+		const base = {
+			workload: workload({ runtime: 'container', release: null, image: 'ghcr.io/acme/app:1.2.3', socketActivation: false }),
+			image: 'ghcr.io/acme/app:1.2.3',
+			envFile: '/run/yoal-workloads/wld_abc123/env',
+			dataDir: '/var/lib/yoal-workloads/wld_abc123',
+			secretsDir: null,
+		};
+		expect(renderContainerUnit(base)).not.toContain('TimeoutStopSec=');
+		expect(renderContainerUnit({ ...base, stopTimeoutSeconds: 7 })).toContain('TimeoutStopSec=7');
 	});
 
 	test('passes an AppArmor override only when the host needs it', () => {

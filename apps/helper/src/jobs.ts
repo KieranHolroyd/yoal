@@ -83,6 +83,11 @@ export interface JobRequest {
 	run: JobRunSpec;
 	workload: WorkloadDesired;
 	activation: WorkloadActivation;
+	/**
+	 * HA-PLAN H25: a release command runs before the first copy rolls, so it may have no running
+	 * app container to join. That one case gets its own user namespace instead of the app's.
+	 */
+	release?: true;
 }
 
 /** What the helper saw of a run's unit. `outcome` is the helper's reading of systemd's fields. */
@@ -161,7 +166,7 @@ export function parseJobRequest(value: unknown): JobRequest {
 	)
 		throw new ValidationError(`run.timeoutSeconds must be an integer from ${JOB_MIN_TIMEOUT_SECONDS} to ${JOB_MAX_TIMEOUT_SECONDS}`);
 	for (const key of Object.keys(record))
-		if (!['run', 'workload', 'activation'].includes(key)) throw new ValidationError(`request.${key} is not allowed`);
+		if (!['run', 'workload', 'activation', 'release'].includes(key)) throw new ValidationError(`request.${key} is not allowed`);
 	const { workload, activation } = parseApplyRequest({ workload: record.workload, activation: record.activation });
 	if (workload.runtime !== 'process' && workload.runtime !== 'container')
 		throw new ValidationError('Jobs run on process and container apps only');
@@ -169,10 +174,13 @@ export function parseJobRequest(value: unknown): JobRequest {
 		throw new ValidationError('Jobs run on apps, not managed services');
 	if (workload.runner) throw new ValidationError('CI runner pools do not run jobs');
 	if (workload.runtime === 'container' && !workload.image) throw new ValidationError('Container jobs need workload.image');
+	if (record.release !== undefined && typeof record.release !== 'boolean')
+		throw new ValidationError('request.release must be a boolean when present');
 	return {
 		run: { runId: assertRunId(run.runId), command: assertJobCommand(run.command), timeoutSeconds },
 		workload,
 		activation,
+		...(record.release === true ? { release: true } : {}),
 	};
 }
 
@@ -207,6 +215,12 @@ export interface ContainerJobOptions extends JobUnitOptions {
 	podmanPath: string;
 	dataDir: string;
 	apparmorProfile: string | null;
+	/**
+	 * Whether the app's container is running. Normal jobs require it and join its user namespace.
+	 * A release command may run before the first copy exists; then the job creates its own
+	 * namespace and takes ownership of the writable mounts (`:U`).
+	 */
+	appContainer: boolean;
 }
 
 /** systemd expands `$NAME` and `${NAME}` in a command line; `$$` is a literal `$`. */
@@ -315,13 +329,20 @@ export function renderContainerJobArgs(options: ContainerJobOptions): string[] {
 		'--cgroups=split',
 		'--log-driver=passthrough',
 		'--pull=missing',
-		// The app container's user namespace: its uid owns /data and the volumes already.
-		`--userns=container:${appContainerName(workload.id)}`,
+		// A normal job joins the app container's user namespace: its uid owns /data and the
+		// volumes already. A release command that runs before the first copy exists cannot, so it
+		// gets its own range and `:U` on the writable mounts (the app re-owns them when it starts).
+		options.appContainer
+			? `--userns=container:${appContainerName(workload.id)}`
+			: '--userns=auto:size=65536',
 		`--network=${workloadNetworkName(workload)}`,
 		`--env-file=${join(options.jobDir, 'env')}`,
-		`--volume=${options.dataDir}:/data`,
+		`--volume=${options.dataDir}:/data${options.appContainer ? '' : ':U'}`,
 	];
-	for (const mount of options.volumeMounts) podman.push(`--volume=${mount.hostPath}:${mount.mountPath}${mount.readOnly ? ':ro' : ''}`);
+	for (const mount of options.volumeMounts)
+		podman.push(
+			`--volume=${mount.hostPath}:${mount.mountPath}${mount.readOnly ? ':ro' : options.appContainer ? '' : ':U'}`,
+		);
 	if (options.secrets.length > 0) {
 		// The run's own copies; `U` hands them to the container uid, and they are deleted after.
 		podman.push(`--volume=${join(options.jobDir, 'secrets')}:${SECRETS_MOUNT}:ro,U`);
@@ -448,12 +469,19 @@ export class JobDriver implements JobApi {
 		let releaseDir: string | null = null;
 		let dataDir: string | null = null;
 		let appUser: string | null = null;
+		let appContainer = false;
 		if (workload.runtime === 'process') {
 			releaseDir = await this.resolveRelease(workload.release!);
 			appUser = await this.appDynamicUser(workload.id);
 		} else {
 			dataDir = await this.options.resolveDataDir(workload);
-			await this.requireAppContainer(workload);
+			appContainer = await this.appContainerRunning(workload);
+			// A release command may run before the first copy rolls; every other job runs beside
+			// the app, as it always has.
+			if (!appContainer && !request.release)
+				throw new ValidationError(
+					`${workload.projectSlug} is not running on this node; container jobs run beside the running app. Start it first.`,
+				);
 		}
 		const volumeMounts = await this.options.resolveAppVolumeMounts(workload);
 
@@ -480,6 +508,7 @@ export class JobDriver implements JobApi {
 						podmanPath: this.options.podmanPath,
 						dataDir: dataDir!,
 						apparmorProfile: this.options.apparmorProfile ?? null,
+						appContainer,
 					});
 		const result = await this.options.runner.run(argv);
 		if (result.code !== 0) {
@@ -574,11 +603,12 @@ export class JobDriver implements JobApi {
 		return this.systemdVersion;
 	}
 
-	private async requireAppContainer(workload: WorkloadDesired): Promise<void> {
-		const name = appContainerName(workload.id);
-		const result = await this.options.runner.run([this.options.podmanPath, 'container', 'inspect', '--format', '{{.State.Running}}', name]);
-		if (result.code !== 0 || result.stdout.trim() !== 'true')
-			throw new ValidationError(`${workload.projectSlug} is not running on this node; container jobs run beside the running app. Start it first.`);
+	/** Whether the app container is running, without failing a release command when it is not. */
+	private async appContainerRunning(workload: WorkloadDesired): Promise<boolean> {
+		const result = await this.options.runner
+			.run([this.options.podmanPath, 'container', 'inspect', '--format', '{{.State.Running}}', appContainerName(workload.id)])
+			.catch(() => null);
+		return Boolean(result && result.code === 0 && result.stdout.trim() === 'true');
 	}
 
 	private async resolveRelease(sha256: string): Promise<string> {

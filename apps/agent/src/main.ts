@@ -6,6 +6,7 @@ import {
 	nodeCapabilities,
 	FUNCTIONS_PYTHON_CAPABILITY,
 	PROCESS_NODE_CAPABILITY,
+	RELEASE_PHASE_CAPABILITY,
 	WORKERD_INSTALL_DIR,
 	WORKERD_PINNED_VERSION,
 	workloadActivationSchema,
@@ -47,7 +48,7 @@ import { FunctionScheduler } from './function-scheduler.ts';
 import { FunctionQueueConsumers } from './function-queues.ts';
 import { EventPublisher } from './event-publisher.ts';
 import { NodeTaskRunner } from './node-tasks.ts';
-import { JobRunner } from './jobs.ts';
+import { JobRunner, ReleaseCommandRunner } from './jobs.ts';
 import { HelperClient } from './helper-client.ts';
 import { formatEnv, JOIN_USAGE, joinNode, nodeFilePath, parseJoinArgs } from './join.ts';
 import { WorkloadLogDrain } from './log-drain.ts';
@@ -166,6 +167,8 @@ class AgentRuntime {
 	private readonly nodeTasks: NodeTaskRunner;
 	/** App cron jobs and one-off commands (plan 09). */
 	private readonly jobs: JobRunner;
+	/** Release commands from desired state, at most once each (HA-PLAN H25, I16). */
+	private readonly releaseCommands: ReleaseCommandRunner;
 
 	private desired: DesiredState | null = null;
 	private desiredEtag: string | null = null;
@@ -413,6 +416,15 @@ class AgentRuntime {
 			statePath: join(config.dataDir, 'jobs-state.json'),
 			log,
 		});
+		// Release commands (HA-PLAN H25): desired-state tasks, started before their deadline, run
+		// once, killed by the node's own clock even while the control plane is unreachable.
+		this.releaseCommands = new ReleaseCommandRunner({
+			helper: this.helper,
+			releases: this.releases,
+			fetchActivation: (id, signal) => this.fetchWorkloadActivation(id, signal),
+			statePath: join(config.dataDir, 'release-commands-state.json'),
+			log,
+		});
 	}
 
 	async run(): Promise<void> {
@@ -533,6 +545,7 @@ class AgentRuntime {
 			this.eventPublisher.run(() => this.desired, this.shutdownController.signal),
 			this.nodeTasks.run(() => this.desired, this.shutdownController.signal),
 			this.jobs.run(() => this.desired, this.shutdownController.signal),
+			this.releaseCommands.run(() => this.desired, this.shutdownController.signal),
 		];
 		if (this.config.logDrain)
 			this.loops.push(this.logDrain.run(() => this.desired, this.shutdownController.signal));
@@ -1340,6 +1353,8 @@ class AgentRuntime {
 		const promotionResults = this.databaseReplication.pendingPromotionResults();
 		const nodeUpdateResult = this.nodeUpdate.pendingResult();
 		const databaseTls = databaseTlsHeartbeat(reports);
+		// Release commands this node ran or refused; re-sent until the control plane drops the task.
+		const releaseCommandResults = this.releaseCommands.pendingResults(this.desired);
 		// Bucket deletions and config convergence are reported once, capped by the heartbeat schema.
 		const storageBucketDeletions = this.storageAdmin.pendingBucketDeletions().slice(0, 500);
 		const storageBucketConfigs = this.storageAdmin.pendingBucketConfigs().slice(0, 500);
@@ -1377,6 +1392,7 @@ class AgentRuntime {
 			...(databaseReplication.length > 0 ? { databaseReplication } : {}),
 			...(promotionResults.length > 0 ? { databaseReplicaPromotionResults: promotionResults } : {}),
 			...(nodeUpdateResult ? { nodeUpdateResult } : {}),
+			...(releaseCommandResults.length > 0 ? { releaseCommandResults } : {}),
 			...(databaseTls.length > 0 ? { databaseTls } : {}),
 			...(purgedDatabases.length > 0 ? { purgedDatabases } : {}),
 			...(purgedStorage.length > 0 ? { purgedStorage } : {}),
@@ -1932,7 +1948,8 @@ export function advertisedCapabilities(
 		python = false;
 	}
 	const capabilities: string[] = [...nodeCapabilities];
-	if (python) capabilities.push(FUNCTIONS_PYTHON_CAPABILITY);
+	// This build runs release commands, honours readiness/drain/stop timeouts and reports results.
+	capabilities.push(RELEASE_PHASE_CAPABILITY);	if (python) capabilities.push(FUNCTIONS_PYTHON_CAPABILITY);
 	// Node.js process apps (D125) need the pinned node the installer links onto every unit's PATH.
 	if (existsSync(nodeBinary)) capabilities.push(PROCESS_NODE_CAPABILITY);
 	// The optional Kubernetes component (docs/KUBERNETES.md K2): only while its marker says it works.
