@@ -1512,6 +1512,33 @@ export class WorkloadService {
 		const spec = previous?.spec ?? this.specOf(project, row);
 		const deploymentId = previous?.deployment.id ?? row.deploymentId;
 		if (!copy && replica >= spec.replicas) throw new NotFoundError('Workload replica');
+		return this.activationPayload(nodeId, row, project, spec, deploymentId, desiredId);
+	}
+
+	/**
+	 * The activation a release-command run gets (HA-PLAN H25): the new release's environment and
+	 * secrets, as a copy of that release would get them on this node. The node holds the run lease,
+	 * not necessarily a workload copy of its own, so this does not assert copy placement; the
+	 * scheduler only serves a run to the node it leased it to.
+	 */
+	releaseActivation(nodeId: string, workloadId: string, releaseId: string): WorkloadActivation {
+		const row = this.ctx.db.select().from(workloads).where(eq(workloads.id, workloadId)).get();
+		if (!row) throw new NotFoundError('Workload');
+		const release = this.copyRelease(releaseId);
+		if (!release || release.deployment.projectId !== row.projectId) throw new NotFoundError('Release');
+		const project = this.requireProject(row.projectId);
+		return this.activationPayload(nodeId, row, project, release.spec, releaseId, workloadId);
+	}
+
+	/** The env, files and registry credentials one spec gets on one node. */
+	private activationPayload(
+		nodeId: string,
+		row: WorkloadRow,
+		project: ProjectRow,
+		spec: WorkloadSpec,
+		deploymentId: string | null,
+		desiredId: string,
+	): WorkloadActivation {
 		const appErrorEnv = this.ctx.appErrors.consumerEnv(row.projectId);
 		if (appErrorEnv.SENTRY_DSN && deploymentId) {
 			appErrorEnv.SENTRY_RELEASE = deploymentId;

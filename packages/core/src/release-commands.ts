@@ -402,8 +402,9 @@ export class ReleaseCommandScheduler {
 			.update(releaseCommandRuns)
 			.set({ nodeId, startBy: now + RELEASE_START_WINDOW_MS, updatedAt: now })
 			.where(and(eq(releaseCommandRuns.id, row.id), eq(releaseCommandRuns.status, 'queued'), isNull(releaseCommandRuns.nodeId)))
-			.run();
-		if (changed.changes > 0) this.ctx.projects.bump(row.orgId);
+			.returning({ id: releaseCommandRuns.id })
+			.all();
+		if (changed.length > 0) this.ctx.projects.bump(row.orgId);
 	}
 
 	private pickNode(workloadId: string, now: number): string | null {
