@@ -42,4 +42,7 @@ The flag-off/no-op requirement is covered by the existing desired-state golden s
 
 ## 4. Final commit
 
-Filled in after the commit: see `git log -1 --format=%H` on `ha/w1-d-drain`; the hand-back commit contains this file.
+- **Code commit:** `05a60cf72cb7344734568115006ff33644c9d8fc` — W5 runtime, drain, readiness and tests.
+- **Hand-back commit:** the tip of `ha/w1-d-drain` that adds this file (`docs(ha): lane D hand-back`), reported in the lane's final message.
+
+Both sit directly on `1cd872e9` (`ha/integration`); no merge, no VERSION bump.
