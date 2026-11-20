@@ -435,3 +435,15 @@ describe('rollout defaults are today\'s behaviour (reviewer item 5)', () => {
 		expect(workloadSpecSchema.safeParse({ ...oldProcessSpec, rollout: { canary: 1 } }).success).toBe(false);
 	});
 });
+
+describe('spread precedence: app over project over cluster (reviewer item 6)', () => {
+	test('resolvedSpread', async () => {
+		const { resolvedSpread } = await import('./index.ts');
+		expect(resolvedSpread({ spread: 'zone' }, { spread: 'node' }, 'node')).toBe('zone');
+		expect(resolvedSpread({ spread: 'node' }, { spread: 'zone' }, 'zone')).toBe('node');
+		expect(resolvedSpread(undefined, { spread: 'zone' }, 'node')).toBe('zone');
+		expect(resolvedSpread({}, null, 'zone')).toBe('zone');
+		expect(resolvedSpread(undefined, undefined, 'node')).toBe('node');
+		expect(resolvedSpread(null, {}, 'node')).toBe('node');
+	});
+});

@@ -1,6 +1,6 @@
 import * as z from 'zod';
 import { jobCommandSchema, jobLimits, jobTimeoutSchema } from './job.ts';
-import { replicaSpreads } from './replica.ts';
+import { replicaSpreads, type ReplicaSpread } from './replica.ts';
 import type { FeatureFlags } from './features.ts';
 
 /**
@@ -69,11 +69,25 @@ export const rolloutSpecSchema = z
 	});
 export type RolloutSpec = z.infer<typeof rolloutSpecSchema>;
 
-/** Per-app placement; `spread` absent means the cluster's `replicas.spread`. */
+/**
+ * Per-app placement on the workload spec. `spread` precedence is **app over project over
+ * cluster**: `workload.placement.spread`, else the project's `placementSpec.spread`, else the
+ * cluster's `replicas.spread` (`resolvedSpread`). Lane B calls `resolvedSpread` wherever copies are
+ * placed.
+ */
 export const workloadPlacementSpecSchema = z.strictObject({
 	spread: z.enum(replicaSpreads).optional(),
 });
 export type WorkloadPlacementSpec = z.infer<typeof workloadPlacementSpecSchema>;
+
+/** The spread copies use: the app's, else the project's, else the cluster's. */
+export function resolvedSpread(
+	app: { spread?: ReplicaSpread } | null | undefined,
+	project: { spread?: ReplicaSpread } | null | undefined,
+	cluster: ReplicaSpread,
+): ReplicaSpread {
+	return app?.spread ?? project?.spread ?? cluster;
+}
 
 /** The `WorkloadSpec` fields that need `RELEASE_PHASE`, in the order a refusal names them. */
 export const RELEASE_PHASE_SPEC_FIELDS = ['release', 'readinessPath', 'drainSeconds', 'stopTimeoutSeconds', 'rollout', 'placement'] as const;
