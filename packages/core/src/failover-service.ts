@@ -17,8 +17,10 @@ import {
 	type NodeRole,
 	type Principal,
 	type SteeringDriverKind,
+	type SteeringDriver,
 } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
+import { featureEnabled } from './config.ts';
 import { chooseReplicaForPromotion } from './database-replicas.ts';
 import { CoreError } from './errors.ts';
 import { canAdvance } from './failover.ts';
@@ -264,6 +266,7 @@ export class FailoverService {
 						detail: steering.findings.map((finding) => finding.reason).join(' '),
 						severity: 'warning',
 					});
+				await this.#dnsFailoverTick(fence, report, alerts);
 				await this.#databaseTick(config, fence, facts, report, alerts);
 			} catch (error) {
 				if (!(error instanceof FencedError)) throw error;
@@ -624,8 +627,32 @@ export class FailoverService {
 
 	// ------------------------------------------------------------------ ingress rotation (§7.2)
 
+	/**
+	 * `dns-failover` with `STEERING` on: the driver probes, decides and writes the provider under
+	 * this tick's lease. The heartbeat-only rotation below is the C5/manual path and is skipped, so
+	 * one node is never withdrawn twice or recorded as `manual` next to the real write.
+	 */
+	async #dnsFailoverTick(fence: FailoverFence, report: FailoverTickReport, alerts: Alert[]): Promise<void> {
+		// One selector for every driver: the Wave 2 cluster setting (`steering.driver`), which is
+		// `direct` whenever the STEERING flag is off.
+		if (this.ctx.steering.selection().kind !== 'dns-failover') return;
+		const driver = this.ctx.steering.driver('dns-failover');
+		if (!isApplyingDriver(driver)) return;
+		const applied = await driver.apply({ epoch: fence.epoch, holds: fence.holds });
+		if (applied.fenced) {
+			report.lease = 'fenced';
+			return;
+		}
+		report.ingress.withdrawn.push(...applied.withdrawn);
+		report.ingress.added.push(...applied.added);
+		for (const alert of applied.alerts) alerts.push(alert);
+	}
+
 	#ingressTick(now: number, fence: FailoverFence, facts: Map<string, NodeFact>, report: FailoverTickReport, alerts: Alert[]): void {
 		const policies = this.ctx.policies.get();
+		// The DNS driver owns the record set when it is enabled; this path would only duplicate it
+		// with `manual` events based on heartbeats rather than probes.
+		if (this.ctx.steering.selection().kind === 'dns-failover') return;
 		const ingressNodes = [...facts.values()].filter((fact) => fact.roles.includes('ingress'));
 		for (const fact of ingressNodes) this.#ingress.observe({ nodeId: fact.id, ok: ingressHealthy(fact), at: now });
 		// Steering owns the record set once a driver is active (HA-PLAN H18). Keeping the legacy
@@ -1017,7 +1044,9 @@ export class FailoverService {
 				// reports the selected kind rather than failing the whole status read.
 			}
 		}
-		const rotates = !steeringActive && ROTATING_DRIVERS.has(policies.ingressDriver);
+		// `dns-failover` keeps its record set in the C5 rotation store, so its view reads the same
+		// state; other active drivers (external-lb) do not rotate records.
+		const rotates = steeringActive ? selection.kind === 'dns-failover' : ROTATING_DRIVERS.has(policies.ingressDriver);
 		const handler = this.#handler !== null;
 
 		// A replica being removed is torn down next: it is never a promotion candidate.
@@ -1387,6 +1416,20 @@ function copyLabel(copy: Pick<ReplicaCopy, 'projectSlug' | 'replicaIndex' | 'sin
 
 function rank(copy: ReplicaCopy): number {
 	return copy.ingress === 'http' ? 0 : 1;
+}
+
+/** The `dns-failover` driver's leased entry point; the contract's `desired()` is read-only. */
+function isApplyingDriver(
+	driver: SteeringDriver,
+): driver is SteeringDriver & {
+	apply(lease: { epoch: number; holds(): boolean }): Promise<{
+		fenced: boolean;
+		withdrawn: string[];
+		added: string[];
+		alerts: Array<{ key: string; title: string; detail: string; severity: 'info' | 'warning' | 'critical' }>;
+	}>;
+} {
+	return typeof (driver as { apply?: unknown }).apply === 'function';
 }
 
 /** An ingress node serves while it heartbeats and does not report its proxy down. */

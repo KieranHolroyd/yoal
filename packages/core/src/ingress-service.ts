@@ -272,6 +272,11 @@ export class SteeringService {
 				observed: await driver.observe().catch(() => null),
 			};
 		}
+		// A driver with its own leased writer (`dns-failover`) is applied by the failover tick under
+		// the lease epoch (FailoverService #dnsFailoverTick), so the provider is written once per tick.
+		if (typeof (driver as { apply?: unknown }).apply === 'function') {
+			return { ...idle, active: true, writes, observed: await driver.observe().catch(() => null) };
+		}
 		try {
 			await driver.desired();
 			const observed = await driver.observe();

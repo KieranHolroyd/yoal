@@ -1,6 +1,7 @@
 import type { Database } from 'bun:sqlite';
 import type { YoalDb } from '@yoal/db';
 import type { CoreConfig } from './config.ts';
+import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
 import { AuditService } from './audit.ts';
 import { QuotaService } from './quota.ts';
@@ -42,6 +43,8 @@ import { ReleaseCommandScheduler } from './release-commands.ts';
 import { RelocationService } from './relocation-service.ts';
 import { ClusterConfigService } from './cluster-config-service.ts';
 import { CertificateService, IngressSetService, SteeringService } from './ingress-service.ts';
+import { createDnsFailoverDriver } from './steering/dns-failover/core.ts';
+import { STEERING_DRIVER_FACTORIES } from './steering/registry.ts';
 import { WorkloadService } from './workloads.ts';
 import { DatabaseService } from './databases.ts';
 import { DatabaseStudioService } from './database-studio.ts';
@@ -484,7 +487,12 @@ export function createCore(options: CoreOptions): Core {
 	ctx.relocations = new RelocationService(ctx);
 	ctx.cluster = new ClusterConfigService(ctx);
 	ctx.ingressSet = new IngressSetService(ctx);
-	ctx.steering = new SteeringService(ctx);
+	// Lane E's driver needs the core context (provider, probes, persisted streaks), so it is
+	// registered here rather than in the context-free registry.
+	ctx.steering = new SteeringService(ctx, {
+		...STEERING_DRIVER_FACTORIES,
+		'dns-failover': () => createDnsFailoverDriver(ctx),
+	});
 	ctx.certificates = new CertificateService(ctx);
 	// Flow definitions register once every service exists, so their steps can call any of them.
 	ctx.flows.register(ctx.moves.databaseMoveFlow());

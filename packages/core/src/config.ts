@@ -2,6 +2,8 @@ import type { DatabasePitrRepoConfig, DatabasePitrRepository, FeatureFlags, Feat
 import { CONTAINER_CONSOLE_DEFAULT_PORT, FEATURE_FLAGS, parseFeatureFlags, STUDIO_DEFAULT_PORT } from '@yoal/contracts';
 import { readFileSync } from 'node:fs';
 import type { ObjectStore } from './object-store.ts';
+import type { DnsProvider } from './steering/dns/provider.ts';
+import type { IngressProber } from './steering/dns-failover/probe.ts';
 import { hmac } from './util.ts';
 
 export interface EmailMessage {
@@ -114,6 +116,14 @@ export interface CoreConfig {
 	 * Production uses the global fetch; under `bun test` pinning is skipped unless this is set.
 	 */
 	registryFetch?: typeof fetch;
+	/**
+	 * Injected DNS provider for the steering drivers (HA-PLAN H18). Production reads the
+	 * environment; tests supply a fake so no token or real zone is involved. `null` disables the
+	 * driver's writes while still running preflight and probes.
+	 */
+	dnsProvider?: DnsProvider | null;
+	/** Injected ingress prober for the steering drivers; production probes the public addresses. */
+	ingressProber?: IngressProber;
 	/**
 	 * Resolved `YOAL_FEATURE_*` flags. Optional so existing tests and embedders keep working;
 	 * services must read them through `featureEnabled`, which falls back to the registry defaults.
