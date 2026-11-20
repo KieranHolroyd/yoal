@@ -68,6 +68,15 @@ class ExternalLbDriver implements SteeringDriver {
 					`ingress.proxyProtocol is ${settings.proxyProtocol} but ingress.trustedProxies is empty: ` +
 					'Caddy would not accept the header from the balancer (or would trust any sender), so client addresses in Access rules would be wrong.',
 			});
+		// HA-PLAN §1.2: a balancer probing every 5 s with 2 failures takes up to ~14 s to remove a
+		// draining node. A shorter drain would stop Caddy while the balancer still sends requests.
+		if (settings.drainSeconds < 15)
+			findings.push({
+				nodeId: null,
+				reason:
+					`ingress.drainSeconds is ${settings.drainSeconds}s: a balancer meeting the 15 s removal bound can still be sending to a draining node. ` +
+					'Use at least 15 (the default is 20).',
+			});
 		return findings;
 	}
 

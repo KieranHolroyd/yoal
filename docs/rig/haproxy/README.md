@@ -138,8 +138,7 @@ wider than the balancers that actually send the header.
 
 `drainSeconds` must be longer than the balancer takes to mark the node down, or Caddy stops while
 HAProxy still sends requests. With `inter 5s fall 2 timeout 2s`, the worst case is ≈14 s; the
-default 20 s leaves margin. A value below 15 s needs a faster probe and is refused by preflight in
-a later lane; do not lower it without re-running the S9 drain scenario.
+default 20 s leaves margin. `external-lb` preflight refuses a value below 15 s.
 
 ## Verify
 

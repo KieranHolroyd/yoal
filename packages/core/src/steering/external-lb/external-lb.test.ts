@@ -45,6 +45,12 @@ describe('external-lb driver (H18)', () => {
 		);
 	});
 
+	test('preflight refuses a drain shorter than the balancer removal bound', () => {
+		const short = createExternalLbDriver(steeringContext(fleet(), { drainSeconds: 5 })).preflight();
+		expect(short).toEqual([{ nodeId: null, reason: expect.stringContaining('drainSeconds is 5s') }]);
+		expect(createExternalLbDriver(steeringContext(fleet(), { drainSeconds: 15 })).preflight()).toEqual([]);
+	});
+
 	test('observe reports the health endpoint the balancer should probe', async () => {
 		const observed = (await createExternalLbDriver(steeringContext(fleet(), { healthPort: 9000 })).observe()) as {
 			health: { path: string; port: number; http: boolean; https: boolean };
