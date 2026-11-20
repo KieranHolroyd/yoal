@@ -26,6 +26,7 @@ import { ObservabilityService } from './observability.ts';
 import { AlertService } from './alerts.ts';
 import { TopologyService } from './topology.ts';
 import { ServiceEndpointService } from './service-endpoints.ts';
+import { NodeCaService } from './node-ca.ts';
 import { ShareService } from './shares.ts';
 import { RegistryCredentialService } from './registry-credentials.ts';
 import { RegistryService } from './registry.ts';
@@ -290,6 +291,8 @@ export interface Core {
 	topology: TopologyService;
 	/** Cross-node service endpoints (CLUSTERING §4.3, C2). */
 	endpoints: ServiceEndpointService;
+	/** The per-install CA for endpoint mTLS (HA-PLAN H24). */
+	nodeCa: NodeCaService;
 	/** Cluster shares (CLUSTERING §5.2, C3). */
 	shares: ShareService;
 	/** Credentials for external container registries (docs/REGISTRY.md R2). */
@@ -455,6 +458,7 @@ export function createCore(options: CoreOptions): Core {
 	ctx.functions = new FunctionService(ctx);
 	ctx.topology = new TopologyService(ctx);
 	ctx.endpoints = new ServiceEndpointService(ctx);
+	ctx.nodeCa = new NodeCaService(ctx);
 	ctx.shares = new ShareService(ctx);
 	ctx.registryCredentials = new RegistryCredentialService(ctx);
 	ctx.registry = new RegistryService(ctx);
@@ -537,6 +541,7 @@ export function createCore(options: CoreOptions): Core {
 		functions: ctx.functions,
 		topology: ctx.topology,
 		endpoints: ctx.endpoints,
+		nodeCa: ctx.nodeCa,
 		shares: ctx.shares,
 		registryCredentials: ctx.registryCredentials,
 		registry: ctx.registry,

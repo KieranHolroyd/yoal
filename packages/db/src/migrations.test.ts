@@ -231,8 +231,14 @@ describe('migration aliases', () => {
 	});
 });
 
-describe('HA Wave 1 migrations 0118–0120 (docs/build-plan/HA-WAVE-1.md)', () => {
-	const wave1 = ['0118_node_ca.sql', '0119_release_phase.sql', '0120_object_store_kinds.sql'];
+describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () => {
+	const wave1 = [
+		'0118_node_ca.sql',
+		'0119_release_phase.sql',
+		'0120_object_store_kinds.sql',
+		// Lane B's reserved spare: endpoint roles (H24).
+		'0121_service_endpoint_roles.sql',
+	];
 	const tables = (sqlite: Database) =>
 		new Set(sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
 	const columns = (sqlite: Database, table: string) =>
@@ -241,7 +247,7 @@ describe('HA Wave 1 migrations 0118–0120 (docs/build-plan/HA-WAVE-1.md)', () =
 	test('are the reserved files, in order, right after 0117', () => {
 		const ids = migrations.map((migration) => migration.id);
 		const at = ids.indexOf('0117_kubernetes_k5_k6.sql');
-		expect(ids.slice(at + 1, at + 4)).toEqual(wave1);
+		expect(ids.slice(at + 1, at + 1 + wave1.length)).toEqual(wave1);
 	});
 
 	test('apply on a fresh database', () => {

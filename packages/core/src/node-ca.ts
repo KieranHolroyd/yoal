@@ -1,5 +1,17 @@
-import type { NodeCaView, NodeCsr, NodeTrustDesired } from '@yoal/contracts';
+import { and, desc, eq, isNotNull, isNull } from 'drizzle-orm';
+import { nodeCa, nodeCaCertificates } from '@yoal/db';
+import {
+	NODE_CERT_VALIDITY_DAYS,
+	NODE_CA_VALIDITY_DAYS,
+	type NodeCaView,
+	type NodeCsr,
+	type NodeTrustDesired,
+} from '@yoal/contracts';
+import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
+import { ValidationError } from './errors.ts';
+import { generateInstallCa, issueNodeCertificate, parseNodeCsr } from './node-pki.ts';
+import { decrypt, encrypt, newId, randomBytes, sha256Hex } from './util.ts';
 
 /**
  * The per-install CA (HA-PLAN H24 "Trust", CLUSTERING §4.3). Owned by Wave 1 lane B (issuance in
@@ -15,35 +27,211 @@ export interface SignedNodeCertificate {
 	notAfter: string;
 }
 
+const CA_COMMON_NAME = 'Yoal install CA';
+
+type CaRow = typeof nodeCa.$inferSelect;
+type LeafRow = typeof nodeCaCertificates.$inferSelect;
+
 export class NodeCaService {
 	constructor(private readonly ctx: CoreContext) {}
 
 	/** Create the install CA if there is none; return the active one. */
 	issue(): NodeCaView {
-		void this.ctx;
-		throw new Error('not implemented (HA Wave 1 lane B): install CA');
+		const existing = this.activeRow();
+		if (existing) return this.view(existing);
+		const generated = generateInstallCa(CA_COMMON_NAME, this.ctx.now(), NODE_CA_VALIDITY_DAYS);
+		const sealed = encrypt(this.ctx.config.masterKey, new TextEncoder().encode(generated.keyPem));
+		const id = newId('nca_');
+		const now = this.ctx.now();
+		this.ctx.db
+			.insert(nodeCa)
+			.values({
+				id,
+				state: 'active',
+				certPem: generated.certPem,
+				keySealed: JSON.stringify(sealed),
+				fingerprint: generated.fingerprint,
+				subject: generated.subject,
+				notBefore: generated.notBefore.getTime(),
+				notAfter: generated.notAfter.getTime(),
+				issuedCount: 0,
+				createdAt: now,
+				updatedAt: now,
+			})
+			.run();
+		// A concurrent caller may have won the partial unique index; its row is the one that signs.
+		const row = this.activeRow();
+		if (!row) throw new ValidationError('Could not create the install CA.');
+		return this.view(row);
 	}
 
 	/**
 	 * Sign a CSR from `nodeId`. Refuses a CSR whose subject is not that node, whose key is weak,
 	 * or that asks for anything beyond CN = node id and URI SAN `yoal://node/<id>`.
 	 */
-	signCsr(_nodeId: string, _csr: NodeCsr): SignedNodeCertificate {
-		throw new Error('not implemented (HA Wave 1 lane B): sign node CSR');
+	signCsr(nodeId: string, csr: NodeCsr): SignedNodeCertificate {
+		if (!featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY'))
+			throw new ValidationError('The install CA is not in use until ENDPOINTS_GATEWAY is on.');
+		let parsed;
+		try {
+			parsed = parseNodeCsr(csr.csrPem, nodeId);
+		} catch (cause) {
+			throw new ValidationError(`The node certificate request was refused: ${(cause as Error).message}`);
+		}
+		const now = this.ctx.now();
+		// A re-sent CSR for the same key is answered with the leaf it already has, not re-signed
+		// (the partial unique index enforces the same thing).
+		const live = this.ctx.db
+			.select()
+			.from(nodeCaCertificates)
+			.where(
+				and(
+					eq(nodeCaCertificates.nodeId, nodeId),
+					eq(nodeCaCertificates.publicKeySha256, parsed.publicKeySha256),
+					isNull(nodeCaCertificates.revokedAt),
+				),
+			)
+			.get();
+		if (live && live.notAfter > now + 86_400_000) return this.signed(live);
+
+		this.issue();
+		const caRow = this.activeRow()!;
+		const keyPem = new TextDecoder().decode(
+			decrypt(
+				this.ctx.config.masterKey,
+				(JSON.parse(caRow.keySealed) as { ciphertext: string }).ciphertext,
+				(JSON.parse(caRow.keySealed) as { nonce: string }).nonce,
+			),
+		);
+		const serial = randomBytes(16).toString('hex');
+		const notBefore = new Date(now - 60_000);
+		const notAfter = new Date(now + NODE_CERT_VALIDITY_DAYS * 86_400_000);
+		const certPem = issueNodeCertificate({
+			caCertPem: caRow.certPem,
+			caKeyPem: keyPem,
+			caCommonName: caRow.subject.replace(/^CN=/, '') || CA_COMMON_NAME,
+			nodeId,
+			spkiDer: parsed.spkiDer,
+			serialHex: serial,
+			notBefore,
+			notAfter,
+		});
+		this.ctx.db.transaction(() => {
+			// One live leaf per node: a renewal or re-key supersedes the old one in the same write.
+			this.ctx.db
+				.update(nodeCaCertificates)
+				.set({ revokedAt: now, revokeReason: 'superseded' })
+				.where(and(eq(nodeCaCertificates.nodeId, nodeId), isNull(nodeCaCertificates.revokedAt)))
+				.run();
+			this.ctx.db
+				.insert(nodeCaCertificates)
+				.values({
+					serial,
+					caId: caRow.id,
+					nodeId,
+					certPem,
+					publicKeySha256: parsed.publicKeySha256,
+					reason: csr.reason,
+					notBefore: notBefore.getTime(),
+					notAfter: notAfter.getTime(),
+					createdAt: now,
+				})
+				.run();
+			this.ctx.db
+				.update(nodeCa)
+				.set({ issuedCount: caRow.issuedCount + 1, updatedAt: now })
+				.where(eq(nodeCa.id, caRow.id))
+				.run();
+		});
+		this.ctx.projects.bump();
+		return { serial, certPem, notAfter: notAfter.toISOString() };
 	}
 
 	/** Every CA a node should trust right now, as one PEM bundle. */
 	bundle(): string {
-		throw new Error('not implemented (HA Wave 1 lane B): CA bundle');
+		this.issue();
+		const rows = this.ctx.db
+			.select()
+			.from(nodeCa)
+			.where(eq(nodeCa.state, 'active'))
+			.all()
+			.concat(this.ctx.db.select().from(nodeCa).where(eq(nodeCa.state, 'previous')).all())
+			.sort((a, b) => a.createdAt - b.createdAt);
+		return rows
+			.slice(-3)
+			.map((row) => row.certPem.trim())
+			.join('\n');
 	}
 
 	/** `nodeTrust` for one node's desired state, or null before the CA exists. */
-	trustFor(_nodeId: string): NodeTrustDesired | null {
-		throw new Error('not implemented (HA Wave 1 lane B): node trust');
+	trustFor(nodeId: string): NodeTrustDesired | null {
+		if (!featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY')) return null;
+		this.issue();
+		const caBundlePem = this.bundle();
+		const leaf =
+			this.ctx.db
+				.select()
+				.from(nodeCaCertificates)
+				.where(and(eq(nodeCaCertificates.nodeId, nodeId), isNull(nodeCaCertificates.revokedAt)))
+				.orderBy(desc(nodeCaCertificates.notAfter))
+				.get() ?? null;
+		const revokedSerials = this.ctx.db
+			.select({ serial: nodeCaCertificates.serial })
+			.from(nodeCaCertificates)
+			.where(isNotNull(nodeCaCertificates.revokedAt))
+			.orderBy(desc(nodeCaCertificates.revokedAt))
+			.limit(1_000)
+			.all()
+			.map((row) => row.serial);
+		// The generation covers every input, so a new leaf or a revocation reloads listeners once.
+		const generation = Number.parseInt(
+			sha256Hex(
+				JSON.stringify({
+					bundle: caBundlePem,
+					serial: leaf?.serial ?? null,
+					notAfter: leaf?.notAfter ?? null,
+					revoked: revokedSerials,
+				}),
+			).slice(0, 8),
+			16,
+		);
+		return {
+			generation: generation & 0x7fffffff,
+			caBundlePem,
+			certificatePem: leaf?.certPem ?? null,
+			serial: leaf?.serial ?? null,
+			notAfter: leaf ? new Date(leaf.notAfter).toISOString() : null,
+			revokedSerials,
+		};
 	}
 
 	/** Revoke every leaf of `nodeId` (node removed or re-keyed). */
-	revoke(_nodeId: string, _reason: string): number {
-		throw new Error('not implemented (HA Wave 1 lane B): revoke node certificates');
+	revoke(nodeId: string, reason: string): number {
+		const result = this.ctx.sqlite.run(
+			'UPDATE node_ca_certificates SET revoked_at = ?, revoke_reason = ? WHERE node_id = ? AND revoked_at IS NULL',
+			[this.ctx.now(), reason.slice(0, 200), nodeId],
+		);
+		const changes = Number(result.changes ?? 0);
+		if (changes > 0) this.ctx.projects.bump();
+		return changes;
+	}
+
+	private activeRow(): CaRow | undefined {
+		return this.ctx.db.select().from(nodeCa).where(eq(nodeCa.state, 'active')).get();
+	}
+
+	private signed(row: LeafRow): SignedNodeCertificate {
+		return { serial: row.serial, certPem: row.certPem, notAfter: new Date(row.notAfter).toISOString() };
+	}
+
+	private view(row: CaRow): NodeCaView {
+		return {
+			fingerprint: row.fingerprint,
+			subject: row.subject,
+			notBefore: new Date(row.notBefore).toISOString(),
+			notAfter: new Date(row.notAfter).toISOString(),
+			state: row.state,
+			createdAt: new Date(row.createdAt).toISOString(),
+		};
 	}
 }

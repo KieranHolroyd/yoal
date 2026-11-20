@@ -26,6 +26,9 @@ import {
 	DATABASE_POOLER_PORT_MAX,
 	DATABASE_POOLER_PORT_MIN,
 	databaseAlias,
+	CONTAINER_GATEWAY_ADDRESS,
+	ENDPOINTS_GATEWAY_CAPABILITY,
+	type ContainerAddHost,
 	databaseAttachSchema,
 	databaseBackupCreateSchema,
 	databaseBackupPolicySchema,
@@ -105,6 +108,7 @@ import {
 	type WorkloadStatus,
 } from '@yoal/contracts';
 import { featureEnabled } from './config.ts';
+import { nodeHasCapability } from './capability-gate.ts';
 import { pitrActivationFor, pitrStoreProblem } from './pitr-store-gate.ts';
 import type { CoreContext } from './context.ts';
 import { nextCronTime } from './cron.ts';
@@ -136,7 +140,11 @@ interface ResolvedAttachment {
 	databaseName: string;
 	scheme: string;
 	row: DatabaseRow;
+	/** Loopback port of the pooled endpoint (H24) or the legacy pooler port. */
 	poolerPort: number | null;
+	poolHost: string | null;
+	/** True when this attachment goes through an endpoint on the consumer (H24, same node too). */
+	gateway: boolean;
 	/** Sealed password the app connects with: the owner's, or its named credential's. */
 	secretSealed: string;
 	/** Set when the attachment connects as a named (non-owner) credential. */
@@ -2820,7 +2828,9 @@ export class DatabaseService {
 			.get()?.nodeId;
 		const warning =
 			workloadNode && workloadNode !== row.nodeId
-				? `"${project.slug}" currently runs on another node. Redeploy it to move it next to "${row.name}"; until then it gets no ${envPrefix}_URL.`
+				? this.crossNodeAllowed(project)
+					? null
+					: `"${project.slug}" currently runs on another node. Redeploy it to move it next to "${row.name}"; until then it gets no ${envPrefix}_URL.`
 				: workloadNode
 					? null
 					: `"${project.slug}" has no running workload yet. Its next deploy is placed next to "${row.name}".`;
@@ -2870,8 +2880,10 @@ export class DatabaseService {
 	}
 
 	/**
-	 * Env vars one consumer workload receives, resolved for its node and runtime. Databases on
-	 * another node are skipped (the next deploy moves the app next to them).
+	 * Env vars one consumer workload receives, resolved for its node and runtime. Without the
+	 * endpoint gateway a database on another node is skipped (the next deploy moves the app next to
+	 * it); with it, every attachment has a stable endpoint, so host and port never change on a
+	 * promotion (G10) and a remote pooler is reachable (G11).
 	 */
 	consumerEnv(projectId: string, nodeId: string | null, runtime: WorkloadRuntime): Record<string, string> {
 		const env: Record<string, string> = {};
@@ -2901,41 +2913,61 @@ export class DatabaseService {
 			// Container env files cannot carry a multi-line PEM; those apps use sslmode=require or
 			// fetch the public CA from the credentials endpoint. Process env files escape newlines.
 			if (tls.enabled && tls.caPem && runtime === 'process') env[`${item.prefix}_CA_CERT`] = tls.caPem;
-			if (item.poolerPort !== null) {
-				const poolHost = runtime === 'container' ? `${databaseAlias(item.databaseId)}-pool` : '127.0.0.1';
-				const poolPort = runtime === 'container' ? 6432 : item.poolerPort;
+			if (item.poolerPort !== null && item.poolHost !== null) {
 				env[`${item.prefix}_POOL_URL`] = databaseConnectionUrl({
 					scheme: item.scheme,
 					user: item.user,
 					pass,
-					host: poolHost,
-					port: poolPort,
+					host: item.poolHost,
+					port: item.poolerPort,
 					database: item.databaseName,
 					sslmode: tls.mode,
 				});
-				env[`${item.prefix}_POOL_HOST`] = poolHost;
-				env[`${item.prefix}_POOL_PORT`] = String(poolPort);
+				env[`${item.prefix}_POOL_HOST`] = item.poolHost;
+				env[`${item.prefix}_POOL_PORT`] = String(item.poolerPort);
 			}
-			// Read replicas (C7): only while one the app can reach is streaming or lagging. They are
-			// physical copies, so the same user and password work; reads may trail by the lag.
-			const reads = this.ctx.databaseReplicas.readTargets(item.row, nodeId!, runtime);
-			if (reads.length > 0) {
-				const urls = reads.map((target) =>
-					databaseConnectionUrl({
+			// Read replicas (C7): same-node replicas directly, or with the gateway a stable read port
+			// that follows the replicas without changing the app's environment (H24).
+			if (item.gateway) {
+				const read = this.endpointRow(nodeId!, item.row.id, 'read');
+				if (read && this.ctx.databaseReplicas.readableUpstreamsFor(item.row.id).length > 0) {
+					const host = runtime === 'container' ? databaseAlias(item.row.id) : '127.0.0.1';
+					const url = databaseConnectionUrl({
 						scheme: item.scheme,
 						user: item.user,
 						pass,
-						host: target.host,
-						port: target.port,
+						host,
+						port: read.localPort,
 						database: item.databaseName,
 						sslmode: tls.mode,
 						query: info.urlQuery,
-					}),
-				);
-				env[`${item.prefix}_READ_URL`] = urls[0]!;
-				env[`${item.prefix}_READ_URLS`] = urls.join(',');
-				env[`${item.prefix}_READ_HOST`] = reads[0]!.host;
-				env[`${item.prefix}_READ_PORT`] = String(reads[0]!.port);
+					});
+					env[`${item.prefix}_READ_URL`] = url;
+					// One stable port fans out over every readable replica, so there is one URL.
+					env[`${item.prefix}_READ_URLS`] = url;
+					env[`${item.prefix}_READ_HOST`] = host;
+					env[`${item.prefix}_READ_PORT`] = String(read.localPort);
+				}
+			} else {
+				const reads = this.ctx.databaseReplicas.readTargets(item.row, nodeId!, runtime);
+				if (reads.length > 0) {
+					const urls = reads.map((target) =>
+						databaseConnectionUrl({
+							scheme: item.scheme,
+							user: item.user,
+							pass,
+							host: target.host,
+							port: target.port,
+							database: item.databaseName,
+							sslmode: tls.mode,
+							query: info.urlQuery,
+						}),
+					);
+					env[`${item.prefix}_READ_URL`] = urls[0]!;
+					env[`${item.prefix}_READ_URLS`] = urls.join(',');
+					env[`${item.prefix}_READ_HOST`] = reads[0]!.host;
+					env[`${item.prefix}_READ_PORT`] = String(reads[0]!.port);
+				}
 			}
 		}
 		return env;
@@ -2959,11 +2991,15 @@ export class DatabaseService {
 			port: item.port,
 			poolerPort: item.poolerPort,
 			tls,
-			// A replica starting or stopping to serve reads changes `<P>_READ_*` (C7).
-			...(() => {
-				const reads = this.ctx.databaseReplicas.readTargets(item.row, nodeId!, runtime);
-				return reads.length > 0 ? { reads: reads.map((target) => `${target.replicaId}@${target.host}:${target.port}`) } : {};
-			})(),
+			// A replica starting or stopping to serve reads changes `<P>_READ_*` (C7). Under the
+			// endpoint gateway the read URL is a stable local port, so a promotion, a replica coming
+			// or going, or a failover changes nothing here and restarts no app (G10).
+			...(!item.gateway
+				? (() => {
+						const reads = this.ctx.databaseReplicas.readTargets(item.row, nodeId!, runtime);
+						return reads.length > 0 ? { reads: reads.map((target) => `${target.replicaId}@${target.host}:${target.port}`) } : {};
+					})()
+				: {}),
 			...(item.credential
 				? { credential: item.credential.id, secret: sha256Hex(item.secretSealed) }
 				: this.ownerRotated(item.databaseId)
@@ -3601,7 +3637,8 @@ export class DatabaseService {
 
 	private resolveForConsumer(projectId: string, nodeId: string | null, runtime: WorkloadRuntime): ResolvedAttachment[] {
 		if (!nodeId) return [];
-		return this.liveAttachmentRows(projectId).flatMap(({ db, prefix, credential }) => {
+		const gateway = this.gatewayAt(nodeId);
+		return this.liveAttachmentRows(projectId).flatMap(({ db, prefix, credential }): ResolvedAttachment[] => {
 			const info = databaseEngineRegistry[db.engine];
 			// A named credential keeps its last confirmed secret while a rotation is in flight; one
 			// that never got a secret (or was revoked underneath) yields no env rather than a bad URL.
@@ -3609,44 +3646,119 @@ export class DatabaseService {
 			const user = credential ? credential.username : databaseIdentifier(db.name);
 			const container = runtime === 'container';
 			const sameNode = db.nodeId === nodeId;
-			const endpoint = sameNode
-				? null
-				: this.ctx.db
-						.select({ localPort: serviceEndpoints.localPort })
-						.from(serviceEndpoints)
-						.where(
-							and(
-								eq(serviceEndpoints.consumerNodeId, nodeId),
-								eq(serviceEndpoints.serviceKind, 'database'),
-								eq(serviceEndpoints.serviceId, db.id),
-							),
-						)
-						.get() ?? null;
-			if (!sameNode && !endpoint) return [];
-			return [{
-				databaseId: db.id,
-				prefix,
-				host: sameNode ? (container ? databaseAlias(db.id) : '127.0.0.1') : '127.0.0.1',
-				port: sameNode ? (container ? info.containerPort : db.hostPort) : endpoint!.localPort,
-				user,
-				// The database itself is always named after the owner, whoever connects to it.
-				databaseName: databaseUrlDatabase(db.engine, databaseIdentifier(db.name)),
-				scheme: info.scheme,
-				row: db,
-				// PgBouncer's userlist carries only the owner, so a named credential connects directly.
-				poolerPort:
-					sameNode && !credential && db.poolerEnabled && info.capabilities.pooler ? db.poolerPort : null,
-				secretSealed: credential ? credential.secretSealed! : db.ownerSecret,
-				credential: credential ? { id: credential.id, role: credential.role } : null,
-			}];
+			const primary = this.endpointRow(nodeId, db.id, 'primary');
+			// With the gateway every attachment goes through its endpoint, on its own node too, so a
+			// promotion re-points the upstream and leaves host, port and activation untouched (G10).
+			if (gateway && primary) {
+				const host = container ? databaseAlias(db.id) : '127.0.0.1';
+				const pool = !credential && db.poolerEnabled && info.capabilities.pooler ? this.endpointRow(nodeId, db.id, 'pool') : null;
+				return [
+					{
+						databaseId: db.id,
+						prefix,
+						host,
+						port: primary.localPort,
+						user,
+						databaseName: databaseUrlDatabase(db.engine, databaseIdentifier(db.name)),
+						scheme: info.scheme,
+						row: db,
+						poolerPort: pool?.localPort ?? null,
+						poolHost: pool ? host : null,
+						gateway: true,
+						secretSealed: credential ? credential.secretSealed! : db.ownerSecret,
+						credential: credential ? { id: credential.id, role: credential.role } : null,
+					},
+				];
+			}
+			// Without the gateway this is C2 exactly: a remote process app uses its endpoint, everything
+			// else must share the database's node.
+			if (!sameNode && !primary) return [];
+			const pooler = sameNode && !credential && db.poolerEnabled && db.poolerPort !== null && info.capabilities.pooler;
+			return [
+				{
+					databaseId: db.id,
+					prefix,
+					host: sameNode ? (container ? databaseAlias(db.id) : '127.0.0.1') : '127.0.0.1',
+					port: sameNode ? (container ? info.containerPort : db.hostPort) : primary!.localPort,
+					user,
+					// The database itself is always named after the owner, whoever connects to it.
+					databaseName: databaseUrlDatabase(db.engine, databaseIdentifier(db.name)),
+					scheme: info.scheme,
+					row: db,
+					// PgBouncer's userlist carries only the owner, so a named credential connects directly.
+					poolerPort: pooler ? (container ? 6_432 : db.poolerPort) : null,
+					poolHost: pooler ? (container ? `${databaseAlias(db.id)}-pool` : '127.0.0.1') : null,
+					gateway: false,
+					secretSealed: credential ? credential.secretSealed! : db.ownerSecret,
+					credential: credential ? { id: credential.id, role: credential.role } : null,
+				},
+			];
 		});
 	}
 
-	/** Process apps may reach a database on another node through a service endpoint (C2). */
+	/** One of a consumer's endpoint rows for a database and role. */
+	private endpointRow(consumerNodeId: string, databaseId: string, role: 'primary' | 'pool' | 'read') {
+		return (
+			this.ctx.db
+				.select({ localPort: serviceEndpoints.localPort, version: serviceEndpoints.version })
+				.from(serviceEndpoints)
+				.where(
+					and(
+						eq(serviceEndpoints.consumerNodeId, consumerNodeId),
+						eq(serviceEndpoints.serviceKind, 'database'),
+						eq(serviceEndpoints.serviceId, databaseId),
+						eq(serviceEndpoints.role, role),
+					),
+				)
+				.get() ?? null
+		);
+	}
+
+	/** Whether this node gets H24's endpoints: the flag is on and its agent advertises the capability. */
+	private gatewayAt(nodeId: string): boolean {
+		if (!featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY')) return false;
+		if (!featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS')) return false;
+		const row = this.ctx.db
+			.select({ capabilitiesJson: nodes.capabilitiesJson })
+			.from(nodes)
+			.where(eq(nodes.id, nodeId))
+			.get();
+		return row ? nodeHasCapability(row, ENDPOINTS_GATEWAY_CAPABILITY) : false;
+	}
+
+	/**
+	 * `AddHost=db-<id>:<gateway>` for a container app on this node (H24). One entry per attached
+	 * database, whatever node it runs on; the helper writes the Quadlet lines itself.
+	 */
+	containerAddHosts(projectId: string, nodeId: string): ContainerAddHost[] {
+		if (!this.gatewayAt(nodeId)) return [];
+		const attached = new Set(
+			this.ctx.db
+				.select({ id: databases.id })
+				.from(databaseAttachments)
+				.innerJoin(databases, eq(databases.id, databaseAttachments.databaseId))
+				.where(and(eq(databaseAttachments.projectId, projectId), isNull(databases.deletedAt)))
+				.all()
+				.map((row) => row.id),
+		);
+		const hosts = new Set<string>();
+		for (const row of this.ctx.db
+			.select({ serviceId: serviceEndpoints.serviceId })
+			.from(serviceEndpoints)
+			.where(and(eq(serviceEndpoints.consumerNodeId, nodeId), eq(serviceEndpoints.serviceKind, 'database')))
+			.all())
+			if (attached.has(row.serviceId)) hosts.add(databaseAlias(row.serviceId));
+		return [...hosts]
+			.sort()
+			.slice(0, 64)
+			.map((host) => ({ host, address: CONTAINER_GATEWAY_ADDRESS }));
+	}
+
+	/** A container may reach a database on another node only when the endpoint gateway is on (H24). */
 	private crossNodeAllowed(project: ProjectRow): boolean {
 		return (
 			featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS') &&
-			project.runtime !== 'container'
+			(project.runtime !== 'container' || featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY'))
 		);
 	}
 

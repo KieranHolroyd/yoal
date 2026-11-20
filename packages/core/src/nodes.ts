@@ -1,5 +1,6 @@
 import { and, desc, eq, isNull, sql } from 'drizzle-orm';
 import { featureFlagsForGate, gateDesiredState } from './capability-gate';
+import { featureEnabled } from './config.ts';
 import {
 	appVolumes,
 	databaseStudioSessions,
@@ -43,6 +44,7 @@ import {
 	type Principal,
 	type PlatformPermission,
 	IDENTITY_CAPABILITY,
+	ENDPOINTS_GATEWAY_CAPABILITY,
 	selectIdentityNode,
 	KUBERNETES_CAPABILITY,
 	WG_SUBNETS_CAPABILITY,
@@ -499,6 +501,15 @@ export class NodeService {
 		if (node.id !== input.nodeId) throw new UnauthorizedError('Node id does not match token');
 		const now = this.ctx.now();
 		this.storeCertificate(node.id, input.nodeCertificate, now);
+		// A node that advertises `endpoints-gateway` sends its CSR here; only the public request
+		// travels and the install CA signs it (HA-PLAN H24 "Trust").
+		if (input.nodeCsr && featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY') && (input.capabilities ?? []).includes(ENDPOINTS_GATEWAY_CAPABILITY)) {
+			try {
+				this.ctx.nodeCa.signCsr(node.id, input.nodeCsr);
+			} catch (cause) {
+				console.error(`[nodes] refused the certificate request from ${node.name}:`, (cause as Error).message);
+			}
+		}
 		// A node moved onto the overlay after it joined (`adoptOverlay`) has an address but no key
 		// until its helper reports one. Only the first key is taken: a different key later is a
 		// re-key the operator must do by re-adopting, not something a heartbeat may change.
@@ -1182,6 +1193,8 @@ export class NodeService {
 			identity: node.id === identityNodeId ? identityDesiredForNode(this.ctx, node.id) : null,
 			domains: this.ctx.domains.desiredForProjects(servedProjectIds),
 			serviceEndpoints: endpoints.serviceEndpointsForNode(node.id),
+			readEndpoints: endpoints.readEndpointsForNode(node.id),
+			nodeTrust: endpoints.nodeTrustForNode(node.id),
 			serviceProviders: endpoints.serviceProvidersForNode(node.id),
 			...(node.networkMode === 'external'
 				? {}

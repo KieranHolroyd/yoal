@@ -17,7 +17,6 @@ import { computeHaLevel } from './ha-level.ts';
 import { judgeCanary } from './canary-judge.ts';
 import { createAzureObjectStore, createGcsObjectStore, createObjectStore } from './object-store-factory.ts';
 import { ReleaseCommandScheduler } from './release-commands.ts';
-import { NodeCaService } from './node-ca.ts';
 import { S3ObjectStore, LocalObjectStore, storageKindForDb } from './object-store.ts';
 import { buildPrincipal } from './orgs.ts';
 import { createCore, type Core } from './index.ts';
@@ -267,7 +266,6 @@ describe('stubs are in place and fail loudly', () => {
 		).toThrow('lane E');
 		const ctx = {} as never;
 		expect(() => new ReleaseCommandScheduler(ctx).gate('dep_1')).toThrow('lane C');
-		expect(() => new NodeCaService(ctx).bundle()).toThrow('lane B');
 	});
 
 	test('the factory builds an s3 store from a target with today\'s defaults', () => {

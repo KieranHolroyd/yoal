@@ -50,6 +50,13 @@ export function endpointPortRangeFor(role: EndpointRole): { min: number; max: nu
 export const gatewayAddressSchema = z.ipv4();
 
 /**
+ * The container gateway the endpoint forwarder binds and every `AddHost` points at (HA-PLAN H24).
+ * Podman's default network gateway; a container reaches `db-<id>:<port>` there whatever node the
+ * database is on.
+ */
+export const CONTAINER_GATEWAY_ADDRESS = '10.89.0.1';
+
+/**
  * How a consumer checks the provider's certificate. `pinned` (absent) is today's SHA-256 pin in
  * `tlsFingerprint`; `install-ca` verifies the chain against `nodeTrust.caBundlePem` and the peer's
  * URI SAN `yoal://node/<upstream.nodeId>` (HA-PLAN H24 "Trust", CLUSTERING §4.3).

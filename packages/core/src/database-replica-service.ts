@@ -481,6 +481,22 @@ export class DatabaseReplicaService {
 			});
 	}
 
+	/** Every readable replica of a database, lowest node id first, for a stable read endpoint (H24). */
+	readableUpstreamsFor(databaseId: string): Array<{ replicaId: string; nodeId: string; port: number }> {
+		const database = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
+		if (!database || database.engine !== 'postgres') return [];
+		return this.rowsFor(databaseId)
+			.filter(
+				(row) =>
+					!row.removingAt &&
+					row.hostPort !== null &&
+					row.primaryGeneration === database.primaryGeneration &&
+					databaseReplicaReadable(row.status),
+			)
+			.map((row) => ({ replicaId: row.id, nodeId: row.nodeId, port: row.hostPort! }))
+			.sort((a, b) => a.nodeId.localeCompare(b.nodeId));
+	}
+
 	/** Replica services a consumer endpoint may need (C2), for `ServiceEndpointService`. */
 	endpointServicesFor(databaseId: string): Array<{ serviceId: string; nodeId: string; port: number }> {
 		const database = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
