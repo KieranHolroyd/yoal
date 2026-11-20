@@ -4,6 +4,7 @@ import {
 	backupTargetCreateSchema,
 	backupTargetUpdateSchema,
 	objectStoreKindIssue,
+	objectStoreTargetSchema,
 	type BackupTargetCredentials,
 	type BackupTargetResolution,
 	type BackupTargetTestResult,
@@ -425,6 +426,8 @@ export class BackupTargetService {
 				`/api/backup-targets/${encodeURIComponent(target.id)}/objects/`,
 			);
 		}
+		if (target.kind === 'azure' || target.kind === 'gcs')
+			throw new CoreError('not_implemented', `not implemented (HA Wave 1 lane E): ${target.kind} backup targets`, 501);
 		const row = this.ctx.db.select().from(backupTargets).where(eq(backupTargets.id, target.id)).get();
 		if (!row?.accessKeySealed || !row.secretSealed)
 			throw new ValidationError('This S3 backup target has no stored credentials.');
@@ -664,6 +667,26 @@ export class BackupTargetService {
 	}
 
 	private toView(row: BackupTargetRow): BackupTargetView {
+		// 0120 (HA-PLAN W3): an Azure or GCS target is an `s3`-kind row with `store_kind` set. Its
+		// credential is one sealed JSON in `secret_sealed`; `bucket`/`endpoint`/`region` and
+		// `access_key_sealed` stay NULL so a pre-0120 control plane refuses it.
+		const storeKind = row.kind === 's3' && (row.storeKind === 'azure' || row.storeKind === 'gcs') ? row.storeKind : null;
+		if (storeKind)
+			return {
+				...this.baseView(row),
+				kind: storeKind,
+				hasCredentials: Boolean(row.secretSealed),
+				store: objectStoreTargetSchema.parse({
+					...parseJson<Record<string, unknown>>(row.storeOptionsJson, {}),
+					kind: storeKind,
+					pathPrefix: row.pathPrefix,
+					immutability: row.objectLock ? { retentionDays: row.immutableRetentionDays ?? null } : null,
+				}),
+			};
+		return this.baseView(row);
+	}
+
+	private baseView(row: BackupTargetRow): BackupTargetView {
 		return {
 			id: row.id,
 			orgId: row.orgId,
