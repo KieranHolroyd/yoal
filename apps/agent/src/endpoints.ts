@@ -479,7 +479,9 @@ export function isGatewayAddress(value: string): boolean {
 }
 
 function routeKey(route: ConsumerRoute): string {
-	return JSON.stringify([route.upstreams, route.balance, route.version]);
+	// The bind list is part of the route: adding or removing a gateway address must open or close
+	// that listener even when the upstream is unchanged.
+	return JSON.stringify([route.binds, route.upstreams, route.balance, route.version]);
 }
 
 function upstreamTargets(route: ConsumerRoute): string {
