@@ -76,7 +76,7 @@ export function routeRoot(route: RouteSpec, dataDir: string, contentDomain: stri
 
 export function toSiteCompileInput(
 	route: RouteSpec,
-	options: Pick<CompileAgentConfigOptions, 'dataDir' | 'agentSocket'> & { contentDomain?: string },
+	options: Pick<CompileAgentConfigOptions, 'dataDir' | 'agentSocket'> & { contentDomain?: string; healthProbeCidr?: string | null },
 ): SiteCompileInput {
 	if (!isSafeProjectId(route.projectId))
 		throw new Error(`Invalid project id in desired state: ${route.projectId}`);
@@ -100,6 +100,8 @@ export function toSiteCompileInput(
 		...(route.upstreams?.length ? { upstreams: route.upstreams } : {}),
 		...(route.healthPath ? { healthPath: route.healthPath } : {}),
 		...(route.healthPath && route.healthIntervalSeconds ? { healthIntervalSeconds: route.healthIntervalSeconds } : {}),
+		// Ingresses probe a protected copy's health path over the overlay with no session (F7).
+		...(route.healthPath && options.healthProbeCidr ? { healthProbeCidr: options.healthProbeCidr } : {}),
 	};
 }
 
@@ -544,7 +546,13 @@ function caddySocketAddress(socketPath: string): string {
 export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<string, unknown> {
 	const entries: SiteEntry[] = [];
 	const toEntry = (route: RouteSpec): SiteCompileInput => {
-		const site = toSiteCompileInput(route, { ...options, contentDomain: options.state.contentDomain });
+		const site = toSiteCompileInput(route, {
+			...options,
+			contentDomain: options.state.contentDomain,
+			// Only a managed overlay has a CIDR. A bring-your-own network exempts nothing: its desired
+			// state does not list the ingress addresses (a known gap, OPS.md §7.3).
+			healthProbeCidr: options.state.wireguard?.mode !== 'external' ? (options.state.wireguard?.cidr ?? null) : null,
+		});
 		entries.push({ site, route });
 		return site;
 	};
