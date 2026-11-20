@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { hostname } from 'node:os';
 import { failoverEvents, nodes } from '@yoal/db';
 import type { CoreContext } from '../../context.ts';
@@ -56,6 +57,21 @@ export function createDnsFailoverDriver(ctx: CoreContext): DnsFailoverDriver {
 	});
 }
 
+/**
+ * The address a DNS A/AAAA record may publish: the host part of the node's WireGuard endpoint (its
+ * public reachability), else its public address, and only when that host is an IP. The managed
+ * install's `public_address` is an internal `host:8080`, never a DNS answer.
+ */
+function publicHost(wgEndpoint: string | null, publicAddress: string | null): string {
+	for (const candidate of [wgEndpoint, publicAddress]) {
+		const raw = candidate?.trim();
+		if (!raw) continue;
+		const host = raw.replace(/^\[([^\]]+)\](?::\d+)?$/, '$1').replace(/:\d+$/, '');
+		if (isIP(host)) return host;
+	}
+	return '';
+}
+
 function providerFromEnv(): DnsProvider | null {
 	const config = cloudflareDnsConfigFromEnv();
 	return config ? new CloudflareDnsProvider(config) : null;
@@ -70,6 +86,7 @@ function ingressNodes(ctx: CoreContext): DnsFailoverNode[] {
 			zone: nodes.zone,
 			status: nodes.status,
 			publicAddress: nodes.publicAddress,
+			wgEndpoint: nodes.wgEndpoint,
 			lastHeartbeatAt: nodes.lastHeartbeatAt,
 			updatedAt: nodes.updatedAt,
 		})
@@ -81,9 +98,10 @@ function ingressNodes(ctx: CoreContext): DnsFailoverNode[] {
 			id: row.id,
 			name: row.name,
 			zone: row.zone,
-			address: row.publicAddress?.trim() ?? '',
+			address: publicHost(row.wgEndpoint, row.publicAddress),
 			status: row.status,
-			offlineSince: row.status === 'offline' ? (row.lastHeartbeatAt ?? row.updatedAt) - OFFLINE_AFTER_MS : null,
+			// The row flips to `offline` one heartbeat window after the last beat; count from then.
+			offlineSince: row.status === 'offline' ? (row.lastHeartbeatAt ?? row.updatedAt) + OFFLINE_AFTER_MS : null,
 		}));
 }
 

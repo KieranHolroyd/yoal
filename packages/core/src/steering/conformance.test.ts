@@ -91,7 +91,9 @@ function dnsDriver(options: { failAll?: () => boolean; multiObserver?: boolean }
 
 function lastHealthyScenario(): Promise<{ withdrawn: string[]; records: string[] }> | { withdrawn: string[]; records: string[] } {
 	let failing = false;
-	const h = dnsDriver({ failAll: () => failing });
+	// Corroborate so the 45 s hold-down (not the 90 s single-witness one) is due at 66 s: without
+	// that, the case would pass even if the last-healthy guard were deleted.
+	const h = dnsDriver({ failAll: () => failing, multiObserver: true });
 	const lease = { epoch: 1, holds: () => true };
 	const run = async () => {
 		await h.driver.apply(lease);

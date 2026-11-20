@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import type { DnsFailoverNode, ProbeObservation } from './health.ts';
 
 /**
@@ -75,5 +76,6 @@ export function httpIngressProber(options: HttpIngressProberOptions): IngressPro
 
 function addressForUrl(address: string): string {
 	const value = address.trim().replace(/^\[|\]$/g, '');
-	return value.includes(':') ? `[${value}]` : value;
+	if (isIP(value) === 6) return `[${value}]`;
+	return value;
 }

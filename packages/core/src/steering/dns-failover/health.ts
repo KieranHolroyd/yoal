@@ -100,6 +100,7 @@ export class DnsFailoverHealth {
 	#reports = new Map<string, Map<string, ProbeObservation>>();
 	#failedSince = new Map<string, number>();
 	#healthySince = new Map<string, number>();
+	#lastSeen = new Map<string, number>();
 	#lastSuccessAt = new Map<string, number>();
 	#offlineSince = new Map<string, number>();
 
@@ -115,6 +116,14 @@ export class DnsFailoverHealth {
 		}
 		observers.set(observation.observerId, observation);
 		if (observation.observerId !== this.primaryObserverId) return;
+		// A gap longer than the staleness window ends the streak: the control plane was not
+		// watching, so a failure after it must earn a fresh hold-down.
+		const lastSeen = this.#lastSeen.get(observation.nodeId);
+		if (lastSeen !== undefined && observation.at - lastSeen > this.policy.staleAfterMs) {
+			this.#failedSince.delete(observation.nodeId);
+			this.#healthySince.delete(observation.nodeId);
+		}
+		this.#lastSeen.set(observation.nodeId, observation.at);
 		if (observation.ok) {
 			this.#failedSince.delete(observation.nodeId);
 			this.#lastSuccessAt.set(observation.nodeId, observation.at);
@@ -148,6 +157,7 @@ export class DnsFailoverHealth {
 	/** Forget a node that is no longer an ingress, so its streak cannot be resurrected. */
 	forget(nodeId: string): void {
 		this.#reports.delete(nodeId);
+		this.#lastSeen.delete(nodeId);
 		this.#failedSince.delete(nodeId);
 		this.#healthySince.delete(nodeId);
 		this.#lastSuccessAt.delete(nodeId);

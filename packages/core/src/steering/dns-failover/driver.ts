@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import type { SteeringDriver } from '@yoal/contracts';
 import {
 	DnsProviderError,
@@ -122,6 +123,8 @@ export class DnsFailoverDriver implements SteeringDriver {
 	#lastProbeAt = Number.NEGATIVE_INFINITY;
 	#lastProbeReports: ProbeObservation[] = [];
 	#offlineSince = new Map<string, number>();
+	/** The ingress ids seen last pass, so a departed node's streaks are forgotten. */
+	#seenNodes: Set<string> = new Set();
 	#retryAt = 0;
 	#retryIndex = 0;
 
@@ -197,8 +200,11 @@ export class DnsFailoverDriver implements SteeringDriver {
 		const nodes = this.#options.nodes();
 		const known = new Set(nodes.map((node) => node.id));
 		const state = normalizeState(this.#options.state.load());
-		// A node that leaves the ingress set must not be re-added from an old streak.
+		// A node that leaves the ingress set must not be re-added from an old streak, and its
+		// failure/health streaks must start afresh if it returns.
 		for (const id of [...this.#offlineSince.keys()]) if (!known.has(id)) this.#offlineSince.delete(id);
+		for (const id of [...this.#seenNodes]) if (!known.has(id)) this.#health.forget(id);
+		this.#seenNodes = known;
 		for (const id of [...(state.records ?? [])]) if (!known.has(id)) state.records = state.records?.filter((candidate) => candidate !== id) ?? null;
 
 		await this.#probe(nodes, now, report);
@@ -373,6 +379,10 @@ export class DnsFailoverDriver implements SteeringDriver {
 				continue;
 			}
 			const ttl = target.proxied ? 1 : target.ttl;
+			// A name is pruned only when every intended entry is confirmed present. Otherwise a failed
+			// create would delete its predecessor and leave the name empty (negative answers outlive
+			// the TTL).
+			let complete = true;
 			for (const entry of desired) {
 				const match = observed.find((record) => record.content === entry.content && record.type === entry.type);
 				if (!match) {
@@ -394,6 +404,7 @@ export class DnsFailoverDriver implements SteeringDriver {
 							appliedAt: now,
 						});
 					} catch (error) {
+						complete = false;
 						failure = error;
 						report.failed += 1;
 						this.#failedEvent(lease, entry.node, name, entry.type, entry.content, error, lease.epoch, decidedAt);
@@ -401,6 +412,7 @@ export class DnsFailoverDriver implements SteeringDriver {
 					continue;
 				}
 				if (match.proxied !== target.proxied) {
+					complete = false;
 					report.failed += 1;
 					this.#event(lease, {
 						action: 'update',
@@ -448,12 +460,14 @@ export class DnsFailoverDriver implements SteeringDriver {
 							appliedAt: now,
 						});
 					} catch (error) {
+						complete = false;
 						failure = error;
 						report.failed += 1;
 						this.#failedEvent(lease, entry.node, name, entry.type, entry.content, error, lease.epoch, decidedAt);
 					}
 				}
 			}
+			if (!complete) continue;
 			// A record whose address is not in the intended set is a withdrawal, or drift left by an
 			// earlier failed pass. Removing it is what makes the reconcile idempotent.
 			const keep = new Set(desired.map((entry) => entry.content));
@@ -563,7 +577,9 @@ export function emptyDnsFailoverState(): DnsFailoverState {
 }
 
 function recordType(address: string): DnsRecordType {
-	return address.includes(':') ? 'AAAA' : 'A';
+	// Content must be an IP. A `host:port` (the managed install's internal address) is neither.
+	const version = isIP(address.trim());
+	return version === 6 ? 'AAAA' : 'A';
 }
 
 function message(error: unknown): string {
