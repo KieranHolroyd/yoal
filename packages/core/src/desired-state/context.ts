@@ -2,11 +2,12 @@ import { isNull } from 'drizzle-orm';
 import { nodes, projects, workloadReplicas, workloads, type nodes as nodesTable } from '@yoal/db';
 import type { CoreContext } from '../context.ts';
 import { effectiveRuntime } from '../runtime-tier.ts';
+import { firstIngress, ingressNodeIds, isIngressNode } from '../ingress.ts';
 
 export type NodeRow = typeof nodesTable.$inferSelect;
 export type ProjectRow = typeof projects.$inferSelect;
 /** The node columns every part of desired state reads about the rest of the fleet. */
-export type FleetNode = Pick<NodeRow, 'id' | 'mode' | 'publicAddress' | 'status' | 'capabilitiesJson'>;
+export type FleetNode = Pick<NodeRow, 'id' | 'mode' | 'publicAddress' | 'status' | 'capabilitiesJson' | 'rolesJson'>;
 
 /**
  * What one node's desired state is built from: the node, the fleet around it, where each project's
@@ -17,8 +18,11 @@ export type FleetNode = Pick<NodeRow, 'id' | 'mode' | 'publicAddress' | 'status'
 export class DesiredStateContext {
 	readonly now: number;
 	readonly allNodes: FleetNode[];
-	readonly edgeId: string | null;
-	readonly isEdge: boolean;
+	/** Every id that serves the edge payload (H17). One node until the W6 lane lands. */
+	readonly ingressIds: readonly string[];
+	/** The first ingress: the compatibility answer to "the edge" (mode/edge id). */
+	readonly ingressId: string | null;
+	readonly isIngress: boolean;
 	readonly nodeById: Map<string, FleetNode>;
 	readonly workloadNodeByProject: Map<string, string>;
 	readonly arrivingHere: Set<string>;
@@ -41,11 +45,14 @@ export class DesiredStateContext {
 				publicAddress: nodes.publicAddress,
 				status: nodes.status,
 				capabilitiesJson: nodes.capabilitiesJson,
+				rolesJson: nodes.rolesJson,
 			})
 			.from(nodes)
 			.all();
-		const edgeId = this.ctx.config.edgeNodeId ?? allNodes.find((row) => row.mode === 'edge')?.id ?? null;
-		const isEdge = node.id === edgeId || node.mode === 'edge';
+		const ingressIds = ingressNodeIds(allNodes, this.ctx.config.edgeNodeId ?? null);
+		// The compatibility answer to "the edge": the configured id, else the first `mode: 'edge'`.
+		const ingressId = firstIngress(allNodes, this.ctx.config.edgeNodeId ?? null);
+		const isIngress = isIngressNode(node.id, ingressIds);
 		const nodeById = new Map(allNodes.map((row) => [row.id, row]));
 
 		// Apps are served from the node their workload was admitted to (`auto` and database pinning
@@ -98,7 +105,7 @@ export class DesiredStateContext {
 			// not only the node `workloads.node_id` names (copy 0).
 			(effectiveRuntime(project) !== 'static' && holdsCopy(project.id) ? node.id : undefined) ??
 			(effectiveRuntime(project) !== 'static' ? workloadNodeByProject.get(project.id) : undefined) ??
-			(project.placement === 'edge' || project.placement === 'auto' ? edgeId : project.placement);
+			(project.placement === 'edge' || project.placement === 'auto' ? ingressId : project.placement);
 
 		const projectRows = this.ctx.db
 			.select()
@@ -109,13 +116,14 @@ export class DesiredStateContext {
 				const target = targetOf(project);
 				// Edge serves edge-placed projects locally and proxies worker-placed ones; a worker
 				// only serves the projects placed on it, or arriving on it.
-				return isEdge || target === node.id || arrivingHere.has(project.id);
+				return isIngress || target === node.id || arrivingHere.has(project.id);
 			});
 
 		this.now = now;
 		this.allNodes = allNodes;
-		this.edgeId = edgeId;
-		this.isEdge = isEdge;
+		this.ingressIds = ingressIds;
+		this.ingressId = ingressId;
+		this.isIngress = isIngress;
 		this.nodeById = nodeById;
 		this.workloadNodeByProject = workloadNodeByProject;
 		this.arrivingHere = arrivingHere;

@@ -6,7 +6,7 @@ import type { EnvironmentRoutes } from './environment-routes.ts';
 /**
  * Ingress and edge-only content: the upstream list an ingress balances across, default pages for
  * never-deployed projects, and the internal gateway the studio and console fronts ride. "Ingress"
- * is still `isEdge` (one node); the `ingressNodes()` refactor is HA-PLAN W6, not this split.
+ * is `isIngress` (one node); the `ingressNodes()` refactor is HA-PLAN W6, not this split.
  */
 export class IngressState extends DesiredStatePart {
 	/**
@@ -14,7 +14,7 @@ export class IngressState extends DesiredStatePart {
 	 * copy (its socket or loopback port), or null when that copy is blocked.
 	 */
 	copyUpstreams(projectId: string, local: string | null): { everyCopyNode: string[]; replicaUpstreams: string[] } {
-		const { node, isEdge, nodeById, replicaNodesByProject, readyNodesByProject } = this.state;
+		const { node, isIngress, nodeById, replicaNodesByProject, readyNodesByProject } = this.state;
 		// Only an ingress balances across copies. A copy on this node is dialled directly (its
 		// socket or loopback port); the others through their node's Caddy over the overlay. A
 		// worker never fans out: it serves its own copy and nothing else.
@@ -24,7 +24,7 @@ export class IngressState extends DesiredStatePart {
 		// check decides; after that only copies that are up take traffic.
 		const replicaNodes = ready?.size ? everyCopyNode.filter((nodeId) => ready.has(nodeId)) : everyCopyNode;
 		const replicaUpstreams =
-			isEdge && everyCopyNode.length > 1
+			isIngress && everyCopyNode.length > 1
 				? replicaNodes
 						.map((nodeId) =>
 							nodeId === node.id
@@ -40,13 +40,13 @@ export class IngressState extends DesiredStatePart {
 
 	/** Default pages for never-deployed projects. */
 	placeholders(deployment: DeploymentRoutes, environment: EnvironmentRoutes): DesiredState['placeholders'] {
-		const { isEdge, projectRows } = this.state;
+		const { isIngress, projectRows } = this.state;
 		const { siteProjectIds } = deployment;
 		const { productionProjectIds, environmentsByProject } = environment;
 		// A project created in the dashboard and never deployed gets a default page at its production
 		// host instead of "No site here". Only the edge answers public traffic, and only while there is
 		// no production pointer at all: a pointer whose release is missing is a fault, not a new project.
-		return isEdge
+		return isIngress
 			? projectRows
 					.filter(
 						(project) =>
@@ -65,15 +65,15 @@ export class IngressState extends DesiredStatePart {
 
 	/** The internal gateway for studio and container-console fronts. */
 	databaseGateway(): DesiredState['databaseGateway'] {
-		const { node, isEdge, nodeById } = this.state;
+		const { node, isIngress, nodeById } = this.state;
 		// The native studio (D96) routes ride one internal gateway listener on the edge's loopback.
 		const publicAddressOf = (id: string) => nodeById.get(id)?.publicAddress ?? null;
 		return {
-			listen: isEdge ? `127.0.0.1:${this.ctx.config.databaseGatewayPort ?? 8082}` : null,
+			listen: isIngress ? `127.0.0.1:${this.ctx.config.databaseGatewayPort ?? 8082}` : null,
 			routes: [
-				...this.ctx.databaseStudio.gatewayRoutes(node.id, isEdge, publicAddressOf),
+				...this.ctx.databaseStudio.gatewayRoutes(node.id, isIngress, publicAddressOf),
 				// Container console fronts (D127) share the internal gateway with `console.internal` hosts.
-				...this.ctx.containerConsole.gatewayRoutes(node.id, isEdge, publicAddressOf),
+				...this.ctx.containerConsole.gatewayRoutes(node.id, isIngress, publicAddressOf),
 			],
 		};
 	}
