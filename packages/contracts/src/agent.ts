@@ -5,7 +5,7 @@ import * as z from 'zod';
 import { OFFLINE_DRILL_CAPABILITY, nodeOfflineDrillDesiredSchema } from './node-drill.ts';
 import { nodeContainerConsoleDesiredSchema } from './container-console.ts';
 import { nodeStudioDesiredSchema } from './database-studio.ts';
-import { nodeHardwareSchema } from './cluster.ts';
+import { nodeHardwareSchema, nodeRoleSchema, nodeRoles, nodeZoneSchema } from './cluster.ts';
 import { wireguardPublicKeySchema, wireguardStateSchema, wireguardStatusSchema } from './overlay.ts';
 import {
 	ENDPOINTS_GATEWAY_CAPABILITY,
@@ -841,6 +841,13 @@ export const nodeJoinSchema = z.object({
 	 * its first heartbeat instead.
 	 */
 	csrPem: pemCsrSchema.optional(),
+	/**
+	 * HA Wave 5 (`node.sh --zone`, `--roles`, HA-PLAN §8 step 2): the node's zone and roles at join,
+	 * the same fields Nodes → Edit node sets. Absent keeps today's defaults (zone `default`, roles
+	 * from the node's mode).
+	 */
+	zone: nodeZoneSchema.optional(),
+	roles: z.array(nodeRoleSchema).min(1).max(nodeRoles.length).optional(),
 });
 export type NodeJoin = z.infer<typeof nodeJoinSchema>;
 
