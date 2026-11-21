@@ -1510,9 +1510,14 @@ export class ApiClient {
 		return { switchovers: (Array.isArray(record?.switchovers) ? record.switchovers : []) as DatabaseSwitchoverView[], raw };
 	}
 
-	async switchoverDatabase(name: string, replicaId: string): Promise<{ switchover: DatabaseSwitchoverView; raw: unknown }> {
+	async switchoverDatabase(
+		name: string,
+		replicaId: string,
+		primaryGeneration: number,
+	): Promise<{ switchover: DatabaseSwitchoverView; raw: unknown }> {
 		const raw = await this.request('POST', `/api/v1/databases/${encodeURIComponent(name)}/switchover`, {
 			body: { replicaId, confirm: true },
+			headers: { 'if-match': String(primaryGeneration) },
 		});
 		return { switchover: asRecord(raw)?.switchover as unknown as DatabaseSwitchoverView, raw };
 	}

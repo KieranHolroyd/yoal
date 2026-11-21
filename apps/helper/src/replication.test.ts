@@ -24,6 +24,7 @@ import {
 	renderReplicaStartScript,
 	renderReplicationConfigureSql,
 	renderReplicationTeardownSql,
+	renderCheckpointSql,
 	replicaPostgresArgs,
 	withReplicationHba,
 } from './replication.ts';
@@ -111,6 +112,8 @@ describe('replica unit', () => {
 		expect(unit).toContain('"hot_standby=on"');
 		expect(unit).toContain(`"primary_slot_name=${SLOT}"`);
 		expect(unit).toContain(`"primary_conninfo=host=/run/yoal-upstream port=5432 user=yoal_repl application_name=${SLOT} connect_timeout=10"`);
+		// A replica must not inherit a drained primary's read-only flag (major 21).
+		expect(unit).toContain('"default_transaction_read_only=off"');
 		expect(unit).toContain(`Volume=/var/lib/yoal/agent/replication/${REPLICA}:/run/yoal-upstream:ro,z`);
 		expect(unit).toContain(`Volume=/run/yoal-workloads/${REPLICA}/replica-start.sh:/usr/local/bin/yoal-replica-start:ro,Z`);
 		expect(unit).toContain('PublishPort=127.0.0.1:15433:5432');
@@ -361,6 +364,9 @@ describe('synchronous set and rewind (H23, W10)', () => {
 		expect(renderSyncConfigureSql([SLOT])).toContain(`synchronous_standby_names = '${SLOT}'`);
 		expect(renderSyncConfigureSql([SLOT])).toContain("synchronous_commit = 'on'");
 		expect(renderSyncConfigureSql([])).toContain("synchronous_standby_names = ''");
+		// The reload is asynchronous: the SQL must prove the setting is in force before a barrier.
+		expect(renderSyncConfigureSql([SLOT])).toContain('current_setting(\'synchronous_standby_names\') = expected');
+		expect(renderSyncConfigureSql([SLOT])).toContain("RAISE EXCEPTION 'synchronous_standby_names did not take effect");
 	});
 
 	test('the barrier is a real write whose LSN is parsed strictly', () => {
@@ -371,19 +377,68 @@ describe('synchronous set and rewind (H23, W10)', () => {
 		expect(() => parseBarrierLsn('not an lsn')).toThrow();
 	});
 
-	test('stop and resume writes are read-only toggles, not a restart', () => {
-		expect(renderStopWritesSql()).toContain('default_transaction_read_only = on');
+	test('stop and resume writes toggle read-only and wait for in-flight transactions', () => {
+		const stop = renderStopWritesSql();
+		expect(stop).toContain('default_transaction_read_only = on');
+		expect(stop).toContain("current_setting('default_transaction_read_only') = 'on'");
+		expect(stop).toContain("state <> 'idle'");
+		expect(stop).toContain('in-flight transactions did not finish');
 		expect(renderResumeWritesSql()).toContain('ALTER SYSTEM RESET default_transaction_read_only');
-		expect(renderStopWritesSql()).not.toContain('pg_ctl');
+		expect(stop).not.toContain('pg_ctl');
+		expect(renderCheckpointSql()).toBe('CHECKPOINT;\n');
 	});
 
-	test('the member probe parses role, recovery and replay position', () => {
-		expect(parseMemberStatus('{"inRecovery":true,"lsn":"0/3000148","streaming":true}')).toEqual({
+	test('the member probe parses role, recovery and read-only state', () => {
+		expect(parseMemberStatus('{"inRecovery":true,"lsn":"0/3000148","streaming":true,"readOnly":false}')).toEqual({
 			inRecovery: true,
 			lsn: '0/3000148',
 			streaming: true,
+			readOnly: false,
 		});
+		expect(parseMemberStatus('{"inRecovery":false,"lsn":"0/1","streaming":true,"readOnly":true}').readOnly).toBe(true);
 		expect(() => parseMemberStatus('nope')).toThrow();
+	});
+
+	test('the rewind route accepts the rewind replica id and the database id in the body (200)', async () => {
+		const f = await driverFixture();
+		await fs.mkdir(join(f.stateDir, PRIMARY, 'pgdata'), { recursive: true });
+		await fs.writeFile(join(f.stateDir, PRIMARY, 'pgdata', 'PG_VERSION'), '17\n');
+		const handler = createHandler(f.driver, { version: 'test' });
+		const body = {
+			databaseId: PRIMARY,
+			source: { host: '10.0.0.2', port: 5432, user: 'yoal_repl', database: 'postgres' },
+			password: PASSWORD,
+			image: 'postgres:18',
+		};
+		const response = await handler(
+			new Request(`http://helper/v1/workloads/${REPLICA}/replica/rewind`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify(body),
+			}),
+		);
+		expect(response.status).toBe(200);
+		expect(await response.json()).toMatchObject({ ok: true, status: 'rewound' });
+		// The path must be a replica id: the primary id is not a rewind workload.
+		const wrong = await handler(
+			new Request(`http://helper/v1/workloads/${PRIMARY}/replica/rewind`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify(body),
+			}),
+		);
+		expect(wrong.status).toBe(400);
+	});
+
+	test('the checkpoint route is a fixed, argument-free verb', async () => {
+		const f = await driverFixture();
+		await f.envFor(PRIMARY);
+		const handler = createHandler(f.driver, { version: 'test' });
+		const response = await handler(new Request(`http://helper/v1/workloads/${PRIMARY}/checkpoint`, { method: 'POST' }));
+		expect(response.status).toBe(200);
+		expect(await response.json()).toEqual({ ok: true, checkpointed: PRIMARY });
+		const withQuery = await handler(new Request(`http://helper/v1/workloads/${PRIMARY}/checkpoint?sql=DROP`, { method: 'POST' }));
+		expect(withQuery.status).toBe(400);
 	});
 
 	test('rewind runs in a container against the new primary, password only in the environment', () => {

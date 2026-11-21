@@ -18,7 +18,7 @@ import { authenticatedClient } from './common.ts';
 import { credentialsCommand, credentialsUsage, isCredentialVerb } from './db-credentials.ts';
 import { pitrBackupCommand, pitrCommand, restoreToCommand } from './db-pitr.ts';
 import { replicaCommand } from './db-replicas.ts';
-import { durabilityCommand } from './db-durability.ts';
+import { durabilityCommand, switchoverCommand } from './db-durability.ts';
 import { confirmOrRefuse } from './run-operation.ts';
 
 /** Managed databases (docs/DATABASES.md). Every check lives on the server; this is a thin client. */
@@ -208,7 +208,7 @@ const subcommands: Record<string, (argv: string[]) => Promise<void>> = {
 	replica: replicaCommand,
 	replicas: replicaCommand,
 	durability: durabilityCommand,
-	switchover: durabilityCommand,
+	switchover: switchoverCommand,
 	restart: restartDatabase,
 	rotate: rotateCredentials,
 	upgrade: upgradeDatabase,

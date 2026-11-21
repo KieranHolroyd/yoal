@@ -407,7 +407,7 @@ export interface DatabaseDurabilityStatus {
 	syncTimeoutSeconds: number;
 	onSyncLoss: 'downgrade' | 'block';
 	transition: {
-		phase: 'opening' | 'switching' | 'waiting-barrier' | 'closing';
+		phase: 'opening' | 'switching' | 'waiting-barrier' | 'closing' | 'rearming';
 		target: string | null;
 		previous: string[];
 		openedAt: string;
@@ -425,10 +425,11 @@ export interface DatabaseSwitchoverView {
 	fromNodeId: string;
 	toNodeId: string;
 	generation: number;
-	step: 'checkpoint' | 'stop-writes' | 'wait-lsn' | 'promote' | 'repoint' | 'done';
+	step: 'checkpoint' | 'stop-writes' | 'quiesce' | 'wait-lsn' | 'promote' | 'repoint' | 'done';
 	primaryLsn: string | null;
 	replayLsn: string | null;
 	gapBytes: number | null;
+	promoted: boolean;
 	startedAt: string;
 	finishedAt: string | null;
 	durationMs: number | null;

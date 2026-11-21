@@ -29,6 +29,24 @@ export const DB_LEASE_PREFIX = 'yoal/ha/db/';
 export const SYNC_CHANGE_TIMEOUT_MS = 30_000;
 /** W9-SPEC §3: `SYNC_DOWNGRADE_AFTER`. */
 export const SYNC_DOWNGRADE_AFTER_MS = 30_000;
+/** W9-SPEC §3: `DB_TTL`; every CAS renews it. */
+export const DB_LEASE_TTL_MS = 15_000;
+
+/**
+ * Renew a lease's expiry on every CAS: `max(now, previous) + DB_TTL`. A write that did not renew
+ * would let a live holder's lease go permanently expired after one TTL (W10 review blocker 8).
+ */
+export function renewedLease(lease: DatabaseLease, now: number, ttlMs = DB_LEASE_TTL_MS): DatabaseLease {
+	const previous = Date.parse(lease.expiresAt);
+	const base = Number.isFinite(previous) ? Math.max(now, previous) : now;
+	return { ...lease, expiresAt: new Date(base + ttlMs).toISOString() };
+}
+
+/** A lease that has expired by the arbiter's clock cannot be held (W9-SPEC §3, §5.2). */
+export function leaseExpired(lease: DatabaseLease, now: number): boolean {
+	const expiresAt = Date.parse(lease.expiresAt);
+	return !Number.isFinite(expiresAt) || expiresAt <= now;
+}
 
 export function databaseLeaseKey(databaseId: string): string {
 	if (!/^[a-z0-9_]{1,64}$/i.test(databaseId)) throw new Error('A database id has letters, digits and underscores only.');
@@ -94,27 +112,50 @@ export class MemoryDatabaseLeaseStore implements DatabaseLeaseStore {
 	}
 }
 
-function parseLease(body: string): DatabaseLease {
-	const parsed = JSON.parse(body) as Partial<DatabaseLease>;
-	if (
-		typeof parsed.generation !== 'number' ||
-		typeof parsed.holderNodeId !== 'string' ||
-		typeof parsed.expiresAt !== 'string' ||
-		!Array.isArray(parsed.sync) ||
-		(parsed.syncState !== 'steady' && parsed.syncState !== 'changing') ||
-		(parsed.durability !== 'async' && parsed.durability !== 'sync') ||
-		(parsed.durabilityEffective !== 'async' && parsed.durabilityEffective !== 'sync')
-	)
-		throw new Error('The stored database lease is not a valid lease object.');
+export function parseLease(body: string): DatabaseLease {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(body);
+	} catch {
+		throw new Error('The stored database lease is not JSON.');
+	}
+	if (!parsed || typeof parsed !== 'object') throw new Error('The stored database lease is not an object.');
+	const value = parsed as Record<string, unknown>;
+	const isDurability = (item: unknown): item is 'async' | 'sync' => item === 'async' || item === 'sync';
+	if (typeof value.generation !== 'number' || !Number.isInteger(value.generation) || value.generation < 0)
+		throw new Error('The stored database lease has no valid generation.');
+	if (typeof value.holderNodeId !== 'string' || value.holderNodeId.length < 1 || value.holderNodeId.length > 64)
+		throw new Error('The stored database lease has no valid holder.');
+	if (typeof value.expiresAt !== 'string' || !Number.isFinite(Date.parse(value.expiresAt)))
+		throw new Error('The stored database lease has no valid expiry.');
+	if (!Array.isArray(value.sync) || value.sync.length > 3)
+		throw new Error('The stored database lease has an invalid sync set.');
+	const sync: string[] = [];
+	for (const entry of value.sync) {
+		if (typeof entry !== 'string' || entry.length < 1 || entry.length > 64)
+			throw new Error('The stored database lease has a malformed sync member.');
+		if (sync.includes(entry)) throw new Error('The stored database lease repeats a sync member.');
+		sync.push(entry);
+	}
+	if (value.syncState !== 'steady' && value.syncState !== 'changing')
+		throw new Error('The stored database lease has an invalid sync state.');
+	if (!isDurability(value.durability)) throw new Error('The stored database lease has an invalid durability.');
+	// `durabilityEffective` is optional on leases written before W9 Revision 1; absent means the
+	// requested durability is what is in force.
+	const durabilityEffective = value.durabilityEffective === undefined ? value.durability : value.durabilityEffective;
+	if (!isDurability(durabilityEffective))
+		throw new Error('The stored database lease has an invalid effective durability.');
+	if (value.syncSetAt !== undefined && value.syncSetAt !== null && typeof value.syncSetAt !== 'string')
+		throw new Error('The stored database lease has an invalid syncSetAt.');
 	return {
-		generation: parsed.generation,
-		holderNodeId: parsed.holderNodeId,
-		expiresAt: parsed.expiresAt,
-		sync: parsed.sync.slice(0, 3),
-		syncState: parsed.syncState,
-		durability: parsed.durability,
-		durabilityEffective: parsed.durabilityEffective,
-		syncSetAt: typeof parsed.syncSetAt === 'string' ? parsed.syncSetAt : null,
+		generation: value.generation,
+		holderNodeId: value.holderNodeId,
+		expiresAt: value.expiresAt,
+		sync,
+		syncState: value.syncState,
+		durability: value.durability,
+		durabilityEffective,
+		syncSetAt: typeof value.syncSetAt === 'string' ? value.syncSetAt : null,
 	};
 }
 
@@ -297,7 +338,7 @@ export class SyncSetTransition {
 		if (!current) return this.refuse('there is no database lease');
 		if (current.lease.holderNodeId !== this.nodeId) return this.refuse('this node is not the lease holder');
 		if (current.lease.syncState !== 'steady') return this.refuse('a sync-set change is already open');
-		const opened = openSyncChange(current.lease);
+		const opened = renewedLease(openSyncChange(current.lease), this.now());
 		if (!(await this.store.compareAndSwap(this.databaseId, current.etag, opened)))
 			return this.refuse('the open lost the compare-and-swap');
 		this.state = {
@@ -335,7 +376,7 @@ export class SyncSetTransition {
 		const targetName = this.state.target;
 		if (!targetName) return this.refuse('the transition has no target');
 		if (target?.nodeId === targetName && target.streaming && barrierHolds(target.replayLsn, this.state.barrierLsn)) {
-			const closed = closeSyncChange(current.lease, targetName, this.now(), this.settings.durability);
+			const closed = renewedLease(closeSyncChange(current.lease, targetName, this.now(), this.settings.durability), this.now());
 			if (!(await this.store.compareAndSwap(this.databaseId, current.etag, closed)))
 				return this.refuse('the close lost the compare-and-swap');
 			this.reset();
@@ -346,9 +387,21 @@ export class SyncSetTransition {
 		// The target did not acknowledge the barrier in time.
 		const old = this.state.previous[0] ?? null;
 		if (old && previous?.nodeId === old && previous.streaming) {
-			const fallback = fallbackSyncChange(current.lease, old, this.now(), this.settings.durability);
+			// The previous member must already hold the failed barrier's position before it may be
+			// recorded again; otherwise naming it would allow writes it cannot protect.
+			if (!barrierHolds(previous.replayLsn, this.state.barrierLsn))
+				return this.lose(current, 'the previous member is behind the failed barrier');
+			try {
+				// Prove the reverted setting is in force with a fresh barrier before the CAS. A
+				// failed set or barrier is `on_sync_loss`, never a silently recorded member.
+				await this.setNames([old]);
+				await this.writeBarrier();
+			} catch (error) {
+				const reason = error instanceof Error ? error.message : String(error);
+				return this.lose(current, `the fallback setting could not be applied: ${reason}`);
+			}
+			const fallback = renewedLease(fallbackSyncChange(current.lease, old, this.now(), this.settings.durability), this.now());
 			if (await this.store.compareAndSwap(this.databaseId, current.etag, fallback)) {
-				await this.setNames([old]).catch(() => undefined);
 				this.reset();
 				this.onEvent({ kind: 'fallback', lease: fallback });
 				return { kind: 'fallback', lease: fallback };
@@ -374,12 +427,13 @@ export class SyncSetTransition {
 
 	private async lose(current: DatabaseLeaseRecord, reason: string): Promise<SyncTransitionEvent> {
 		const policy = this.settings.onSyncLoss;
-		const lease = loseSyncSet(current.lease, policy, this.settings, this.now());
+		const lease = renewedLease(loseSyncSet(current.lease, policy, this.settings, this.now()), this.now());
 		if (!(await this.store.compareAndSwap(this.databaseId, current.etag, lease))) return this.refuse('the downgrade lost the compare-and-swap');
 		// `downgrade` makes writes async, so the setting goes away. `block` deliberately keeps the
 		// unavailable member named: `synchronous_commit = on` then makes every write wait, which is
-		// the point of choosing block over an invisible RPO change.
-		if (policy === 'downgrade') await this.setNames([]).catch(() => undefined);
+		// the point of choosing block over an invisible RPO change. A failed clear is reported, not
+		// swallowed: the lease would otherwise say async while writes still block.
+		if (policy === 'downgrade') await this.setNames([]);
 		this.reset();
 		const event: SyncTransitionEvent = { kind: policy === 'downgrade' ? 'downgraded' : 'blocked', lease };
 		this.onEvent(event);
@@ -393,9 +447,16 @@ export class SyncSetTransition {
 		if (!current) return this.refuse(reason);
 		const old = this.state.previous[0] ?? null;
 		if (old) {
-			const fallback = fallbackSyncChange(current.lease, old, this.now(), this.settings.durability);
+			try {
+				// The setting must be back in force, proven by a barrier, before the lease names it.
+				await this.setNames([old]);
+				await this.writeBarrier();
+			} catch (error) {
+				const failure = error instanceof Error ? error.message : String(error);
+				return this.lose(current, `${reason}; the fallback setting could not be applied: ${failure}`);
+			}
+			const fallback = renewedLease(fallbackSyncChange(current.lease, old, this.now(), this.settings.durability), this.now());
 			if (await this.store.compareAndSwap(this.databaseId, current.etag, fallback)) {
-				await this.setNames([old]).catch(() => undefined);
 				this.reset();
 				this.onEvent({ kind: 'fallback', lease: fallback });
 				return { kind: 'fallback', lease: fallback };

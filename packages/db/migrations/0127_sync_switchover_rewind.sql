@@ -30,6 +30,16 @@ ALTER TABLE databases ADD COLUMN sync_change_started_at INTEGER;
 ALTER TABLE databases ADD COLUMN sync_previous_node_id TEXT;
 -- First observation of "no synchronous standby", for the 30 s downgrade timer.
 ALTER TABLE databases ADD COLUMN sync_lost_at INTEGER;
+-- Counts sync-set openings, so re-opening the same target produces a new task version (W10 review).
+ALTER TABLE databases ADD COLUMN sync_attempt INTEGER NOT NULL DEFAULT 0;
+-- The phase the primary's node last reported for the open change, for an honest status report.
+ALTER TABLE databases ADD COLUMN sync_phase TEXT CHECK (sync_phase IN ('opening','switching','waiting-barrier','closing','rearming'));
+-- The barrier LSN the node wrote, so status does not fabricate it.
+ALTER TABLE databases ADD COLUMN sync_barrier_lsn TEXT;
+-- The lease ETag/expiry the control plane last read, sent to the primary's node as its ownership
+-- token: a node result at another ETag can never close a newer change.
+ALTER TABLE databases ADD COLUMN sync_lease_etag TEXT;
+ALTER TABLE databases ADD COLUMN sync_lease_expires_at INTEGER;
 
 -- The last role/generation/replay position each member reported (W9-SPEC §5.6). Role discovery
 -- reads this, so a consumer poll does not need the control plane or a fresh helper round trip.
@@ -44,6 +54,10 @@ CREATE TABLE IF NOT EXISTS database_member_status (
   lsn TEXT,
   durability_effective TEXT NOT NULL DEFAULT 'async',
   sync_state TEXT NOT NULL DEFAULT 'steady',
+  read_only INTEGER NOT NULL DEFAULT 0,
+  fenced INTEGER NOT NULL DEFAULT 0,
+  lease_generation INTEGER NOT NULL DEFAULT 0,
+  lease_epoch INTEGER NOT NULL DEFAULT 0,
   observed_at INTEGER NOT NULL,
   PRIMARY KEY (database_id, node_id)
 );

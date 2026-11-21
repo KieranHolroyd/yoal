@@ -118,6 +118,9 @@ export function replicaPostgresArgs(slot: string): string[] {
 		`primary_slot_name=${slot}`,
 		'-c',
 		'wal_receiver_timeout=60s',
+		// A replica must never inherit a drained primary's read-only flag from `auto.conf`.
+		'-c',
+		'default_transaction_read_only=off',
 	];
 }
 
@@ -307,15 +310,39 @@ export function syncStandbyNames(members: readonly string[]): string {
 	return `ANY 1 (${members.join(', ')})`;
 }
 
-/** Set (or clear) the synchronous set and turn `synchronous_commit` on. Reload, no restart. */
+/** Set (or clear) the synchronous set and turn `synchronous_commit` on. Reload, and verify. */
 export function renderSyncConfigureSql(members: readonly string[]): string {
 	const names = syncStandbyNames(members);
+	// `pg_reload_conf()` is asynchronous: `ALTER SYSTEM` only writes the file. This loop proves the
+	// setting is actually in force in this session before the caller writes the barrier, so a
+	// barrier can never commit against the old (or no) synchronous set (W10 review blocker 2).
+	const expected = names.replace(/'/g, "''");
 	return [
 		`ALTER SYSTEM SET synchronous_commit = 'on';`,
 		`ALTER SYSTEM SET synchronous_standby_names = '${names}';`,
-		'SELECT pg_reload_conf();',
+		`DO $$
+DECLARE
+  expected text := '${expected}';
+  deadline timestamptz := clock_timestamp() + interval '10 seconds';
+BEGIN
+  PERFORM pg_reload_conf();
+  LOOP
+    EXIT WHEN current_setting('synchronous_standby_names') = expected
+      AND current_setting('synchronous_commit') = 'on';
+    IF clock_timestamp() > deadline THEN
+      RAISE EXCEPTION 'synchronous_standby_names did not take effect (is %, want %)',
+        current_setting('synchronous_standby_names'), expected;
+    END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+END $$;`,
 		'',
 	].join('\n');
+}
+
+/** The exact `synchronous_standby_names` a set of members renders: the node verifies against it. */
+export function syncStandbyNamesFor(members: readonly string[]): string {
+	return syncStandbyNames(members);
 }
 
 /**
@@ -340,11 +367,37 @@ export function parseBarrierLsn(stdout: string): string {
 	return last;
 }
 
-/** Stop accepting writes without stopping Postgres, so its final LSN stays readable. */
+/** Stop accepting writes without stopping Postgres, and wait for in-flight transactions to end. */
 export function renderStopWritesSql(): string {
+	// `ALTER SYSTEM` only writes the file: the reload must be verified before the wait, and the wait
+	// must precede the LSN sample, or a transaction that began earlier commits after the sample and
+	// the promotion loses it (W10 review blocker 4).
 	return [
 		`ALTER SYSTEM SET default_transaction_read_only = on;`,
-		'SELECT pg_reload_conf();',
+		`DO $$
+DECLARE
+  deadline timestamptz := clock_timestamp() + interval '20 seconds';
+  busy integer;
+BEGIN
+  PERFORM pg_reload_conf();
+  LOOP
+    EXIT WHEN current_setting('default_transaction_read_only') = 'on';
+    IF clock_timestamp() > deadline THEN
+      RAISE EXCEPTION 'default_transaction_read_only did not take effect';
+    END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+  LOOP
+    SELECT count(*) INTO busy FROM pg_stat_activity
+      WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()
+        AND state IS NOT NULL AND state <> 'idle';
+    EXIT WHEN busy = 0;
+    IF clock_timestamp() > deadline THEN
+      RAISE EXCEPTION 'in-flight transactions did not finish before the switchover (% still active)', busy;
+    END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+END $$;`,
 		'',
 	].join('\n');
 }
@@ -358,6 +411,11 @@ export function renderResumeWritesSql(): string {
 	].join('\n');
 }
 
+/** The drain's first step: flush shared buffers before writes stop (W10 review major 16). */
+export function renderCheckpointSql(): string {
+	return 'CHECKPOINT;\n';
+}
+
 /**
  * The member probe (W9-SPEC §5.6): role, generation are decided by the control plane; this is the
  * database's own view — recovery state, replay/current LSN and whether its receiver is up.
@@ -365,13 +423,15 @@ export function renderResumeWritesSql(): string {
 export const MEMBER_STATUS_SQL = `SELECT json_build_object(
   'inRecovery', pg_is_in_recovery(),
   'lsn', CASE WHEN pg_is_in_recovery() THEN pg_last_wal_replay_lsn()::text ELSE pg_current_wal_lsn()::text END,
-  'streaming', CASE WHEN pg_is_in_recovery() THEN coalesce((SELECT status = 'streaming' FROM pg_stat_wal_receiver LIMIT 1), false) ELSE true END
+  'streaming', CASE WHEN pg_is_in_recovery() THEN coalesce((SELECT status = 'streaming' FROM pg_stat_wal_receiver LIMIT 1), false) ELSE true END,
+  'readOnly', current_setting('default_transaction_read_only') = 'on'
 )::text`;
 
 export interface MemberStatus {
 	inRecovery: boolean;
 	lsn: string | null;
 	streaming: boolean;
+	readOnly: boolean;
 }
 
 /** Parse `MEMBER_STATUS_SQL` strictly. */
@@ -388,6 +448,7 @@ export function parseMemberStatus(stdout: string): MemberStatus {
 		inRecovery: row.inRecovery === true,
 		lsn: typeof row.lsn === 'string' && LSN.test(row.lsn) ? row.lsn : null,
 		streaming: row.streaming === true,
+		readOnly: row.readOnly === true,
 	};
 }
 

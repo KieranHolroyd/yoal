@@ -32,7 +32,7 @@ export const syncStates = ['steady', 'changing'] as const;
 export type SyncState = (typeof syncStates)[number];
 
 /** The primary's progress through a sync-set change; the lease only records `changing`. */
-export const syncTransitionPhases = ['opening', 'switching', 'waiting-barrier', 'closing'] as const;
+export const syncTransitionPhases = ['opening', 'switching', 'waiting-barrier', 'closing', 'rearming'] as const;
 export type SyncTransitionPhase = (typeof syncTransitionPhases)[number];
 
 /** How a database is configured to behave when its synchronous replica is lost. */
@@ -70,11 +70,12 @@ export const databaseLeaseSchema = z.object({
 	generation: z.number().int().nonnegative(),
 	holderNodeId: z.string().min(1).max(64),
 	expiresAt: z.string().datetime(),
-	sync: z.array(z.string().max(64)).max(3),
+	sync: z.array(z.string().min(1).max(64)).max(3),
 	syncState: z.enum(syncStates),
 	durability: z.enum(databaseDurabilities),
-	durabilityEffective: z.enum(databaseDurabilities),
-	syncSetAt: z.string().datetime().nullable(),
+	/** Optional on leases written before W9 Revision 1; absent means `durability` is in force. */
+	durabilityEffective: z.enum(databaseDurabilities).optional(),
+	syncSetAt: z.string().datetime().nullable().optional(),
 });
 
 export type DatabaseLease = z.infer<typeof databaseLeaseSchema>;
@@ -125,6 +126,7 @@ export type DatabaseSwitchoverRequest = z.infer<typeof databaseSwitchoverRequest
 export const databaseSwitchoverSteps = [
 	'checkpoint',
 	'stop-writes',
+	'quiesce',
 	'wait-lsn',
 	'promote',
 	'repoint',
@@ -139,11 +141,15 @@ export const databaseSwitchoverTaskSchema = z.object({
 	step: z.enum(['drain', 'resume']),
 	/** The replica's physical slot, so the drain reports that replica's fresh replay LSN. */
 	replicaSlot: z.string().max(100).nullable().default(null),
+	/** Bumped when the step is retried; a result at another version is stale. */
+	version: z.string().max(128).default(''),
 });
 export type DatabaseSwitchoverTask = z.infer<typeof databaseSwitchoverTaskSchema>;
 
 export const databaseSwitchoverResultSchema = z.object({
 	switchoverId: z.string().min(1).max(100),
+	/** Echo of the task version; a mismatch is a stale result and is ignored. */
+	version: z.string().max(128).optional(),
 	step: z.enum(['drain', 'resume']),
 	status: z.enum(['ok', 'failed']),
 	/** `pg_current_wal_lsn()` after writes stopped. */
@@ -167,6 +173,8 @@ export interface DatabaseSwitchoverView {
 	replayLsn: string | null;
 	/** The gap that refused the switchover, if any. */
 	gapBytes: number | null;
+	/** The promotion succeeded; the old primary must not resume writes. */
+	promoted: boolean;
 	startedAt: string;
 	finishedAt: string | null;
 	/** Measured wall time from start to done/refused. */
@@ -179,6 +187,8 @@ export const databaseMemberSchema = z.object({
 	nodeId: z.string().min(1).max(64),
 	address: z.string().max(253).nullable(),
 	role: z.enum(['primary', 'replica']),
+	/** The physical slot a replica streams under; the sync setting names it. */
+	slot: z.string().max(100).nullable().default(null),
 });
 
 export type DatabaseMember = z.infer<typeof databaseMemberSchema>;
@@ -195,6 +205,14 @@ export const databaseMemberReportSchema = z.object({
 	inRecovery: z.boolean().default(false),
 	/** `pg_last_wal_replay_lsn()` on a replica, `pg_current_wal_lsn()` on a primary. */
 	lsn: z.string().max(64).nullable().default(null),
+	/** `default_transaction_read_only` on the member, so a drained/fenced primary is visible. */
+	readOnly: z.boolean().default(false),
+	/** This member is the old primary of a promotion and is read-only/stopped. */
+	fenced: z.boolean().default(false),
+	/** The database lease generation this member last saw (0 when it has none). */
+	leaseGeneration: z.number().int().nonnegative().default(0),
+	/** The control-plane epoch this member last saw (0 when unknown). */
+	leaseEpoch: z.number().int().nonnegative().default(0),
 	/** The lease's effective durability, as this member last read it. */
 	durabilityEffective: z.enum(databaseDurabilities).default('async'),
 	syncState: z.enum(syncStates).default('steady'),
@@ -213,6 +231,8 @@ export const databaseMemberProbeSchema = z.object({
 	streaming: z.boolean(),
 	inRecovery: z.boolean(),
 	lsn: z.string().max(64).nullable(),
+	/** The member's `default_transaction_read_only`; a drained primary answers true. */
+	readOnly: z.boolean().default(false),
 	observedAt: z.string().datetime(),
 });
 
@@ -227,6 +247,16 @@ export const databaseMembersDesiredSchema = z.object({
 	durability: z.enum(databaseDurabilities),
 	syncState: z.enum(syncStates).default('steady'),
 	durabilityEffective: z.enum(databaseDurabilities).default('async'),
+	/** The node the database lease names; the node-hosted watchdog acts only when it is this one. */
+	holderNodeId: z.string().max(64).nullable().default(null),
+	/** The lease ETag as the control plane last read it: the ownership token for node-side results. */
+	leaseEtag: z.string().max(256).nullable().default(null),
+	leaseExpiresAt: z.string().datetime().nullable().default(null),
+	leaseGeneration: z.number().int().nonnegative().default(0),
+	leaseEpoch: z.number().int().nonnegative().default(0),
+	/** `on_sync_loss` policy, so the primary's node can act within `sync_timeout` while I11 holds. */
+	syncTimeoutSeconds: z.number().int().min(0).max(300).default(30),
+	onSyncLoss: z.enum(syncLossPolicies).default('downgrade'),
 });
 
 export type DatabaseMembersDesired = z.infer<typeof databaseMembersDesiredSchema>;
@@ -237,26 +267,37 @@ export const databaseSyncStep = [
 	'clear-sync',
 	'barrier',
 	'downgrade',
+	/** A node-hosted on_sync_loss decision; not a task the control plane queues. */
+	'watchdog',
 ] as const;
 export type DatabaseSyncStep = (typeof databaseSyncStep)[number];
 
 export const databaseSyncTaskSchema = z.object({
 	databaseId: z.string().min(1).max(64),
-	/** Bumped when the instruction changes, so a node applies it once. */
+	/** Bumped when the instruction changes, so a node applies it once. Includes the attempt. */
 	version: z.string().min(1).max(128),
 	step: z.enum(databaseSyncStep),
 	/** Application names (physical slot names) the setting must name. */
 	sync: z.array(z.string().max(100)).max(3),
+	/** The lease ETag this instruction belongs to; a result at another ETag is stale. */
+	leaseEtag: z.string().max(256).nullable().default(null),
 });
 export type DatabaseSyncTask = z.infer<typeof databaseSyncTaskSchema>;
 
 export const databaseSyncResultSchema = z.object({
 	databaseId: z.string().min(1).max(64),
+	/** Echo of the task version; a mismatch is a stale result and is ignored. */
+	version: z.string().max(128).optional(),
 	step: z.enum(databaseSyncStep),
 	status: z.enum(['ok', 'failed']),
 	/** `pg_current_wal_lsn()` after a barrier write, and the target's replay position. */
 	lsn: z.string().max(64).nullable().optional(),
+	/** The TARGET slot's `pg_stat_replication.replay_lsn`; never the primary's own position. */
 	replayLsn: z.string().max(64).nullable().optional(),
+	/** The TARGET slot's `pg_stat_replication.sync_state`; `sync` proves the setting took effect. */
+	targetSyncState: z.string().max(32).nullable().optional(),
+	/** The lease ETag the node acted at (its ownership token). */
+	leaseEtag: z.string().max(256).nullable().optional(),
 	error: z.string().max(2_000).optional(),
 });
 export type DatabaseSyncResult = z.infer<typeof databaseSyncResultSchema>;
@@ -268,7 +309,7 @@ export type DatabaseSyncResult = z.infer<typeof databaseSyncResultSchema>;
  */
 export const databaseRewindTaskSchema = z.object({
 	databaseId: z.string().min(1).max(64),
-	/** The old primary's workload id on its node (`db_<databaseId>`). */
+	/** The rewind replica workload on the old primary's node (`db_dbr_<id>`); its data dir receives the copy. */
 	workloadId: z.string().min(1).max(100),
 	generation: z.number().int().nonnegative(),
 	source: z.object({

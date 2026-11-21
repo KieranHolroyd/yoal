@@ -568,7 +568,9 @@ export class NodeService {
 		if (input.databaseReplication?.length)
 			this.ctx.databaseReplicas.applyReplicationReports(node.id, input.databaseReplication);
 		if (input.databaseReplicaPromotionResults?.length)
-			this.ctx.databaseReplicas.applyPromotionResults(node.id, input.databaseReplicaPromotionResults);
+			void this.ctx.databaseReplicas
+				.applyPromotionResults(node.id, input.databaseReplicaPromotionResults)
+				.catch((error: unknown) => console.error(`[database-replicas] promotion result: ${(error as Error).message}`));
 		// W10: member roles, sync steps, switchover drain/resume and rewind outcomes.
 		if (input.databaseMembers?.length) this.ctx.databaseMembers.applyMemberReports(node.id, input.databaseMembers);
 		if (input.databaseSyncResults?.length)

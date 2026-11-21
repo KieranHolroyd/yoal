@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import type { DatabaseLease } from '@yoal/contracts';
 import {
+	DB_LEASE_TTL_MS,
 	MemoryDatabaseLeaseStore,
 	SYNC_CHANGE_TIMEOUT_MS,
 	SyncSetTransition,
@@ -10,7 +11,9 @@ import {
 	databaseLeaseKey,
 	mayAcquire,
 	openSyncChange,
+	parseLease,
 	parseLsn,
+	renewedLease,
 	syncLossDecision,
 	type SyncTransitionEvent,
 } from './database-sync.ts';
@@ -48,7 +51,7 @@ interface Harness {
 	names: string[][];
 	barriers: number;
 	events: SyncTransitionEvent[];
-	failBarrier: { value: boolean };
+	failBarrier: { value: boolean; once?: boolean };
 	seed: (value?: DatabaseLease) => Promise<void>;
 }
 
@@ -57,7 +60,7 @@ function harness(settings: Partial<{ durability: 'async' | 'sync'; syncTimeoutSe
 	const clock = { now: Date.parse('2026-11-20T20:41:00Z') };
 	const names: string[][] = [];
 	const events: SyncTransitionEvent[] = [];
-	const failBarrier = { value: false };
+	const failBarrier: { value: boolean; once?: boolean } = { value: false };
 	const engine = new SyncSetTransition({
 		databaseId: DATABASE,
 		nodeId: PRIMARY,
@@ -68,7 +71,10 @@ function harness(settings: Partial<{ durability: 'async' | 'sync'; syncTimeoutSe
 			names.push(members);
 		},
 		writeBarrier: async () => {
-			if (failBarrier.value) throw new Error('the setting did not take');
+			if (failBarrier.value) {
+				if (failBarrier.once) failBarrier.value = false;
+				throw new Error('the setting did not take');
+			}
 			return '0/2000000';
 		},
 		onEvent: (event) => events.push(event),
@@ -177,10 +183,33 @@ describe('the three-step sync change (H23, Revision 1)', () => {
 		const f = harness();
 		await f.seed();
 		f.failBarrier.value = true;
+		f.failBarrier.once = true;
 		const result = await f.engine.begin(NEW);
 		expect(result.kind).toBe('fallback');
 		expect(f.store.peek(DATABASE)).toMatchObject({ sync: [OLD], syncState: 'steady' });
-		expect(f.names.at(-1)).toEqual([OLD]);
+		expect(f.names).toEqual([[NEW], [OLD]]);
+	});
+
+	test('a fallback whose setting or barrier also fails applies on_sync_loss, never records OLD', async () => {
+		const f = harness();
+		await f.seed();
+		f.failBarrier.value = true;
+		const result = await f.engine.begin(NEW);
+		expect(result.kind).toBe('downgraded');
+		expect(f.store.peek(DATABASE)).toMatchObject({ sync: [], syncState: 'steady', durabilityEffective: 'async' });
+	});
+
+	test('a previous member behind the failed barrier is not restored', async () => {
+		const f = harness();
+		await f.seed();
+		await f.engine.begin(NEW);
+		f.clock.now += SYNC_CHANGE_TIMEOUT_MS + 1;
+		const result = await f.engine.tick(
+			{ nodeId: NEW, streaming: true, replayLsn: '0/1F00000' },
+			{ nodeId: OLD, streaming: true, replayLsn: '0/1FFFFFF' },
+		);
+		expect(result?.kind).toBe('downgraded');
+		expect(f.store.peek(DATABASE)).toMatchObject({ sync: [], durabilityEffective: 'async' });
 	});
 
 	test('a lost CAS is reported, not retried blind', async () => {
@@ -277,5 +306,29 @@ describe('lease helpers', () => {
 			sync: [NEW],
 			syncState: 'steady',
 		});
+	});
+
+	test('every CAS renewal extends from max(now, previous) by the DB TTL', () => {
+		const now = Date.parse('2026-11-20T20:41:00Z');
+		const renewed = renewedLease(lease({ expiresAt: new Date(now + 1_000).toISOString() }), now);
+		expect(Date.parse(renewed.expiresAt)).toBe(now + 1_000 + DB_LEASE_TTL_MS);
+		const late = renewedLease(lease({ expiresAt: new Date(now - 60_000).toISOString() }), now);
+		expect(Date.parse(late.expiresAt)).toBe(now + DB_LEASE_TTL_MS);
+	});
+
+	test('parseLease rejects a malformed sync member instead of truncating it', () => {
+		expect(() => parseLease(JSON.stringify({ ...lease(), sync: ['ok', 7] }))).toThrow(/malformed/);
+		expect(() => parseLease(JSON.stringify({ ...lease(), sync: ['a', 'a'] }))).toThrow(/repeats/);
+		expect(() => parseLease(JSON.stringify({ ...lease(), sync: ['a', 'b', 'c', 'd'] }))).toThrow(/invalid sync set/);
+		// A Revision 0 lease without durabilityEffective is accepted; the requested value is in force.
+		const { durabilityEffective: _ignored, ...specShaped } = lease();
+		expect(parseLease(JSON.stringify(specShaped)).durabilityEffective).toBe('sync');
+	});
+
+	test('the synced test harness records expiry-renewing opens and closes', async () => {
+		const f = harness();
+		await f.seed(lease({ expiresAt: new Date(f.clock.now + 500).toISOString() }));
+		await f.engine.begin(NEW);
+		expect(Date.parse(f.store.peek(DATABASE)!.expiresAt)).toBe(f.clock.now + 500 + DB_LEASE_TTL_MS);
 	});
 });

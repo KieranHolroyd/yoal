@@ -42,8 +42,12 @@ export async function durabilityCommand(argv: string[]): Promise<void> {
 		console.log(durabilityUsage);
 		return;
 	}
-	if (verb === 'switchover') return switchover(rest);
 	return durability(verb, rest);
+}
+
+/** `yoal db switchover <name> <replica-id>`: the db dispatcher passes the positionals directly. */
+export async function switchoverCommand(argv: string[]): Promise<void> {
+	return switchover(argv);
 }
 
 async function durability(name: string, argv: string[]): Promise<void> {
@@ -106,8 +110,7 @@ async function switchover(argv: string[]): Promise<void> {
 	const replicaId = requirePositional(args, 1, `replica id.\n\n${durabilityUsage}`);
 	const client = await authenticatedClient();
 	const current = await client.databaseReplicas(name);
-	const replica = current.replicas.find((item) => item.id === replicaId);
-	const confirmed = await confirmOrRefuse(
+	const replica = current.replicas.find((item) => item.id === replicaId);	const confirmed = await confirmOrRefuse(
 		`Switch "${name}" over to replica ${replicaId}${replica ? ` on ${replica.nodeName ?? replica.nodeId}` : ''}? ` +
 			'Writes stop briefly; a replica that has not replayed the primary is refused and nothing is promoted. ' +
 			`Type ${name} to confirm: `,
@@ -122,7 +125,7 @@ async function switchover(argv: string[]): Promise<void> {
 		process.exitCode = 1;
 		return;
 	}
-	const { switchover: result, raw } = await client.switchoverDatabase(name, replicaId);
+	const { switchover: result, raw } = await client.switchoverDatabase(name, replicaId, current.primaryGeneration);
 	if (args.boolean('json')) {
 		printJson(raw);
 		return;

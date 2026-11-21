@@ -117,8 +117,10 @@ export interface HelperApi {
 	syncBarrier(id: string): Promise<string>;
 	writesStop(id: string): Promise<void>;
 	writesResume(id: string): Promise<void>;
+	/** Flush the primary before the switchover drain. */
+	checkpoint(id: string): Promise<void>;
 	fenceWorkload(id: string, mode: 'stop' | 'readonly'): Promise<void>;
-	memberStatus(id: string): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean }>;
+	memberStatus(id: string): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean; readOnly: boolean }>;
 	replicaRewind(
 		id: string,
 		input: { databaseId: string; source: { host: string; port: number; user: string; database: string }; password: string; image: string },
@@ -418,20 +420,26 @@ export class HelperClient
 		await this.request('POST', `/v1/workloads/${encodeURIComponent(id)}/writes/resume`, undefined, 30_000);
 	}
 
+	async checkpoint(id: string): Promise<void> {
+		await this.request('POST', `/v1/workloads/${encodeURIComponent(id)}/checkpoint`, undefined, 60_000);
+	}
+
 	async fenceWorkload(id: string, mode: 'stop' | 'readonly'): Promise<void> {
 		await this.request('POST', `/v1/workloads/${encodeURIComponent(id)}/fence`, { mode }, 60_000);
 	}
 
-	async memberStatus(id: string): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean }> {
+	async memberStatus(id: string): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean; readOnly: boolean }> {
 		const body = (await this.request('GET', `/v1/workloads/${encodeURIComponent(id)}/member`, undefined, 15_000)) as {
 			inRecovery?: unknown;
 			lsn?: unknown;
 			streaming?: unknown;
+			readOnly?: unknown;
 		};
 		return {
 			inRecovery: body.inRecovery === true,
 			lsn: typeof body.lsn === 'string' ? body.lsn : null,
 			streaming: body.streaming === true,
+			readOnly: body.readOnly === true,
 		};
 	}
 

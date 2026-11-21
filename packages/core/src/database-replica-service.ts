@@ -263,6 +263,16 @@ export class DatabaseReplicaService {
 			.where(and(eq(databaseReplicas.id, replicaId), eq(databaseReplicas.databaseId, database.id)))
 			.get();
 		if (!row || row.removingAt) throw new NotFoundError('Database replica');
+		// I12 / acquireRefusal: a change is non-promotable, and a `sync` database may only promote a
+		// member the lease names (or an operator who explicitly accepts the loss).
+		if (database.syncState === 'changing')
+			throw new ConflictError(
+				`"${database.name}" has a sync-set change open, which is non-promotable (W9-SPEC §5.5). Wait for it to close, or choose manually after it does.`,
+			);
+		if (database.durability === 'sync' && database.durabilityEffective === 'sync' && database.syncReplicaNodeId !== row.nodeId && !input.acceptDataLoss)
+			throw new ConflictError(
+				`This node is not in "${database.name}"'s synchronous set, so promoting it could lose an acknowledged commit. Pass acceptDataLoss: true to promote anyway.`,
+			);
 		const risks = this.promotionRisks(database, row);
 		if (risks.length > 0 && !input.acceptDataLoss)
 			throw new ConflictError(
@@ -444,37 +454,6 @@ export class DatabaseReplicaService {
 			.where(eq(databaseReplicas.id, row.id))
 			.run();
 		this.ctx.projects.bump();
-	}
-
-	/**
-	 * A failed `pg_rewind` after a switchover falls back to a rebuild (W10): add a fresh replica on
-	 * the same node, whose standby script copies the new primary. The old divergent copy is purged
-	 * by `purgesForNode`.
-	 */
-	addRebuiltReplica(databaseId: string, nodeId: string): DatabaseReplicaView | null {
-		const database = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
-		if (!database || database.deletedAt || database.nodeId === nodeId) return null;
-		if (this.rowsFor(databaseId).some((row) => row.nodeId === nodeId && !row.removingAt)) return null;
-		const node = this.ctx.db.select().from(nodes).where(eq(nodes.id, nodeId)).get();
-		if (!node || node.status === 'offline') return null;
-		try {
-			const view = this.insertReplica(database, nodeId, null);
-			this.ctx.audit.record({
-				orgId: database.orgId,
-				action: 'database.replica.rebuild',
-				resource: 'database',
-				resourceId: database.id,
-				args: { name: database.name, replicaId: view.id, node: nodeId, reason: 'rewind failed' },
-				result: 'ok',
-			});
-			this.ctx.endpoints.reconcileForDatabase(database.id);
-			this.ctx.projects.bump(database.orgId);
-			return view;
-		} catch {
-			// Capacity or an in-flight removal: the alert from applyRewindResults stays; an operator
-			// can add the replica by hand.
-			return null;
-		}
 	}
 
 	isReplicaWorkloadId(id: string): boolean {
@@ -929,10 +908,11 @@ export class DatabaseReplicaService {
 	}
 
 	/** Promotion outcomes from the replica's node: re-point the database, or put the old primary back. */
-	applyPromotionResults(nodeId: string, results: readonly DatabaseReplicaPromotionResult[]): void {
+	async applyPromotionResults(nodeId: string, results: readonly DatabaseReplicaPromotionResult[]): Promise<void> {
 		for (const result of results) {
 			const failover = this.ctx.db.select().from(databaseFailovers).where(eq(databaseFailovers.id, result.failoverId)).get();
 			if (!failover || failover.toNodeId !== nodeId || failover.status !== 'promoting' || failover.promotedAt) continue;
+			const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
 			if (result.status === 'failed') {
 				const message = `Promotion failed on the replica's node: ${result.error ?? 'unknown error'}`;
 				this.failFailover(failover, message);
@@ -942,9 +922,18 @@ export class DatabaseReplicaService {
 						.set({ status: 'failed', message: `${message} Remove this replica and add a new one.`, updatedAt: this.ctx.now() })
 						.where(eq(databaseReplicas.id, failover.replicaId))
 						.run();
+				// A switchover's old primary is read-only: ask its node to resume and alert (major 6).
+				if (failover.kind === 'switchover') await this.ctx.databaseMembers.onPromotionFailed(failover, message);
 				continue;
 			}
-			this.repoint(failover, result.lsn ?? null);
+			// The promotion must not re-point a lease that a sync change has made non-promotable.
+			if (database?.syncState === 'changing') {
+				const message = 'The promotion was refused: a sync-set change is open, so the database is non-promotable (W9-SPEC §5.5).';
+				this.failFailover(failover, message);
+				if (failover.kind === 'switchover') await this.ctx.databaseMembers.onPromotionFailed(failover, message);
+				continue;
+			}
+			await this.repoint(failover, result.lsn ?? null);
 		}
 	}
 
@@ -1237,7 +1226,7 @@ export class DatabaseReplicaService {
 	}
 
 	/** The replica is the primary now: move the database row onto it and rebuild the others. */
-	private repoint(failover: FailoverRow, lsn: string | null): void {
+	private async repoint(failover: FailoverRow, lsn: string | null): Promise<void> {
 		const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
 		const replica = failover.replicaId
 			? this.ctx.db.select().from(databaseReplicas).where(eq(databaseReplicas.id, failover.replicaId)).get()
@@ -1314,6 +1303,19 @@ export class DatabaseReplicaService {
 		});
 		this.ctx.endpoints.reconcileForDatabase(database.id);
 		this.ctx.projects.bump(database.orgId);
+		// Take the lease at the new generation and re-arm the Revision 1 transition. A failure here
+		// leaves the promoted database live but without a lease: it must be surfaced, not hidden.
+		try {
+			await this.ctx.databaseMembers.onPromotion(database.id, replica.nodeId, failover.generation);
+		} catch (error) {
+			const message = `The promotion re-pointed ${database.id} but the lease could not be taken: ${(error as Error).message}`;
+			this.ctx.db
+				.update(databaseFailovers)
+				.set({ message: message.slice(0, 2_000) })
+				.where(eq(databaseFailovers.id, failover.id))
+				.run();
+			throw error;
+		}
 	}
 
 	private failFailover(failover: FailoverRow, message: string): void {

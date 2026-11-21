@@ -8,16 +8,23 @@ import { requirePrincipal } from '#lib/server/principal.js';
  * the members themselves; this is the control-plane view for operators and the dashboard.
  */
 export const GET: RequestHandler = (event) =>
-	route(() => {
+	route(async () => {
 		const principal = requirePrincipal(event);
 		const database = core.databases.get(principal, event.params.name);
-		return {
-			generation: database.primaryGeneration,
-			members: core.databaseMembers.members(database.id),
-			roles: core.databaseMembers.members(database.id).map((member) => ({
+		const members = core.databaseMembers.members(database.id);
+		const roles = [];
+		for (const member of members) {
+			const report = await core.databaseMembers.memberRole(database.id, member.nodeId);
+			roles.push({
 				nodeId: member.nodeId,
-				role: core.databaseMembers.memberRole(database.id, member.nodeId)?.role ?? 'streaming',
-				generation: core.databaseMembers.memberRole(database.id, member.nodeId)?.generation ?? database.primaryGeneration,
-			})),
-		};
+				role: report?.role ?? 'unknown',
+				generation: report?.generation ?? null,
+				epoch: report?.epoch ?? null,
+				fenced: report?.fenced ?? false,
+				readOnly: report?.readOnly ?? false,
+				leaseGeneration: report?.leaseGeneration ?? null,
+				observedAt: report?.observedAt ?? null,
+			});
+		}
+		return { generation: database.primaryGeneration, members, roles };
 	});

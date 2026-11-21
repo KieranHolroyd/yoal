@@ -156,6 +156,10 @@ class FakeHelper implements HelperApi {
 	async writesResume(): Promise<never> {
 		throw new Error('writesResume not used in this test');
 	}
+
+	async checkpoint(): Promise<never> {
+		throw new Error('checkpoint not used in this test');
+	}
 	async memberStatus(): Promise<never> {
 		throw new Error('memberStatus not used in this test');
 	}

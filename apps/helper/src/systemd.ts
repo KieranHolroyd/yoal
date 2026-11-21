@@ -71,6 +71,7 @@ import {
 	parseReplicationStatus,
 	parseSlots,
 	renderBarrierSql,
+	renderCheckpointSql,
 	renderPromoteArgs,
 	renderReplicaStartScript,
 	renderReplicationConfigureSql,
@@ -1458,6 +1459,18 @@ export class SystemdDriver {
 	/** Resume writes after a refused switchover. */
 	async writesResume(id: string): Promise<void> {
 		await this.#writeToggle(id, renderResumeWritesSql(), 'resume writes');
+	}
+
+	/** Flush the primary before writes stop (switchover step 1). Fixed statement, no input. */
+	async checkpoint(id: string): Promise<void> {
+		const databaseId = assertPrimaryDatabaseId(id);
+		const env = await this.readPostgresEnv(databaseId);
+		const result = await this.runner.run(this.psqlArgs(databaseId, env, ['-v', 'ON_ERROR_STOP=1']), {
+			env: { PGPASSWORD: env.password },
+			stdin: renderCheckpointSql(),
+		});
+		if (result.code !== 0)
+			throw new Error(`checkpoint failed (${result.code}): ${result.stderr.trim().slice(0, 500) || 'no detail'}`);
 	}
 
 	/**

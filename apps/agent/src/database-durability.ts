@@ -30,7 +30,7 @@ export interface DatabaseDurabilityRunnerOptions {
 	nodeId: string;
 	helper: Pick<
 		HelperApi,
-		'syncConfigure' | 'syncBarrier' | 'writesStop' | 'writesResume' | 'memberStatus' | 'replicationStatus' | 'replicaRewind'
+		'syncConfigure' | 'syncBarrier' | 'writesStop' | 'writesResume' | 'checkpoint' | 'memberStatus' | 'replicationStatus' | 'replicaRewind'
 	>;
 	log?: (level: 'info' | 'warn' | 'error', message: string) => void;
 	now?: () => number;
@@ -50,6 +50,8 @@ export class DatabaseDurabilityRunner {
 	private readonly rewindResults = new Map<string, DatabaseRewindResult>();
 	private readonly appliedSync = new Set<string>();
 	private readonly inFlight = new Set<string>();
+	/** First observation of "the named synchronous standby is not streaming", per database. */
+	private readonly syncLostSince = new Map<string, number>();
 
 	constructor(options: DatabaseDurabilityRunnerOptions) {
 		this.controlUrl = options.controlUrl;
@@ -63,11 +65,18 @@ export class DatabaseDurabilityRunner {
 
 	async runOnce(state: DesiredState, signal: AbortSignal): Promise<void> {
 		await this.#sync(state, signal);
+		await this.#watchdog(state, signal);
 		await this.#switchovers(state, signal);
 		await this.#rewinds(state, signal);
 		// Forget results whose instruction is gone (the control plane applied or abandoned it).
-		this.#prune(this.syncResults, new Set((state.databaseSyncTasks ?? []).map((task) => `${task.databaseId}:${task.version}`)));
-		this.#prune(this.switchoverResults, new Set((state.databaseSwitchovers ?? []).map((task) => `${task.switchoverId}:${task.step}`)));
+		// A watchdog result has no task, so its own desired entry keeps it until the next heartbeat
+		// applies it or the lease snapshot changes.
+		const present = new Set((state.databaseSyncTasks ?? []).map((task) => `${task.databaseId}:${task.version}`));
+		for (const desired of state.databaseMembers ?? []) {
+			if (desired.holderNodeId === this.nodeId) present.add(`watchdog:${desired.databaseId}:${desired.leaseEtag ?? ''}`);
+		}
+		this.#prune(this.syncResults, present);
+		this.#prune(this.switchoverResults, new Set((state.databaseSwitchovers ?? []).map((task) => `${task.switchoverId}:${task.version}`)));
 		this.#prune(this.rewindResults, new Set((state.databaseRewindTasks ?? []).map((task) => task.databaseId)));
 	}
 
@@ -81,14 +90,27 @@ export class DatabaseDurabilityRunner {
 			if (!workload) continue;
 			try {
 				const status = await this.helper.memberStatus(workload);
+				// Never synthesise a role: a member still in recovery is a replica; a primary that
+				// carries the leaky read-only flag is fenced for writes (W10 review major 14).
+				const role = status.inRecovery
+					? status.streaming
+						? 'streaming'
+						: 'rewind'
+					: status.readOnly
+						? 'fenced'
+						: 'primary';
 				reports.push({
 					databaseId: desired.databaseId,
-					role: status.inRecovery ? (status.streaming ? 'streaming' : 'rewind') : 'primary',
+					role,
 					generation: desired.generation,
-					epoch: 0,
+					epoch: desired.leaseEpoch,
 					streaming: status.streaming,
 					inRecovery: status.inRecovery,
 					lsn: status.lsn,
+					readOnly: status.readOnly,
+					fenced: status.readOnly && !status.inRecovery,
+					leaseGeneration: desired.leaseGeneration,
+					leaseEpoch: desired.leaseEpoch,
 					durabilityEffective: desired.durabilityEffective,
 					syncState: desired.syncState,
 					observedAt: new Date(this.now()).toISOString(),
@@ -122,24 +144,55 @@ export class DatabaseDurabilityRunner {
 				await this.helper.syncConfigure(task.databaseId, task.sync);
 				if (task.step === 'set-sync') {
 					const lsn = await this.helper.syncBarrier(task.databaseId);
-					const status = await this.helper.memberStatus(task.databaseId).catch(() => null);
+					// The barrier's LSN is the primary's position. The proof that the TARGET has it is
+					// the target slot's own `replay_lsn` in a fresh `pg_stat_replication` sample, and
+					// `sync_state = 'sync'` is the proof the setting actually took effect. Using the
+					// primary's own LSN here would make the barrier compare itself with itself.
+					const slots = await this.helper.replicationStatus(task.databaseId).catch(() => []);
+					const target = task.sync[0] ? slots.find((slot) => slot.slot === task.sync[0]) : undefined;
+					if (!target?.replayLsn || target.syncState !== 'sync') {
+						this.syncResults.set(key, {
+							databaseId: task.databaseId,
+							version: task.version,
+							step: task.step,
+							status: 'failed',
+							lsn,
+							replayLsn: target?.replayLsn ?? null,
+							targetSyncState: target?.syncState ?? null,
+							leaseEtag: task.leaseEtag,
+							error: `The target did not report a replay position at the barrier (sync_state ${target?.syncState ?? 'missing'}).`,
+						});
+						continue;
+					}
 					this.syncResults.set(key, {
 						databaseId: task.databaseId,
+						version: task.version,
 						step: task.step,
 						status: 'ok',
 						lsn,
-						replayLsn: status?.lsn ?? lsn,
+						replayLsn: target.replayLsn,
+						targetSyncState: target.syncState,
+						leaseEtag: task.leaseEtag,
 					});
-					this.log('info', `Sync set for ${task.databaseId} applied; barrier at ${lsn}`);
+					this.log('info', `Sync set for ${task.databaseId} applied; barrier at ${lsn}, target replay ${target.replayLsn}`);
 				} else {
-					this.syncResults.set(key, { databaseId: task.databaseId, step: task.step, status: 'ok', lsn: null });
+					this.syncResults.set(key, {
+						databaseId: task.databaseId,
+						version: task.version,
+						step: task.step,
+						status: 'ok',
+						lsn: null,
+						leaseEtag: task.leaseEtag,
+					});
 				}
 				this.appliedSync.add(key);
 			} catch (error) {
 				this.syncResults.set(key, {
 					databaseId: task.databaseId,
+					version: task.version,
 					step: task.step,
 					status: 'failed',
+					leaseEtag: task.leaseEtag,
 					error: errorText(error).slice(0, 2_000),
 				});
 				this.log('error', `Sync set for ${task.databaseId} failed: ${errorText(error)}`);
@@ -149,14 +202,92 @@ export class DatabaseDurabilityRunner {
 		}
 	}
 
+	/**
+	 * The node-hosted sync-loss watchdog (W9-SPEC §5.5, I11). The primary's node decides from its
+	 * own fresh slot sample whether the named synchronous standby is still streaming; it does not
+	 * wait for the control plane. It acts only on the lease snapshot in desired state (the ETag is
+	 * its ownership token), so a stale snapshot can never clear a newer set. `downgrade` clears the
+	 * setting locally; `block` leaves it named and reports so writes wait as configured.
+	 */
+	async #watchdog(state: DesiredState, signal: AbortSignal): Promise<void> {
+		for (const desired of state.databaseMembers ?? []) {
+			if (signal.aborted) return;
+			if (desired.holderNodeId !== this.nodeId || desired.durability !== 'sync' || desired.syncState !== 'steady') {
+				this.syncLostSince.delete(desired.databaseId);
+				continue;
+			}
+			if (desired.durabilityEffective !== 'sync' || desired.sync.length === 0) {
+				this.syncLostSince.delete(desired.databaseId);
+				continue;
+			}
+			// No lease token means this node cannot prove which lease it is acting on; fail closed
+			// and let the control plane's tick apply the policy.
+			if (!desired.leaseEtag) {
+				this.syncLostSince.delete(desired.databaseId);
+				continue;
+			}
+			const key = `watchdog:${desired.databaseId}:${desired.leaseEtag ?? ''}`;
+			if (this.syncResults.has(key) || this.inFlight.has(key)) continue;
+			let slots;
+			try {
+				slots = await this.helper.replicationStatus(desired.databaseId);
+			} catch {
+				continue;
+			}
+			const named = desired.members.filter((member) => desired.sync.includes(member.nodeId));
+			const held = named.some((member) => {
+				const slot = member.slot ? slots.find((item) => item.slot === member.slot) : undefined;
+				return slot?.state === 'streaming' && slot.syncState === 'sync';
+			});
+			if (held) {
+				this.syncLostSince.delete(desired.databaseId);
+				continue;
+			}
+			const since = this.syncLostSince.get(desired.databaseId) ?? this.now();
+			if (!this.syncLostSince.has(desired.databaseId)) this.syncLostSince.set(desired.databaseId, since);
+			if (this.now() - since < desired.syncTimeoutSeconds * 1_000) continue;
+			this.inFlight.add(key);
+			try {
+				const policy = desired.onSyncLoss === 'block' ? 'block' : 'downgrade';
+				if (policy === 'downgrade') await this.helper.syncConfigure(desired.databaseId, []);
+				this.syncResults.set(key, {
+					databaseId: desired.databaseId,
+					version: `${desired.leaseEtag ?? ''}:watchdog:${since}`,
+					step: 'watchdog',
+					status: 'ok',
+					lsn: null,
+					leaseEtag: desired.leaseEtag,
+					targetSyncState: policy,
+				});
+				this.log('warn', `No synchronous standby for ${desired.databaseId}; applied on_sync_loss ${policy} on the primary's node.`);
+				this.syncLostSince.delete(desired.databaseId);
+			} catch (error) {
+				this.syncResults.set(key, {
+					databaseId: desired.databaseId,
+					version: `${desired.leaseEtag ?? ''}:watchdog:${since}`,
+					step: 'watchdog',
+					status: 'failed',
+					leaseEtag: desired.leaseEtag,
+					error: errorText(error).slice(0, 2_000),
+				});
+				this.log('error', `Sync-loss watchdog for ${desired.databaseId} failed: ${errorText(error)}`);
+			} finally {
+				this.inFlight.delete(key);
+			}
+		}
+	}
+
 	async #switchovers(state: DesiredState, signal: AbortSignal): Promise<void> {
 		for (const task of state.databaseSwitchovers ?? []) {
 			if (signal.aborted) return;
-			const key = `${task.switchoverId}:${task.step}`;
+			const key = `${task.switchoverId}:${task.version}`;
 			if (this.switchoverResults.has(key) || this.inFlight.has(key)) continue;
 			this.inFlight.add(key);
 			try {
 				if (task.step === 'drain') {
+					// The plan's order: checkpoint, then stop writes, which waits for in-flight
+					// transactions before the LSN is sampled (W10 review blocker 4).
+					await this.helper.checkpoint(task.databaseId);
 					await this.helper.writesStop(task.databaseId);
 					const status = await this.helper.memberStatus(task.databaseId);
 					// A fresh `pg_stat_replication` sample is what proves the target has the primary's
@@ -165,6 +296,7 @@ export class DatabaseDurabilityRunner {
 					const target = task.replicaSlot ? slots.find((slot) => slot.slot === task.replicaSlot) : undefined;
 					this.switchoverResults.set(key, {
 						switchoverId: task.switchoverId,
+						version: task.version,
 						step: 'drain',
 						status: 'ok',
 						lsn: status.lsn,
@@ -173,12 +305,13 @@ export class DatabaseDurabilityRunner {
 					this.log('info', `Drained ${task.databaseId} at ${status.lsn ?? 'unknown LSN'} (replica ${target?.replayLsn ?? 'unknown'})`);
 				} else {
 					await this.helper.writesResume(task.databaseId);
-					this.switchoverResults.set(key, { switchoverId: task.switchoverId, step: 'resume', status: 'ok' });
+					this.switchoverResults.set(key, { switchoverId: task.switchoverId, version: task.version, step: 'resume', status: 'ok' });
 					this.log('info', `Resumed writes for ${task.databaseId}`);
 				}
 			} catch (error) {
 				this.switchoverResults.set(key, {
 					switchoverId: task.switchoverId,
+					version: task.version,
 					step: task.step,
 					status: 'failed',
 					error: errorText(error).slice(0, 2_000),
@@ -202,7 +335,9 @@ export class DatabaseDurabilityRunner {
 				);
 				if (!response.ok) throw new Error(`rewind activation -> ${response.status}`);
 				const activation = databaseRewindActivationSchema.parse(await response.json());
-				const result = await this.helper.replicaRewind(task.databaseId, {
+				// The path is the rewind replica's workload id (`db_dbr_…`); the body names the
+				// database whose old data dir is moved into it. Both helper assertions pass.
+				const result = await this.helper.replicaRewind(task.workloadId, {
 					databaseId: task.databaseId,
 					source: { host: activation.source.address ?? '', port: activation.source.port, user: 'yoal_repl', database: 'postgres' },
 					password: activation.password,

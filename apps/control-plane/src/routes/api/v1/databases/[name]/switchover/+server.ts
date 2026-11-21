@@ -19,5 +19,9 @@ export const POST: RequestHandler = (event) =>
 	route(async () => {
 		const principal = requirePrincipal(event);
 		const input = await readJson(event.request, databaseSwitchoverRequestSchema);
-		return json({ switchover: await core.databaseMembers.switchover(principal, event.params.name, input) }, 202);
+		const header = event.request.headers.get('if-match')?.replace(/^W\//, '').replace(/"/g, '').trim();
+		const ifMatch = header ? Number(header) : null;
+		if (header && !Number.isInteger(ifMatch))
+			return json({ error: 'If-Match must be the primary generation (an integer).' }, 400);
+		return json({ switchover: await core.databaseMembers.switchover(principal, event.params.name, input, { ifMatch }) }, 202);
 	});

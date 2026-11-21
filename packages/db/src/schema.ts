@@ -1280,6 +1280,15 @@ export const databases = sqliteTable(
 		syncPreviousNodeId: text('sync_previous_node_id'),
 		/** First observed loss of the synchronous standby, for the downgrade timer (0127). */
 		syncLostAt: integer('sync_lost_at'),
+		/** Counts sync-set openings, so a re-open to the same target has a new task version (0127). */
+		syncAttempt: integer('sync_attempt').notNull().default(0),
+		/** The phase the primary's node last reported for the open change (0127). */
+		syncPhase: text('sync_phase', { enum: ['opening', 'switching', 'waiting-barrier', 'closing', 'rearming'] }),
+		/** The barrier LSN the node wrote, for an honest transition report (0127). */
+		syncBarrierLsn: text('sync_barrier_lsn'),
+		/** The lease ETag/expiry the control plane last read, handed to the primary's node as its token (0127). */
+		syncLeaseEtag: text('sync_lease_etag'),
+		syncLeaseExpiresAt: integer('sync_lease_expires_at'),
 		/** Set while a pooler-only restart is waiting for the node to acknowledge it. */
 		poolerRestartRequestedAt: integer('pooler_restart_requested_at'),
 		status: text('status', { enum: ['pending', 'starting', 'running', 'failed', 'stopped'] })

@@ -23,7 +23,7 @@ import {
 } from './validate.ts';
 import type { HelperLogResult, HelperWorkloadStatus, LogReadOptions } from './systemd.ts';
 import type { HelperPitrStatus } from './pitr.ts';
-import { assertPrimaryDatabaseId, type ReplicationSlotStatus } from './replication.ts';
+import { assertPrimaryDatabaseId, assertReplicaWorkloadId, type ReplicationSlotStatus } from './replication.ts';
 import { parseStudioPrincipalRequest, STUDIO_PRINCIPAL_USER } from './studio-principal.ts';
 import type { HelperInventory, VerifyResult } from './volumes.ts';
 import {
@@ -107,14 +107,16 @@ export interface HelperRuntime {
 	/** The synchronous set (H23, W10): setting, barrier, stop/resume writes and the member probe. */
 	syncConfigure?(id: string, input: { members?: unknown }): Promise<{ members: string[] }>;
 	syncBarrier?(id: string): Promise<{ lsn: string }>;
+	/** Flush the primary before writes stop (switchover). */
+	checkpoint?(id: string): Promise<void>;
 	writesStop?(id: string): Promise<void>;
 	writesResume?(id: string): Promise<void>;
 	/** Fence a deposed primary: `stop`, or `readonly` where reads must continue (H22). */
 	fenceWorkload?(id: string, mode: 'stop' | 'readonly'): Promise<void>;
-	memberStatus?(id: string): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean }>;
+	/** Role, replay position and read-only state of one member (W9-SPEC §5.6). */
+	memberStatus?(id: string): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean; readOnly: boolean }>;
 	/** Rewind an old primary against the new primary; a failure reports `rebuild` (W10). */
 	replicaRewind?(id: string, input: { databaseId?: unknown; source?: unknown; password?: unknown; image?: unknown }): Promise<{ status: 'rewound' | 'rebuild'; error?: string }>;
-	/** `systemctl start yoal-studio.service` (plan 22). The unit name is fixed; no arguments. */
 	/** Remove images no unit or container needs (docs/REGISTRY.md R3). Optional for test fakes. */
 	pruneImages?(): Promise<ImagePruneResult>;
 	/** The platform registry's pull-through mirror (docs/REGISTRY.md G4). Optional for test fakes. */
@@ -809,10 +811,20 @@ export function createHandler(
 			if (writesMatch) {
 				if (method !== 'POST') return methodNotAllowed('POST');
 				const id = assertDatabaseId(decodeURIComponent(writesMatch[1]!), 'database id');
+				assertNoVerbInput({ search: url.search, body: await readText(request, maxBodyBytes) });
 				const action = writesMatch[2] === 'stop' ? runtime.writesStop : runtime.writesResume;
 				if (!action) return json({ error: 'not supported by this helper' }, 501);
 				await action.call(runtime, id);
 				return json({ ok: true, writes: writesMatch[2] === 'stop' ? 'stopped' : 'resumed' });
+			}
+			const checkpointMatch = /^\/v1\/workloads\/([^/]+)\/checkpoint$/.exec(path);
+			if (checkpointMatch) {
+				if (method !== 'POST') return methodNotAllowed('POST');
+				if (!runtime.checkpoint) return json({ error: 'not supported by this helper' }, 501);
+				const id = assertPrimaryDatabaseId(decodeURIComponent(checkpointMatch[1]!), 'database id');
+				assertNoVerbInput({ search: url.search, body: await readText(request, maxBodyBytes) });
+				await runtime.checkpoint(id);
+				return json({ ok: true, checkpointed: id });
 			}
 			const fenceMatch = /^\/v1\/workloads\/([^/]+)\/fence$/.exec(path);
 			if (fenceMatch) {
@@ -838,7 +850,9 @@ export function createHandler(
 			if (rewindMatch) {
 				if (method !== 'POST') return methodNotAllowed('POST');
 				if (!runtime.replicaRewind) return json({ error: 'not supported by this helper' }, 501);
-				const id = assertPrimaryDatabaseId(decodeURIComponent(rewindMatch[1]!), 'database id');
+				// The path is the rewind replica's workload id; the body names the database whose old
+				// data dir is moved into it. Both assertions must be satisfiable (W10 review blocker 7).
+				const id = assertReplicaWorkloadId(decodeURIComponent(rewindMatch[1]!), 'replica id');
 				const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
 				for (const key of Object.keys(body))
 					if (key !== 'databaseId' && key !== 'source' && key !== 'password' && key !== 'image')
