@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
@@ -97,14 +97,18 @@ class FakeHelper implements HelperJobApi {
 	starts: Array<Parameters<HelperJobApi['startJob']>[0]> = [];
 	current: HelperJobStatus = status('running');
 	failStart: Error | null = null;
+	failStatus: Error | null = null;
+	onStart: (() => void) | null = null;
 	async startJob(input: Parameters<HelperJobApi['startJob']>[0]): Promise<HelperJobStatus> {
 		this.calls.push(`start:${input.run.runId}:${input.workload.release ?? 'no-release'}`);
 		this.starts.push(input);
+		this.onStart?.();
 		if (this.failStart) throw this.failStart;
 		return this.current;
 	}
 	async jobStatus(runId: string, timeout?: number): Promise<HelperJobStatus> {
 		this.calls.push(`status:${runId}:${timeout}`);
+		if (this.failStatus) throw this.failStatus;
 		return this.current;
 	}
 	async jobLogs() {
@@ -276,5 +280,138 @@ describe('ReleaseCommandRunner', () => {
 		expect(f.helper.calls).toEqual([]);
 		expect(f.runner.pendingResults(state([]))).toEqual([]);
 		expect(f.runner.heldRuns()).toEqual([]);
+	});
+
+	test('a desired state that could not be fetched (null) never stops a held run', async () => {
+		const f = setup();
+		const desired = state([task()]);
+		await f.runner.tick(desired, signal);
+		await f.runner.tick(null, signal);
+		expect(f.helper.calls.filter((call) => call.startsWith('stop:'))).toEqual([]);
+		expect(f.runner.pendingResults(desired)).toEqual([expect.objectContaining({ status: 'running' })]);
+	});
+
+	test('the run id is on disk before the helper is asked to start it (I16)', async () => {
+		const dir = mkdtempSync(join(tmpdir(), 'yoal-release-commands-'));
+		dirs.push(dir);
+		const statePath = join(dir, 'release-commands-state.json');
+		const f = setup({ statePath });
+		let onDisk: string[] = [];
+		f.helper.onStart = () => {
+			onDisk = (JSON.parse(readFileSync(statePath, 'utf8')) as { seen: string[] }).seen;
+		};
+		await f.runner.tick(state([task()]), signal);
+		expect(f.helper.starts).toHaveLength(1);
+		expect(onDisk).toEqual([RC]);
+	});
+});
+
+describe('ReleaseCommandRunner with a corrupt state file (I16)', () => {
+	const TRUNCATED = `{"version":1,"seen":["${RC}"],"runs":[{"runId":"${RC}`;
+	const corrupt = () => {
+		const dir = mkdtempSync(join(tmpdir(), 'yoal-release-commands-'));
+		dirs.push(dir);
+		const statePath = join(dir, 'release-commands-state.json');
+		writeFileSync(statePath, TRUNCATED);
+		return { dir, statePath };
+	};
+
+	test('a run still going in the helper is adopted and watched, never started or failed', async () => {
+		const { statePath } = corrupt();
+		const f = setup({ statePath });
+		f.helper.current = status('running', { startedAt: Date.parse('2026-11-20T09:59:30Z') });
+		const desired = state([task({ timeoutSeconds: 60 })]);
+		await f.runner.tick(desired, signal);
+
+		expect(f.helper.calls[0]).toBe(`status:${releaseHelperRunId(RC)}:60`);
+		expect(f.helper.starts).toEqual([]);
+		expect(f.runner.pendingResults(desired)).toEqual([expect.objectContaining({ runId: RC, status: 'running' })]);
+		// Watched like any held run: the node's own timeout runs from the helper's start time.
+		f.advance(31_000);
+		await f.runner.tick(desired, signal);
+		expect(f.helper.calls).toContain(`stop:${releaseHelperRunId(RC)}:false`);
+		f.helper.current = status('timeout', { signal: 15 });
+		await f.runner.tick(desired, signal);
+		expect(f.runner.pendingResults(desired)).toEqual([expect.objectContaining({ runId: RC, status: 'timeout' })]);
+		expect(f.helper.starts).toEqual([]);
+	});
+
+	test('a run the helper already finished reports the helper’s outcome', async () => {
+		const { statePath } = corrupt();
+		const f = setup({ statePath });
+		f.helper.current = status('succeeded');
+		const desired = state([task()]);
+		await f.runner.tick(desired, signal);
+		expect(f.helper.starts).toEqual([]);
+		expect(f.runner.pendingResults(desired)).toEqual([expect.objectContaining({ status: 'succeeded', exitCode: 0 })]);
+		expect(f.helper.calls).toContain(`remove:${releaseHelperRunId(RC)}`);
+	});
+
+	test('a run the helper does not know is reported timeout (unknown), never failed', async () => {
+		const { statePath } = corrupt();
+		const f = setup({ statePath });
+		f.helper.current = status('not-found');
+		const desired = state([task()]);
+		await f.runner.tick(desired, signal);
+		expect(f.helper.starts).toEqual([]);
+		expect(f.runner.pendingResults(desired)).toEqual([
+			expect.objectContaining({ status: 'timeout', error: expect.stringMatching(/unknown/) }),
+		]);
+	});
+
+	test('an unreachable helper decides nothing until it answers', async () => {
+		const { statePath } = corrupt();
+		const f = setup({ statePath });
+		f.helper.failStatus = new Error('helper socket refused');
+		const desired = state([task()]);
+		await f.runner.tick(desired, signal);
+		expect(f.runner.pendingResults(desired)).toEqual([]);
+		expect(f.helper.starts).toEqual([]);
+
+		f.helper.failStatus = null;
+		f.helper.current = status('running');
+		await f.runner.tick(desired, signal);
+		expect(f.runner.pendingResults(desired)).toEqual([expect.objectContaining({ status: 'running' })]);
+		expect(f.helper.starts).toEqual([]);
+	});
+
+	test('the corrupt file is moved aside intact and keeps refusing across restarts until removed', async () => {
+		const { statePath } = corrupt();
+		const first = setup({ statePath });
+		first.helper.current = status('not-found');
+		await first.runner.tick(state([task()]), signal);
+		expect(readFileSync(`${statePath}.corrupt`, 'utf8')).toBe(TRUNCATED);
+
+		// Restart, then a new release's task: still refused, still reconciled, never started.
+		const other = `rc_${'2'.repeat(32)}`;
+		const second = setup({ statePath });
+		second.helper.current = status('not-found', { runId: releaseHelperRunId(other) });
+		const next = state([task({ runId: other, releaseId: 'dep_3' })]);
+		await second.runner.tick(next, signal);
+		expect(second.helper.starts).toEqual([]);
+		expect(second.runner.pendingResults(next)).toEqual([expect.objectContaining({ runId: other, status: 'timeout' })]);
+		expect(readFileSync(`${statePath}.corrupt`, 'utf8')).toBe(TRUNCATED);
+
+		// A person removes the quarantined file: new runs start again.
+		rmSync(`${statePath}.corrupt`);
+		const third = `rc_${'3'.repeat(32)}`;
+		const after = setup({ statePath });
+		await after.runner.tick(state([task({ runId: third, releaseId: 'dep_4' })]), signal);
+		expect(after.helper.starts).toHaveLength(1);
+	});
+
+	test('a corrupt file that cannot be moved aside is never written over', async () => {
+		const { dir, statePath } = corrupt();
+		chmodSync(dir, 0o500);
+		try {
+			const f = setup({ statePath });
+			f.helper.current = status('not-found');
+			await f.runner.tick(state([task()]), signal);
+			expect(f.helper.starts).toEqual([]);
+			expect(readFileSync(statePath, 'utf8')).toBe(TRUNCATED);
+			expect(existsSync(`${statePath}.corrupt`)).toBe(false);
+		} finally {
+			chmodSync(dir, 0o700);
+		}
 	});
 });
