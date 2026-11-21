@@ -3353,6 +3353,8 @@ export const controlState = sqliteTable(
 		canPromote: integer('can_promote', { mode: 'boolean' }).notNull().default(false),
 		replicationLagSeconds: integer('replication_lag_seconds'),
 		updatedAt: integer('updated_at').notNull(),
+		/** The host's running feature flags from its control report, as JSON (HA Wave 5, 0132). */
+		featureFlagsJson: text('feature_flags_json'),
 	},
 	(t) => [index('control_state_role_idx').on(t.role, t.epoch)],
 );
@@ -3447,34 +3449,58 @@ export const sloObjects = sqliteTable(
 	],
 );
 
-/** `yoal ha region promote` (HA-PLAN H26, W13; 0132). The lease generation is the fence. */
+/** `yoal ha region promote` (HA-PLAN H26, W13; 0132). Stored only once confirmed. */
 export const regionPromotions = sqliteTable(
 	'region_promotions',
 	{
 		id: text('id').primaryKey(),
 		toRegion: text('to_region').notNull(),
 		fromRegion: text('from_region').notNull(),
-		stage: text('stage', {
-			enum: ['awaiting-confirmation', 'fencing', 'control-plane', 'databases', 'steering', 'completed', 'failed', 'cancelled'],
-		})
+		stage: text('stage', { enum: ['control-plane', 'databases', 'steering', 'completed', 'failed', 'cancelled'] })
 			.notNull()
-			.default('awaiting-confirmation'),
-		/** The generation the plan was made at; the promotion is refused if it moved. */
-		expectedGeneration: integer('expected_generation').notNull(),
-		/** The generation the fence wrote; strictly greater than `expectedGeneration`. */
-		fencedGeneration: integer('fenced_generation'),
-		/** `RegionPromotionItem[]` as JSON. */
-		itemsJson: text('items_json').notNull().default('[]'),
-		acceptDataLoss: integer('accept_data_loss', { mode: 'boolean' }).notNull().default(false),
-		reason: text('reason'),
-		requestedBy: text('requested_by').notNull(),
-		requestedAt: integer('requested_at').notNull(),
-		confirmedBy: text('confirmed_by'),
-		confirmedAt: integer('confirmed_at'),
-		startedAt: integer('started_at'),
-		/** Set by every terminal stage; at most one row has it null (the open promotion). */
+			.default('control-plane'),
+		/** The hash of the plan the operator confirmed. */
+		planHash: text('plan_hash').notNull(),
+		/** The runner lease: one control plane at a time; another resumes only after it expires. */
+		runnerId: text('runner_id'),
+		leaseExpiresAt: integer('lease_expires_at'),
+		attempt: integer('attempt').notNull().default(1),
+		acceptDataLoss: integer('accept_data_loss', { mode: 'boolean' }).notNull(),
+		reason: text('reason').notNull(),
+		confirmedBy: text('confirmed_by').notNull(),
+		confirmedAt: integer('confirmed_at').notNull(),
+		startedAt: integer('started_at').notNull(),
+		/** Set by every terminal stage and only by one; at most one row has it null. */
 		finishedAt: integer('finished_at'),
 		error: text('error'),
 	},
-	(t) => [index('region_promotions_requested_idx').on(t.requestedAt)],
+	(t) => [index('region_promotions_started_idx').on(t.startedAt)],
+);
+
+/** One step and resource of a region promotion, with its own fence (0132). */
+export const regionPromotionSteps = sqliteTable(
+	'region_promotion_steps',
+	{
+		promotionId: text('promotion_id').notNull(),
+		position: integer('position').notNull(),
+		step: text('step', { enum: ['control-plane', 'databases', 'steering'] }).notNull(),
+		kind: text('kind', { enum: ['control-plane', 'database', 'steering'] }).notNull(),
+		resourceId: text('resource_id').notNull(),
+		name: text('name').notNull(),
+		targetNodeId: text('target_node_id'),
+		/** The control epoch (control and steering steps) or the database lease generation. */
+		expectedGeneration: integer('expected_generation').notNull(),
+		/** What the step wrote; strictly greater. Null until done, and always for steering. */
+		fencedGeneration: integer('fenced_generation'),
+		status: text('status', { enum: ['pending', 'running', 'done', 'skipped', 'failed'] }).notNull().default('pending'),
+		lagBytes: integer('lag_bytes'),
+		lagSeconds: real('lag_seconds'),
+		startedAt: integer('started_at'),
+		finishedAt: integer('finished_at'),
+		message: text('message'),
+	},
+	(t) => [
+		primaryKey({ columns: [t.promotionId, t.position] }),
+		uniqueIndex('region_promotion_steps_resource_idx').on(t.promotionId, t.kind, t.resourceId),
+	],
 );

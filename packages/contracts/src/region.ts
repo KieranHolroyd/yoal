@@ -23,7 +23,34 @@ import type { ReplicaSpread } from './replica.ts';
  *
  * Every region field is refused while `REGIONS` is off (`regionWriteIssues`), on every write path:
  * REST, MCP, dashboard, blueprint and config import (`packages/core/src/region-gate.ts`).
+ *
+ * **Rollback risk.** `REGIONS_DOWNGRADE_NOTE`: once a `spread: region` or a node `region` other than
+ * `default` is stored, a control plane older than Wave 5 cannot parse the cluster configuration
+ * (`clusterConfigSchema`) or the project's placement (`parsePlacementSpec`), because `region` is not
+ * in its enums. Downgrading the control plane after that is unsupported; put the values back to
+ * `node`/`zone` and `default` first.
+ *
+ * **A stored `spread: region` while `REGIONS` is off** (left from when it was on) is placed as
+ * `zone` (`placementSpread`), never an error at placement time; the preflight's `regions` check
+ * warns about it.
  */
+
+/** Said by the `REGIONS` flag, this contract and `ha init`'s plan output. */
+export const REGIONS_DOWNGRADE_NOTE =
+	'Once a spread: region or a non-default node region is stored, an older control plane cannot parse the cluster configuration or project placement, so downgrading the control plane is unsupported until those values are put back.';
+
+/**
+ * The spread placement actually applies. `region` is placed as `zone` while `REGIONS` is off, and
+ * also while it is on until W13 lane A builds region placement (lane A changes the second case).
+ * Pure; the replica planner calls it (`packages/core/src/replicas.ts`).
+ */
+export function placementSpread(spread: ReplicaSpread, features: Pick<FeatureFlags, 'REGIONS'>): ReplicaSpread {
+	if (spread !== 'region') return spread;
+	if (!features.REGIONS) return 'zone';
+	// Region placement is not built yet (W13 lane A replaces this line): the closest safe
+	// constraint is zone spread, never the weaker node spread.
+	return 'zone';
+}
 
 /** The implicit region every node is in until an operator names another. */
 export const DEFAULT_REGION = 'default';
@@ -105,6 +132,11 @@ export const REGION_FIELDS = [
 	'database.standbyRegion',
 	'blueprint.databases.spread',
 	'blueprint.databases.standbyRegion',
+	/**
+	 * A blueprint project's `placement: { spread }` maps to the workload's `placement.spread`
+	 * (`workload.placement.spread`), gated as it is today; it never touches the project's
+	 * `placementSpec`.
+	 */
 	'blueprint.projects.placement.spread',
 ] as const;
 export type RegionField = (typeof REGION_FIELDS)[number];
@@ -124,8 +156,10 @@ export interface RegionWrite {
 export function isRegionWrite(write: RegionWrite): boolean {
 	if (write.value === undefined) return false;
 	if (write.field === 'node.region') {
-		// Absent and `default` are the same region; naming the implicit one is not a change.
+		// Absent and `default` are the same region. Returning to it is always allowed, as clearing a
+		// standby region is: it is the way back, and needs no flag.
 		const next = regionOf({ region: write.value as string | null });
+		if (next === DEFAULT_REGION) return false;
 		const current = regionOf({ region: write.current as string | null | undefined });
 		return next !== current;
 	}
@@ -253,26 +287,38 @@ export function regionSpreadSyncRefusal(spread: ReplicaSpread | undefined, durab
 // ------------------------------------------------------------------ region promotion
 
 /**
- * The promotion's stages, in order. A promotion is created `awaiting-confirmation` with the plan
- * and the generation it was planned at; a typed confirmation moves it to `fencing`, which bumps
- * the lease generation (the fence: anything still acting at the old generation is refused); then
- * the three steps run in dependency order, each finishing before the next starts:
- * - `control-plane`: the control-plane member in the standby region becomes primary (W9, manual);
- * - `databases`: each database with this standby region promotes its standby-region replica;
- * - `steering`: the stacked driver (for example `dns-failover` between regions) points at the region.
- * `completed`, `failed` and `cancelled` are terminal. A failed step stops the promotion where it
- * is: nothing is rolled back automatically, and the view says which steps ran.
+ * `yoal ha region promote <region>`: a fenced, human-confirmed promotion of everything in the
+ * standby region, in dependency order (H26).
+ *
+ * **Where it runs and where the record lives.** The promotion runs on the control plane in the
+ * surviving region: the W9 standby there. Its plan (`regionPromote` without `confirm`) is computed
+ * from fresh arbiter reads and never stored, because that standby is not primary yet. On
+ * confirmation its first step promotes itself (the control-plane step, fenced on the control
+ * epoch); only then, under the new epoch, does it write the `region_promotions` record and its
+ * steps (migration 0132) to the platform database it now owns. A crash between the two is
+ * recovered by re-running: the control step is idempotent (below), so it finds its epoch already
+ * written and records itself done.
+ *
+ * **Stages.** A stored promotion is in `control-plane` (written as that step finishes), then
+ * `databases`, then `steering`, then `completed`. `failed` stops where it is: nothing is rolled back
+ * automatically, and the steps say what ran. `cancelled` stops between steps.
+ *
+ * **Fences, per step.** Every step names the generation it was planned at and the one it wrote:
+ * - `control-plane`: the W9 control lease epoch; the promote is a CAS at `expectedGeneration` and
+ *   writes `fencedGeneration` = epoch + 1;
+ * - `database`: that database's lease generation (W9-SPEC §5.1), the same way;
+ * - `steering`: no lease of its own. Its writes are fenced by the new control epoch: only the holder
+ *   of that epoch writes, so `expectedGeneration` is that epoch and `fencedGeneration` stays null.
+ *
+ * **Idempotent, keyed on the fenced generation.** Re-running a step whose `fencedGeneration` is
+ * already the lease's generation (and this runner's) is a no-op that marks it done; a lease at any
+ * other generation fails the step with "someone else acted". A step is never run twice.
+ *
+ * **Runner lease.** One runner at a time holds `runnerId` until `leaseExpiresAt` and renews it
+ * between steps; another control plane takes over a crashed run only once the lease has expired
+ * (`regionPromotionLeaseFree`), with a conditional update on the old values.
  */
-export const regionPromotionStages = [
-	'awaiting-confirmation',
-	'fencing',
-	'control-plane',
-	'databases',
-	'steering',
-	'completed',
-	'failed',
-	'cancelled',
-] as const;
+export const regionPromotionStages = ['control-plane', 'databases', 'steering', 'completed', 'failed', 'cancelled'] as const;
 export type RegionPromotionStage = (typeof regionPromotionStages)[number];
 
 /** The dependency order of the promotion's steps. Fixed (H26). */
@@ -281,16 +327,12 @@ export type RegionPromotionStep = (typeof REGION_PROMOTION_ORDER)[number];
 
 export const REGION_PROMOTION_TERMINAL: ReadonlySet<RegionPromotionStage> = new Set(['completed', 'failed', 'cancelled']);
 
-/**
- * The stage after `stage` on success, or null for a terminal stage. Pure; lane A's runner calls
- * it so the order is in one place. Failure and cancellation are explicit, never "next".
- */
+/** Seconds a runner holds the promotion before another control plane may resume it. */
+export const REGION_PROMOTION_RUNNER_LEASE_SECONDS = 60;
+
+/** The stage after `stage` on success, or null for a terminal stage. Pure. */
 export function nextRegionPromotionStage(stage: RegionPromotionStage): RegionPromotionStage | null {
 	switch (stage) {
-		case 'awaiting-confirmation':
-			return 'fencing';
-		case 'fencing':
-			return 'control-plane';
 		case 'control-plane':
 			return 'databases';
 		case 'databases':
@@ -302,40 +344,78 @@ export function nextRegionPromotionStage(stage: RegionPromotionStage): RegionPro
 	}
 }
 
+/** Whether a runner may take the promotion now: nobody holds it, or the holder's lease expired. */
+export function regionPromotionLeaseFree(lease: { runnerId: string | null; leaseExpiresAt: number | null }, now: number): boolean {
+	return lease.runnerId === null || lease.leaseExpiresAt === null || lease.leaseExpiresAt <= now;
+}
+
+export const regionPromotionStepKinds = ['control-plane', 'database', 'steering'] as const;
+export type RegionPromotionStepKind = (typeof regionPromotionStepKinds)[number];
+
+/** Which generation fences each kind of step (see the module comment). */
+export const REGION_PROMOTION_STEP_FENCES: Readonly<Record<RegionPromotionStepKind, 'control-epoch' | 'database-lease'>> = Object.freeze({
+	'control-plane': 'control-epoch',
+	database: 'database-lease',
+	steering: 'control-epoch',
+});
+
 export const regionPromotionStepStatuses = ['pending', 'running', 'done', 'skipped', 'failed'] as const;
 export type RegionPromotionStepStatus = (typeof regionPromotionStepStatuses)[number];
 
-/** One resource the promotion acts on, with the evidence it was planned with. */
-export const regionPromotionItemSchema = z.object({
-	step: z.enum(REGION_PROMOTION_ORDER),
-	kind: z.enum(['control-plane', 'database', 'steering']),
-	/** Database id, `control-plane`, or the steering driver kind. */
-	id: z.string().min(1).max(100),
-	name: z.string().max(120),
-	/** The node that becomes primary in the target region, when there is one. */
-	targetNodeId: z.string().max(100).nullable().default(null),
-	status: z.enum(regionPromotionStepStatuses).default('pending'),
-	/** Replication lag when the plan was made: the RPO the operator accepts. Null when unknown. */
-	lagBytes: z.number().int().nonnegative().nullable().default(null),
-	lagSeconds: z.number().nonnegative().nullable().default(null),
-	/** Why the item is skipped or failed. */
-	message: z.string().max(1_000).nullable().default(null),
-});
-export type RegionPromotionItem = z.infer<typeof regionPromotionItemSchema>;
+/** One step, one resource, one fence (`region_promotion_steps`). */
+export const regionPromotionStepSchema = z
+	.object({
+		/** Order within the promotion; control plane first, then databases, then steering. */
+		position: z.number().int().nonnegative(),
+		step: z.enum(REGION_PROMOTION_ORDER),
+		kind: z.enum(regionPromotionStepKinds),
+		/** `control-plane`, a database id, or the steering driver kind. */
+		resourceId: z.string().min(1).max(100),
+		name: z.string().max(120),
+		/** The node that becomes primary in the target region, when there is one. */
+		targetNodeId: z.string().max(100).nullable().default(null),
+		/** The generation the plan read; the step's CAS is at this value. */
+		expectedGeneration: z.number().int().nonnegative(),
+		/** The generation the step wrote; strictly greater. Null until done, and always for steering. */
+		fencedGeneration: z.number().int().nonnegative().nullable().default(null),
+		status: z.enum(regionPromotionStepStatuses).default('pending'),
+		/** Replication lag when the plan was made: the RPO the operator accepts. Null when unknown. */
+		lagBytes: z.number().int().nonnegative().nullable().default(null),
+		lagSeconds: z.number().nonnegative().nullable().default(null),
+		startedAt: z.string().nullable().default(null),
+		finishedAt: z.string().nullable().default(null),
+		/** Why the step is skipped or failed. */
+		message: z.string().max(1_000).nullable().default(null),
+	})
+	.refine((step) => step.fencedGeneration === null || step.fencedGeneration > step.expectedGeneration, {
+		message: 'A fence only moves forward: fencedGeneration must be greater than expectedGeneration.',
+		path: ['fencedGeneration'],
+	});
+export type RegionPromotionStepView = z.infer<typeof regionPromotionStepSchema>;
+
+/** The computed plan `promote` returns without `confirm`. Never stored. */
+export interface RegionPromotionPlan {
+	toRegion: string;
+	fromRegion: string;
+	steps: RegionPromotionStepView[];
+	/** sha256 over `toRegion` and each step's kind, resource and expected generation; pass it back. */
+	planHash: string;
+	/** Writes after the last replicated one are lost: the largest planned lag. */
+	maxLagSeconds: number | null;
+}
 
 /**
- * `POST /api/v1/ha/regions/:region/promote` and `yoal ha region promote <region>`. Two calls:
- * without `confirm` it returns the plan (`awaiting-confirmation`); with it, it runs. The human
- * confirmation is the region name typed back, the generation the plan was made at (`If-Match`
- * semantics: a stale plan is refused), and `acceptDataLoss`, because RPO is the measured lag.
+ * `POST /api/v1/ha/regions/:region/promote` and `yoal ha region promote <region>`. Without
+ * `confirm` it returns the plan. With it, the human confirmation is the region name typed back,
+ * the `planHash` the plan showed (any generation that moved since changes the hash, so a stale plan
+ * is refused), `acceptDataLoss: true` (RPO is the measured lag) and a reason for the audit log.
  * Never exposed as an MCP write tool.
  */
 export const regionPromoteRequestSchema = z
 	.object({
 		/** The region name typed back exactly. */
 		confirm: nodeRegionSchema.optional(),
-		/** The lease generation shown in the plan; the promotion is refused if it moved. */
-		expectedGeneration: z.number().int().nonnegative().optional(),
+		planHash: z.string().regex(/^[a-f0-9]{64}$/, 'Use the 64-character plan hash the plan showed.').optional(),
 		/** Required with `confirm`: writes after the last replicated one are lost (RPO = lag). */
 		acceptDataLoss: z.boolean().default(false),
 		/** Recorded in the audit log and the promotion record. */
@@ -344,35 +424,34 @@ export const regionPromoteRequestSchema = z
 	.strict()
 	.superRefine((input, ctx) => {
 		if (input.confirm === undefined) return;
-		if (input.expectedGeneration === undefined)
-			ctx.addIssue({ code: 'custom', path: ['expectedGeneration'], message: 'Pass the generation the plan showed.' });
+		if (input.planHash === undefined) ctx.addIssue({ code: 'custom', path: ['planHash'], message: 'Pass the plan hash the plan showed.' });
 		if (!input.acceptDataLoss)
 			ctx.addIssue({ code: 'custom', path: ['acceptDataLoss'], message: 'A region promotion loses writes after the last replicated one; pass acceptDataLoss: true.' });
 		if (!input.reason) ctx.addIssue({ code: 'custom', path: ['reason'], message: 'Say why, for the audit log.' });
 	});
 export type RegionPromoteRequest = z.input<typeof regionPromoteRequestSchema>;
 
-/** One region promotion, from `region_promotions`. Every field a reviewer needs is here. */
+/** One stored region promotion, from `region_promotions` and its steps. */
 export const regionPromotionViewSchema = z.object({
 	id: z.string().regex(/^rgp_[a-f0-9]{32}$/),
 	/** The region traffic and writes move to. */
 	toRegion: nodeRegionSchema,
-	/** The region believed lost, as it was primary when the plan was made. */
+	/** The region believed lost. */
 	fromRegion: nodeRegionSchema,
 	stage: z.enum(regionPromotionStages),
-	/** The fence: the generation the plan was made at, and the one the fence wrote (strictly greater). */
-	expectedGeneration: z.number().int().nonnegative(),
-	fencedGeneration: z.number().int().nonnegative().nullable(),
-	items: z.array(regionPromotionItemSchema).max(500),
-	// Human confirmation.
-	acceptDataLoss: z.boolean(),
-	reason: z.string().max(500).nullable(),
-	requestedBy: z.string().max(200),
-	requestedAt: z.string(),
-	confirmedBy: z.string().max(200).nullable(),
-	confirmedAt: z.string().nullable(),
+	planHash: z.string().regex(/^[a-f0-9]{64}$/),
+	steps: z.array(regionPromotionStepSchema).max(500),
+	// Runner lease.
+	runnerId: z.string().max(100).nullable(),
+	leaseExpiresAt: z.string().nullable(),
+	attempt: z.number().int().min(1),
+	// Human confirmation (always present: a promotion is stored only once confirmed).
+	acceptDataLoss: z.literal(true),
+	reason: z.string().max(500),
+	confirmedBy: z.string().max(200),
+	confirmedAt: z.string(),
 	// Audit.
-	startedAt: z.string().nullable(),
+	startedAt: z.string(),
 	finishedAt: z.string().nullable(),
 	/** The step that failed, and why. */
 	error: z.string().max(2_000).nullable(),
@@ -396,7 +475,9 @@ export interface RegionsView {
 	regions: RegionView[];
 	/** Zones whose nodes name different regions (only possible from a direct database write). */
 	conflicts: Array<{ zone: string; regions: string[]; nodes: string[] }>;
-	/** The running or awaiting promotion, if any; at most one at a time. */
+	/** The running promotion, if any; at most one at a time. */
 	active: RegionPromotionView | null;
 	recent: RegionPromotionView[];
+	/** `REGIONS_DOWNGRADE_NOTE` while any region value is stored. */
+	notes: string[];
 }

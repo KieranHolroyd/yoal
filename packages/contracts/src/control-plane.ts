@@ -61,6 +61,14 @@ export const controlReportSchema = z.object({
 	leaseExpiresAt: z.string().datetime().nullable(),
 	canPromote: z.boolean(),
 	replicationLagSeconds: z.number().nonnegative().nullable(),
+	/**
+	 * HA Wave 5: the flags this host's control plane is running with (`YOAL_FEATURE_*` as resolved
+	 * at its start), so the `flags-consistent` check can find drift between control-plane hosts.
+	 * Optional: an older control plane or agent omits it, and the check says it cannot verify that
+	 * host. The control plane adds it to its local `/readyz` (socket only, never the public health
+	 * endpoint) and the agent forwards it; both are Wave 5 lane B.
+	 */
+	featureFlags: z.record(z.string().max(64), z.boolean()).optional(),
 });
 
 export type ControlReport = z.infer<typeof controlReportSchema>;
@@ -77,6 +85,8 @@ export const controlStatusSchema = z.object({
 	replicationLagSeconds: z.number().nonnegative().nullable(),
 	version: z.string().nullable(),
 	updatedAt: z.string().datetime().nullable(),
+	/** The host's last reported flags (HA Wave 5); null when it never reported them. */
+	featureFlags: z.record(z.string(), z.boolean()).nullable().optional(),
 });
 
 export type ControlStatus = z.infer<typeof controlStatusSchema>;

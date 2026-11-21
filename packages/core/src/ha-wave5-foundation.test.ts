@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createDb } from '@yoal/db';
 import { DEFAULT_FEATURES, HA_DRILL_CATALOGUE, haCheckIds } from '@yoal/contracts';
 import { parseBlueprint } from './blueprints.ts';
+import { planReplicas } from './replicas.ts';
 import { createCore, type Core } from './index.ts';
 import { LocalObjectStore } from './object-store.ts';
 import { buildPrincipal } from './orgs.ts';
@@ -200,5 +201,92 @@ describe('old blueprint files', () => {
 		const doc = parseBlueprint(text);
 		expect('cluster' in doc).toBe(false);
 		for (const project of Object.values(doc.projects)) expect(project.placement === undefined || typeof project.placement === 'string').toBe(true);
+	});
+});
+
+describe('review fixes', () => {
+	const preflightEntries = (profile: 'single' | 'ha' | 'ha-dr', id: string) =>
+		core.haDoctor.preflight(principal, profile).checks.filter((check) => check.id === id);
+
+	beforeEach(() => {
+		opened.sqlite.run("UPDATE databases SET durability = 'async', failover_mode = 'manual'");
+		opened.sqlite.run('DELETE FROM control_state');
+		core.cluster.update(principal, { steering: { driver: 'direct', stacked: [] }, replicas: { spread: 'node' } });
+		opened.sqlite.run('UPDATE projects SET placement_json = NULL');
+	});
+
+	test('a node can always return to the default region, flag off', () => {
+		opened.sqlite.run("UPDATE nodes SET region = 'ukwest', zone = 'ukwest-1' WHERE id = ?", [join1.nodeId]);
+		expect(core.nodes.update(principal, join1.nodeId, { region: 'default' }).region).toBe('default');
+		expect(opened.sqlite.query<{ region: string }, [string]>('SELECT region FROM nodes WHERE id = ?').get(join1.nodeId)).toEqual({ region: 'default' });
+	});
+
+	test('NodeView carries zone and region', () => {
+		const view = core.nodes.update(principal, join1.nodeId, { zone: 'uksouth-1' });
+		expect(view.zone).toBe('uksouth-1');
+		expect(view.region).toBe('default');
+	});
+
+	test('single passes with nothing depending on HA, and is refused per dependent with its way back', () => {
+		expect(preflightEntries('single', 'ha-dependents')).toMatchObject([{ status: 'pass' }]);
+		expect(core.haDoctor.preflight(principal, 'single').ok).toBe(true);
+
+		opened.sqlite.run("UPDATE databases SET durability = 'sync', failover_mode = 'auto' WHERE name = 'main'");
+		opened.sqlite.run("UPDATE nodes SET region = 'ukwest', zone = 'ukwest-1' WHERE id = ?", [join2.nodeId]);
+		opened.sqlite.run("INSERT INTO control_state (node_id, role, epoch, updated_at) VALUES (?, 'standby', 3, 1)", [join2.nodeId]);
+		core.cluster.update(principal, { steering: { driver: 'external-lb' } });
+
+		const entries = preflightEntries('single', 'ha-dependents');
+		expect(entries.map((entry) => [entry.status, entry.fix?.value])).toEqual([
+			['fail', 'yoal db durability main --async'],
+			['fail', 'yoal db failover main --disarm'],
+			['fail', expect.stringContaining('a2')],
+			['fail', expect.stringContaining('"region": "default"')],
+			['fail', expect.stringContaining('steering.driver')],
+		]);
+		expect(core.haDoctor.preflight(principal, 'single').ok).toBe(false);
+	});
+
+	test('flags-consistent fails when control-plane hosts run different flags and warns on a host that does not report', () => {
+		expect(preflightEntries('ha', 'flags-consistent')).toMatchObject([{ status: 'pass' }]);
+		const flags = { ...DEFAULT_FEATURES, REGIONS: true };
+		opened.sqlite.run("INSERT INTO control_state (node_id, role, epoch, updated_at, feature_flags_json) VALUES (?, 'standby', 3, 1, ?)", [
+			join2.nodeId,
+			JSON.stringify(flags),
+		]);
+		expect(preflightEntries('ha', 'flags-consistent')).toMatchObject([
+			{ status: 'fail', evidence: [expect.stringContaining('REGIONS')], fix: { kind: 'env' } },
+		]);
+		core.ctx.controlPlane.report({
+			nodeId: join2.nodeId,
+			role: 'standby',
+			epoch: 3,
+			leaseHolderNodeId: null,
+			leaseExpiresAt: null,
+			canPromote: true,
+			replicationLagSeconds: 0,
+			featureFlags: { ...DEFAULT_FEATURES },
+		});
+		expect(preflightEntries('ha', 'flags-consistent')).toMatchObject([{ status: 'pass' }]);
+		expect(core.ctx.controlPlane.status().find((row) => row.nodeId === join2.nodeId)?.featureFlags).toEqual({ ...DEFAULT_FEATURES });
+		opened.sqlite.run('UPDATE control_state SET feature_flags_json = NULL');
+		expect(preflightEntries('ha', 'flags-consistent')).toMatchObject([{ status: 'warn', evidence: [expect.stringContaining('a2')] }]);
+	});
+
+	test('a stored spread: region with REGIONS off warns in the preflight and is placed as zone', async () => {
+		opened.sqlite.run('UPDATE projects SET placement_json = ? WHERE slug = ?', [JSON.stringify({ spread: 'region' }), app.slug]);
+		expect(preflightEntries('ha', 'regions')).toEqual(
+			expect.arrayContaining([expect.objectContaining({ status: 'warn', evidence: expect.arrayContaining([expect.stringContaining(app.slug)]) })]),
+		);
+		const decision = planReplicas({
+			count: 2,
+			memoryMb: 64,
+			spread: 'region',
+			candidates: [
+				{ id: 'n1', name: 'n1', zone: 'a', status: 'online', freeMemoryMb: 1024 },
+				{ id: 'n2', name: 'n2', zone: 'a', status: 'online', freeMemoryMb: 1024 },
+			] as never,
+		});
+		expect(decision.ok).toBe(false);
 	});
 });

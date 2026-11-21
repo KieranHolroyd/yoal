@@ -309,7 +309,7 @@ export const FEATURE_FLAGS = {
 		default: false,
 		area: 'platform',
 		description:
-			'Regions group zones: a node region, spread: region, a database standby region that never auto-promotes, and the fenced, human-confirmed region promotion (HA-PLAN H26).'
+			'Regions group zones: a node region, spread: region, a database standby region that never auto-promotes, and the fenced, human-confirmed region promotion (HA-PLAN H26). Once a region value is stored, downgrading the control plane is unsupported until it is put back.'
 	}
 } as const satisfies Record<string, FeatureFlagDefinition>;
 

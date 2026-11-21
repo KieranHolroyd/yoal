@@ -50,7 +50,7 @@ function addNode(name: string, capabilities: string[], publicAddress: string | n
 
 describe('HA profile preflight (HA-PLAN H27/H28, W12)', () => {
 	test('defaults to single and reports the local platform store as a blocker', () => {
-		expect(core.cluster.get().ha).toEqual({ profile: 'single' });
+		expect(core.cluster.get().ha).toEqual({ profile: 'single', applied: null });
 		const view = core.ha.view(owner);
 		expect(view.profile).toBe('single');
 		const blocker = view.findings.find((finding) => finding.key === 'platform-store')!;

@@ -9,9 +9,16 @@ import type { CoreContext } from './context.ts';
  * `packages/contracts/src/blueprint.ts`), so a file can be validated. Plan and apply do not act on
  * them yet: `assertBlueprintHaKeysSupported` refuses a document that sets any, naming each key, so
  * a file never applies without the part an operator cared about most. Lane C replaces the refusal
- * with `planBlueprintHa` and `applyBlueprintHa`, checks `cluster.requires` as assertions, routes
- * region values through `assertRegionWrites` and release-phase values through `setSpec`, and adds
- * an HA section to the plan diff.
+ * with `planBlueprintHa` and `applyBlueprintHa`, checks `cluster.requires` as assertions, and adds
+ * an HA section to the plan diff. Decisions it must keep:
+ * - `projects.<p>.placement: { spread }` is the workload's `placement.spread`, applied through
+ *   `setSpec` (so `RELEASE_PHASE` and `REGIONS` gate it as today); it never touches `placementSpec`;
+ * - `databases.<d>.failover: auto` (with `acceptDataLoss` for async) goes through
+ *   `DatabaseFailoverPolicyService.arm`, as `yoal db failover --arm` does, never a direct write;
+ *   `manual` goes through `disarm`;
+ * - `cluster.steering` goes through `ClusterConfigService.update`, as `ha init` does: the last
+ *   write wins, and the plan shows the diff against the live value;
+ * - region values go through `assertRegionWrites`.
  */
 export function assertBlueprintHaKeysSupported(doc: Blueprint): void {
 	const keys = blueprintHaKeys(doc);

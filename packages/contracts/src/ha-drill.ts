@@ -1,6 +1,7 @@
 import * as z from 'zod';
 import type { HaLevel } from './cluster.ts';
-import type { FeatureName } from './features.ts';
+import { featureEnvKey, type FeatureFlags, type FeatureName } from './features.ts';
+import { haLevels } from './cluster.ts';
 
 /**
  * The drill catalogue (HA-PLAN H27, §7.2, §10, W14; Wave 5 foundation). `yoal ha drill <scenario>
@@ -19,12 +20,18 @@ import type { FeatureName } from './features.ts';
  *
  * **Fleet or lab.** A release build has no fault verbs (§10), so a scenario that needs one (kill or
  * freeze a process, partition a link, skew a clock, fill a disk) runs only in the lab
- * (`tests/lab`, `tests/ha`) with the same id. `--all` runs the `fleet` ones and lists the `lab`
- * ones as skipped with that reason.
+ * (`tests/lab`, `tests/ha`) with the same id. So do `zone-offline`, `control-plane-failover` and
+ * `region-failover` until a fleet path exists; `fleetUnavailableReason` says why for each.
  *
- * **Safety (§10).** Drills need a platform admin and name the resource. A `destructive` scenario
- * needs the resource's name typed back (`confirmation: 'typed'`) and is refused on a resource below
- * `minHaLevel`, its declared HA level: a drill must not take down something that cannot survive it.
+ * **Safety (§10).** Drills need a platform admin and always name the resource: the runner never
+ * picks one at random (the D235 random pick stays only on the old `NodeDrillService.start` path;
+ * the catalogue requires `resource`). A `destructive` scenario needs the resource's name typed back
+ * (`confirmation: 'typed'`). `haDrillLevelIssue` refuses a resource whose declared HA level is
+ * below the scenario's `minHaLevel`, and a resource that is currently below its own declared level.
+ *
+ * **`--all`** (`planHaDrillAll`) runs only scenarios that are available on a fleet, not
+ * destructive and need no typed confirmation (`haDrillRunsInAll`), and only against resources the
+ * operator named; a scenario with no named resource of its kind is skipped with the reason.
  */
 
 /** §7.2's families. */
@@ -80,6 +87,8 @@ export interface HaDrillScenario {
 	confirmation: HaDrillConfirmation;
 	measures: readonly HaDrillMeasure[];
 	availability: 'fleet' | 'lab';
+	/** Why it cannot run on a fleet today; null exactly when `availability` is `fleet`. */
+	fleetUnavailableReason: string | null;
 	/** Flags that must be on, or the scenario is skipped with the flag named. */
 	flags: readonly FeatureName[];
 	/** Refused on a resource whose computed HA level is below this (§10); null when any level may run. */
@@ -87,8 +96,6 @@ export interface HaDrillScenario {
 	/** The HA-PLAN §1.2 bound it is judged against; null where §1.2 gives none. */
 	bound: { rtoSeconds: number | null; rpo: 'zero' | 'lag' | null };
 	recordsIn: 'node_drills' | 'database_failover_drills' | 'ha_drills';
-	/** Included in `yoal ha drill --all`. Destructive scenarios need `includeDestructive`. */
-	inAll: boolean;
 }
 
 const scenario = (entry: HaDrillScenario) => entry;
@@ -105,11 +112,11 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		confirmation: 'none',
 		measures: ['refusal'],
 		availability: 'fleet',
+		fleetUnavailableReason: null,
 		flags: [],
 		minHaLevel: 'L2',
 		bound: { rtoSeconds: null, rpo: null },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'node-offline',
@@ -117,15 +124,15 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		faultCatalogue: 'Power off a node (simulated partition, D235)',
 		title: 'One node goes dark for a bounded time',
 		resourceKind: 'node',
-		destructive: false,
-		confirmation: 'none',
+		destructive: true,
+		confirmation: 'typed',
 		measures: ['rto'],
 		availability: 'fleet',
+		fleetUnavailableReason: null,
 		flags: [],
 		minHaLevel: null,
 		bound: { rtoSeconds: null, rpo: null },
 		recordsIn: 'node_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'ingress-offline',
@@ -133,15 +140,15 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		faultCatalogue: 'Power off an ingress mid-request',
 		title: 'An ingress leaves rotation and in-flight requests elsewhere are unaffected',
 		resourceKind: 'ingress-node',
-		destructive: false,
-		confirmation: 'none',
+		destructive: true,
+		confirmation: 'typed',
 		measures: ['rto', 'failed-requests'],
 		availability: 'fleet',
+		fleetUnavailableReason: null,
 		flags: ['INGRESS_SET', 'STEERING'],
 		minHaLevel: null,
 		bound: { rtoSeconds: 15, rpo: null },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'database-failover',
@@ -153,11 +160,11 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		confirmation: 'confirm',
 		measures: ['rto', 'rpo'],
 		availability: 'fleet',
+		fleetUnavailableReason: null,
 		flags: ['SYNC_REPLICA'],
 		minHaLevel: 'L2',
 		bound: { rtoSeconds: 30, rpo: 'zero' },
 		recordsIn: 'database_failover_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'release-readiness-fail',
@@ -169,11 +176,11 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		confirmation: 'typed',
 		measures: ['failed-requests'],
 		availability: 'fleet',
+		fleetUnavailableReason: null,
 		flags: ['RELEASE_PHASE'],
 		minHaLevel: 'L3',
 		bound: { rtoSeconds: null, rpo: null },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'release-command-fail',
@@ -185,11 +192,11 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		confirmation: 'typed',
 		measures: ['failed-requests'],
 		availability: 'fleet',
+		fleetUnavailableReason: null,
 		flags: ['RELEASE_PHASE'],
 		minHaLevel: 'L3',
 		bound: { rtoSeconds: null, rpo: null },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'control-plane-failover',
@@ -200,12 +207,12 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		destructive: true,
 		confirmation: 'typed',
 		measures: ['rto', 'failed-requests'],
-		availability: 'fleet',
+		availability: 'lab',
+		fleetUnavailableReason: 'There is no fleet path that takes the control-plane primary down and restores it; the lab powers the node off.',
 		flags: ['CONTROL_STANDBY'],
 		minHaLevel: 'L2',
 		bound: { rtoSeconds: 60, rpo: null },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'zone-offline',
@@ -216,12 +223,12 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		destructive: true,
 		confirmation: 'typed',
 		measures: ['rto', 'rpo', 'failed-requests'],
-		availability: 'fleet',
+		availability: 'lab',
+		fleetUnavailableReason: 'Taking every node in a zone dark at once has no fleet path yet (the D235 drill takes one node); the lab partitions the zone.',
 		flags: [],
 		minHaLevel: 'L3',
 		bound: { rtoSeconds: 45, rpo: 'zero' },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'region-failover',
@@ -232,13 +239,12 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		destructive: true,
 		confirmation: 'typed',
 		measures: ['rto', 'rpo'],
-		availability: 'fleet',
+		availability: 'lab',
+		fleetUnavailableReason: 'Cutting a region off needs a network fault, and a real region promotion is not a drill; the weekly cloud run does it in the lab.',
 		flags: ['REGIONS'],
 		minHaLevel: 'L2',
 		bound: { rtoSeconds: 900, rpo: 'lag' },
 		recordsIn: 'ha_drills',
-		// A region promotion moves writes with RPO = lag: only by name, never as part of --all.
-		inAll: false,
 	}),
 	scenario({
 		id: 'postgres-kill',
@@ -250,11 +256,11 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		confirmation: 'typed',
 		measures: ['rto', 'rpo'],
 		availability: 'lab',
+		fleetUnavailableReason: 'Needs a fault verb, which a release build does not have (HA-PLAN §10).',
 		flags: [],
 		minHaLevel: 'L2',
 		bound: { rtoSeconds: 30, rpo: 'zero' },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'agent-freeze',
@@ -266,11 +272,11 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		confirmation: 'typed',
 		measures: ['rto', 'rpo'],
 		availability: 'lab',
+		fleetUnavailableReason: 'Needs a fault verb, which a release build does not have (HA-PLAN §10).',
 		flags: [],
 		minHaLevel: 'L2',
 		bound: { rtoSeconds: 30, rpo: 'zero' },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'primary-arbiter-partition',
@@ -282,11 +288,11 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		confirmation: 'typed',
 		measures: ['rto', 'rpo'],
 		availability: 'lab',
+		fleetUnavailableReason: 'Needs a fault verb, which a release build does not have (HA-PLAN §10).',
 		flags: [],
 		minHaLevel: 'L2',
 		bound: { rtoSeconds: 30, rpo: 'zero' },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'arbiter-unreachable',
@@ -298,11 +304,11 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		confirmation: 'none',
 		measures: ['failed-requests'],
 		availability: 'lab',
+		fleetUnavailableReason: 'Needs a fault verb, which a release build does not have (HA-PLAN §10).',
 		flags: [],
 		minHaLevel: null,
 		bound: { rtoSeconds: null, rpo: null },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'clock-skew',
@@ -314,11 +320,11 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		confirmation: 'none',
 		measures: ['refusal'],
 		availability: 'lab',
+		fleetUnavailableReason: 'Needs a fault verb, which a release build does not have (HA-PLAN §10).',
 		flags: [],
 		minHaLevel: null,
 		bound: { rtoSeconds: null, rpo: null },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 	scenario({
 		id: 'disk-full',
@@ -330,11 +336,11 @@ export const HA_DRILL_CATALOGUE: readonly HaDrillScenario[] = Object.freeze([
 		confirmation: 'typed',
 		measures: ['rto', 'rpo'],
 		availability: 'lab',
+		fleetUnavailableReason: 'Needs a fault verb, which a release build does not have (HA-PLAN §10).',
 		flags: [],
 		minHaLevel: 'L2',
 		bound: { rtoSeconds: null, rpo: 'zero' },
 		recordsIn: 'ha_drills',
-		inAll: true,
 	}),
 ]);
 
@@ -345,30 +351,63 @@ export function haDrillScenario(id: HaDrillScenarioId): HaDrillScenario {
 }
 
 /**
- * The refusal for a confirmation, or null. `typed` needs the resource's name typed back exactly;
- * `confirm` needs `confirm: true`. Pure; lane B calls it before anything runs.
+ * The refusal for a confirmation, or null. Every drill names its resource, so an empty name is
+ * refused; `typed` needs the resource's name typed back exactly; `confirm` needs `confirm: true`. An
+ * empty confirmation never counts. Pure; lane B calls it before anything runs.
  */
 export function haDrillConfirmationIssue(
 	entry: Pick<HaDrillScenario, 'id' | 'confirmation'>,
 	resourceName: string,
 	confirm: string | boolean | undefined,
 ): string | null {
+	if (resourceName.trim() === '') return `Name the resource the ${entry.id} drill runs on; a drill never picks one.`;
 	if (entry.confirmation === 'none') return null;
-	if (entry.confirmation === 'confirm') return confirm === true || confirm === resourceName ? null : `The ${entry.id} drill needs confirm: true.`;
-	return confirm === resourceName ? null : `The ${entry.id} drill is destructive: type the ${resourceName === '' ? 'resource' : `name "${resourceName}"`} to confirm.`;
+	if (entry.confirmation === 'confirm') return confirm === true ? null : `The ${entry.id} drill needs confirm: true.`;
+	return typeof confirm === 'string' && confirm !== '' && confirm === resourceName
+		? null
+		: `The ${entry.id} drill is destructive: type the name "${resourceName}" to confirm.`;
+}
+
+const LEVEL_RANK: Readonly<Record<HaLevel, number>> = Object.fromEntries(haLevels.map((level, index) => [level, index])) as Record<HaLevel, number>;
+
+/**
+ * The §10 HA-level refusal, or null. A drill is refused when the resource's declared level (its
+ * project's HA target, `projectHaTargetViewSchema`; the effective level when it declares none) is
+ * below the scenario's `minHaLevel`, and also when the resource is currently below its own declared
+ * level, whatever the scenario. Pure.
+ */
+export function haDrillLevelIssue(
+	entry: Pick<HaDrillScenario, 'id' | 'minHaLevel'>,
+	level: { declared: HaLevel | null; effective: HaLevel },
+): string | null {
+	if (entry.minHaLevel !== null) {
+		const basis = level.declared ?? level.effective;
+		if (LEVEL_RANK[basis] < LEVEL_RANK[entry.minHaLevel])
+			return level.declared !== null
+				? `The ${entry.id} drill needs a resource declared at ${entry.minHaLevel} or higher; this one is declared ${level.declared}.`
+				: `The ${entry.id} drill needs a resource at ${entry.minHaLevel} or higher; this one is at ${level.effective} and declares no target.`;
+	}
+	if (level.declared !== null && LEVEL_RANK[level.effective] < LEVEL_RANK[level.declared])
+		return `The resource is at ${level.effective}, below its declared ${level.declared}; restore it before drilling it.`;
+	return null;
+}
+
+/** Whether `yoal ha drill --all` may run the scenario at all (named resources still required). */
+export function haDrillRunsInAll(entry: Pick<HaDrillScenario, 'availability' | 'destructive' | 'confirmation'>): boolean {
+	return entry.availability === 'fleet' && !entry.destructive && entry.confirmation !== 'typed';
 }
 
 // ------------------------------------------------------------------ requests and views
 
-/** `POST /api/v1/ha/drills/run` and `yoal ha drill <scenario> [resource]`. */
+/** `POST /api/v1/ha/drills/run` and `yoal ha drill <scenario> <resource>`. */
 export const haDrillRunRequestSchema = z
 	.object({
 		scenario: z.enum(haDrillScenarioIds),
-		/** Id or name. Omitted only for `node-offline`, which then picks an eligible node at random. */
-		resource: z.string().trim().min(1).max(128).optional(),
+		/** Id or name. Always required: a drill never picks a resource at random. */
+		resource: z.string().trim().min(1).max(128),
 		/** `true` for `confirmation: 'confirm'`; the resource name for `confirmation: 'typed'`. */
-		confirm: z.union([z.literal(true), z.string().max(128)]).optional(),
-		/** Bounded fault length where the scenario has one (node and zone offline). */
+		confirm: z.union([z.literal(true), z.string().trim().min(1).max(128)]).optional(),
+		/** Bounded fault length where the scenario has one (node and ingress offline). */
 		durationSeconds: z.number().int().min(60).max(1_800).optional(),
 		/** `database-failover`: the disposable copy to promote (never the production database). */
 		drillDatabase: z.string().trim().min(1).max(128).optional(),
@@ -376,19 +415,77 @@ export const haDrillRunRequestSchema = z
 	.strict();
 export type HaDrillRunRequest = z.input<typeof haDrillRunRequestSchema>;
 
-/** `POST /api/v1/ha/drills/all` and `yoal ha drill --all`. */
+/** One resource the operator names for `--all`. */
+export const haDrillTargetSchema = z
+	.object({
+		kind: z.enum(haDrillResourceKinds),
+		resource: z.string().trim().min(1).max(128),
+		/** For `database-failover` on this database: its disposable copy. */
+		drillDatabase: z.string().trim().min(1).max(128).optional(),
+	})
+	.strict();
+export type HaDrillTarget = z.infer<typeof haDrillTargetSchema>;
+
+/** `POST /api/v1/ha/drills/all` and `yoal ha drill --all --database main --node a1 …`. */
 export const haDrillAllRequestSchema = z
 	.object({
-		/** Also run destructive scenarios that are `inAll`. Needs `confirm: 'all'`. */
-		includeDestructive: z.boolean().default(false),
-		confirm: z.literal('all').optional(),
+		targets: z.array(haDrillTargetSchema).max(64).default([]),
+		/** Runs the `confirmation: 'confirm'` scenarios too (never a typed one). */
+		confirm: z.literal(true).optional(),
 	})
-	.strict()
-	.refine((input) => !input.includeDestructive || input.confirm === 'all', {
-		message: 'Destructive drills need confirm: "all" typed back.',
-		path: ['confirm'],
-	});
+	.strict();
 export type HaDrillAllRequest = z.input<typeof haDrillAllRequestSchema>;
+
+/**
+ * What `--all` would run, in catalogue order, and every scenario it skips with the reason. Pure;
+ * lane B runs `runs` one at a time and records each.
+ */
+export function planHaDrillAll(
+	request: z.infer<typeof haDrillAllRequestSchema>,
+	flags: Partial<FeatureFlags>,
+	catalogue: readonly HaDrillScenario[] = HA_DRILL_CATALOGUE,
+): {
+	runs: Array<{ scenario: HaDrillScenarioId; resource: string; drillDatabase?: string }>;
+	skipped: Array<{ scenario: HaDrillScenarioId; reason: string }>;
+} {
+	const runs: Array<{ scenario: HaDrillScenarioId; resource: string; drillDatabase?: string }> = [];
+	const skipped: Array<{ scenario: HaDrillScenarioId; reason: string }> = [];
+	for (const entry of catalogue) {
+		const skip = (reason: string) => skipped.push({ scenario: entry.id, reason });
+		if (entry.availability !== 'fleet') {
+			skip(`Runs in the lab only: ${entry.fleetUnavailableReason}`);
+			continue;
+		}
+		if (entry.destructive || entry.confirmation === 'typed') {
+			skip(`Needs a typed confirmation; run it by name: yoal ha drill ${entry.id} <${entry.resourceKind}>.`);
+			continue;
+		}
+		const missing = entry.flags.filter((name) => !flags[name]);
+		if (missing.length > 0) {
+			skip(`Needs ${missing.map((name) => featureEnvKey(name)).join(', ')}.`);
+			continue;
+		}
+		const targets = request.targets.filter((target) => target.kind === entry.resourceKind);
+		if (targets.length === 0) {
+			skip(`No ${entry.resourceKind} was named; name one to include this drill.`);
+			continue;
+		}
+		if (entry.confirmation === 'confirm' && request.confirm !== true) {
+			skip('Needs confirm: true.');
+			continue;
+		}
+		for (const target of targets) {
+			if (entry.id === 'database-failover') {
+				if (!target.drillDatabase) {
+					skip(`Name a disposable copy of ${target.resource} (drillDatabase); a drill never promotes the database itself.`);
+					continue;
+				}
+				runs.push({ scenario: entry.id, resource: target.resource, drillDatabase: target.drillDatabase });
+			} else runs.push({ scenario: entry.id, resource: target.resource });
+		}
+	}
+	return { runs, skipped };
+}
 
 export const haDrillRunStatuses = ['running', 'passed', 'failed', 'cancelled', 'skipped'] as const;
 export type HaDrillRunStatus = (typeof haDrillRunStatuses)[number];

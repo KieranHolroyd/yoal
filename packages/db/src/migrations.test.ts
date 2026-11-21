@@ -511,13 +511,35 @@ describe('HA Wave 5 migration 0132 (docs/build-plan/HA-WAVE-5.md)', () => {
 			 VALUES (?, 'org_1', ?, '16', 'nod_1', 5432, 256, 'owner', 'monitor', 'user_1', 1, 1)`,
 			[id, id],
 		);
-	const promotion = (sqlite: Database, id: string, fields: Record<string, unknown> = {}) => {
-		const row = { id, to_region: 'ukwest', from_region: 'uksouth', expected_generation: 3, requested_by: 'user_1', requested_at: 1, ...fields };
+	const insert = (sqlite: Database, table: string, row: Record<string, unknown>) =>
 		sqlite.run(
-			`INSERT INTO region_promotions (${Object.keys(row).join(', ')}) VALUES (${Object.keys(row).map(() => '?').join(', ')})`,
+			`INSERT INTO ${table} (${Object.keys(row).join(', ')}) VALUES (${Object.keys(row).map(() => '?').join(', ')})`,
 			Object.values(row) as never[],
 		);
-	};
+	const promotion = (sqlite: Database, id: string, fields: Record<string, unknown> = {}) =>
+		insert(sqlite, 'region_promotions', {
+			id,
+			to_region: 'ukwest',
+			from_region: 'uksouth',
+			plan_hash: 'a'.repeat(64),
+			accept_data_loss: 1,
+			reason: 'uksouth is down',
+			confirmed_by: 'user_1',
+			confirmed_at: 1,
+			started_at: 1,
+			...fields,
+		});
+	const step = (sqlite: Database, promotionId: string, position: number, fields: Record<string, unknown> = {}) =>
+		insert(sqlite, 'region_promotion_steps', {
+			promotion_id: promotionId,
+			position,
+			step: 'databases',
+			kind: 'database',
+			resource_id: `db_${position}`,
+			name: `db-${position}`,
+			expected_generation: 7,
+			...fields,
+		});
 
 	test('is the reserved file, right after 0131', () => {
 		const ids = migrations.map((migration) => migration.id);
@@ -529,6 +551,7 @@ describe('HA Wave 5 migration 0132 (docs/build-plan/HA-WAVE-5.md)', () => {
 		migrate(sqlite);
 		expect(columns(sqlite, 'nodes')).toContain('region');
 		expect(columns(sqlite, 'databases')).toContain('standby_region');
+		expect(columns(sqlite, 'control_state')).toContain('feature_flags_json');
 		insertNode(sqlite, 'nod_1');
 		insertDatabase(sqlite, 'db_1');
 		expect(sqlite.query<{ region: string }, []>("SELECT region FROM nodes WHERE id = 'nod_1'").get()).toEqual({ region: 'default' });
@@ -538,20 +561,34 @@ describe('HA Wave 5 migration 0132 (docs/build-plan/HA-WAVE-5.md)', () => {
 
 		promotion(sqlite, 'rgp_1');
 		expect(
-			sqlite.query<{ stage: string; items_json: string; accept_data_loss: number }, []>(
-				"SELECT stage, items_json, accept_data_loss FROM region_promotions WHERE id = 'rgp_1'",
-			).get(),
-		).toEqual({ stage: 'awaiting-confirmation', items_json: '[]', accept_data_loss: 0 });
+			sqlite.query<{ stage: string; attempt: number; runner_id: string | null }, []>("SELECT stage, attempt, runner_id FROM region_promotions WHERE id = 'rgp_1'").get(),
+		).toEqual({ stage: 'control-plane', attempt: 1, runner_id: null });
+		// Stored only once confirmed, with data loss accepted.
+		expect(() => promotion(sqlite, 'rgp_x', { accept_data_loss: 0 })).toThrow();
+		expect(() => promotion(sqlite, 'rgp_y', { confirmed_at: null })).toThrow();
 		// One open promotion at a time.
 		expect(() => promotion(sqlite, 'rgp_2')).toThrow();
-		// The fence only moves forward.
-		expect(() => sqlite.run("UPDATE region_promotions SET fenced_generation = 3 WHERE id = 'rgp_1'")).toThrow();
-		// A promotion cannot run without a confirmation that accepted data loss.
+		// A terminal stage sets finished_at, and only a terminal stage does.
+		expect(() => sqlite.run("UPDATE region_promotions SET stage = 'completed' WHERE id = 'rgp_1'")).toThrow();
+		expect(() => sqlite.run("UPDATE region_promotions SET finished_at = 5 WHERE id = 'rgp_1'")).toThrow();
 		expect(() => sqlite.run("UPDATE region_promotions SET stage = 'fencing' WHERE id = 'rgp_1'")).toThrow();
-		sqlite.run(
-			"UPDATE region_promotions SET stage = 'fencing', confirmed_by = 'user_1', confirmed_at = 2, accept_data_loss = 1, fenced_generation = 4 WHERE id = 'rgp_1'",
+
+		// Each step carries its own fence, which only moves forward; one row per resource.
+		step(sqlite, 'rgp_1', 0, { step: 'control-plane', kind: 'control-plane', resource_id: 'control-plane', expected_generation: 3, fenced_generation: 4, status: 'done' });
+		step(sqlite, 'rgp_1', 1);
+		step(sqlite, 'rgp_1', 2, { step: 'steering', kind: 'steering', resource_id: 'dns-failover', expected_generation: 4 });
+		expect(() => sqlite.run("UPDATE region_promotion_steps SET fenced_generation = 7 WHERE promotion_id = 'rgp_1' AND position = 1")).toThrow();
+		sqlite.run("UPDATE region_promotion_steps SET fenced_generation = 8, status = 'done' WHERE promotion_id = 'rgp_1' AND position = 1");
+		expect(() => step(sqlite, 'rgp_1', 3, { resource_id: 'db_1' })).toThrow();
+		expect(() => step(sqlite, 'rgp_1', 4, { status: 'sideways' })).toThrow();
+
+		// The runner lease: a takeover is a conditional update on the old holder.
+		sqlite.run("UPDATE region_promotions SET runner_id = 'cp-b', lease_expires_at = 100 WHERE id = 'rgp_1'");
+		const takeover = sqlite.run(
+			"UPDATE region_promotions SET runner_id = 'cp-c', lease_expires_at = 200, attempt = attempt + 1 WHERE id = 'rgp_1' AND runner_id = 'cp-b' AND lease_expires_at <= 150",
 		);
-		expect(() => sqlite.run("UPDATE region_promotions SET stage = 'sideways' WHERE id = 'rgp_1'")).toThrow();
+		expect(takeover.changes).toBe(1);
+
 		sqlite.run("UPDATE region_promotions SET stage = 'completed', finished_at = 3 WHERE id = 'rgp_1'");
 		promotion(sqlite, 'rgp_2');
 		sqlite.close();
@@ -569,8 +606,10 @@ describe('HA Wave 5 migration 0132 (docs/build-plan/HA-WAVE-5.md)', () => {
 		insertNode(sqlite, 'nod_2');
 		sqlite.run("UPDATE nodes SET zone = 'uksouth-1' WHERE id = 'nod_2'");
 		insertDatabase(sqlite, 'db_old');
+		sqlite.run("INSERT INTO control_state (node_id, role, epoch, updated_at) VALUES ('nod_1', 'primary', 2, 1)");
 		const before = sqlite.query<Record<string, unknown>, []>('SELECT * FROM nodes ORDER BY id').all();
 		const databaseBefore = sqlite.query<Record<string, unknown>, []>('SELECT * FROM databases').all();
+		const controlBefore = sqlite.query<Record<string, unknown>, []>('SELECT * FROM control_state').all();
 
 		expect(migrate(sqlite)).toEqual(['0132_regions.sql']);
 
@@ -578,6 +617,9 @@ describe('HA Wave 5 migration 0132 (docs/build-plan/HA-WAVE-5.md)', () => {
 		expect(after).toEqual(before.map((row) => ({ ...row, region: 'default' })));
 		expect(sqlite.query<Record<string, unknown>, []>('SELECT * FROM databases').all()).toEqual(
 			databaseBefore.map((row) => ({ ...row, standby_region: null })),
+		);
+		expect(sqlite.query<Record<string, unknown>, []>('SELECT * FROM control_state').all()).toEqual(
+			controlBefore.map((row) => ({ ...row, feature_flags_json: null })),
 		);
 		expect(sqlite.query<{ count: number }, []>('SELECT count(*) AS count FROM region_promotions').get()).toEqual({ count: 0 });
 		sqlite.close();

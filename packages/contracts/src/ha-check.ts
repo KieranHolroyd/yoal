@@ -62,6 +62,13 @@ export const haCheckIds = [
 	'mail',
 	/** W12: agents spool telemetry to disk during a control-plane outage. */
 	'telemetry-spool',
+	/** Every control-plane host runs the same feature flags (W9 control report, `featureFlagDrift`). */
+	'flags-consistent',
+	/**
+	 * Nothing still depends on an HA feature (`haDependentChecks`): the gate on `--profile single`,
+	 * so turning flags off can never strand a resource. One entry per dependent, each with its way back.
+	 */
+	'ha-dependents',
 ] as const;
 export type HaCheckId = (typeof haCheckIds)[number];
 
@@ -82,16 +89,20 @@ export const HA_CHECK_AREAS: Readonly<Record<HaCheckId, HaCheckArea>> = Object.f
 	identity: 'platform',
 	mail: 'platform',
 	'telemetry-spool': 'platform',
+	'flags-consistent': 'platform',
+	'ha-dependents': 'platform',
 });
 
 /**
  * The checks a profile requires to pass before `yoal ha init` applies it. Every other check still
  * runs and is shown; a `fail` outside this list is reported but does not block that profile.
- * `single` requires nothing: it is the way back and must always be reachable.
+ * `single` requires only `ha-dependents`: the way back is refused while turning the flags off would
+ * strand a resource, and each refusal names that resource's own way back (HA-PLAN §9).
  */
 export const HA_PROFILE_REQUIRED_CHECKS: Readonly<Record<HaProfile, readonly HaCheckId[]>> = Object.freeze({
-	single: [],
+	single: ['ha-dependents'],
 	ha: [
+		'flags-consistent',
 		'nodes',
 		'node-capabilities',
 		'zones',
@@ -106,6 +117,7 @@ export const HA_PROFILE_REQUIRED_CHECKS: Readonly<Record<HaProfile, readonly HaC
 		'registry-storage',
 	],
 	'ha-dr': [
+		'flags-consistent',
 		'nodes',
 		'node-capabilities',
 		'zones',
@@ -206,4 +218,118 @@ export function summarizeHaChecks(
 		return entries.length > 0 && entries.every((check) => check.status === 'pass' || check.status === 'warn');
 	});
 	return { ok, counts };
+}
+
+// ------------------------------------------------------------------ flags-consistent
+
+/**
+ * Flags that differ between control-plane hosts, and hosts that did not report theirs. A flag a
+ * host omits counts as `null` (unknown), which differs from any value. Pure.
+ */
+export function featureFlagDrift(hosts: ReadonlyArray<{ name: string; flags: Readonly<Record<string, boolean>> | null }>): {
+	differences: Array<{ flag: string; values: Record<string, boolean | null> }>;
+	unreported: string[];
+} {
+	const reported = hosts.filter((host) => host.flags !== null) as Array<{ name: string; flags: Readonly<Record<string, boolean>> }>;
+	const names = [...new Set(reported.flatMap((host) => Object.keys(host.flags)))].sort();
+	const differences: Array<{ flag: string; values: Record<string, boolean | null> }> = [];
+	for (const flag of names) {
+		const values = Object.fromEntries(reported.map((host) => [host.name, host.flags[flag] ?? null])) as Record<string, boolean | null>;
+		if (new Set(Object.values(values)).size > 1) differences.push({ flag, values });
+	}
+	return { differences, unreported: hosts.filter((host) => host.flags === null).map((host) => host.name) };
+}
+
+// ------------------------------------------------------------------ ha-dependents
+
+/** What can still depend on an HA feature, and so blocks `--profile single`. */
+export const haDependentKinds = [
+	/** A database with `durability: sync` (`SYNC_REPLICA`). */
+	'sync-database',
+	/** A database with `failover_mode: auto` (`DB_AUTO_PROMOTE`). */
+	'armed-database',
+	/**
+	 * A workload whose attachments go through the endpoints gateway (`ENDPOINTS_GATEWAY`). Read from
+	 * `workloads.endpoints_gateway`, which the Wave 5 review-debt lane adds; until that column exists
+	 * there is nothing to read and no entry.
+	 */
+	'gateway-attachment',
+	/** An enrolled control-plane standby (`CONTROL_STANDBY`). */
+	'control-standby',
+	/** A node in a region other than `default` (`REGIONS`). */
+	'region',
+	/** A steering driver other than `direct` (`STEERING`). */
+	'steering',
+] as const;
+export type HaDependentKind = (typeof haDependentKinds)[number];
+
+export interface HaDependent {
+	kind: HaDependentKind;
+	id: string;
+	name: string;
+}
+
+/** The per-resource way back (HA-PLAN §9 "Turning it off"), as the exact fix. */
+export function haDependentFix(dependent: HaDependent): HaCheckFix {
+	switch (dependent.kind) {
+		case 'sync-database':
+			return { kind: 'command', value: `yoal db durability ${dependent.name} --async` };
+		case 'armed-database':
+			return { kind: 'command', value: `yoal db failover ${dependent.name} --disarm` };
+		case 'gateway-attachment':
+			return {
+				kind: 'manual',
+				value: `Keep YOAL_FEATURE_ENDPOINTS_GATEWAY=1 until ${dependent.name} no longer reaches its database through the gateway: redeploy it once its database is on its own node.`,
+			};
+		case 'control-standby':
+			return {
+				kind: 'manual',
+				value: `Demote the control-plane standby on ${dependent.name}: stop its control plane and remove it from the standby set (docs/OPS.md, control-plane standby).`,
+			};
+		case 'region':
+			return { kind: 'setting', value: `PATCH /api/v1/nodes/${dependent.id} {"region": "default"} (node ${dependent.name})` };
+		case 'steering':
+			return { kind: 'setting', value: 'cluster_config steering.driver = direct (Settings → High availability → Steering)' };
+	}
+}
+
+const DEPENDENT_TITLES: Readonly<Record<HaDependentKind, string>> = {
+	'sync-database': 'A database is synchronous',
+	'armed-database': 'A database has automatic failover armed',
+	'gateway-attachment': 'An app reaches its database through the endpoints gateway',
+	'control-standby': 'A control-plane standby is enrolled',
+	region: 'A node is in a named region',
+	steering: 'A steering driver is in use',
+};
+
+const DEPENDENT_SUBJECTS: Readonly<Record<HaDependentKind, HaCheckSubject['kind']>> = {
+	'sync-database': 'database',
+	'armed-database': 'database',
+	'gateway-attachment': 'project',
+	'control-standby': 'node',
+	region: 'node',
+	steering: 'platform',
+};
+
+/** The `ha-dependents` check: one `fail` per dependent with its way back, or one `pass`. Pure. */
+export function haDependentChecks(dependents: readonly HaDependent[]): HaCheck[] {
+	if (dependents.length === 0)
+		return [
+			{
+				id: 'ha-dependents',
+				title: 'Nothing depends on an HA feature',
+				status: 'pass',
+				evidence: ['No sync or armed database, gateway attachment, control standby, region or steering driver.'],
+				fix: null,
+				subject: null,
+			},
+		];
+	return dependents.map((dependent) => ({
+		id: 'ha-dependents',
+		title: DEPENDENT_TITLES[dependent.kind],
+		status: 'fail',
+		evidence: [`${dependent.name} still depends on an HA feature; turning the flags off would strand it.`],
+		fix: haDependentFix(dependent),
+		subject: { kind: DEPENDENT_SUBJECTS[dependent.kind], id: dependent.id, name: dependent.name },
+	}));
 }

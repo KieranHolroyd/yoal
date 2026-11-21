@@ -142,8 +142,10 @@ export const blueprintProjectSchema = z
 		/** Fixed for the project's life. */
 		runtime: z.enum(blueprintProjectRuntimes).default('static'),
 		/**
-		 * `edge`, `auto` or a node id; or, new in HA-PLAN §8, `{ spread: node | zone | region }`
-		 * (the app's `placement.spread`, `workloadPlacementSpecSchema`). The string form is unchanged.
+		 * `edge`, `auto` or a node id; or, new in HA-PLAN §8, `{ spread: node | zone | region }`. The
+		 * object form maps to the workload's `placement.spread` (`workloadPlacementSpecSchema`),
+		 * gated by `RELEASE_PHASE` and, for `region`, `REGIONS`, exactly as `setSpec` gates it today;
+		 * it never touches the project's `placementSpec`. The string form is unchanged.
 		 */
 		placement: z.union([z.string().min(1).max(64), workloadPlacementSpecSchema]).optional(),
 		access: z
@@ -235,8 +237,17 @@ export const blueprintDatabaseSchema = z
 		replicas: z.number().int().min(0).max(5).optional(),
 		/** `sync` keeps one recorded synchronous replica (H23); needs `SYNC_REPLICA` and a replica. */
 		durability: z.enum(databaseDurabilities).optional(),
-		/** `auto` arms member-driven failover (W11) once a drill passes; `manual` is today. */
+		/**
+		 * `auto` arms member-driven failover (W11) through the same arming path as
+		 * `yoal db failover <name> --arm`, never by writing the policy directly, so every refusal
+		 * (no passed drill, no self-fencing, …) fails the plan. `manual` disarms.
+		 */
 		failover: z.enum(databaseFailoverModes).optional(),
+		/**
+		 * With `failover: auto` on an async database: accept that an automatic promotion may lose
+		 * recent commits, exactly as `--arm --accept-data-loss` does. Refused on a sync database.
+		 */
+		acceptDataLoss: z.boolean().optional(),
 		/** Never two replicas on one node, zone or region; `region` needs `REGIONS`. */
 		spread: z.enum(replicaSpreads).optional(),
 		/** Point-in-time recovery (docs/PITR.md). */
@@ -254,13 +265,21 @@ export const blueprintDatabaseSchema = z
 	})
 	.superRefine((input, ctx) => {
 		const info = databaseEngineRegistry[input.engine];
-		for (const field of ['replicas', 'durability', 'failover', 'spread', 'pitr', 'standbyRegion'] as const)
+		for (const field of ['replicas', 'durability', 'failover', 'acceptDataLoss', 'spread', 'pitr', 'standbyRegion'] as const)
 			if (input[field] !== undefined && input.engine !== 'postgres')
 				ctx.addIssue({ code: 'custom', path: [field], message: `${info.label} has no ${field} setting; it is PostgreSQL only.` });
 		if (input.durability === 'sync' && input.replicas === 0)
 			ctx.addIssue({ code: 'custom', path: ['durability'], message: 'durability: sync needs at least one replica.' });
 		if (input.failover === 'auto' && input.replicas === 0)
 			ctx.addIssue({ code: 'custom', path: ['failover'], message: 'failover: auto needs at least one replica to promote.' });
+		if (input.acceptDataLoss !== undefined && input.failover !== 'auto')
+			ctx.addIssue({ code: 'custom', path: ['acceptDataLoss'], message: 'acceptDataLoss is used only with failover: auto.' });
+		if (input.acceptDataLoss && input.durability === 'sync')
+			ctx.addIssue({
+				code: 'custom',
+				path: ['acceptDataLoss'],
+				message: 'A sync database loses no acknowledged commit on failover; acceptDataLoss is refused for it.',
+			});
 		const crossRegion = regionSpreadSyncRefusal(input.spread, input.durability);
 		if (crossRegion) ctx.addIssue({ code: 'custom', path: ['spread'], message: crossRegion.message });
 		if (input.version && !info.versions.includes(input.version))
@@ -366,7 +385,11 @@ export const blueprintClusterSchema = z.strictObject({
 			dataNodes: z.number().int().min(1).max(256).optional(),
 		})
 		.optional(),
-	/** The cluster's steering (`cluster_config.steering`, H18) and the ingress drain (H19). */
+	/**
+	 * The cluster's steering (`cluster_config.steering`, H18) and the ingress drain (H19). `ha init`
+	 * writes the same settings; both go through `ClusterConfigService.update`, so the last write
+	 * wins, and each plan shows its diff against the live value first.
+	 */
 	steering: z
 		.strictObject({
 			driver: z.enum(steeringDriverKinds),
@@ -393,7 +416,7 @@ export function blueprintHaKeys(doc: Pick<Blueprint, 'projects' | 'databases'> &
 			if (project[field] !== undefined) keys.push(`projects.${slug}.${field}`);
 	}
 	for (const [name, database] of Object.entries(doc.databases))
-		for (const field of ['replicas', 'durability', 'failover', 'spread', 'pitr', 'backups', 'standbyRegion'] as const)
+		for (const field of ['replicas', 'durability', 'failover', 'acceptDataLoss', 'spread', 'pitr', 'backups', 'standbyRegion'] as const)
 			if (database[field] !== undefined) keys.push(`databases.${name}.${field}`);
 	return keys;
 }

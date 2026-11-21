@@ -108,6 +108,8 @@ export interface NodeView {
 	storage: NodeStorage & { status: NodeStorageStatus | null };
 	/** Failure domain (CLUSTERING §3.2). */
 	zone: string;
+	/** The region the zone belongs to (HA-PLAN H26); `default` unless an operator named one. */
+	region: string;
 	/** What the node may run; derived from mode/can_build when roles_json is null. */
 	roles: NodeRole[];
 	/** Operator labels. */
@@ -180,6 +182,7 @@ export class NodeService {
 				status: storageStatus(row.storageStatusJson),
 			},
 			zone: row.zone,
+			region: row.region ?? 'default',
 			roles: rolesFor(row),
 			labels,
 			derivedLabels: { ...labels, ...derivedLabelsFor(hardware) },

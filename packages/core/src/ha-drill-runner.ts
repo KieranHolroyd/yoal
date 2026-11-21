@@ -15,11 +15,14 @@ import { CoreError } from './errors.ts';
  * **Owner: Wave 5 lane B (`ha/w5-b-ha-commands`).** The signatures are final.
  *
  * `catalogue` returns `HA_DRILL_CATALOGUE` as it is. `run` checks the platform admin, the
- * scenario's flags, its confirmation (`haDrillConfirmationIssue`) and the resource's HA level
- * against `minHaLevel`, then hands `node-offline` to `NodeDrillService` and `database-failover` to
+ * scenario's flags, its confirmation (`haDrillConfirmationIssue`; the resource is always named,
+ * never picked at random) and `haDrillLevelIssue` (the scenario's minimum against the resource's
+ * declared level, and the resource against its own declared level), then hands `node-offline` to
+ * `NodeDrillService.start` with the named node and `database-failover` to
  * `DatabaseFailoverPolicyService.drill` unchanged, and records every other scenario in `ha_drills`
- * (lane B's migration). `runAll` runs the `fleet` scenarios with `inAll`, one resource each, and
- * lists the rest as skipped with the reason. Lab-only scenarios are refused on a fleet.
+ * (lane B's migration). `runAll` runs exactly `planHaDrillAll(request, flags).runs`: fleet,
+ * non-destructive, untyped scenarios against the resources the operator named, and returns the
+ * skipped ones with their reasons. Lab-only scenarios are refused on a fleet.
  */
 export class HaDrillRunner {
 	constructor(private readonly ctx: CoreContext) {}
