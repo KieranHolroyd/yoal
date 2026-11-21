@@ -316,6 +316,25 @@ describe('ReleaseCommandRunner with a corrupt state file (I16)', () => {
 		return { dir, statePath };
 	};
 
+	for (const [label, content] of [
+		['an empty object', '{}'],
+		['an array', '[]'],
+		['a string', '"x"'],
+		['a non-array seen', `{"version":1,"seen":"${RC}","runs":[]}`],
+		['an unknown version', `{"version":2,"seen":[],"runs":[]}`],
+	] as const)
+		test(`valid JSON in the wrong shape (${label}) is quarantined, never read as an empty history`, async () => {
+			const dir = mkdtempSync(join(tmpdir(), 'yoal-release-commands-'));
+			dirs.push(dir);
+			const statePath = join(dir, 'release-commands-state.json');
+			writeFileSync(statePath, content);
+			const f = setup({ statePath });
+			f.helper.current = status('running', { startedAt: Date.parse('2026-11-20T09:59:30Z') });
+			await f.runner.tick(state([task({ timeoutSeconds: 60 })]), signal);
+			expect(f.helper.starts).toEqual([]);
+			expect(f.helper.calls[0]).toBe(`status:${releaseHelperRunId(RC)}:60`);
+		});
+
 	test('a run still going in the helper is adopted and watched, never started or failed', async () => {
 		const { statePath } = corrupt();
 		const f = setup({ statePath });

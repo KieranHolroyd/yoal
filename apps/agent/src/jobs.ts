@@ -882,8 +882,19 @@ export class ReleaseCommandRunner {
 		}
 		try {
 			const parsed = JSON.parse(text) as Partial<ReleaseCommandsStateFile>;
-			for (const id of parsed.seen ?? []) if (typeof id === 'string') this.seen.add(id);
-			for (const run of parsed.runs ?? []) {
+			// Valid JSON in the wrong shape is as unknowable as a torn write: an empty `seen` set
+			// would let a replayed run start again (I16), so it is quarantined too.
+			if (
+				parsed === null ||
+				typeof parsed !== 'object' ||
+				Array.isArray(parsed) ||
+				parsed.version !== 1 ||
+				!Array.isArray(parsed.seen) ||
+				!Array.isArray(parsed.runs)
+			)
+				throw new Error('release-command state has the wrong shape');
+			for (const id of parsed.seen) if (typeof id === 'string') this.seen.add(id);
+			for (const run of parsed.runs) {
 				if (typeof run?.runId !== 'string' || typeof run.releaseId !== 'string' || typeof run.helperRunId !== 'string') continue;
 				this.runs.set(run.runId, {
 					runId: run.runId,

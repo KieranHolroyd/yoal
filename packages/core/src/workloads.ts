@@ -719,6 +719,12 @@ export class WorkloadService {
 				.run();
 		else if (!options.holdCopies && changed && total === 0 && existing && scheduling.rollingDeploys && scheduling.surgeDeploys && !releaseSpec)
 			this.startSurge(project, { ...existing, ...values, id }, resolved.spec, running!, existing.status === 'running', now);
+		// Moving off a release (deploy, promote or rollback) cancels its unstarted command, whether or
+		// not the new release has one and whether or not the copies change: a rollback onto the
+		// release a held one came from leaves `changed` false, and its migration must still never run
+		// after the fact (I16/H25).
+		if (existing && existing.deploymentId !== deploymentId && !options.holdCopies)
+			this.ctx.releaseCommands.cancelSuperseded(id, deploymentId);
 		// Queue the release command (idempotent: the I16 index is the lease). A superseded deploy's
 		// unstarted attempt is cancelled so its migrations never run after the fact. A first deploy
 		// has no previous release to hold, so its copies are withheld by desired state instead.
