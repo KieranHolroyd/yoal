@@ -36,13 +36,35 @@ Implementation SHA: `git log -1 --format=%H -- packages/core/src/slo-service.ts`
 | Command | Result |
 |---|---|
 | `bun run check` | all workspace packages exit 0; one pre-existing Svelte warning in `settings/registry/+page.svelte`. |
-| `bun test` | **6793 pass, 74 skip, 0 fail** (6867 tests, 611 files, 205 s). |
-| `bun test packages/core/src/slo-observability.test.ts` | 14 pass: flag-off gates, create/update/remove, error budget, multi-window burn, unsupported indicator note, database signal, burn sweep, effective target + 5 min grace, timeline order/TTF/lost commits, prober token/de-dupe/stale/revoke, metrics series. |
+| `bun test` | **6804 pass, 74 skip, 0 fail** (6878 tests, 612 files, 209 s). |
+| `bun test packages/core/src/slo-observability.test.ts` | 19 pass: flag-off gates, create/update/remove, error budget, multi-window burn, unsupported indicator note, database signal, burn sweep, effective target + 5 min grace, timeline order/TTF/lost commits, prober token/de-dupe/stale/revoke, metrics series. |
 | `bun test packages/core/src/ha-wave4-foundation.test.ts` | pass; the foundation’s “not implemented” expectations were replaced with the real lane-B behaviour. |
 | `bun test packages/contracts` | pass, including `ha-observability.test.ts`. |
 | `bun test packages/core/src/desired-state/golden.test.ts` | pass; desired state byte-identical. |
 | `bun run check:migrations` | ok; **no migration 0132 added** (see deviations). |
 | `bun test apps/control-plane/src/lib/server/mcp*.test.ts` | 88 pass. |
+| `bun test apps/control-plane/src/lib/server/prober-report.test.ts apps/control-plane/src/lib/server/csrf.test.ts` | 13 pass: token-only/no-Origin 200, flag-off 404, 401 before body, 413, CSRF exact path, auth exemption. |
+
+## 2a. Review fixes (round 1)
+
+Every review item is fixed in this revision; no item is deferred.
+
+| # | Fix | Evidence |
+|---|---|---|
+| 1 | `/api/v1/ha/prober/report` is on the exact CSRF cookieless list and exempt from `isAuthenticatedApi`, so the Bearer prober token is the only gate. | `csrf.ts`, `api-auth.ts`, `hooks.server.ts`; `prober-report.test.ts` posts with only the token and no Origin/session (200) and asserts flag-off 404. |
+| 2 | `slo_objects` is in `projectOwnedTables` and `ORPHAN_TABLES`; `purgeRow` deletes `ha_target:<projectId>`; `sweep()` skips SLOs whose project is not live. | `projects.ts`, `operations/prune.ts` (shared list), `slo-service.ts`; tests cover purge cascade, orphan sweep, and no alert for a deleted project. |
+| 3 | W15 HA/lease/steering series are emitted only for the authenticated platform render; the anonymous public `/metrics` keeps the old tenant-free groups. | `metrics-export.ts` `#renderPlatform(settings, authenticated)`; test renders anonymously and asserts the W15 families are absent. `docs/METRICS.md` states the split. |
+| 4 | The handler authenticates before reading the body, caps reports at 8 MiB (declared and actual) and 120/minute per prober. | `prober-report.ts`, `ExternalProberService.authenticate`/`report`; tests cover 401-before-parse, 413 and `rate_limited`. |
+| 5 | A non-numeric/too-small `YOAL_PROBER_INTERVAL` falls back to 60 s instead of NaN/0. | `scripts/external-prober.ts` `Number.isFinite(...) && >= 10 ? ... : 60`. |
+| 6 | The burn-alert list keys by index, so equal severity/rate alerts cannot collide. | `settings/slo/+page.svelte`. |
+| 7 | `sloErrorBudget.hasData` is false for a zero-event/blind window; the page renders neutral “No data in this window”, not green 0 % used. | `contracts/slo.ts`, `slo-evaluation.ts`, SLO page; evaluation test asserts `hasData: false` with no traffic. |
+| 8 | An install-bound registration rejects a report whose `installId` is null or different; the script and registration UI carry it. | `external-prober-service.ts`, `scripts/external-prober.ts`, HA page; test rejects null then accepts the bound id. |
+| 9 | Report `sequence` is `>= 1` in the contract, so 0 cannot be silently ignored; the script starts from epoch seconds. | `contracts/slo.ts`, contract test; the sink keeps `lastSequence`. |
+| 10 | `ha.target` is audited on `resource: 'project'`. | `slo-service.ts` `setHaTarget`. |
+| 11 | `resourceLevels()` now batches every table it needs and `#ha` computes it once, passing it to `targetsInternal`; no per-resource queries per scrape/status poll. | `topology.ts`, `metrics-export.ts`, `slo-service.ts`. |
+| 12 | Tests clear `database_replicas`, reset the below-target first-seen state through the service, create an SLO before the flag-off list assertion, and include the prober HTTP test. | `slo-observability.test.ts` `beforeEach`; `prober-report.test.ts`. |
+| 13 | SLO remove controls are shown only for the caller’s org (platform-wide reads stay visible); the HA target selector lists only projects the caller’s org can edit. The services still enforce project scope. | `settings/slo/+page.*`, `settings/high-availability/+page.*`. |
+| 14 | `docs/API.md` documents every new route; `docs/METRICS.md` documents the authenticated-vs-public split. | both docs. |
 
 ## 3. Not verified, and why
 

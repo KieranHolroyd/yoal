@@ -552,6 +552,30 @@ admin (or a platform admin); acknowledging and silencing also allow deployers.
 | POST | `/alerts/channels/test` | platform owner | `{ channel? }`: test one channel or all → `{ delivery }` |
 | GET | `/alerts/history?rule=&kind=&before=&limit=` | `metrics:read` | Events newest first: `state`, `notification` (with per-channel `delivery`), `error`, `ack`, `silence`, and `system` (platform admins) |
 
+## High availability and observability (W15)
+
+SLO objects and the external prober ([HA-PLAN §4 W15](./HA-PLAN.md)). SLO reads/writes need
+`project:read`/`project:update` on the project and the opt-in `SLO_OBJECTS` flag; the platform-wide
+overview needs a platform admin. The prober needs `EXTERNAL_PROBER`; its report route is the only
+endpoint authenticated by the prober token instead of a session/API key.
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET | `/api/v1/ha/status` | platform operator | The failover document plus `haTargets` (declared vs effective level) |
+| GET | `/api/v1/ha/timeline?limit=` | platform admin | Failovers, switchovers and drills newest first, with TTF and lost commits |
+| GET | `/api/v1/ha/observability` | platform admin | Every project's declared target, effective level, gap and blockers |
+| GET | `/api/v1/projects/:slug/ha-target` | `project:read` | One project's declaration and effective level |
+| PUT | `/api/v1/projects/:slug/ha-target` | `project:update` | `{ target: 'L0'..'L3' \| null }`; audited as `ha.target` on `project` |
+| GET | `/api/v1/projects/:slug/slos` | `project:read` | Stored SLOs; empty while `SLO_OBJECTS` is off |
+| POST | `/api/v1/projects/:slug/slos` | `project:update` | `SloObjectInput` → 201; the same name updates in place |
+| GET | `/api/v1/projects/:slug/slos/evaluate?id=` | `project:read` | Error budget, burn-alert state and a note when telemetry is blind |
+| DELETE | `/api/v1/projects/:slug/slos/:id` | `project:update` | Remove one objective |
+| GET | `/api/v1/slos` | platform admin | Platform-wide SLOs with the latest evaluation |
+| GET | `/api/v1/ha/probers` | platform admin | Registrations, last report, target counts and stale health |
+| POST | `/api/v1/ha/probers` | platform admin | `{ name, installId?, intervalSeconds }` → 201, token shown once |
+| DELETE | `/api/v1/ha/probers/:id` | platform admin | Revoke; the next report is refused |
+| POST | `/api/v1/ha/prober/report` | **prober Bearer token only** | Cookieless and exempt from the session gate. 404 while `EXTERNAL_PROBER` is off; 401 before the body is read; 413 above 8 MiB; at most 120 reports/minute per prober. `sequence` starts at 1 and a duplicate is acknowledged with `accepted: 0` |
+
 ## IAM
 
 Bindings, custom roles and groups ([IAM.md](./IAM.md) I1). Reads need `iam:read`; writes check

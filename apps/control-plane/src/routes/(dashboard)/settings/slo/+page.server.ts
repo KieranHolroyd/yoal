@@ -18,6 +18,8 @@ export const load: PageServerLoad = async ({ locals }) => {
 		overview: await core.slos.overview(principal),
 		/** The current org's projects, for the create form; the service still enforces project:update. */
 		projects: core.projects.list(principal).map((project) => ({ slug: project.slug, name: project.name })),
+		/** Controls act only on the caller's org; the platform-wide view is read-only for other orgs. */
+		orgId: principal.orgId,
 		canEdit: core.ctx.platformIam.canAdminister(principal)
 	};
 };

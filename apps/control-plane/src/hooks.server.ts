@@ -7,6 +7,7 @@ import { auth, backfillApiKeyRateLimits, ensurePlatformAdmin } from '#lib/server
 import { contentDomain, platformOrigin } from '#lib/server/config.js';
 import { featureEnabled, reconcilePlatformDomains, startFailoverLoop } from '@yoal/core';
 import { ipInCidr } from '@yoal/contracts';
+import { isAuthenticatedApi, USER_POOL_PUBLIC_API } from '#lib/server/api-auth.js';
 import { checkCsrf } from '#lib/server/csrf.js';
 import { sqlite } from '#lib/server/db.js';
 import { needsSetup, setupUrl } from '#lib/server/setup.js';
@@ -218,7 +219,6 @@ export const handleError: HandleServerError = (caught) => {
  * Public user-pool endpoints: OIDC discovery/JWKS and the OAuth code flow. They authenticate with
  * a client secret, PKCE or the pool's own bearer token, never the platform session (IAM.md §11.2).
  */
-const USER_POOL_PUBLIC_API = /^\/api\/v1\/user-pools\/[^/]+\/(?:oauth\/|\.well-known\/)/;
 const USER_POOL_OAUTH_API = /^\/api\/v1\/user-pools\/[^/]+\/oauth\//;
 
 const handleRequest: Handle = async ({ event, resolve }) => {
@@ -400,23 +400,6 @@ function clientIp(request: Request): string | undefined {
 	);
 }
 
-/** `/api/v1/**` except the endpoints that authenticate themselves (CLI code exchange). */
-function isAuthenticatedApi(pathname: string): boolean {
-	if (pathname === '/api/v1') return true;
-	return (
-		pathname.startsWith('/api/v1/') &&
-		pathname !== '/api/v1/cli/token' &&
-		// Public user-pool OIDC discovery and code flow (IAM.md §11.2).
-		!USER_POOL_PUBLIC_API.test(pathname) &&
-		// Yoal Access sign-in: the agent sends an unauthenticated browser here, and the handler
-		// redirects to `/login` (IAM.md I25, §11.1).
-		pathname !== '/api/v1/access/authorize' &&
-		// `/login` asks this before a session exists (email → IdP routing).
-		pathname !== '/api/v1/sso/resolve' &&
-		// A cluster's log shipper authenticates with its own ingest token (docs/KUBERNETES.md K23).
-		!pathname.startsWith('/api/v1/kubernetes-ingest/')
-	);
-}
 
 /** Pages redirect to the challenge (and back afterwards); API calls get a JSON 403. */
 function secondFactorRequired(event: RequestEvent): Response {

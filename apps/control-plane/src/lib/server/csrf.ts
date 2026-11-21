@@ -20,6 +20,8 @@ const COOKIELESS_ENDPOINTS = new Set([
 	'/api/auth/oauth2/introspect',
 	'/api/v1/cli/token',
 	'/api/domains/ask',
+	// W15 external prober: authenticated by its registration token, never a cookie.
+	'/api/v1/ha/prober/report',
 	'/mcp',
 	'/_yoal/site-login',
 ]);

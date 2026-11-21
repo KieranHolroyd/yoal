@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
 	externalProberRegistrationInputSchema,
+	externalProberReportSchema,
 	externalProberViewSchema,
 	haTimelineItemSchema,
 	projectHaTargetInputSchema,
@@ -67,6 +68,17 @@ describe('W15 observability contracts', () => {
 				arbiterTested: null,
 			}).lostCommits,
 		).toBeNull();
+	});
+
+	test('a report sequence starts at 1, so sequence 0 is refused', () => {
+		expect(() =>
+			externalProberReportSchema.parse({
+				proberId: 'prb_1',
+				sequence: 0,
+				sentAt: AT,
+				targets: [{ target: 'https://app.test/healthz', kind: 'https', status: 'up', checkedAt: AT }],
+			}),
+		).toThrow();
 	});
 
 	test('a prober registration defaults its interval and health is explicit', () => {

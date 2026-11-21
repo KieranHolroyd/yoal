@@ -137,13 +137,13 @@ export class MetricsExporter {
 		const settings = this.settings();
 		if (!principal) {
 			if (scope.section !== 'all' || !settings.publicPlatform) throw new UnauthorizedError('Send an API key with metrics:read.');
-			return this.#cached('public', settings, () => this.#renderPlatform(settings));
+			return this.#cached('public', settings, () => this.#renderPlatform(settings, false));
 		}
 		this.ctx.iam.require(principal, 'metrics:read', { type: 'org' });
 		if (scope.section !== 'all' && !settings.sections[scope.section]) throw new NotFoundError(`Metrics section "${scope.section}"`);
 		if (scope.section === 'platform') {
 			if (!this.ctx.platformIam.canView(principal)) throw new ForbiddenError('platform:read');
-			return this.#cached('platform', settings, () => this.#renderPlatform(settings));
+			return this.#cached('platform', settings, () => this.#renderPlatform(settings, true));
 		}
 		if (scope.section !== 'all')
 			this.ctx.iam.require(principal, SECTION_PERMISSION[scope.section], { type: 'org' });
@@ -548,12 +548,14 @@ export class MetricsExporter {
 
 	// ---------------------------------------------------------------- platform
 
-	async #renderPlatform(settings: MetricsExportSettings): Promise<string> {
+	async #renderPlatform(settings: MetricsExportSettings, authenticated: boolean): Promise<string> {
 		const lines = this.platformSummary();
 		if (settings.sections.platform) {
 			const out = new Exposition();
 			this.#nodes(out);
-			this.#ha(out);
+			// W15 series name projects, databases, nodes and leases; only an authenticated platform
+			// scrape may see them. The anonymous public fleet summary stays the old tenant-free set.
+			if (authenticated) this.#ha(out);
 			lines.push(out.render().trimEnd());
 		}
 		const telemetry = this.ctx.telemetry;
@@ -570,7 +572,8 @@ export class MetricsExporter {
 	#ha(out: Exposition): void {
 		const rank: Record<string, number> = { L0: 0, L1: 1, L2: 2, L3: 3 };
 		try {
-			for (const target of this.ctx.slos.targetsInternal()) {
+			const levels = this.ctx.topology.resourceLevels();
+			for (const target of this.ctx.slos.targetsInternal(levels)) {
 				const labels = { project: target.slug, project_id: target.projectId };
 				if (target.declared !== null) {
 					out.gauge('yoal_ha_declared_level', 'The HA level a project declares it needs (0=L0 … 3=L3).', { ...labels, level: target.declared }, rank[target.declared] ?? 0);
@@ -586,7 +589,6 @@ export class MetricsExporter {
 				if (target.blockers.length > 0)
 					out.gauge('yoal_ha_level_blockers', 'Reasons the weakest resource is not one level up.', labels, target.blockers.length);
 			}
-			const levels = this.ctx.topology.resourceLevels();
 			for (const [kind, map] of [
 				['workload', levels.workloads],
 				['database', levels.databases],

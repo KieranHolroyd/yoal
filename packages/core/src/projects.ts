@@ -100,6 +100,8 @@ export const projectOwnedTables = [
 	'app_volume_attachments',
 	'app_volumes',
 	'github_runner_registrations',
+	// W15 service-level objectives belong to the project and go with it.
+	'slo_objects',
 ] as const;
 
 export class ProjectService {
@@ -511,6 +513,8 @@ export class ProjectService {
 				[row.id],
 			);
 			this.ctx.sqlite.run('DELETE FROM share_links WHERE project_id = ?', [row.id]);
+			// W15's declared HA target is a settings row keyed by project id, not a table.
+			this.ctx.sqlite.run('DELETE FROM settings WHERE key = ?', [`ha_target:${row.id}`]);
 			this.ctx.sqlite.run('DELETE FROM projects WHERE id = ?', [row.id]);
 		})();
 		this.bump();

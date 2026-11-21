@@ -115,7 +115,7 @@ telemetry store's TTL would make a running total go backwards.
 
 Brokers are not in the public fleet summary.
 
-**Fleet** (public `/metrics`, `/metrics/platform`)
+**Fleet** (public `/metrics`, `/metrics/platform`). The public anonymous summary is the tenant-free group below; HA, lease and steering series are returned only with an authenticated `metrics:read` platform scrape.
 
 - `yoal_nodes_total`, `yoal_nodes_online`, `yoal_projects_total`, `yoal_deployments_active`,
   `yoal_storage_bytes`, `yoal_agent_desired_version_info{version}`
@@ -126,7 +126,8 @@ Brokers are not in the public fleet summary.
 - Disks: `yoal_volume_up{node,volume,kind,tier}`, `yoal_volume_size_bytes`,
   `yoal_volume_free_bytes` (D80). The names predate disks and stay; `volume` is the disk name and
   `tier` is `fast` or `bulk` ([STORAGE.md](./STORAGE.md)).
-- HA levels (W15): `yoal_ha_declared_level{project,project_id,level}`,
+- **Authenticated platform scrape only** — these name tenants, databases, nodes and leases, so the
+  anonymous public `/metrics` never includes them. HA levels (W15): `yoal_ha_declared_level{project,project_id,level}`,
   `yoal_ha_effective_level{...}`, `yoal_ha_effective_below_target{project,project_id}` (1 when the
   weakest live resource is under the declaration; `ha.effective_below_target` alerts after 5 min),
   `yoal_ha_level_blockers{project,project_id}`, and

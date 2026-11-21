@@ -94,6 +94,8 @@ export type SloObject = z.infer<typeof sloObjectSchema>;
  * the elapsed window, above 1 when it is exhausting early.
  */
 export const sloErrorBudgetSchema = z.object({
+	/** False when the window had no events (or no source), so the budget is not a healthy 0 %. */
+	hasData: z.boolean().default(true),
 	total: z.number().min(0).max(1),
 	consumed: z.number().min(0).max(1),
 	remaining: z.number().min(0).max(1),
@@ -154,8 +156,8 @@ export type ExternalProberTarget = z.infer<typeof externalProberTargetSchema>;
  */
 export const externalProberReportSchema = z.object({
 	proberId: z.string().min(1).max(100),
-	/** Monotonic per prober; a report at or below the last sequence is stale and ignored. */
-	sequence: z.number().int().nonnegative(),
+	/** Monotonic per prober, starting at 1; a report at or below the last sequence is ignored. */
+	sequence: z.number().int().positive(),
 	sentAt: z.string().datetime(),
 	/** The install the prober was registered for; omitted on older registrations. */
 	installId: z.string().max(100).nullable().default(null),

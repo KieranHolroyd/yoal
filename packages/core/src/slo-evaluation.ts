@@ -51,12 +51,14 @@ export function computeErrorBudget(input: {
 	const allowed = 1 - input.target;
 	const events = finiteNonNegative(input.total);
 	const good = Math.min(events, finiteNonNegative(input.good));
-	if (allowed <= 0 || events === 0) return { total: Math.max(0, allowed), consumed: 0, remaining: 1, burnRate: 0 };
+	if (allowed <= 0 || events === 0)
+		return { hasData: false, total: Math.max(0, allowed), consumed: 0, remaining: 1, burnRate: 0 };
 	const badRatio = (events - good) / events;
 	const raw = badRatio / allowed;
 	const consumed = Math.min(1, Math.max(0, raw));
 	const elapsed = Math.min(1, Math.max(0.000_001, input.elapsedFraction ?? 1));
 	return {
+		hasData: true,
 		total: allowed,
 		consumed,
 		remaining: 1 - consumed,

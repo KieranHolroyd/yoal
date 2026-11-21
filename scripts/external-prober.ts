@@ -32,6 +32,8 @@ interface ProberConfig {
 	url: string;
 	token: string;
 	proberId: string;
+	/** The install the registration was bound to, when it was registered with one. */
+	installId?: string | null;
 	intervalSeconds?: number;
 	targets: TargetConfig[];
 }
@@ -61,7 +63,14 @@ function fromEnv(): ProberConfig {
 		throw new Error('YOAL_PROBER_TARGETS must be a JSON array of targets.');
 	}
 	if (!Array.isArray(targets) || targets.length === 0) throw new Error('YOAL_PROBER_TARGETS must contain at least one target.');
-	return { url, token, proberId, intervalSeconds: Number(process.env.YOAL_PROBER_INTERVAL ?? 60), targets };
+	return {
+		url,
+		token,
+		proberId,
+		installId: process.env.YOAL_PROBER_INSTALL_ID ?? null,
+		intervalSeconds: Number(process.env.YOAL_PROBER_INTERVAL ?? 60),
+		targets,
+	};
 }
 
 async function loadConfig(argv: string[]): Promise<ProberConfig> {
@@ -188,7 +197,13 @@ async function post(config: ProberConfig, sequence: number, targets: TargetRepor
 	const response = await fetch(endpoint, {
 		method: 'POST',
 		headers: { 'content-type': 'application/json', authorization: `Bearer ${config.token}` },
-		body: JSON.stringify({ proberId: config.proberId, sequence, sentAt: new Date().toISOString(), installId: null, targets }),
+		body: JSON.stringify({
+			proberId: config.proberId,
+			sequence,
+			sentAt: new Date().toISOString(),
+			installId: config.installId ?? null,
+			targets,
+		}),
 		signal: AbortSignal.timeout(15_000)
 	});
 	if (response.ok) {
@@ -206,7 +221,9 @@ async function post(config: ProberConfig, sequence: number, targets: TargetRepor
 async function main(): Promise<void> {
 	const once = process.argv.includes('--once');
 	const config = await loadConfig(process.argv.slice(2));
-	const intervalSeconds = Math.max(10, Math.round(config.intervalSeconds ?? 60));
+	// A typo in YOAL_PROBER_INTERVAL must not become NaN (setInterval would then busy-loop).
+	const requestedInterval = Number(config.intervalSeconds);
+	const intervalSeconds = Number.isFinite(requestedInterval) && requestedInterval >= 10 ? Math.round(requestedInterval) : 60;
 	// Time-based, so a restart does not replay a sequence the sink has already seen.
 	let sequence = Math.floor(Date.now() / 1000);
 	const report = async () => {

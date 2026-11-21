@@ -388,7 +388,7 @@
 				<label class="text-xs">
 					<span class="mb-1 block text-muted-foreground">Project</span>
 					<select name="slug" class="h-9 min-w-44 rounded-md border bg-background px-2 text-sm" required>
-						{#each data.targets.targets as target (target.projectId)}
+						{#each data.targets.targets.filter((target) => data.editableSlugs.includes(target.slug)) as target (target.projectId)}
 							<option value={target.slug}>{target.name}</option>
 						{/each}
 					</select>
@@ -611,6 +611,10 @@
 				<label class="text-xs">
 					<span class="mb-1 block text-muted-foreground">Every (seconds)</span>
 					<input name="intervalSeconds" type="number" min="10" max="3600" value="60" class="h-9 w-28 rounded-md border bg-background px-2 text-sm" />
+				</label>
+				<label class="text-xs">
+					<span class="mb-1 block text-muted-foreground">Install id (optional)</span>
+					<input name="installId" maxlength="100" class="h-9 rounded-md border bg-background px-2 text-sm" placeholder="ins_…" />
 				</label>
 				<Button type="submit" size="sm" variant="outline">Register prober</Button>
 			</form>

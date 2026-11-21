@@ -11,6 +11,7 @@ import {
 	type SloObjectInput,
 } from '@yoal/contracts';
 import { createCore, type Core } from './index.ts';
+import { ExternalProberService } from './external-prober-service.ts';
 import { LocalObjectStore } from './object-store.ts';
 import { buildPrincipal } from './orgs.ts';
 import type { MetricPoint, TelemetryStore } from './telemetry.ts';
@@ -198,11 +199,13 @@ beforeEach(() => {
 	opened.sqlite.run('DELETE FROM slo_objects');
 	opened.sqlite.run('DELETE FROM alert_events');
 	opened.sqlite.run('DELETE FROM alert_state');
-	opened.sqlite.run("DELETE FROM settings WHERE key LIKE 'ha_target:%'");
+	// The service keeps a first-seen map; clearing the declaration is what resets it.
+	core.slos.setHaTarget(owner, projectSlug, { target: null });
 	opened.sqlite.run("DELETE FROM settings WHERE key = 'external_prober_registrations'");
 	opened.sqlite.run('DELETE FROM database_failover_drills');
 	opened.sqlite.run('DELETE FROM database_failovers');
 	opened.sqlite.run('DELETE FROM database_member_status');
+	opened.sqlite.run('DELETE FROM database_replicas');
 });
 
 afterAll(() => {
@@ -212,12 +215,15 @@ afterAll(() => {
 
 describe('SLO objects', () => {
 	test('are absent and refuse writes while SLO_OBJECTS is off', async () => {
+		const existing = await core.slos.upsert(owner, projectSlug, input());
 		setFeature('SLO_OBJECTS', false);
 		expect(core.slos.list(owner, projectSlug)).toEqual([]);
 		await expect(core.slos.upsert(owner, projectSlug, input())).rejects.toMatchObject({ code: 'unavailable' });
 		await expect(core.slos.evaluate(owner, projectSlug)).rejects.toMatchObject({ code: 'unavailable' });
 		expect(() => core.slos.remove(owner, projectSlug, 'slo_x')).toThrow(/SLO_OBJECTS/);
 		expect((await core.slos.overview(owner)).enabled).toBe(false);
+		setFeature('SLO_OBJECTS', true);
+		core.slos.remove(owner, projectSlug, existing.id);
 	});
 
 	test('create by name, update in place and list newest values', async () => {
@@ -273,6 +279,14 @@ describe('SLO evaluation and burn alerts', () => {
 		expect(evaluation!.burnAlerts[0]!.observedBurnRate).toBeCloseTo(4);
 		expect(evaluation!.burnAlerts[0]!.firing).toBe(false);
 		telemetry.trafficFor = null;
+	});
+
+	test('a zero-traffic window is marked as no data, not a healthy 0%', async () => {
+		await core.slos.upsert(owner, projectSlug, input({ target: 0.99 }));
+		telemetry.traffic = [];
+		const [evaluation] = await core.slos.evaluate(owner, projectSlug);
+		expect(evaluation!.errorBudget.hasData).toBe(false);
+		expect(evaluation!.note).toContain('no requests');
 	});
 
 	test('an unsupported indicator is a note, never a healthy fabricated ratio', async () => {
@@ -398,6 +412,67 @@ describe('external prober', () => {
 		expect(systemAlerts().some((alert) => alert.fingerprint === `ha.prober_stale:${registration.prober.proberId}`)).toBe(true);
 	});
 
+	test('an install-bound registration refuses a report with no installId', async () => {
+		const registration = core.externalProber.register(owner, { name: 'bound', installId: 'ins_1', intervalSeconds: 60 });
+		const report = (installId: string | null) =>
+			externalProberReportSchema.parse({
+				proberId: registration.prober.proberId,
+				sequence: 1,
+				sentAt: new Date(clock).toISOString(),
+				installId,
+				targets: [{ target: 'https://app.test/healthz', kind: 'https', status: 'up', checkedAt: new Date(clock).toISOString() }],
+			});
+		await expect(core.externalProber.report(registration.token, report(null))).rejects.toMatchObject({ code: 'conflict' });
+		expect((await core.externalProber.report(registration.token, report('ins_1'))).accepted).toBe(1);
+	});
+
+	test('a purged project takes its SLO and declared target with it', async () => {
+		await core.projects.create(owner, {
+			name: 'Stray',
+			slug: 'stray-project',
+			runtime: 'static',
+			placement: 'edge',
+			productionAccess: 'public',
+			previewAccess: 'platform',
+		});
+		const stray = await core.slos.upsert(owner, 'stray-project', input({ target: 0.9 }));
+		core.slos.setHaTarget(owner, 'stray-project', { target: 'L2' });
+		const row = core.projects.requireRow(owner, 'stray-project');
+		await core.projects.purgeRow(row);
+		expect(opened.sqlite.query<{ n: number }, [string]>('SELECT COUNT(*) AS n FROM slo_objects WHERE id = ?').get(stray.id)!.n).toBe(0);
+		expect(opened.sqlite.query<{ n: number }, [string]>('SELECT COUNT(*) AS n FROM settings WHERE key = ?').get(`ha_target:${row.id}`)!.n).toBe(0);
+	});
+
+	test('sweep skips an SLO whose project row has already gone', async () => {
+		await core.projects.create(owner, {
+			name: 'Orphan',
+			slug: 'orphan-project',
+			runtime: 'static',
+			placement: 'edge',
+			productionAccess: 'public',
+			previewAccess: 'platform',
+		});
+		const stray = await core.slos.upsert(owner, 'orphan-project', input({ target: 0.9 }));
+		telemetry.traffic = [{ requests: 1_000, status5xx: 400 } as unknown as MetricPoint];
+		opened.sqlite.run('DELETE FROM projects WHERE id = ?', [core.projects.requireRow(owner, 'orphan-project').id]);
+		expect(await core.slos.sweep()).toEqual([]);
+		expect(systemAlerts().some((alert) => alert.fingerprint?.includes(stray.id))).toBe(false);
+	});
+
+	test('reports are rate-capped per prober', async () => {
+		const registration = core.externalProber.register(owner, { name: 'chatty', installId: null, intervalSeconds: 10 });
+		const service = new ExternalProberService(core.ctx);
+		const report = (sequence: number) =>
+			externalProberReportSchema.parse({
+				proberId: registration.prober.proberId,
+				sequence,
+				sentAt: new Date(clock).toISOString(),
+				targets: [{ target: 'https://app.test/healthz', kind: 'https', status: 'up', checkedAt: new Date(clock).toISOString() }],
+			});
+		for (let sequence = 1; sequence <= 120; sequence += 1) await service.report(registration.token, report(sequence));
+		await expect(service.report(registration.token, report(121))).rejects.toMatchObject({ code: 'rate_limited' });
+	});
+
 	test('a revoked token is refused', async () => {
 		const registration = core.externalProber.register(owner, { name: 'berlin', installId: null, intervalSeconds: 60 });
 		core.externalProber.revoke(owner, registration.prober.proberId);
@@ -437,5 +512,11 @@ describe('HA metrics on /metrics', () => {
 		expect(platform).toContain('yoal_steering_active');
 		expect(org).toContain('yoal_database_replica_lag_seconds{database="main"');
 		expect(org).toContain('yoal_database_durability_effective{database="main"');
+		core.ctx.metricsExport.updateSettings(owner, { publicPlatform: true });
+		const publicText = await core.ctx.metricsExport.render(undefined, { section: 'all' });
+		expect(publicText).not.toContain('yoal_ha_effective_below_target');
+		expect(publicText).not.toContain('yoal_database_lease_holder');
+		expect(publicText).not.toContain('yoal_steering_active');
+		core.ctx.metricsExport.updateSettings(owner, { publicPlatform: false });
 	});
 });

@@ -11,7 +11,7 @@ import type {
 import { externalProberRegistrationInputSchema } from '@yoal/contracts';
 import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
-import { CoreError, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError } from './errors.ts';
+import { CoreError, ForbiddenError, NotFoundError, RateLimitError, UnauthorizedError, ValidationError } from './errors.ts';
 import { newId, parseJson, randomToken, sha256Hex } from './util.ts';
 
 /** One registration, stored as one JSON document in `settings`; no migration for a small list. */
@@ -40,6 +40,8 @@ const SETTINGS_KEY = 'external_prober_registrations';
 const TOKEN_PREFIX = 'yoalp_';
 /** A prober is unhealthy after max(3 intervals, this); a short interval cannot page on one miss. */
 const MIN_STALE_SECONDS = 120;
+/** A prober may post at most this often; a 10 s interval is the advertised floor. */
+const MAX_REPORTS_PER_MINUTE = 120;
 
 /**
  * The external prober's registration and report sink (HA-PLAN W15).
@@ -53,6 +55,9 @@ const MIN_STALE_SECONDS = 120;
  * is absent, so nothing accepts reports.
  */
 export class ExternalProberService {
+	/** Report arrival times per prober, for the in-process rate cap. */
+	readonly #recent = new Map<string, number[]>();
+
 	constructor(private readonly ctx: CoreContext) {}
 
 	/** Whether the sink accepts reports; the HTTP route is absent while this is false. */
@@ -137,22 +142,31 @@ export class ExternalProberService {
 	}
 
 	/**
+	 * Check the token before a caller reads the body. The report route calls this first, so a bad or
+	 * absent token is a 401 without buffering an attacker's payload.
+	 */
+	authenticate(token: string | null): void {
+		this.#require(token);
+	}
+
+	/**
 	 * Accept one report. The token is the prober's only credential; a duplicate or older sequence is
 	 * acknowledged with `accepted: 0` and changes nothing, so a retry after a lost response is safe.
 	 */
 	async report(token: string | null, report: ExternalProberReport): Promise<ExternalProberAck> {
-		if (!this.enabled())
-			throw new CoreError('unavailable', 'The external prober is off: enable EXTERNAL_PROBER first (HA-PLAN W15).', 409);
-		if (!token) throw new UnauthorizedError('Send the prober token as a Bearer credential.');
-		const hash = sha256Hex(token);
 		const document = this.#read();
-		const row = document.registrations.find((candidate) => candidate.tokenHash === hash && candidate.revokedAt === null);
-		if (!row) throw new UnauthorizedError('Unknown or revoked prober token.');
+		const row = this.#require(token, document);
 		if (row.proberId !== report.proberId)
 			throw new UnauthorizedError('The token does not belong to that prober.');
-		if (row.installId !== null && report.installId !== null && row.installId !== report.installId)
+		// A registration bound to an install refuses a report that omits or changes it.
+		if (row.installId !== null && report.installId !== row.installId)
 			throw new CoreError('conflict', 'The report names a different install than the registration.', 409);
 		const now = this.ctx.now();
+		const recent = (this.#recent.get(row.proberId) ?? []).filter((at) => now - at < 60_000);
+		if (recent.length >= MAX_REPORTS_PER_MINUTE)
+			throw new RateLimitError('This prober is reporting faster than 120 times a minute.');
+		recent.push(now);
+		this.#recent.set(row.proberId, recent);
 		const receivedAt = new Date(now).toISOString();
 		if (report.sequence <= row.lastSequence)
 			return { proberId: row.proberId, sequence: report.sequence, receivedAt, accepted: 0 };
@@ -226,6 +240,17 @@ export class ExternalProberService {
 			})),
 			counts,
 		};
+	}
+
+	/** Find the live registration behind a token, or refuse with the reason. */
+	#require(token: string | null, document: ProberDocument = this.#read()): StoredProber {
+		if (!this.enabled())
+			throw new CoreError('unavailable', 'The external prober is off: enable EXTERNAL_PROBER first (HA-PLAN W15).', 409);
+		if (!token) throw new UnauthorizedError('Send the prober token as a Bearer credential.');
+		const hash = sha256Hex(token);
+		const row = document.registrations.find((candidate) => candidate.tokenHash === hash && candidate.revokedAt === null);
+		if (!row) throw new UnauthorizedError('Unknown or revoked prober token.');
+		return row;
 	}
 
 	#requireAdmin(principal: Principal): void {

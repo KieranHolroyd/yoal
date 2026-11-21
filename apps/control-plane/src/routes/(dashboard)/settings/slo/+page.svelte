@@ -16,7 +16,7 @@
 		return `${(value * 100).toFixed(value >= 0.999 ? 3 : 2)}%`;
 	}
 	function budgetTone(slo: SloOverviewItem): 'success' | 'warning' | 'danger' | 'neutral' {
-		if (!slo.errorBudget) return 'neutral';
+		if (!slo.errorBudget || !slo.errorBudget.hasData) return 'neutral';
 		if (slo.errorBudget.consumed >= 1) return 'danger';
 		if (slo.errorBudget.consumed >= 0.75) return 'warning';
 		return 'success';
@@ -85,7 +85,7 @@
 								</Table.Cell>
 								<Table.Cell class="font-mono text-xs">{percent(slo.target)}</Table.Cell>
 								<Table.Cell>
-									{#if slo.errorBudget}
+									{#if slo.errorBudget?.hasData}
 										<p class="flex items-center gap-2 text-sm">
 											<Badge variant={budgetTone(slo)}>{Math.round(slo.errorBudget.consumed * 100)}% used</Badge>
 											<span class="text-xs text-muted-foreground">{Math.round(slo.errorBudget.remaining * 100)}% left</span>
@@ -94,12 +94,12 @@
 											Burn {slo.errorBudget.burnRate.toFixed(2)}× · budget {percent(slo.errorBudget.total)}
 										</p>
 									{:else}
-										<span class="text-xs text-muted-foreground">No window</span>
+										<span class="text-xs text-muted-foreground">No data in this window</span>
 									{/if}
 								</Table.Cell>
 								<Table.Cell>
 									{#if firing(slo) > 0}
-										{#each slo.evaluation?.burnAlerts.filter((alert) => alert.firing) ?? [] as alert (alert.severity + alert.burnRate)}
+										{#each slo.evaluation?.burnAlerts.filter((alert) => alert.firing) ?? [] as alert, index (index)}
 											<Badge variant={alert.severity === 'critical' ? 'danger' : 'warning'}>
 												{alert.severity} {alert.observedBurnRate.toFixed(1)}× / {alert.burnRate}×
 											</Badge>
@@ -109,7 +109,7 @@
 									{/if}
 								</Table.Cell>
 								<Table.Cell class="pr-4 text-right">
-									{#if data.canEdit}
+									{#if data.canEdit && slo.orgId === data.orgId}
 										<form method="POST" action="?/remove">
 											<input type="hidden" name="project" value={slo.projectSlug} />
 											<input type="hidden" name="id" value={slo.id} />

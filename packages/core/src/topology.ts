@@ -181,32 +181,87 @@ export class TopologyService {
 		databases: Map<string, HaLevelAssessment>;
 		storage: Map<string, HaLevelAssessment>;
 	} {
-		const levels = this.haLevels(this.ctx.db.select().from(nodes).all());
+		const nodeRows = this.ctx.db.select().from(nodes).all();
+		const zoneOf = new Map(nodeRows.map((row) => [row.id, row.zone]));
+		const placed = (nodeIds: string[]) => ({
+			nodes: new Set(nodeIds).size,
+			zones: new Set(nodeIds.map((id) => zoneOf.get(id) ?? 'default')).size,
+		});
+		// One read per table: this runs on every authenticated platform scrape and HA status poll,
+		// so per-resource queries would turn a fleet's worth of placement into N+1 round trips.
+		const workloadRows = this.ctx.db.select().from(workloads).where(isNotNull(workloads.nodeId)).all();
+		const copiesByWorkload = new Map<string, string[]>();
+		for (const copy of this.ctx.db.select({ id: workloadReplicas.workloadId, nodeId: workloadReplicas.nodeId }).from(workloadReplicas).all())
+			copiesByWorkload.set(copy.id, [...(copiesByWorkload.get(copy.id) ?? []), copy.nodeId]);
+		const volumesByProject = new Map<string, number>();
+		for (const volume of this.ctx.db
+			.select({ projectId: appVolumes.projectId })
+			.from(appVolumes)
+			.where(isNull(appVolumes.deletedAt))
+			.all())
+			volumesByProject.set(volume.projectId, (volumesByProject.get(volume.projectId) ?? 0) + 1);
 		const workloadsMap = new Map<string, HaLevelAssessment>();
-		for (const row of this.ctx.db
-			.select({ id: workloads.id, nodeId: workloads.nodeId })
-			.from(workloads)
-			.where(isNotNull(workloads.nodeId))
-			.all()) {
-			if (row.nodeId) workloadsMap.set(row.id, levels.workload(row.id));
+		for (const row of workloadRows) {
+			if (!row.nodeId) continue;
+			const spec = workloadSpecSchema.safeParse(parseJson<unknown>(row.specJson, null)).data;
+			const copies = copiesByWorkload.get(row.id) ?? [];
+			const nodeIds = copies.length > 0 ? copies : [row.nodeId];
+			workloadsMap.set(
+				row.id,
+				computeHaLevel({
+					kind: 'workload',
+					copies: copies.length > 0 ? copies.length : (spec?.replicas ?? 1),
+					...placed(nodeIds),
+					verifiedBackup: false,
+					http: spec?.ingress !== 'none',
+					pinned: Boolean(spec?.data) || (volumesByProject.get(row.projectId) ?? 0) > 0,
+				}),
+			);
 		}
+		const replicasByDatabase = new Map<string, string[]>();
+		for (const replica of this.ctx.db.select().from(databaseReplicas).all()) {
+			if (replica.status !== 'streaming' && replica.status !== 'lagging') continue;
+			replicasByDatabase.set(replica.databaseId, [...(replicasByDatabase.get(replica.databaseId) ?? []), replica.nodeId]);
+		}
+		const verifiedBackups = new Set(
+			this.ctx.db
+				.select({ databaseId: databaseBackups.databaseId })
+				.from(databaseBackups)
+				.where(isNotNull(databaseBackups.verifiedAt))
+				.all()
+				.map((row) => row.databaseId),
+		);
 		const databasesMap = new Map<string, HaLevelAssessment>();
 		for (const row of this.ctx.db
 			.select({ id: databases.id, nodeId: databases.nodeId })
 			.from(databases)
 			.where(isNull(databases.deletedAt))
-			.all())
-			databasesMap.set(row.id, levels.database(row.id, row.nodeId));
+			.all()) {
+			const replicas = replicasByDatabase.get(row.id) ?? [];
+			databasesMap.set(
+				row.id,
+				computeHaLevel({
+					kind: 'database',
+					copies: 1 + replicas.length,
+					...placed([row.nodeId, ...replicas]),
+					verifiedBackup: verifiedBackups.has(row.id),
+					http: false,
+					pinned: false,
+				}),
+			);
+		}
 		const storageMap = new Map<string, HaLevelAssessment>();
 		for (const row of this.ctx.db
 			.select({ id: storageInstances.id, nodeId: storageInstances.nodeId })
 			.from(storageInstances)
 			.where(isNull(storageInstances.deletedAt))
 			.all())
-			storageMap.set(row.id, levels.storage(row.nodeId));
+			storageMap.set(
+				row.id,
+				computeHaLevel({ kind: 'storage', copies: 1, ...placed([row.nodeId]), verifiedBackup: false, http: false, pinned: false }),
+			);
 		return { workloads: workloadsMap, databases: databasesMap, storage: storageMap };
 	}
-
 	/**
 	 * HA levels from current placement (HA-PLAN G24, CLUSTERING §8.1), through `computeHaLevel`. Shown
 	 * whatever `RELEASE_PHASE` says: it describes where things run and changes no behaviour. A disk

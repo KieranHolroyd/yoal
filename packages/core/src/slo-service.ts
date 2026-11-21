@@ -213,13 +213,22 @@ export class SloService {
 		const project = this.#project(principal, projectSlug, 'project:update');
 		const parsed = projectHaTargetInputSchema.parse(input);
 		const key = `${HA_TARGET_PREFIX}${project.id}`;
+		// A cleared or changed declaration restarts the below-target grace instead of inheriting it.
+		this.#belowSince.delete(project.id);
 		if (parsed.target === null) this.ctx.sqlite.run('DELETE FROM settings WHERE key = ?', [key]);
 		else
 			this.ctx.sqlite.run(
 				'INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at',
 				[key, parsed.target, this.ctx.now()],
 			);
-		this.#audit(principal, 'ha.target', project.id, { project: project.slug, target: parsed.target });
+		this.ctx.audit.record({
+			principal,
+			action: 'ha.target',
+			resource: 'project',
+			resourceId: project.id,
+			args: { project: project.slug, target: parsed.target },
+			result: 'ok',
+		});
 		const view = this.targetsInternal().find((target) => target.projectId === project.id);
 		if (!view) throw new NotFoundError('Project');
 		return view;
@@ -229,10 +238,9 @@ export class SloService {
 	 * The declaration check without a principal, for `/metrics`. Returns every live project; a
 	 * project with no declaration has `belowTarget: false` and `declared: null`.
 	 */
-	targetsInternal(): ProjectHaTargetView[] {
+	targetsInternal(levels: ReturnType<CoreContext['topology']['resourceLevels']> = this.ctx.topology.resourceLevels()): ProjectHaTargetView[] {
 		const projectRows = this.ctx.db.select().from(projects).where(isNull(projects.deletedAt)).all();
 		if (projectRows.length === 0) return [];
-		const levels = this.ctx.topology.resourceLevels();
 		const workloadRows = this.ctx.db.select({ id: workloads.id, projectId: workloads.projectId }).from(workloads).all();
 		const databaseRows = this.ctx.db
 			.select({ id: databaseAttachments.databaseId, projectId: databaseAttachments.projectId })
@@ -386,8 +394,13 @@ export class SloService {
 		if (!featureEnabled(this.ctx.config, 'SLO_OBJECTS')) return fired;
 
 		const cache = new Map<string, Promise<SloSignalCounts>>();
-		const projectNames = new Map(this.ctx.db.select({ id: projects.id, name: projects.name }).from(projects).all().map((row) => [row.id, row.name]));
+		const liveProjects = this.ctx.db.select({ id: projects.id, name: projects.name }).from(projects).where(isNull(projects.deletedAt)).all();
+		const projectNames = new Map(liveProjects.map((row) => [row.id, row.name]));
+		const live = new Set(liveProjects.map((row) => row.id));
 		for (const row of this.ctx.db.select().from(sloObjects).where(eq(sloObjects.enabled, true)).all()) {
+			// A purged project's row must never alert: it is invisible and unremovable from every
+			// surface. The purge/prune removes it; this is the belt-and-braces read gate.
+			if (!live.has(row.projectId)) continue;
 			let evaluation: SloEvaluation;
 			try {
 				evaluation = await this.#evaluateRow(row, cache);
@@ -424,7 +437,7 @@ export class SloService {
 				sloId: row.id,
 				evaluatedAt: endsAt,
 				window: { startsAt, endsAt },
-				errorBudget: { total: Math.max(0, 1 - row.target), consumed: 0, remaining: 1, burnRate: 0 },
+				errorBudget: { hasData: false, total: Math.max(0, 1 - row.target), consumed: 0, remaining: 1, burnRate: 0 },
 				burnAlerts: alerts.map((alert) => ({ severity: alert.severity, burnRate: alert.burnRate, observedBurnRate: 0, firing: false })),
 				note: 'SLO is disabled.',
 			};

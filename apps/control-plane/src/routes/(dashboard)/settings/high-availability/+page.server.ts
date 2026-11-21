@@ -17,6 +17,8 @@ export const load: PageServerLoad = ({ locals }) => {
 		ha: core.ha.view(principal),
 		/** W15: declared versus effective levels, the failover/drill timeline and outside-in probes. */
 		targets: core.slos.targets(principal),
+		/** Projects the signed-in operator may edit (their org); the fleet table stays read-only. */
+		editableSlugs: core.projects.list(principal).map((project) => project.slug),
 		timeline: core.slos.timeline(principal, { limit: 50 }),
 		probers: core.externalProber.list(principal),
 		/** The policy editor writes platform settings, which is admin-only. */
@@ -61,7 +63,8 @@ export const actions: Actions = {
 		try {
 			const name = formString(data, 'name');
 			const intervalSeconds = Number(formString(data, 'intervalSeconds') || 60);
-			const registration = core.externalProber.register(principal, { name, installId: null, intervalSeconds });
+			const installId = formString(data, 'installId') || null;
+			const registration = core.externalProber.register(principal, { name, installId, intervalSeconds });
 			return {
 				success: `Prober registered. Copy the token now: it is not shown again.`,
 				proberToken: registration.token,
