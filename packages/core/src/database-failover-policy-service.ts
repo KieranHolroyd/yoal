@@ -64,6 +64,17 @@ export class DatabaseFailoverPolicyService {
 	}
 
 	/**
+	 * Every refusal `arm` would meet for this request, evaluated exactly as `arm` evaluates it (the
+	 * request's `acceptDataLoss` applied first), without writing. Blueprint plans (HA-PLAN W14) show
+	 * this list for `failover: auto`. `auto-promote-off` comes first while the flag is off, which is
+	 * where `arm` itself stops.
+	 */
+	armRefusals(principal: Principal, databaseName: string, request: Pick<DatabaseFailoverArmRequest, 'acceptDataLoss'>): FailoverArmRefusal[] {
+		const database = this.#require(principal, databaseName, 'database:read');
+		return this.#evaluate({ ...database, acceptDataLoss: request.acceptDataLoss || database.acceptDataLoss }).refusals;
+	}
+
+	/**
 	 * The live half of the policy (W11-MODEL assumption 9 + review blockers 2/10). The controller and
 	 * `view.active` use this one predicate: the flag, the per-database mode, a steady sync state, and
 	 * the §1.3 durability condition. Arming separately enforces every §3 refusal.
