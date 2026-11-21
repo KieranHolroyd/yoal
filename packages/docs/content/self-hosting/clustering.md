@@ -231,6 +231,8 @@ yoal ha migrate attachments            # lists what would move and what cannot, 
 yoal ha migrate attachments --apply    # moves them; each app restarts once
 ```
 
+Anyone who can read the HA status can run the first command. `--apply` needs a platform admin.
+
 An app listed as `blocked` runs a copy on a node whose agent does not support endpoints yet. Update
 that node, then run the command again.
 
@@ -248,8 +250,9 @@ The modes are:
 
 Nodes authenticate each other's endpoint traffic with certificates from the install's own
 certificate authority. `yoal ha ca` shows it and the node certificates; `yoal ha ca rotate` replaces
-it. The old authority stays trusted while each node renews its certificate, within 60 days. Do not
-rotate again while `yoal ha ca` says nodes still hold certificates the previous one signed.
+it (a platform admin only). The old authority stays trusted while each node renews its certificate,
+within 60 days. A second rotation is refused until no node holds a certificate the previous one
+signed; `yoal ha ca` shows how many still do.
 
 ## Settings → Clustering
 

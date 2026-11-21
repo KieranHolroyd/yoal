@@ -11,10 +11,13 @@ Most of these commands need a **platform admin**, an install-wide role separate 
 
 | Commands | Who can run them |
 | --- | --- |
-| `ha status`, `ha attachments`, `ha migrate attachments`, `ha ca`, `ha ca rotate`, `fleet status`, `fleet links`, `fleet rebalance` (preview), `nodes rollout plan`, `status` and `list`, `upgrade plan` | A platform admin, with any credential, including the API key the CLI uses. |
-| `fleet rebalance --apply`, `fleet link-test`, `nodes update`, `nodes rollout start`, `resume` and `cancel` | A platform admin signed in to the dashboard. By default an API key gets `403` for these, even a platform admin's; make the change from the dashboard instead. |
+| `ha status`, `ha attachments`, `ha migrate attachments` (without `--apply`), `ha ca`, `fleet status`, `fleet links`, `fleet rebalance` (preview), `nodes rollout plan`, `status` and `list`, `upgrade plan` | A platform admin, with any credential, including the API key the CLI uses. |
+| `ha migrate attachments --apply`, `ha ca rotate`, `fleet rebalance --apply`, `fleet link-test`, `nodes update`, `nodes rollout start`, `resume` and `cancel` | A platform admin signed in to the dashboard. By default an API key gets `403` for these, even a platform admin's; make the change from the dashboard instead. |
 | `fleet move` | Anyone with `project:update` on the project. `--status` needs read access to the project. |
 | `upgrade apply`, `upgrade rollback` | Root on the Yoal host. No API credential can do this. |
+
+> [!NOTE]
+> The dashboard has no control for `ha migrate attachments --apply` or `ha ca rotate` yet. With the default bindings, the CLI's API key gets `403` for them: call `POST /api/v1/ha/attachments/migrate` or `POST /api/v1/ha/ca/rotate` with a platform admin's dashboard session. Apps also move on their own next deploy.
 
 ## ha
 
@@ -62,7 +65,7 @@ Lists the apps with an attached database that do not use their stable endpoints 
 | Flag | Description |
 | --- | --- |
 | `--project <slug>` | Only this app. Repeat it for several. |
-| `--apply` | Move the listed apps now. Each restarts once. |
+| `--apply` | Move the listed apps now. Each restarts once. Needs a platform admin signed in to the dashboard. |
 | `--json` | Print the raw response. |
 
 ```sh
@@ -74,7 +77,7 @@ yoal ha migrate attachments --project shop --apply
 
 Shows the install's certificate authority: the one that signs, a previous one still trusted after a rotation, and the node certificates (how many nodes hold one, how many are due to renew, how many were revoked, and the next expiry). `yoal ha status` shows the same lines while attachment endpoints are on.
 
-`yoal ha ca rotate` creates a new authority. The old one stays trusted, so no node loses its connections; each node moves to the new one when it renews, within 60 days. Don't rotate again while nodes still hold certificates the previous one signed.
+`yoal ha ca rotate` creates a new authority. The old one stays trusted, so no node loses its connections; each node moves to the new one when it renews, within 60 days. A second rotation is refused while nodes still hold certificates the previous one signed. Needs a platform admin signed in to the dashboard.
 
 ## fleet
 

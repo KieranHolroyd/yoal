@@ -72,12 +72,13 @@ Actions:
   migrate attachments [--project <slug>]... [--apply] [--json]
       With ENDPOINTS_GATEWAY on, an app moves to its stable endpoint on its own next deploy. This
       lists the apps that still connect directly (a dry run, the default); --apply moves them now,
-      which restarts each once.
+      which restarts each once (platform admin).
   ca [--json]
       The install CA: the CA that signs, a previous one still trusted after a rotation, and the
       node certificates (how many, due to renew, revoked).
   ca rotate [--json]
-      Rotate the install CA (platform admin). The old CA stays trusted until every node renews.
+      Rotate the install CA (platform admin). The old CA stays trusted until every node renews; a
+      second rotation is refused while a node still holds a certificate the previous CA signed.
 
   db arm|disarm|drill <database> [--json]
       Automatic database failover (W11): arm after the policy and a passed drill, disarm now, or run

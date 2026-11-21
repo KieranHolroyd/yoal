@@ -887,7 +887,7 @@ ports from 23000–23999. A promotion re-points the endpoint and changes no app'
 
 **Which apps use the endpoints.** Only an app whose own deploy, attach or migration ran with the
 flag on and with every node holding a copy advertising `endpoints-gateway`
-(`workloads.endpoints_gateway`, migration 0132). Turning the flag on, upgrading an agent, a
+(`workloads.endpoints_gateway`, migration 0133). Turning the flag on, upgrading an agent, a
 neighbour deploying, or a replica being added, removed or promoted never moves another app or
 restarts it. Such an app has its read endpoint (`<P>_READ_URL`, pointing at the primary until a
 replica serves reads) from that deploy on, so replicas coming and going change nothing in its
@@ -902,7 +902,10 @@ yoal ha migrate attachments --apply               # move them now; each restarts
 ```
 
 REST: `GET /api/v1/ha/attachments/migrate` (dry run), `POST /api/v1/ha/attachments/migrate` with
-`{ "apply": true, "projects": ["shop"] }`. A `blocked` app names the node whose agent lacks the
+`{ "apply": true, "projects": ["shop"] }`. A platform operator can run the dry run; `--apply` needs
+a platform admin (the admin-only check other platform writes use, so by default a dashboard session:
+an API key gets `403`). An app the upgrade put on the gateway keeps exactly the variables it had,
+and gains its read URL on its own next deploy. A `blocked` app names the node whose agent lacks the
 gateway: update that agent (§4.1.2) and run it again. Each move is audited as
 `ha.migrate-attachments`.
 
@@ -939,14 +942,14 @@ before it expires (`yoal ha ca` shows the date; it is valid for 10 years). `yoal
 `yoal ha status` show the CA only while the gateway flag is on.
 
 1. `yoal ha ca`: note the active fingerprint, and that every node holds a live leaf.
-2. `yoal ha ca rotate` (platform admin; `POST /api/v1/ha/ca/rotate`). A new CA signs from now. The
-   old one becomes `previous` and stays in every node's trust bundle, so no endpoint loses mTLS.
-   Audited as `ha.ca.rotate`.
+2. `yoal ha ca rotate` (`POST /api/v1/ha/ca/rotate`; a platform admin, by default from a dashboard
+   session: an API key gets `403`). A new CA signs from now. The old one becomes `previous` and stays
+   in every node's trust bundle, so no endpoint loses mTLS. Audited as `ha.ca.rotate`.
 3. Each node moves to the new CA when it next renews, within 60 days. There is no command to force a
    node to renew early.
-4. Do not rotate again while `yoal ha ca` says nodes still hold leaves the previous CA signed: a
-   second rotation drops that CA from the bundle, and those nodes lose mTLS with every peer until
-   they renew.
+4. A second rotation is refused (`409`) while `yoal ha ca` says nodes still hold leaves the
+   previous CA signed: it would drop that CA from the bundle, and those nodes would lose mTLS with
+   every peer until they renew. Wait until the count is 0.
 
 **Turning the gateway off.** Set `YOAL_FEATURE_ENDPOINTS_GATEWAY=0` and restart the control plane.
 A container on another node than its database loses its URL until it is redeployed, which places it

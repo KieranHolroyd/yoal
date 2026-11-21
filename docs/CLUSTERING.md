@@ -1859,7 +1859,7 @@ at (review debt 2, 2026-11-21). An app reads through `_READ_URL` directly.
 **When an app gets its endpoints (HA-PLAN §9).** With `ENDPOINTS_GATEWAY` on, an app uses its stable
 endpoints (same-node primary, pooled and read) only once its own deploy, attach or `yoal ha migrate
 attachments` ran with every copy's node advertising `endpoints-gateway` (`workloads.endpoints_gateway`,
-migration 0132). A neighbour's deploy, an agent upgrade or a replica coming, going or being promoted
+migration 0133). A neighbour's deploy, an agent upgrade or a replica coming, going or being promoted
 moves no other app. Such an app's read endpoint exists from that deploy on, pointing at the primary
 until a replica serves reads, so replicas changing never change its environment; the endpoint's
 `version` bumps when its replica set changes (`service_endpoints.upstreams_key`), which tells the
