@@ -341,7 +341,7 @@ export function regionChecks(ctx: CoreContext, profile: HaProfile): HaCheck[] {
 }
 
 /** Region values stored anywhere, as evidence lines (nodes, standby regions, spreads). */
-function storedRegionValues(ctx: CoreContext): string[] {
+export function storedRegionValues(ctx: CoreContext): string[] {
 	const evidence: string[] = [];
 	if (ctx.cluster.get().replicas.spread === 'region') evidence.push('cluster replicas.spread is region');
 	for (const row of ctx.sqlite

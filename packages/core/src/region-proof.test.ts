@@ -276,4 +276,34 @@ describe('PROOF: database live-lease gate', () => {
 		await core.databaseMembers.tick(clock);
 		expect(Date.parse(leaseExpiry())).toBe(clock + 5_000);
 	});
+
+	test('a primary on a draining or pending node keeps its lease renewed (no promotion open)', async () => {
+		core.databases.create(admin, { name: 'orders', placement: a1.nodeId });
+		const orders = ids('orders');
+		opened.sqlite.run("UPDATE databases SET sync_lease_etag = 'x' WHERE id = ?", [orders]);
+		const leaseExpiry = () => JSON.parse(arbiter.objects.get(databaseLeaseKey(orders))!.body).expiresAt as string;
+		for (const status of ['draining', 'pending']) {
+			setLease(arbiter, orders, a1.nodeId, clock + 5_000);
+			opened.sqlite.run('UPDATE nodes SET status = ? WHERE id = ?', [status, a1.nodeId]);
+			await core.databaseMembers.tick(clock);
+			expect(Date.parse(leaseExpiry())).toBeGreaterThan(clock + 5_000);
+		}
+	});
+
+	test('with REGIONS off, an offline primary\'s lease is renewed as before regions existed', async () => {
+		core.databases.create(admin, { name: 'orders', placement: a1.nodeId });
+		const orders = ids('orders');
+		opened.sqlite.run("UPDATE databases SET sync_lease_etag = 'x' WHERE id = ?", [orders]);
+		const leaseExpiry = () => JSON.parse(arbiter.objects.get(databaseLeaseKey(orders))!.body).expiresAt as string;
+		const features = core.ctx.config.features as Record<string, boolean>;
+		features.REGIONS = false;
+		try {
+			setLease(arbiter, orders, a1.nodeId, clock + 5_000);
+			opened.sqlite.run("UPDATE nodes SET status = 'offline' WHERE id = ?", [a1.nodeId]);
+			await core.databaseMembers.tick(clock);
+			expect(Date.parse(leaseExpiry())).toBeGreaterThan(clock + 5_000);
+		} finally {
+			features.REGIONS = true;
+		}
+	});
 });

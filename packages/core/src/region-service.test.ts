@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDb } from '@yoal/db';
-import { DEFAULT_FEATURES, nodeCapabilities, type Heartbeat, type RegionPromotionPlan, type RegionPromotionView } from '@yoal/contracts';
+import { DEFAULT_FEATURES, REGIONS_DOWNGRADE_NOTE, nodeCapabilities, type Heartbeat, type RegionPromotionPlan, type RegionPromotionView } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { CoreError } from './errors.ts';
 import { createCore, type Core } from './index.ts';
@@ -474,6 +474,46 @@ describe('W13 rework', () => {
 		const rejected = results.find((result) => result.status === 'rejected') as PromiseRejectedResult;
 		expect(rejected.reason).toMatchObject({ status: 409 });
 		expect(control.promotions).toBe(1);
+	});
+
+	test('a control plane that is not primary never takes the runner lease (no write on a W9 standby)', async () => {
+		setupFleet();
+		const plan = (await runner.promote(admin, 'ukwest', {})) as RegionPromotionPlan;
+		await runner.promote(admin, 'ukwest', { confirm: 'ukwest', planHash: plan.planHash, acceptDataLoss: true, reason: 'drill' });
+		const lease = () => opened.sqlite.query<{ runner_id: string; attempt: number; lease_expires_at: number }, []>('SELECT runner_id, attempt, lease_expires_at FROM region_promotions').get();
+		const before = lease();
+		// b2's control plane is a standby of b1: its runner lease has expired, but it may not act.
+		const standby = new FakeControlPlane(b2.nodeId);
+		standby.holder = b1.nodeId;
+		standby.epoch = control.epoch;
+		clock += 61_000;
+		await service(standby, 'runner-standby').tick();
+		expect(lease()).toEqual(before!);
+	});
+
+	test('the downgrade note counts an app placement.spread: region, as the preflight does', async () => {
+		const regionsBefore = opened.sqlite.query<{ id: string; region: string }, []>('SELECT id, region FROM nodes').all();
+		const projectsBefore = opened.sqlite.query<{ id: string; placement_json: string | null; workload_json: string | null }, []>('SELECT id, placement_json, workload_json FROM projects').all();
+		try {
+			opened.sqlite.run("UPDATE nodes SET region = 'default'");
+			opened.sqlite.run('UPDATE projects SET placement_json = NULL, workload_json = NULL');
+			const project = await core.projects.create(admin, {
+				name: 'App spread',
+				slug: 'app-spread-region',
+				runtime: 'process',
+				placement: 'auto',
+				productionAccess: 'public',
+				previewAccess: 'platform',
+			});
+			expect(core.regions.view(admin).notes).toEqual([]);
+			opened.sqlite.run('UPDATE projects SET workload_json = ? WHERE id = ?', [JSON.stringify({ placement: { spread: 'region' } }), project.id]);
+			expect(core.regions.view(admin).notes).toEqual([REGIONS_DOWNGRADE_NOTE]);
+			opened.sqlite.run('UPDATE projects SET deleted_at = 1 WHERE id = ?', [project.id]);
+		} finally {
+			for (const row of regionsBefore) opened.sqlite.run('UPDATE nodes SET region = ? WHERE id = ?', [row.region, row.id]);
+			for (const row of projectsBefore)
+				opened.sqlite.run('UPDATE projects SET placement_json = ?, workload_json = ? WHERE id = ?', [row.placement_json, row.workload_json, row.id]);
+		}
 	});
 
 	test('the default runner id carries a per-boot nonce and is stable within a process', () => {

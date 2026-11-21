@@ -22,12 +22,13 @@ import {
 	type RegionView,
 	type RegionsView,
 } from '@yoal/contracts';
-import { databaseFailovers, databaseReplicas, databases, nodes, projects, regionPromotionSteps, regionPromotions } from '@yoal/db';
+import { databaseFailovers, databaseReplicas, databases, nodes, regionPromotionSteps, regionPromotions } from '@yoal/db';
 import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import { compareLsn } from './database-replicas.ts';
 import { buildSystemPrincipal } from './iam/system.ts';
+import { storedRegionValues } from './ha-preflight.ts';
 import { maxPlannedLag, pickStandbyNode, regionLeaseGate, regionPlanHash, regionSteeringSet, type StandbyCandidate } from './regions.ts';
 import { newId, parseJson } from './util.ts';
 
@@ -496,9 +497,10 @@ export class RegionService {
 		if (this.#running) return;
 		this.#running = true;
 		try {
-			if (!this.#takeLease(id)) return;
-			// A control plane that is not primary must not write the promotion (W9 fence).
+			// A control plane that is not primary must not write the promotion (W9 fence), and taking
+			// the runner lease is a write: check first, or a standby writes into its replica.
 			if (!this.ctx.controlPlane.mayActAsPrimary()) return;
+			if (!this.#takeLease(id)) return;
 			for (;;) {
 				const promotion = this.#requirePromotion(id);
 				if (promotion.finishedAt !== null) return;
@@ -764,16 +766,9 @@ export class RegionService {
 		return known(holder) ?? known(this.ctx.controlPlane.nodeId) ?? this.ctx.workloads.edgeNode();
 	}
 
+	/** Any region value stored anywhere: the same list the `regions` preflight warns about. */
 	#regionValuesStored(): boolean {
-		if (this.ctx.sqlite.query("SELECT 1 FROM nodes WHERE region <> 'default' LIMIT 1").get()) return true;
-		if (this.ctx.sqlite.query('SELECT 1 FROM databases WHERE standby_region IS NOT NULL AND deleted_at IS NULL LIMIT 1').get()) return true;
-		if (this.ctx.cluster.get().replicas.spread === 'region') return true;
-		return this.ctx.db
-			.select({ placement: projects.placementJson })
-			.from(projects)
-			.where(isNull(projects.deletedAt))
-			.all()
-			.some((row) => parseJson<{ spread?: string } | null>(row.placement, null)?.spread === 'region');
+		return storedRegionValues(this.ctx).length > 0;
 	}
 
 	#requireHa(principal: Principal): void {

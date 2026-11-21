@@ -1053,6 +1053,15 @@ Prerequisites: a control-plane standby enrolled in the surviving region (§ `yoa
 each database to move has a replica there (`yoal db update <db> --standby-region <region>`), and an
 online ingress node there. `yoal ha region` shows all three.
 
+**Warning: nothing stops two writable primaries across regions yet.** Until database nodes fence
+themselves (W11 self-fencing), a region A cut off from B and from the arbiter keeps running: its
+leases lapse (nobody renews them), the promotion goes ahead without break glass, and A's Postgres
+primaries keep accepting writes from any client that still reaches them. Those writes are lost when
+A's primaries are rebuilt as replicas. A lapsed lease proves only that A stopped renewing, not that
+A stopped. With no database arbiter there is no database lease at all, so the lease check proves
+nothing. **Stop or isolate A's database nodes (instances off, or their network cut at the provider)
+before promoting, or straight after if they cannot be reached first.**
+
 1. Decide. Region A is lost when its nodes, its control plane and its database primaries have been
    unreachable for longer than you will wait. Reads already serve from B if steering fell back.
 2. Point the CLI (or a dashboard session) at the control plane **in region B** and show the plan:
@@ -1064,9 +1073,10 @@ online ingress node there. `yoal ha region` shows all three.
    Needs a platform admin, by default a dashboard session (`POST /api/v1/ha/regions/<B>/promote`);
    audited as `ha.region.promote`. A moved generation returns 412: show the plan again.
 4. If A still holds a valid control-plane or database lease (holder is not the node being promoted,
-   not expired at the arbiter's clock), the promotion is refused (409). The control plane stops
-   renewing a lease on behalf of an offline primary, or of a database an open promotion moves, so a
-   lost region's leases lapse within one TTL. Wait, or, **only once A is known to be stopped**
+   not expired at the arbiter's clock), the promotion is refused (409). With REGIONS on, the control
+   plane stops renewing a lease on behalf of a primary whose node is `offline` (a draining or pending
+   node keeps its renewal), or of a database an open promotion moves, so a lost region's leases lapse
+   within one TTL. A lapsed lease is not proof A is stopped (see the warning above). Wait, or, **only once A is known to be stopped**
    (instances off, or its network cut at the provider), add `--break-glass`. It is stored on the
    record (`region_promotions.break_glass`, migration 0136) and in the audit row. Each database step
    re-checks its lease at its planned generation on whichever runner reaches it, and stops the run if
@@ -1087,7 +1097,8 @@ online ingress node there. `yoal ha region` shows all three.
    (`attempt` increments); each step is idempotent at its fenced generation.
 8. After: point DNS or balancers that Yoal does not drive at B's ingress (the steering step's
    message lists them for `direct`); when A returns, do not re-add it as primary. Its old database
-   primaries are fenced by generation; rebuild them as replicas (`yoal db replicas add`).
+   primaries are not stopped by Yoal and may have accepted writes B never saw: keep them stopped or
+   isolated, then rebuild them as replicas (`yoal db replicas add`).
 
 ## 4. Upgrade
 

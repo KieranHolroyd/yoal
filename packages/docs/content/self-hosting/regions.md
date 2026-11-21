@@ -98,7 +98,12 @@ yoal ha region promote ukwest --confirm ukwest --plan-hash <hash> \
 
 If any generation moved since the plan, the hash no longer matches and the promotion is refused: show the plan again.
 
-A lease is still held when it names a node other than the one being promoted and has not expired by the arbiter's clock: the old primary may still be serving writes. While the old region holds its control-plane lease or any database lease, the promotion is refused. When a region is really lost its leases expire within seconds, because nothing renews them; Yoal also stops renewing a lease on behalf of a primary whose node is offline or whose database a promotion is moving. Wait for the leases to expire, or add `--break-glass` once you know the old region is stopped. Break glass is stored on the promotion and recorded in the audit log.
+A lease is still held when it names a node other than the one being promoted and has not expired by the arbiter's clock: the old primary may still be serving writes. While the old region holds its control-plane lease or any database lease, the promotion is refused. Yoal stops renewing a lease on behalf of a primary whose node is offline or whose database a promotion is moving, so a lost region's leases lapse within one lease period. Wait for them to lapse, or add `--break-glass` once you know the old region is stopped. Break glass is stored on the promotion and recorded in the audit log.
+
+> [!WARNING]
+> An expired lease does not mean the old region is stopped. Yoal cannot yet stop an old database primary that is cut off from the rest of the fleet, so two primaries can accept writes at once. If region `uksouth` loses its link to `ukwest` and to the arbiter but keeps running, its leases lapse, the promotion goes ahead without break glass, and the old Postgres primaries in `uksouth` keep accepting writes from anything that can still reach them. Those writes are lost when you rebuild the old primaries. Stop or isolate the old region's database nodes (power them off, or cut their network at the provider) before you promote, or straight after if you cannot reach them first.
+>
+> Without a database arbiter there is no database lease at all, so the lease check proves nothing about the old region.
 
 Each database is checked again when its turn comes, whichever control plane runs it. If its old primary holds a valid lease again, the promotion stops at that database and promotes nothing more, unless you broke glass. Two other things are reported in the plan on their own lines:
 

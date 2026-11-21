@@ -1811,10 +1811,11 @@ export class DatabaseMemberService {
 		// Review blocker 9: once every data node advertises the real member machine, the primary's
 		// node renews its own lease; the control plane must not race it.
 		if (this.#nodeRenewalAvailable(database)) return false;
-		// HA-PLAN H26 (W13 review): renewing on the holder's behalf is only honest while its node is
-		// online. A silent holder's lease must lapse, and so must the lease of a database an open
-		// region promotion is moving, or the promotion's live-lease gate would refuse for ever.
-		if (this.#node(database.nodeId)?.status !== 'online') return false;
+		// HA-PLAN H26 (W13 review): with regions on, an offline holder's lease must lapse, and so must
+		// the lease of a database an open region promotion is moving, or the promotion's live-lease
+		// gate would refuse for ever. A draining or pending node still runs its primary, and with
+		// regions off nothing gates on the lease lapsing, so both keep the W10 renewal.
+		if (featureEnabled(this.ctx.config, 'REGIONS') && this.#node(database.nodeId)?.status === 'offline') return false;
 		if (this.#regionPromotionMoving(database.id)) return false;
 		const store = this.#store();
 		if (!store) return false;
