@@ -215,6 +215,83 @@ describe('release command gates the rollout (I16, H25)', () => {
 	});
 });
 
+describe('a deploy on top of a held release never serves it (H25)', () => {
+	const tag = (ids: Record<string, string>) => (list: { deploymentId: string }[]) =>
+		list.map((entry) => Object.entries(ids).find(([, id]) => id === entry.deploymentId)?.[0] ?? entry.deploymentId);
+
+	for (const replicas of [1, 2]) {
+		test(`replicas=${replicas}: deploying C while B's command runs keeps every node on A`, async () => {
+			const f = fleet(['a', 'b']);
+			const A = (await f.app('web', { replicas })).deploymentId;
+			await f.settle('web');
+			f.core.workloads.setSpec(principal, f.project('web'), { ...baseSpec, replicas, release: { command: ['bin/migrate'] } });
+			const B = (await f.deploy('web', '2')).id;
+			const [runB] = f.run(B);
+			f.core.releaseCommands.recordResults(runB!.nodeId!, [{ runId: runB!.id, releaseId: B, status: 'running', startedAt: f.clock.now }]);
+			const C = (await f.deploy('web', '3')).id;
+			const names = tag({ A, B, C });
+
+			const rendered = [...names(await f.desired('a', 'web')), ...names(await f.desired('b', 'web'))];
+			expect(rendered).toHaveLength(replicas);
+			expect(rendered.every((name) => name === 'A')).toBe(true);
+			expect(f.row('web').from).toBe(A);
+
+			// B's migration fails, then C's: the app goes back to A, the last release that ran.
+			f.core.releaseCommands.recordResults(runB!.nodeId!, [{ runId: runB!.id, releaseId: B, status: 'failed', exitCode: 1 }]);
+			f.core.releaseCommands.tick(f.clock.now);
+			const [runC] = f.run(C);
+			expect(runC?.nodeId).not.toBeNull();
+			f.core.releaseCommands.recordResults(runC!.nodeId!, [{ runId: runC!.id, releaseId: C, status: 'failed', exitCode: 1 }]);
+			f.core.workloads.rolloutTick(f.clock.now);
+			expect(f.row('web').deploymentId).toBe(A);
+			const after = [...names(await f.desired('a', 'web')), ...names(await f.desired('b', 'web'))];
+			expect(after.every((name) => name === 'A')).toBe(true);
+		});
+	}
+
+	test('a second deploy on a held first deploy still renders nothing', async () => {
+		const f = fleet(['a', 'b']);
+		await f.core.projects.create(principal, { name: 'web', slug: 'web', runtime: 'process', placement: 'auto', productionAccess: 'public', previewAccess: 'platform' });
+		f.core.workloads.setSpec(principal, f.project('web'), { ...baseSpec, release: { command: ['bin/migrate'] } });
+		const B = (await f.deploy('web', '1')).id;
+		const [runB] = f.run(B);
+		f.core.releaseCommands.recordResults(runB!.nodeId!, [{ runId: runB!.id, releaseId: B, status: 'running', startedAt: f.clock.now }]);
+		await f.deploy('web', '2');
+		expect(await f.desired('a', 'web')).toEqual([]);
+		expect(await f.desired('b', 'web')).toEqual([]);
+		expect(f.row('web').from).toBeNull();
+	});
+
+	test('a gated first deploy is a rollout, so a failed command is acted on', async () => {
+		const f = fleet(['a']);
+		await f.core.projects.create(principal, { name: 'web', slug: 'web', runtime: 'process', placement: 'auto', productionAccess: 'public', previewAccess: 'platform' });
+		f.core.workloads.setSpec(principal, f.project('web'), { ...baseSpec, release: { command: ['bin/migrate'] } });
+		const B = (await f.deploy('web', '1')).id;
+		expect(f.row('web').status).toBe('rolling');
+		const [runB] = f.run(B);
+		f.core.releaseCommands.recordResults(runB!.nodeId!, [{ runId: runB!.id, releaseId: B, status: 'failed', exitCode: 2 }]);
+		const alerts = f.core.workloads.rolloutTick(f.clock.now);
+		expect(alerts.some((alert) => alert.detail.includes('release command'))).toBe(true);
+		expect(f.row('web').status).toBe('paused');
+	});
+
+	test('a pruned rollout pointer falls back to the lowest copy that runs an old release, never a fresh one', async () => {
+		const f = fleet(['a', 'b']);
+		const A = (await f.app('web', { replicas: 2 })).deploymentId;
+		await f.settle('web');
+		f.core.workloads.setSpec(principal, f.project('web'), { ...baseSpec, replicas: 2, release: { command: ['bin/migrate'] } });
+		const B = (await f.deploy('web', '2')).id;
+		// The pointer is gone, and copy r0 was re-placed (no deployment of its own yet). Copy r1
+		// still names the release that runs.
+		f.sqlite.run('UPDATE workloads SET rollout_from_deployment_id = NULL');
+		f.sqlite.run('UPDATE workload_replicas SET deployment_id = NULL WHERE replica_index = 0');
+		const rendered = [...(await f.desired('a', 'web')), ...(await f.desired('b', 'web'))];
+		expect(rendered).toHaveLength(2);
+		expect(rendered.every((entry) => entry.deploymentId === A)).toBe(true);
+		expect(rendered.some((entry) => entry.deploymentId === B)).toBe(false);
+	});
+});
+
 describe('canary judged on the edge counters (H25)', () => {
 	const canarySpec = { replicas: 3, rollout: { canary: 1, soakSeconds: 10 } };
 	/** A v1 release that is settled, then v2 with the canary spec: an update is what canaries. */

@@ -3,7 +3,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDb } from '@yoal/db';
-import { DEFAULT_FEATURES, type WorkloadStatus } from '@yoal/contracts';
+import { DEFAULT_FEATURES, workloadReplicaId, type WorkloadStatus } from '@yoal/contracts';
 import { buildPrincipal } from './orgs.ts';
 import { createCore } from './index.ts';
 import { LocalObjectStore } from './object-store.ts';
@@ -143,6 +143,49 @@ describe('spread replicas on every node', () => {
 		expect(
 			f.core.workloads.runsOnNode({ id: workload.id, nodeId: workload.nodeId, movingFromNodeId: null }, 1, f.node.edge!.id),
 		).toBe(false);
+	});
+});
+
+describe('copy readiness reaches the edge (M1)', () => {
+	test('a re-placed copy that turns running is in the edge upstreams with no unrelated change', async () => {
+		const f = fleet(['edge', 'a', 'b', 'c']);
+		const workload = await f.app('web', { replicas: 2 });
+		const copies = f.sqlite
+			.query<{ nodeId: string; replicaIndex: number }, []>('SELECT node_id AS nodeId, replica_index AS replicaIndex FROM workload_replicas ORDER BY replica_index')
+			.all();
+		const copyId = (index: number) => workloadReplicaId(workload.id, index);
+		const report = (index: number, status: WorkloadStatus) => [{ id: copyId(index), status, restarts: 0 }];
+		for (const copy of copies) f.beat(f.nameOf(copy.nodeId), report(copy.replicaIndex, 'running'));
+		const spare = ['a', 'b', 'c'].find((name) => !copies.some((copy) => f.nameOf(copy.nodeId) === name))!;
+		const kept = f.nameOf(copies[0]!.nodeId);
+
+		// Copy r1's node died and the copy was re-placed on the spare node; it has not come up yet.
+		f.sqlite.run("UPDATE workload_replicas SET node_id = ?, status = 'pending', applied_version = NULL WHERE replica_index = 1", [f.node[spare]!.id]);
+		f.core.projects.bump();
+		const before = await f.desired('edge');
+		expect((await f.routeFor('edge', 'web'))?.upstreams).toEqual([`http://${kept}.internal:8080`]);
+
+		// Starting is not serving: the edge's list is unchanged, so no node has to re-pull.
+		f.beat(spare, report(1, 'starting'));
+		expect((await f.desired('edge')).version).toBe(before.version);
+
+		// Running is: a new version, and the copy is in the upstreams without any other change.
+		f.beat(spare, report(1, 'running'));
+		const after = await f.desired('edge');
+		expect(after.version).toBeGreaterThan(before.version);
+		expect((await f.routeFor('edge', 'web'))?.upstreams).toEqual([`http://${kept}.internal:8080`, `http://${spare}.internal:8080`]);
+
+		// A repeat report of the same status is not a version either.
+		f.beat(spare, report(1, 'running'));
+		expect((await f.desired('edge')).version).toBe(after.version);
+	});
+
+	test("the workload's own status steps are not a fleet-wide version", async () => {
+		const f = fleet(['a']);
+		const workload = await f.app('solo');
+		const before = (await f.desired('a')).version;
+		for (const status of ['starting', 'running', 'failed', 'running'] as const) f.beat('a', [{ id: workload.id, status, restarts: 0 }]);
+		expect((await f.desired('a')).version).toBe(before);
 	});
 });
 

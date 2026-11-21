@@ -467,7 +467,10 @@ const RELEASE_STOP_GRACE_MS = 30_000;
  *   cannot start it later.
  * - **At most once.** Every `runId` this process has started or refused is persisted before the
  *   helper is asked to start it. A replayed desired state, an agent restart or a partition that
- *   swallows a heartbeat never runs it a second time.
+ *   swallows a heartbeat never runs it a second time. A state file that cannot be read is moved to
+ *   `<statePath>.corrupt` and, while that file exists, nothing new starts: each task is reconciled
+ *   with the helper (whose unit id derives from the run id) and adopted, or reported `timeout`
+ *   when its fate is unknown. Never `failed`, which would free the lease for a second run.
  * - **Self-kill.** The run's timeout is enforced here, not by the control plane: with no contact
  *   for the whole run, the helper unit is stopped (then SIGKILLed after the grace).
  * - **Lease loss.** A run whose task disappears from desired state is stopped rather than being
@@ -486,8 +489,14 @@ export class ReleaseCommandRunner {
 	private readonly seen = new Set<string>();
 	private readonly runs = new Map<string, HeldReleaseCommand>();
 	private loaded = false;
-	/** The state file exists but cannot be read: refuse to start anything (I16). */
+	/**
+	 * The state file existed but could not be read (I16). It is moved aside to `<statePath>.corrupt`
+	 * and this node refuses to start any new release command while that file exists. Tasks it is
+	 * handed are reconciled with the helper instead (see `adopt`).
+	 */
 	private corrupt = false;
+	/** False while a corrupt state file could not be moved aside: never write over it. */
+	private writable = true;
 	private dirty = false;
 
 	constructor(private readonly options: ReleaseCommandRunnerOptions) {
@@ -528,36 +537,6 @@ export class ReleaseCommandRunner {
 		const known = state !== null;
 		const tasks = state?.releaseCommands ?? [];
 		const live = new Set(tasks.map((task) => task.runId));
-		// A state file we cannot read may already have run this id. Refuse to start, and report each
-		// task failed, rather than recomputing "never seen" and running a migration twice.
-		if (this.corrupt) {
-			for (const task of tasks) {
-				if (this.seen.has(task.runId)) continue;
-				this.seen.add(task.runId);
-				this.runs.set(task.runId, {
-					runId: task.runId,
-					releaseId: task.releaseId,
-					workloadId: task.workloadId,
-					helperRunId: releaseHelperRunId(task.runId),
-					timeoutSeconds: task.timeoutSeconds,
-					startedAt: null,
-					stop: null,
-					result: {
-						runId: task.runId,
-						releaseId: task.releaseId,
-						status: 'failed',
-						exitCode: null,
-						startedAt: null,
-						finishedAt: this.now(),
-						error: 'This node’s release-command state is unreadable, so it will not risk running a command twice. Remove the state file to allow new runs.',
-					},
-				});
-				this.dirty = true;
-			}
-			if (this.dirty) await this.persist();
-			return;
-		}
-
 		// A finished result is kept until the control plane removes its task (proof it was applied).
 		if (known) for (const run of [...this.runs.values()]) {
 			if (run.result && run.result.status !== 'running' && !live.has(run.runId)) {
@@ -577,7 +556,10 @@ export class ReleaseCommandRunner {
 		for (const task of tasks) {
 			if (signal.aborted) break;
 			if (this.seen.has(task.runId)) continue;
-			await this.start(task, state, signal);
+			// A state file we could not read may already have started this id. Never start it:
+			// ask the helper, whose unit id is derived from the run id, what became of it.
+			if (this.corrupt) await this.adopt(task);
+			else await this.start(task, state, signal);
 		}
 		for (const run of [...this.runs.values()]) {
 			if (!run.result || run.result.status === 'running') await this.watch(run, signal);
@@ -752,6 +734,63 @@ export class ReleaseCommandRunner {
 		await this.persist();
 	}
 
+	/**
+	 * Corrupt state (I16): this node may have started `task` before its record was lost. The
+	 * helper's unit id is `releaseHelperRunId(runId)`, so its status is the truth:
+	 * - running → adopt it and watch it like any held run (timeout, lease loss, result);
+	 * - finished → adopt the outcome the helper recorded;
+	 * - gone → it may have run and been cleaned up: report `timeout` (outcome unknown), which the
+	 *   control plane never retries automatically. Never `failed`, which frees the lease for a
+	 *   retry while the first run might still be live;
+	 * - helper unreachable → decide nothing; ask again next round. A silent node's lease expires
+	 *   as `timeout` on the control plane anyway.
+	 */
+	private async adopt(task: ReleaseCommandTask): Promise<void> {
+		const helperRunId = releaseHelperRunId(task.runId);
+		let status: HelperJobStatus;
+		try {
+			status = await this.options.helper.jobStatus(helperRunId, task.timeoutSeconds);
+		} catch (error) {
+			this.log('warn', `Release command ${task.runId}: cannot reconcile with the helper (${errorText(error)}); will retry`);
+			return;
+		}
+		this.seen.add(task.runId);
+		this.dirty = true;
+		const held: HeldReleaseCommand = {
+			runId: task.runId,
+			releaseId: task.releaseId,
+			workloadId: task.workloadId,
+			helperRunId,
+			timeoutSeconds: task.timeoutSeconds,
+			startedAt: status.startedAt ?? (status.outcome === 'running' ? this.now() : null),
+			stop: null,
+			result: null,
+		};
+		this.runs.set(task.runId, held);
+		if (status.outcome === 'running') {
+			held.result = { runId: task.runId, releaseId: task.releaseId, status: 'running', exitCode: null, startedAt: held.startedAt, finishedAt: null, error: null };
+			this.log('info', `Release command ${task.runId}: adopted a run still going in the helper`);
+		} else if (status.outcome === 'not-found') {
+			held.result = {
+				runId: task.runId,
+				releaseId: task.releaseId,
+				status: 'timeout',
+				exitCode: null,
+				startedAt: null,
+				finishedAt: this.now(),
+				error: `This node’s release-command state was unreadable and the helper has no record of the run, so whether it ran is unknown. It was not started. The state file was moved to ${this.corruptPath()}; remove it to allow new runs.`,
+			};
+		} else {
+			held.result = this.resultFor(held, status);
+			await this.options.helper.removeJob(helperRunId).catch((error: unknown) => this.log('warn', `Release command ${task.runId}: cleanup failed: ${errorText(error)}`));
+		}
+		await this.persist();
+	}
+
+	private corruptPath(): string {
+		return `${this.options.statePath ?? 'release-commands-state.json'}.corrupt`;
+	}
+
 	private async watch(run: HeldReleaseCommand, signal: AbortSignal): Promise<void> {
 		let status: HelperJobStatus;
 		try {
@@ -824,20 +863,38 @@ export class ReleaseCommandRunner {
 		if (this.loaded) return;
 		this.loaded = true;
 		if (!this.options.statePath) return;
+		// A state file found corrupt earlier stays a refusal until a person removes it: an agent
+		// restart must not forget what the lost file may have recorded (I16).
+		const aside = await fs.stat(this.corruptPath()).then(
+			() => true,
+			(error: NodeJS.ErrnoException) => error?.code !== 'ENOENT',
+		);
+		if (aside) {
+			this.corrupt = true;
+			this.log('error', `Release-command state was found corrupt earlier (${this.corruptPath()}); refusing to start any release command until that file is removed`);
+		}
 		let text: string;
 		try {
 			text = await fs.readFile(this.options.statePath, 'utf8');
 		} catch (error) {
-			if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') {
-				this.corrupt = true;
-				this.log('error', `Release-command state is unreadable (${errorText(error)}); refusing to run any release command until it is removed`);
-			}
+			if ((error as NodeJS.ErrnoException)?.code !== 'ENOENT') await this.quarantine(errorText(error));
 			return;
 		}
 		try {
 			const parsed = JSON.parse(text) as Partial<ReleaseCommandsStateFile>;
-			for (const id of parsed.seen ?? []) if (typeof id === 'string') this.seen.add(id);
-			for (const run of parsed.runs ?? []) {
+			// Valid JSON in the wrong shape is as unknowable as a torn write: an empty `seen` set
+			// would let a replayed run start again (I16), so it is quarantined too.
+			if (
+				parsed === null ||
+				typeof parsed !== 'object' ||
+				Array.isArray(parsed) ||
+				parsed.version !== 1 ||
+				!Array.isArray(parsed.seen) ||
+				!Array.isArray(parsed.runs)
+			)
+				throw new Error('release-command state has the wrong shape');
+			for (const id of parsed.seen) if (typeof id === 'string') this.seen.add(id);
+			for (const run of parsed.runs) {
 				if (typeof run?.runId !== 'string' || typeof run.releaseId !== 'string' || typeof run.helperRunId !== 'string') continue;
 				this.runs.set(run.runId, {
 					runId: run.runId,
@@ -852,15 +909,33 @@ export class ReleaseCommandRunner {
 			}
 			if (this.runs.size > 0) this.log('info', `Resuming ${this.runs.size} release-command run(s) from ${this.options.statePath}`);
 		} catch (error) {
-			this.corrupt = true;
-			this.log('error', `Release-command state is invalid (${errorText(error)}); refusing to run any release command until it is removed`);
+			this.seen.clear();
+			this.runs.clear();
+			await this.quarantine(errorText(error));
+		}
+	}
+
+	/**
+	 * Move an unreadable state file aside, never overwrite it: it is evidence of what this node
+	 * may have run, and its presence keeps the refusal across restarts. If it cannot be moved,
+	 * nothing is written over it either.
+	 */
+	private async quarantine(reason: string): Promise<void> {
+		this.corrupt = true;
+		const path = this.options.statePath!;
+		try {
+			await fs.rename(path, this.corruptPath());
+			this.log('error', `Release-command state is unreadable (${reason}); moved it to ${this.corruptPath()}. No release command will start on this node until that file is removed.`);
+		} catch (error) {
+			this.writable = false;
+			this.log('error', `Release-command state is unreadable (${reason}) and could not be moved aside (${errorText(error)}). No release command will start on this node until ${path} is removed.`);
 		}
 	}
 
 	private async persist(): Promise<void> {
 		this.dirty = false;
 		const path = this.options.statePath;
-		if (!path) return;
+		if (!path || !this.writable) return;
 		const body: ReleaseCommandsStateFile = {
 			version: 1,
 			seen: [...this.seen].sort(),

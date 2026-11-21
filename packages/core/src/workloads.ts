@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { deploymentCanaries, deployments, nodes, projects, releases, workloadReplicas, workloads } from '@yoal/db';
 import {
 	RUN_LEASES_CAPABILITY,
@@ -628,6 +628,11 @@ export class WorkloadService {
 			this.ctx.db.delete(workloadReplicas).where(eq(workloadReplicas.workloadId, id)).run();
 			priorRows = [];
 		}
+		// A release still held behind its release command never ran (H25): the copies run what its
+		// rollout came from, or nothing on a first deploy. A deploy on top must hold that, never
+		// promote the held release to "what runs", whose migration may still be going or failed.
+		if (existing && running === existing.deploymentId && this.awaitingRelease(existing, this.specOf(project, existing)))
+			running = existing.rolloutFromDeploymentId;
 		// A promote or rollback keeps the copies where they are; the workload's node is copy 0's.
 		const keptFirst = options.keepSpread && !resolved.replicas ? [...priorRows].sort((a, b) => a.replicaIndex - b.replicaIndex)[0] : undefined;
 		const values = {
@@ -714,6 +719,12 @@ export class WorkloadService {
 				.run();
 		else if (!options.holdCopies && changed && total === 0 && existing && scheduling.rollingDeploys && scheduling.surgeDeploys && !releaseSpec)
 			this.startSurge(project, { ...existing, ...values, id }, resolved.spec, running!, existing.status === 'running', now);
+		// Moving off a release (deploy, promote or rollback) cancels its unstarted command, whether or
+		// not the new release has one and whether or not the copies change: a rollback onto the
+		// release a held one came from leaves `changed` false, and its migration must still never run
+		// after the fact (I16/H25).
+		if (existing && existing.deploymentId !== deploymentId && !options.holdCopies)
+			this.ctx.releaseCommands.cancelSuperseded(id, deploymentId);
 		// Queue the release command (idempotent: the I16 index is the lease). A superseded deploy's
 		// unstarted attempt is cancelled so its migrations never run after the fact. A first deploy
 		// has no previous release to hold, so its copies are withheld by desired state instead.
@@ -1044,14 +1055,7 @@ export class WorkloadService {
 			// Normally the rollout records the release the copies still run. If that pointer was
 			// pruned, fall back to the deployment on the copies themselves, so a gated rollout never
 			// blanks an app that has something running.
-			const runningCopy = this.ctx.db
-				.select({ deploymentId: workloadReplicas.deploymentId })
-				.from(workloadReplicas)
-				.where(eq(workloadReplicas.workloadId, workload.id))
-				.get()?.deploymentId;
-			const held = awaitingRelease
-				? this.copyRelease(workload.rolloutFromDeploymentId) ?? this.copyRelease(runningCopy ?? null)
-				: null;
+			const held = awaitingRelease ? this.copyRelease(workload.rolloutFromDeploymentId) ?? this.heldCopyRelease(workload) : null;
 			// Nothing to hold and nothing running: a first deploy awaits its command with no copies.
 			if (awaitingRelease && !held) return [];
 			const released = held?.deployment ?? current;
@@ -1157,6 +1161,26 @@ export class WorkloadService {
 				};
 			});
 		});
+	}
+
+	/**
+	 * The release a gated workload's copies still run when the rollout's pointer is gone: the
+	 * lowest-indexed copy that names an old, still-runnable deployment. Never a copy with no
+	 * deployment of its own (that would be the held release) and never the held release itself.
+	 */
+	private heldCopyRelease(workload: WorkloadRow): ReturnType<WorkloadService['copyRelease']> {
+		const rows = this.ctx.db
+			.select({ deploymentId: workloadReplicas.deploymentId })
+			.from(workloadReplicas)
+			.where(and(eq(workloadReplicas.workloadId, workload.id), isNotNull(workloadReplicas.deploymentId)))
+			.orderBy(workloadReplicas.replicaIndex)
+			.all();
+		for (const row of rows) {
+			if (row.deploymentId === workload.deploymentId) continue;
+			const release = this.copyRelease(row.deploymentId);
+			if (release) return release;
+		}
+		return null;
 	}
 
 	/**
@@ -1918,10 +1942,10 @@ export class WorkloadService {
 			// drops its copy on the next pull.
 			const arrived = status === 'running' && row.movingFromNodeId !== null;
 			if (status === row.status && !arrived) continue;
-			// A copy becoming `running` adds it to every ingress's upstream list, and one leaving
-			// removes it: either must be a new desired-state version, or the edge keeps the old list
-			// until some unrelated change (the M1 kill-node edge bug).
-			this.ctx.projects.bump(row.orgId);
+			// Only a finished move changes what desired state renders (the route follows the copy).
+			// The workload's own status is never rendered, so a status step or a health flap is not a
+			// new version for every node; copy readiness, which the edge does render, bumps below.
+			if (arrived) this.ctx.projects.bump(row.orgId);
 			this.ctx.db
 				.update(workloads)
 				.set({
@@ -1980,9 +2004,12 @@ export class WorkloadService {
 				.set({ status, ...(confirmed ? { appliedVersion: null } : {}), updatedAt: now })
 				.where(eq(workloadReplicas.id, row.id))
 				.run();
-			// The edge's upstream list is built from copy status; a copy becoming running (or
-			// failing) must re-render desired state now, not on the next unrelated change.
-			this.ctx.projects.bump();
+			// The edge's upstream list holds exactly the copies that are running with nothing pending
+			// (desired-state/context.ts). When that flips, every ingress must re-render now, not on the
+			// next unrelated change (the M1 kill-node edge bug). Any other status step is not a version.
+			const wasReady = row.status === 'running' && row.appliedVersion === null;
+			const isReady = status === 'running' && (confirmed || row.appliedVersion === null);
+			if (wasReady !== isReady) this.ctx.projects.bump();
 		}
 	}
 

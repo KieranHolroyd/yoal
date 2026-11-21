@@ -284,6 +284,51 @@ describe('release-command lease (I16)', () => {
 		close();
 	});
 
+	test('a run waiting behind another of the same app is not failed for waiting, and its clock restarts when that one ends', async () => {
+		const { core, close, deployment, node, schedule } = await fixture();
+		const first = schedule(deployment({}));
+		const secondRelease = deployment({});
+		const second = schedule(secondRelease);
+		expect(second.nodeId).toBeNull();
+		core.releaseCommands.recordResults(node, [result(first.id, first.releaseId, 'running')]);
+
+		// Well past the unleased limit (the 300 s rollout timeout), but only because it is in line.
+		clock += 11 * 60_000;
+		core.releaseCommands.tick(clock);
+		expect(core.releaseCommands.gate(secondRelease).state).toBe('pending');
+
+		// The first run ends just as the node drops out: one missed lease must not fail the next run.
+		core.ctx.db.update(nodes).set({ status: 'offline' }).where(eq(nodes.id, node)).run();
+		core.releaseCommands.recordResults(node, [result(first.id, first.releaseId, 'succeeded', { exitCode: 0 })]);
+		clock += 1;
+		core.releaseCommands.tick(clock);
+		expect(core.releaseCommands.gate(secondRelease).state).toBe('pending');
+		// It gets its own full limit from that moment, then gives up.
+		clock += 5 * 60_000;
+		core.releaseCommands.tick(clock);
+		expect(core.releaseCommands.gate(secondRelease).state).toBe('failed');
+		close();
+	});
+
+	test('the lease write itself refuses a second leased run for one app, whatever a stale read saw', async () => {
+		const { core, close, deployment, node, schedule } = await fixture();
+		const first = schedule(deployment({}));
+		const b = schedule(deployment({}));
+		const c = schedule(deployment({}));
+		core.releaseCommands.recordResults(node, [result(first.id, first.releaseId, 'failed', { exitCode: 1 })]);
+		// A second writer (a promoted standby) leases c between this writer's busy check and its UPDATE.
+		const scheduler = core.releaseCommands as unknown as { pickNode: (workloadId: string, now: number) => string | null; lease: (row: unknown, now: number) => void };
+		const pick = scheduler.pickNode.bind(scheduler);
+		scheduler.pickNode = (workloadId, now) => {
+			core.ctx.db.update(releaseCommandRuns).set({ nodeId: node, startBy: now + RELEASE_START_WINDOW_MS }).where(eq(releaseCommandRuns.id, c.id)).run();
+			return pick(workloadId, now);
+		};
+		scheduler.lease(core.ctx.db.select().from(releaseCommandRuns).where(eq(releaseCommandRuns.id, b.id)).get(), clock);
+		const leased = core.ctx.db.select().from(releaseCommandRuns).all().filter((row) => row.nodeId !== null && (row.status === 'queued' || row.status === 'running'));
+		expect(leased.map((row) => row.id)).toEqual([c.id]);
+		close();
+	});
+
 	test('activation resolves the new release environment, not the running spec', async () => {
 		const { core, close, deployment, node, schedule } = await fixture();
 		const releaseId = deployment({ RELEASE_VAR: 'new' });

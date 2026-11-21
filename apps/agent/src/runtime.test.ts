@@ -222,7 +222,7 @@ interface Fixture {
 	errors: string[];
 }
 
-function fixture(options: { healthy?: boolean; now?: () => number } = {}): Fixture {
+function fixture(options: { healthy?: boolean; now?: () => number; retryDelayMs?: number } = {}): Fixture {
 	const helper = new FakeHelper();
 	const releases = new FakeReleases();
 	const activations = new Map<string, WorkloadActivation>();
@@ -243,6 +243,7 @@ function fixture(options: { healthy?: boolean; now?: () => number } = {}): Fixtu
 		probeHealth: async () => health.healthy,
 		sleep: async () => undefined,
 		...(options.now ? { now: options.now } : {}),
+		...(options.retryDelayMs !== undefined ? { retryDelayMs: options.retryDelayMs } : {}),
 		log: (level, message) => {
 			if (level === 'error') errors.push(message);
 		},
@@ -344,6 +345,25 @@ describe('WorkloadRuntime.converge', () => {
 		clock += 1;
 		await f.runtime.converge(state([], 2));
 		expect(f.helper.removed).toEqual(['app']);
+	});
+
+	test('a drain after an old, expired failure backoff waits for its deadline instead of retrying every loop', async () => {
+		const f = fixture({ retryDelayMs: 1 });
+		f.activations.set('app', activationFor('app'));
+		const desired = workload('app', { drainSeconds: 10 });
+		// A failure long ago leaves a retry deadline that has passed...
+		f.helper.failSlice = true;
+		await f.runtime.converge(state([desired]));
+		await Bun.sleep(5);
+		// ...then a clean converge, then the copy leaves desired state and starts draining.
+		f.helper.failSlice = false;
+		await f.runtime.converge(state([desired], 2));
+		expect(f.runtime.needsRetry()).toBe(false);
+		await f.runtime.converge(state([], 3));
+		expect(f.helper.removed).toEqual([]);
+		// The stale deadline must not win: no retry until the drain ends.
+		expect(f.runtime.needsRetry()).toBe(false);
+		expect(f.runtime.needsRetry(Date.now() + 10_001)).toBe(true);
 	});
 
 	test('a stop that leaves and comes back during its drain is not stopped', async () => {

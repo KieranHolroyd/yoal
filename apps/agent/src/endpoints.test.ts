@@ -260,9 +260,10 @@ describe('ServiceForwarder gateway address (HA-PLAN H24)', () => {
 		const target = await echoServer();
 		const port = await freePort();
 		const logs: string[] = [];
-		const forwarder = new ServiceForwarder({ log: (_level, message) => logs.push(message) });
+		// This node's bridge gateway, never configured on a test host: the bind fails like a bridge
+		// that is not up yet.
+		const forwarder = new ServiceForwarder({ log: (_level, message) => logs.push(message), bridgeGateway: '10.99.99.99' });
 		forwarders.push(forwarder);
-		// A private address never configured on a test host: the bind fails like a bridge not up yet.
 		const endpoint = plainEndpoint('sep_g2', port, target, { gatewayAddress: '10.99.99.99' });
 		forwarder.converge([endpoint], [], { gatewayAllowed: true });
 		forwarder.converge([endpoint], [], { gatewayAllowed: true });
@@ -271,6 +272,24 @@ describe('ServiceForwarder gateway address (HA-PLAN H24)', () => {
 		expect(await readOnce(port, 'still')).toBe('still');
 		// Logged once per failure, not once per converge.
 		expect(logs.filter((line) => line.includes('10.99.99.99')).length).toBe(1);
+	});
+
+	test('an address that is not this node’s bridge gateway is refused: loopback only, logged once', async () => {
+		const target = await echoServer();
+		const logs: string[] = [];
+		const forwarder = new ServiceForwarder({ log: (_level, message) => logs.push(message) });
+		forwarders.push(forwarder);
+		// The overlay, a private underlay, another private range and a public address.
+		const refused = ['10.47.0.5', '192.168.0.9', '172.16.4.1', '203.0.113.7'];
+		const ports: number[] = [];
+		for (const _ of refused) ports.push(await freePort());
+		const endpoints = refused.map((address, index) => plainEndpoint(`sep_r${index}`, ports[index]!, target, { gatewayAddress: address }));
+		forwarder.converge(endpoints, [], { gatewayAllowed: true });
+		forwarder.converge(endpoints, [], { gatewayAllowed: true });
+		await Bun.sleep(50);
+		for (const port of ports) expect(forwarder.listening()[port]).toEqual(['127.0.0.1']);
+		expect(await readOnce(ports[0]!, 'lo')).toBe('lo');
+		for (const address of refused) expect(logs.filter((line) => line.includes(`refusing to bind ${address}`))).toHaveLength(1);
 	});
 
 	test.skipIf(process.platform !== 'linux')('listens on the gateway address too, same port, and drops it when unset', async () => {
@@ -487,8 +506,15 @@ describe('ServiceForwarder install-CA trust (HA-PLAN H24)', () => {
 });
 
 describe('gateway address validation (W4)', () => {
-	test('only a private container-gateway address may be bound', () => {
-		for (const address of ['10.89.0.1', '172.16.4.1', '192.168.1.1', '100.64.0.1', '127.0.0.2']) expect(isGatewayAddress(address)).toBe(true);
-		for (const address of ['127.0.0.1', '0.0.0.0', '203.0.113.7', '8.8.8.8', '10.89.0.1 evil', '010.0.0.1', '10.89.0']) expect(isGatewayAddress(address)).toBe(false);
+	test('only this node’s bridge gateway, or a 127/8 alias, may be bound', () => {
+		for (const address of ['10.89.0.1', '127.0.0.2', '127.1.2.3']) expect(isGatewayAddress(address)).toBe(true);
+		// Never the overlay (DEFAULT_OVERLAY_CIDR 10.47.0.0/22), any other private or CGNAT range,
+		// or a public address.
+		for (const address of ['10.47.0.1', '10.47.3.254', '10.0.0.1', '172.16.4.1', '192.168.1.1', '100.64.0.1', '203.0.113.7', '8.8.8.8'])
+			expect(isGatewayAddress(address)).toBe(false);
+		for (const address of ['127.0.0.1', '0.0.0.0', '10.89.0.1 evil', '010.0.0.1', '10.89.0', '010.89.0.1']) expect(isGatewayAddress(address)).toBe(false);
+		// A node whose bridge has another gateway binds that one, and no longer the default.
+		expect(isGatewayAddress('10.88.0.1', '10.88.0.1')).toBe(true);
+		expect(isGatewayAddress('10.89.0.1', '10.88.0.1')).toBe(false);
 	});
 });

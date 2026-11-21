@@ -1,6 +1,6 @@
 import { createServer, connect, type Server, type Socket } from 'node:net';
 import { createServer as createTlsServer, connect as connectTls, type PeerCertificate, type SecureContextOptions, type TLSSocket } from 'node:tls';
-import type { EndpointTrustMode, ReadEndpoint, ServiceEndpoint, ServiceProvider } from '@yoal/contracts';
+import { CONTAINER_GATEWAY_ADDRESS, type EndpointTrustMode, type ReadEndpoint, type ServiceEndpoint, type ServiceProvider } from '@yoal/contracts';
 
 /**
  * Cross-node service forwarding (docs/CLUSTERING.md §4.3, phase C2; HA-PLAN H24; Bun forwarder).
@@ -96,10 +96,22 @@ export class ServiceForwarder {
 	private readonly bindFailures = new Map<string, string>();
 	private retryTimer: ReturnType<typeof setTimeout> | null = null;
 	private closed = false;
+	/** The gateway of this node's own container bridge: the only non-loopback address a consumer binds. */
+	private readonly bridgeGateway: string;
+	/** Gateway addresses already refused, so a refusal logs once, not every converge. */
+	private readonly refusedGateways = new Set<string>();
 
-	constructor(options: { log?: (level: 'info' | 'warn', message: string) => void; certificate?: { certPem: string; keyPem: string } } = {}) {
+	constructor(
+		options: {
+			log?: (level: 'info' | 'warn', message: string) => void;
+			certificate?: { certPem: string; keyPem: string };
+			/** This node's container-bridge gateway (default: Podman's, `CONTAINER_GATEWAY_ADDRESS`). */
+			bridgeGateway?: string;
+		} = {},
+	) {
 		this.log = options.log ?? (() => undefined);
 		this.certificate = options.certificate;
+		this.bridgeGateway = options.bridgeGateway ?? CONTAINER_GATEWAY_ADDRESS;
 	}
 
 	/** Reconcile listeners to desired state. Idempotent; an unchanged listener is never rebound. */
@@ -107,9 +119,20 @@ export class ServiceForwarder {
 		this.closed = false;
 		this.trust = extras.trust ?? null;
 		const gatewayAllowed = extras.gatewayAllowed === true;
+		const binds = (gatewayAddress: string | undefined): string[] => {
+			if (!gatewayAddress || !gatewayAllowed) return [LOOPBACK];
+			if (!isGatewayAddress(gatewayAddress, this.bridgeGateway)) {
+				if (gatewayAddress !== LOOPBACK && !this.refusedGateways.has(gatewayAddress)) {
+					this.refusedGateways.add(gatewayAddress);
+					this.log('warn', `Endpoint forwarder: refusing to bind ${gatewayAddress}; only this node's container gateway (${this.bridgeGateway}) may be bound. Serving on loopback only.`);
+				}
+				return [LOOPBACK];
+			}
+			return [LOOPBACK, gatewayAddress];
+		};
 		const wanted = new Map<number, ConsumerRoute>();
-		for (const endpoint of endpoints) wanted.set(endpoint.localPort, serviceRoute(endpoint, gatewayAllowed));
-		for (const endpoint of extras.readEndpoints ?? []) wanted.set(endpoint.localPort, readRoute(endpoint, gatewayAllowed));
+		for (const endpoint of endpoints) wanted.set(endpoint.localPort, serviceRoute(endpoint, binds(endpoint.gatewayAddress)));
+		for (const endpoint of extras.readEndpoints ?? []) wanted.set(endpoint.localPort, readRoute(endpoint, binds(endpoint.gatewayAddress)));
 		const wantedProviders = new Map<number, ServiceProvider>();
 		for (const provider of providers) wantedProviders.set(provider.listenPort, provider);
 
@@ -421,10 +444,10 @@ export function wantsGateway(endpoints: readonly ServiceEndpoint[], readEndpoint
 	return endpoints.some((endpoint) => endpoint.gatewayAddress) || readEndpoints.some((endpoint) => endpoint.gatewayAddress);
 }
 
-function serviceRoute(endpoint: ServiceEndpoint, gatewayAllowed: boolean): ConsumerRoute {
+function serviceRoute(endpoint: ServiceEndpoint, binds: string[]): ConsumerRoute {
 	return {
 		port: endpoint.localPort,
-		binds: binds(endpoint.gatewayAddress, gatewayAllowed),
+		binds,
 		upstreams: [
 			{
 				nodeId: endpoint.upstream.nodeId,
@@ -439,10 +462,10 @@ function serviceRoute(endpoint: ServiceEndpoint, gatewayAllowed: boolean): Consu
 	};
 }
 
-function readRoute(endpoint: ReadEndpoint, gatewayAllowed: boolean): ConsumerRoute {
+function readRoute(endpoint: ReadEndpoint, binds: string[]): ConsumerRoute {
 	return {
 		port: endpoint.localPort,
-		binds: binds(endpoint.gatewayAddress, gatewayAllowed),
+		binds,
 		upstreams: endpoint.upstreams.map((upstream) => ({
 			nodeId: upstream.nodeId,
 			address: upstream.address,
@@ -455,27 +478,22 @@ function readRoute(endpoint: ReadEndpoint, gatewayAllowed: boolean): ConsumerRou
 	};
 }
 
-function binds(gatewayAddress: string | undefined, gatewayAllowed: boolean): string[] {
-	if (!gatewayAddress || !gatewayAllowed || gatewayAddress === LOOPBACK || !isGatewayAddress(gatewayAddress)) return [LOOPBACK];
-	return [LOOPBACK, gatewayAddress];
-}
-
 /**
- * A container-gateway address is private (10/8, 172.16/12, 192.168/16 or 100.64/10) and never the
- * node's underlay or public address: binding one of those would put the forwarder on the wire, and
- * the guard deliberately permits the address the packet was sent to.
+ * The only addresses the forwarder binds besides loopback: this node's own container-bridge
+ * gateway, or a 127/8 alias. Never any other private address: the overlay (10.47.0.0/22), a
+ * private underlay or another bridge would put the forwarder on the wire, and the endpoint guard
+ * deliberately permits traffic to the address a packet was sent to.
  */
-export function isGatewayAddress(value: string): boolean {
+export function isGatewayAddress(value: string, bridgeGateway: string = CONTAINER_GATEWAY_ADDRESS): boolean {
 	// The canonical loopback is the local listener itself, never a gateway alias.
 	if (value === LOOPBACK) return false;
 	const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(value);
 	if (!match) return false;
 	const octets = match.slice(1).map(Number);
 	if (octets.some((octet, index) => octet > 255 || String(octet) !== match[index + 1])) return false;
-	const [a, b] = octets as [number, number, number, number];
 	// 127/8 aliases are local-only: binding one cannot expose the forwarder, and the lab uses
-	// 127.0.0.2 as a gateway-shaped address. Everything publicly routable is still refused.
-	return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168) || (a === 100 && b >= 64 && b <= 127);
+	// 127.0.0.2 as a gateway-shaped address.
+	return octets[0] === 127 || value === bridgeGateway;
 }
 
 function routeKey(route: ConsumerRoute): string {
