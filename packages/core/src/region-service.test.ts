@@ -348,6 +348,22 @@ describe('yoal ha region promote', () => {
 		expect(view.steps.map((step) => step.status)).toEqual(['done', 'failed', 'pending', 'pending']);
 	});
 
+	test('a database whose primary is in a third region is listed as skipped, never moved', async () => {
+		setupFleet();
+		opened.sqlite.run("UPDATE nodes SET region = 'uknorth', zone = 'unk-1' WHERE id = ?", [a2.nodeId]);
+		try {
+			const plan = (await runner.promote(admin, 'ukwest', {})) as RegionPromotionPlan;
+			expect(plan.fromRegion).toBe('uksouth');
+			expect(plan.steps.filter((step) => step.kind === 'database').map((step) => [step.name, step.status])).toEqual([
+				['orders', 'pending'],
+				['ledger', 'skipped'],
+			]);
+			expect(plan.steps.find((step) => step.name === 'ledger')!.message).toContain('region "uknorth"');
+		} finally {
+			opened.sqlite.run("UPDATE nodes SET region = 'uksouth', zone = 'uks-2' WHERE id = ?", [a2.nodeId]);
+		}
+	});
+
 	test('it must run on the control plane in the target region', async () => {
 		setupFleet();
 		const wrong = service(new FakeControlPlane(a2.nodeId), 'runner-a2');

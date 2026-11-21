@@ -340,7 +340,9 @@ export class RegionService {
 		if (lease && lease.holderNodeId !== controlId && Date.parse(lease.expiresAt) > this.ctx.now())
 			liveLeases.push(`the control-plane lease is held by ${byId.get(lease.holderNodeId)?.name ?? lease.holderNodeId} until ${lease.expiresAt}`);
 
-		// Databases whose primary is elsewhere: those with a standby region here first, then by name.
+		// The region being left: the active region, or (when traffic already serves from the target)
+		// the region holding most primaries that have a replica here. Only its databases move; one in
+		// a third region is listed as skipped, never moved and never dropped silently.
 		const databaseRows = this.ctx.db
 			.select()
 			.from(databases)
@@ -349,12 +351,28 @@ export class RegionService {
 			.filter((row) => regionOf(byId.get(row.nodeId) ?? {}) !== target)
 			.sort((a, b) => Number(b.standbyRegion === target) - Number(a.standbyRegion === target) || a.name.localeCompare(b.name));
 		const replicaRows = this.ctx.db.select().from(databaseReplicas).where(isNull(databaseReplicas.removingAt)).all();
-		const fromRegions = new Map<string, number>();
-		for (const database of databaseRows) {
-			const replica = replicaRows
-				.filter((row) => row.databaseId === database.id && row.status !== 'pending' && regionOf(byId.get(row.nodeId) ?? {}) === target)
+		const replicaIn = (databaseId: string) =>
+			replicaRows
+				.filter((row) => row.databaseId === databaseId && row.status !== 'pending' && regionOf(byId.get(row.nodeId) ?? {}) === target)
 				.sort((a, b) => compareLsn(b.replayLsn, a.replayLsn) || (byId.get(a.nodeId)?.name ?? '').localeCompare(byId.get(b.nodeId)?.name ?? ''))[0];
+		const active = this.activeRegion();
+		const counts = new Map<string, number>();
+		for (const database of databaseRows)
+			if (replicaIn(database.id)) {
+				const region = regionOf(byId.get(database.nodeId) ?? {});
+				counts.set(region, (counts.get(region) ?? 0) + 1);
+			}
+		const busiest = [...counts.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))[0]?.[0];
+		const fromRegion = active !== target ? active : (busiest ?? active);
+		for (const database of databaseRows) {
+			const replica = replicaIn(database.id);
+			const primaryRegion = regionOf(byId.get(database.nodeId) ?? {});
 			const base = { position: steps.length, step: 'databases' as const, kind: 'database' as const, resourceId: database.id, name: database.name, expectedGeneration: database.primaryGeneration };
+			if (primaryRegion !== fromRegion) {
+				if (replica || database.standbyRegion === target)
+					steps.push(this.#step({ ...base, status: 'skipped', message: `The primary is in region "${primaryRegion}", not "${fromRegion}"; it stays where it is.` }));
+				continue;
+			}
 			if (!replica) {
 				// Visible in the plan the operator confirms, never dropped silently.
 				if (database.standbyRegion === target)
@@ -362,8 +380,6 @@ export class RegionService {
 				steps.push(this.#step({ ...base, status: 'skipped', message: `No replica of ${database.name} in region "${target}"; it stays where it is.` }));
 				continue;
 			}
-			const from = regionOf(byId.get(database.nodeId) ?? {});
-			fromRegions.set(from, (fromRegions.get(from) ?? 0) + 1);
 			steps.push(this.#step({ ...base, targetNodeId: replica.nodeId, lagBytes: replica.lagBytes, lagSeconds: replica.lagSeconds }));
 			// The database lease is the fence: still valid means the old primary may be serving.
 			const strict = await this.ctx.databaseMembers.promotionRefusal(database, replica.nodeId, false);
@@ -387,9 +403,6 @@ export class RegionService {
 		const ingress = this.#ingressIn(target);
 		if (!ingress.some((node) => node.status === 'online')) blockers.push(`no ingress node in region "${target}" is online, so traffic cannot move there`);
 
-		const active = this.activeRegion();
-		const busiest = [...fromRegions.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
-		const fromRegion = active !== target ? active : (busiest ?? active);
 		const moving = steps.some((step) => step.kind === 'database' && step.status !== 'skipped');
 		const snapshot = this.ctx.controlPlane.snapshot();
 		const controlNeeded = this.ctx.controlPlane.enabled() && !(snapshot?.role === 'primary' && snapshot.lease.holderNodeId === controlId);
