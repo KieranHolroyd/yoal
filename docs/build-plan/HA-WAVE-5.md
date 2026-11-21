@@ -80,8 +80,8 @@ it needs the human-timed walkthrough and a cloud run.
 Two lane D fixes also landed earlier, on their own: `e995890f`, where a named `node:crypto` import
 in `contracts/ingress.ts` broke `vite dev` on every dashboard page, and `4460e673`, a test that
 changed the shared drill catalogue. Main also gained `5741cfbe`, the D235 drill files that
-`0.16.10` referenced but never committed. Without that commit, `origin/main` does not build from a
-clean checkout.
+`0.16.10` referenced but never committed; without it a clean checkout does not build. It is on
+`origin/main`.
 
 ### Bugs found and fixed during review
 
@@ -138,4 +138,4 @@ clean checkout.
      `yoal ha region promote`, and checks that RPO equals the measured replication lag.
    - This scenario is not built and has not run.
 3. The docs pipeline lane (W17).
-4. A release. Local `main` is 42 commits ahead of `origin/main` and has not been pushed.
+4. A release. Local `main` is ahead of `origin/main` (from lane B on) and has not been pushed.
