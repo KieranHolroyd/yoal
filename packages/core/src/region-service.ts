@@ -55,7 +55,8 @@ import { newId, parseJson } from './util.ts';
  *   lets another control plane take over a crashed run once it expires, and each step is
  *   idempotent at its fenced generation, so nothing runs twice.
  *
- * Platform admin only (`canAdminister`), never MCP. Both writes refuse while `REGIONS` is off.
+ * The plan needs `platform:ha`; running it needs a platform admin (`canAdminister`), never MCP.
+ * Promotion refuses while `REGIONS` is off.
  */
 export class RegionService {
 	/** This process's runner identity for the promotion lease (no randomness: seeded fixtures). */
@@ -202,10 +203,12 @@ export class RegionService {
 	// ------------------------------------------------------------------ promotion
 
 	async promote(principal: Principal, region: string, raw: RegionPromoteRequest): Promise<RegionPromotionPlan | RegionPromotionView> {
-		this.#requireAdmin(principal);
+		// The plan only reads (`platform:ha`); running it moves writes (a platform admin, never MCP).
+		this.#requireHa(principal);
+		const input = regionPromoteRequestSchema.parse(raw);
+		if (input.confirm !== undefined) this.#requireAdmin(principal);
 		if (!this.enabled())
 			throw new ValidationError('Regions are not enabled on this platform (YOAL_FEATURE_REGIONS), so there is no region to promote.');
-		const input = regionPromoteRequestSchema.parse(raw);
 		const target = nodeRegionSchema.parse(region);
 		if (!this.#nodes().some((row) => regionOf(row) === target)) throw new NotFoundError(`Region "${target}"`);
 
@@ -712,9 +715,12 @@ export class RegionService {
 			throw new CoreError('forbidden', 'High availability is for platform operators and admins.', 403);
 	}
 
-	/** A region promotion moves writes: a platform admin, signed in, never MCP. */
+	/**
+	 * A region promotion moves writes: a platform admin. The seeded platform-admin binding is
+	 * session-only, so an API key or MCP token is refused by default, and no MCP tool calls this.
+	 */
 	#requireAdmin(principal: Principal): void {
-		if (principal.kind === 'mcp' || !this.ctx.platformIam.canAdminister(principal))
+		if (!this.ctx.platformIam.canAdminister(principal))
 			throw new CoreError('forbidden', 'A region promotion needs a platform admin signed in to the dashboard or the CLI; MCP cannot run it.', 403);
 	}
 }

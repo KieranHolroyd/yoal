@@ -59,7 +59,7 @@ Yoal does not mirror a node's disks. A failed drive loses that node's data unles
 
 ### Zones
 
-A zone is a failure domain: nodes in one zone share power, network and provider. Set a zone on each node so that replicas can be spread across zones. In **Nodes**, open **Actions for** the node, choose **Edit node** and set **Zone**. A node that never has a zone is in `default`.
+A zone is a failure domain: nodes in one zone share power, network and provider. Set a zone on each node so that replicas can be spread across zones. In **Nodes**, open **Actions for** the node, choose **Edit node** and set **Zone**, or run `yoal nodes set <node> --zone <zone>`. A node that never has a zone is in `default`. Zones can be grouped into regions; see [regions and disaster recovery](/self-hosting/regions).
 
 The **Topology** page shows each node's roles and its blast radius: what would be affected if that node were lost, computed from current placement.
 
