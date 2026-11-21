@@ -188,6 +188,9 @@ describe('REGIONS flag and region fields', () => {
 		const planHash = 'a'.repeat(64);
 		expect(regionPromoteRequestSchema.safeParse({ confirm: 'ukwest', planHash, acceptDataLoss: true, reason: 'uksouth is down' }).success).toBe(true);
 		expect(regionPromoteRequestSchema.safeParse({ unknown: 1 }).success).toBe(false);
+		// Break glass is explicit and off by default (Wave 5 lane A deviation: the brief requires it).
+		expect(regionPromoteRequestSchema.parse({}).breakGlass).toBe(false);
+		expect(regionPromoteRequestSchema.parse({ breakGlass: true }).breakGlass).toBe(true);
 	});
 
 	test('the REGIONS flag and the contract warn that a stored region value cannot be downgraded', () => {
@@ -197,7 +200,7 @@ describe('REGIONS flag and region fields', () => {
 
 	test('a stored spread: region is placed as zone until region placement exists, and always with REGIONS off', () => {
 		expect(placementSpread('region', { REGIONS: false })).toBe('zone');
-		expect(placementSpread('region', { REGIONS: true })).toBe('zone');
+		expect(placementSpread('region', { REGIONS: true })).toBe('region');
 		expect(placementSpread('node', { REGIONS: false })).toBe('node');
 		expect(placementSpread('zone', { REGIONS: true })).toBe('zone');
 	});
