@@ -4,7 +4,6 @@
 	import HistoryIcon from '@lucide/svelte/icons/history';
 	import ServerIcon from '@lucide/svelte/icons/server';
 	import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
-	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 	import type { FailoverEventView, FailoverStatusView } from '@yoal/contracts';
 	import { createQuery } from '@tanstack/svelte-query';
 	import { resolve } from '$app/paths';
@@ -19,7 +18,12 @@
 	import Panel from '../../_lib/Panel.svelte';
 	import { formatDateTime, formatRelative } from '../../_lib/format.js';
 	import PolicyPanel from '../_lib/PolicyPanel.svelte';
+	import AdminActions from './_AdminActions.svelte';
 	import DisasterDrill from './_DisasterDrill.svelte';
+	import DrillCatalogue from './_DrillCatalogue.svelte';
+	import GuidedSetup from './_GuidedSetup.svelte';
+	import StatusCards from './_StatusCards.svelte';
+	import { databaseFailoverState, type StatusCardsInput } from './_lib/ha-setup.js';
 	import SettingsHeader from '../_lib/SettingsHeader.svelte';
 	import type { PageProps } from './$types';
 
@@ -62,6 +66,61 @@
 		lease: 'Lease'
 	};
 
+	const statusInput = $derived<StatusCardsInput>({
+		profile: data.ha.profile,
+		steering: { driver: data.steering.driver, stacked: data.steering.stacked, flag: !!data.flags.STEERING },
+		ingress: {
+			nodes: data.status.nodes.length,
+			ready: data.status.nodes.filter((node) => node.ready).length,
+			inRotation: failover.ingress.rotates ? failover.ingress.nodes.filter((node) => node.inRotation).length : null,
+			setFlag: !!data.flags.INGRESS_SET
+		},
+		arbiter: {
+			kind: data.ha.dependencies.platformStore.kind,
+			detail: data.ha.dependencies.platformStore.detail,
+			external: data.ha.dependencies.platformStore.survivesNodeLoss
+		},
+		control: {
+			flag: !!data.flags.CONTROL_STANDBY,
+			members: (failover.controlPlane ?? []).map((member) => ({
+				name: member.name,
+				role: member.role,
+				canPromote: member.canPromote,
+				lagSeconds: member.replicationLagSeconds
+			}))
+		},
+		databases: failover.databases.map((database) => {
+			const seen = data.databaseDurability[database.id] ?? null;
+			return {
+				id: database.id,
+				name: database.name,
+				durability: seen ? { configured: seen.configured, effective: seen.effective } : null,
+				standbyRegion: seen?.standbyRegion ?? null,
+				automatic: database.automatic
+			};
+		}),
+		failover: data.databaseFailover,
+		regionsFlag: !!data.flags.REGIONS,
+		recentDrills: [
+			...data.drills.recent.map((drill) => ({
+				id: drill.id,
+				at: drill.startedAt,
+				label: `node-offline on ${drill.nodeName}`,
+				status: drill.status,
+				detail: drill.observations?.backOnlineAfterMs ? `back after ${Math.round(drill.observations.backOnlineAfterMs / 1000)} s` : null
+			})),
+			...data.timeline.items
+				.filter((item) => item.kind === 'drill')
+				.map((item) => ({
+					id: item.id,
+					at: item.startedAt,
+					label: `database-failover on ${item.databaseName ?? item.databaseId}`,
+					status: item.status,
+					detail: item.timeToWritableMs === null ? null : `writable after ${(item.timeToWritableMs / 1000).toFixed(1)} s`
+				}))
+		]
+	});
+
 	function seconds(value: number): string {
 		return value >= 120 && value % 60 === 0 ? `${value / 60} min` : `${value}s`;
 	}
@@ -69,7 +128,7 @@
 
 <SettingsHeader
 	id="high-availability"
-	description="The failover controller, its lease and history, the ingress driver, and the nodes allowed to serve traffic."
+	description="Set up high availability step by step, see what is in force, run drills, and watch the failover controller and its history."
 />
 
 <div class="space-y-6">
@@ -84,68 +143,16 @@
 		</div>
 	{/if}
 
+	<GuidedSetup currentProfile={data.ha.profile} canApply={data.canEditPolicies} />
+
+	<StatusCards input={statusInput} />
+
 	<Panel
-		title="HA profile and platform dependencies"
+		title="Platform dependencies"
 		icon={ShieldCheckIcon}
-		description="The dependencies the request path and a failover need. Turning on the HA profile is refused while any of them still lives on one node."
+		description="What the request path and a failover need besides your apps. The checks above say which of them still live on one node."
 	>
-		<div class="flex flex-wrap items-start justify-between gap-4">
-			<div>
-				<p class="text-xs text-muted-foreground">Profile</p>
-				<p class="mt-1 flex items-center gap-2">
-					<Badge variant={data.ha.profile === 'single' ? 'neutral' : 'success'}>{data.ha.profile}</Badge>
-					<span class="text-xs text-muted-foreground">
-						{#if data.ha.ok}
-							Every platform dependency can survive a node loss.
-						{:else}
-							{data.ha.blockers} blocker{data.ha.blockers === 1 ? '' : 's'} must be fixed first.
-						{/if}
-					</span>
-				</p>
-			</div>
-			{#if data.canEditPolicies}
-				<div class="flex flex-wrap gap-2">
-					{#if data.ha.profile !== 'ha'}
-						<form method="POST" action="?/saveProfile">
-							<input type="hidden" name="profile" value="ha" />
-							<Button type="submit" size="sm" disabled={!data.ha.ok}>Turn on the HA profile</Button>
-						</form>
-					{/if}
-					{#if data.ha.profile !== 'single'}
-						<form method="POST" action="?/saveProfile">
-							<input type="hidden" name="profile" value="single" />
-							<Button type="submit" size="sm" variant="outline">Return to single</Button>
-						</form>
-					{/if}
-				</div>
-			{/if}
-		</div>
-
-		<ul class="mt-4 space-y-2">
-			{#each data.ha.findings as finding (finding.key)}
-				<li class="rounded-md border px-3 py-2">
-					<div class="flex items-start gap-2">
-						{#if finding.severity === 'blocker'}
-							<TriangleAlertIcon class="mt-0.5 size-4 shrink-0 text-destructive" />
-						{:else}
-							<span class="mt-1.5 size-2 shrink-0 rounded-full bg-muted-foreground/50"></span>
-						{/if}
-						<div class="min-w-0">
-							<p class="text-sm font-medium">
-								{finding.title}
-								<Badge variant={finding.severity === 'blocker' ? 'danger' : finding.severity === 'warning' ? 'warning' : 'outline'} class="ml-1">
-									{finding.severity}
-								</Badge>
-							</p>
-							<p class="text-xs text-muted-foreground">{finding.detail}</p>
-							{#if finding.fix}<p class="mt-1 text-xs"><span class="font-medium">Fix:</span> {finding.fix}</p>{/if}
-						</div>
-					</div>
-				</li>
-			{/each}
-		</ul>
-
-		<div class="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+		<div class="grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
 			<div class="rounded-lg border p-3">
 				<p class="text-xs text-muted-foreground">Platform object store</p>
 				<p class="mt-1 text-sm font-medium">{data.ha.dependencies.platformStore.kind}</p>
@@ -333,8 +340,10 @@
 									<p class="text-xs text-muted-foreground">{refusal}</p>
 								{/each}
 							</Table.Cell>
-							<Table.Cell class="pr-4">
-								<Badge variant={database.automatic ? 'success' : 'neutral'}>{database.automatic ? 'Automatic' : 'Manual'}</Badge>
+							<Table.Cell class="max-w-72 pr-4 whitespace-normal">
+								{@const state = databaseFailoverState(data.databaseFailover, database)}
+								<Badge variant={state.tone}>{state.label}</Badge>
+								{#if state.label !== 'Automatic'}<p class="mt-0.5 text-xs text-muted-foreground">{state.reason}</p>{/if}
 							</Table.Cell>
 						</Table.Row>
 					{/each}
@@ -461,7 +470,11 @@
 		{/if}
 	</Panel>
 
+	<DrillCatalogue flags={data.flags} canRun={data.canEditPolicies} />
+
 	<DisasterDrill initial={data.drills} />
+
+	<AdminActions isAdmin={data.canEditPolicies} />
 
 	<Panel title="Failover history" icon={HistoryIcon} description="Every action the controller decided on, newest first. The epoch is the lease it acted under." count={failover.recent.length} flush>
 		{#if failover.recent.length === 0}

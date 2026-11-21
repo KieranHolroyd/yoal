@@ -17,7 +17,7 @@ Most of these commands need a **platform admin**, an install-wide role separate 
 | `upgrade apply`, `upgrade rollback` | Root on the Yoal host. No API credential can do this. |
 
 > [!NOTE]
-> The dashboard has no control for `ha migrate attachments --apply` or `ha ca rotate` yet. With the default bindings, the CLI's API key gets `403` for them: call `POST /api/v1/ha/attachments/migrate` or `POST /api/v1/ha/ca/rotate` with a platform admin's dashboard session. Apps also move on their own next deploy.
+> With the default bindings, the CLI's API key gets `403` for `ha migrate attachments --apply` and `ha ca rotate`. Take them from **Settings → High availability** instead, signed in as a platform admin: **Move apps to their endpoints** and **Install CA**. Apps also move on their own next deploy.
 
 ## ha
 
