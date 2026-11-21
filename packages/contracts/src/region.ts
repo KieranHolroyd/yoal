@@ -450,6 +450,11 @@ export const regionPromotionViewSchema = z.object({
 	attempt: z.number().int().min(1),
 	// Human confirmation (always present: a promotion is stored only once confirmed).
 	acceptDataLoss: z.literal(true),
+	/**
+	 * The operator broke glass: the old region still held a valid lease when it was confirmed. Stored
+	 * on the record (migration 0134) so every database step, on any runner, applies the same rule.
+	 */
+	breakGlass: z.boolean().default(false),
 	reason: z.string().max(500),
 	confirmedBy: z.string().max(200),
 	confirmedAt: z.string(),
