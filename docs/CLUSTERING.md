@@ -2406,6 +2406,22 @@ Each drill writes `ha_drills` (§13; kind, started, measured RTO/RPO, assertions
 shows measured against target, because a drill without contention, an epoch bump and agent reaction
 proves nothing.
 
+**Built: the node offline drill (D235).** The first drill in the catalogue that runs on demand.
+Settings → High availability → Disaster drill, `yoal ha drill node-offline` or `POST
+/api/v1/ha/drills` picks a random eligible node (or a named one) and puts `offlineDrill { id, endsAt }`
+in its desired state. Its agent (capability `offline-drill`) then goes dark until `endsAt`: no
+heartbeats, no desired-state pulls (it serves the copy it has), and its health endpoint answers `503
+desired-state`. Everything downstream is the real path: the failover controller marks it offline at
+30 s, moves copies after the grace, withdraws it from ingress, run leases fence, and the `Node
+offline` alert fires at 2 min with a drill note. The only call the dark agent makes is `GET
+/api/agent/drill` every 5 s, which is not a heartbeat, so a cancel ends it early. It arms only from a
+fresh pull and caps the window at 30 min locally, so an agent restart or a lost control plane cannot
+keep a node dark. Guards: one drill at a time, never the last online node, the control-plane host
+(the edge or a `control` role) only with `includeControlNode`. Results live in `node_drills` (0131):
+start → marked offline, end → first heartbeat, and the `failover_events` in the window. It is a
+partition, not a power-off: workloads without a run lease keep serving, so the ingress-loss and
+zone-loss rows above still need their own drills.
+
 ### 12.8 Who can do what
 
 Roles are `owner`, `admin`, `deployer` and `viewer` (DESIGN §6.2); "member" means an org member with

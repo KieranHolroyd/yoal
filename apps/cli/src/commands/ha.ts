@@ -4,6 +4,7 @@ import { parseArgs, requirePositional, type FlagSpec } from '../args.ts';
 import { installControlEnrolment, parseSealedControlBundle } from '../control-enrol.ts';
 import { UsageError } from '../errors.ts';
 import { formatControlStatus, formatHaStatus } from '../ha.ts';
+import { formatDrill, formatDrillList, formatMs } from '../drills.ts';
 import { printJson } from '../output.ts';
 import { authenticatedClient } from './common.ts';
 
@@ -21,6 +22,9 @@ const flags: FlagSpec = {
 	'data-dir': { type: 'string' },
 	'master-key': { type: 'string' },
 	env: { type: 'string' },
+	minutes: { type: 'string' },
+	'include-control': { type: 'boolean' },
+	wait: { type: 'boolean' },
 	help: { type: 'boolean', short: 'h' },
 };
 
@@ -47,6 +51,16 @@ Actions:
       On the standby: unseal the bundle, verify the master-key fingerprint and config digest, write
       master.key 0400 and the allowlisted yoal.env 0600, and write the enrolment record 0600.
       Promotion is refused on a host without that record.
+  drill node-offline [--node <id|name>] [--minutes <n>] [--include-control] [--wait] [--json]
+      Disaster drill: take a node off the control plane for a while (default 5 min, 1–30) so the
+      failover controller, alerts and steering react as to a real loss. Without --node a random
+      eligible node is picked; the control-plane host only with --include-control. The node comes
+      back by itself. --wait follows it and prints the report: detection time, recovery time and
+      every failover action. Ctrl-C while waiting ends the drill early.
+  drill list [--json]
+      Which nodes may be drilled, the running drill and recent results.
+  drill show <id> [--json]   One drill's report.
+  drill cancel <id> [--json] End a running drill; the node is back within about 5 s.
 
 Options:
   --events <n>       Recent events to list (default 10, at most 50)
@@ -71,6 +85,7 @@ export async function haCommand(argv: string[]): Promise<void> {
 	}
 	const action = requirePositional(args, 0, 'action');
 	if (action === 'control') return controlCommand(args);
+	if (action === 'drill') return drillCommand(args);
 
 	if (action !== 'status') throw new UsageError(`Unknown ha action "${action}".\n\n${usage}`);
 	if (args.positionals.length > 1) throw new UsageError(usage);
@@ -189,4 +204,72 @@ async function standbyEnrolCommand(args: ReturnType<typeof parseArgs>, openPath:
 			`Next: set YOAL_CONTROL_ROLE=standby and YOAL_FEATURE_CONTROL_STANDBY=1, then start yoal-control-plane. Promotion is refused until ${join(dataDir, 'ha-control-enrolment.json')} exists.`,
 		].join('\n'),
 	);
+}
+
+/** `yoal ha drill` (D235): node offline drills. */
+async function drillCommand(args: ReturnType<typeof parseArgs>): Promise<void> {
+	const sub = requirePositional(args, 1, 'drill action');
+	const client = await authenticatedClient();
+	const json = args.boolean('json');
+	if (sub === 'list') {
+		const { view, raw } = await client.listDrills();
+		if (json) printJson(raw);
+		else console.log(formatDrillList(view));
+		return;
+	}
+	if (sub === 'show' || sub === 'cancel') {
+		const id = requirePositional(args, 2, 'drill id');
+		const drill = sub === 'show' ? await client.getDrill(id) : await client.cancelDrill(id);
+		if (json) printJson(drill);
+		else console.log(sub === 'cancel' ? `Ended the drill on ${drill.nodeName}; it is back within about 5 s.` : formatDrill(drill));
+		return;
+	}
+	if (sub !== 'node-offline') throw new UsageError(`Unknown drill action "${sub}".\n\n${usage}`);
+
+	const minutesFlag = args.string('minutes');
+	const minutes = minutesFlag === undefined ? 5 : Number(minutesFlag);
+	if (!Number.isInteger(minutes) || minutes < 1 || minutes > 30) throw new UsageError('--minutes must be a whole number from 1 to 30.');
+	const node = args.string('node');
+	let drill = await client.startDrill({
+		...(node ? { node } : {}),
+		durationSeconds: minutes * 60,
+		includeControlNode: args.boolean('include-control'),
+	});
+	if (!args.boolean('wait')) {
+		if (json) printJson(drill);
+		else
+			console.log(
+				`Drill ${drill.id}: ${drill.nodeName}${drill.random ? ' (picked at random)' : ''} is offline until ${new Date(drill.endsAt).toISOString()}.\nFollow it with \`yoal ha drill show ${drill.id}\` or Settings → High availability; end it early with \`yoal ha drill cancel ${drill.id}\`.`,
+			);
+		return;
+	}
+
+	console.error(`Drill ${drill.id}: ${drill.nodeName}${drill.random ? ' (picked at random)' : ''} is going offline for ${minutes} min. Ctrl-C ends it early.`);
+	let interrupted = false;
+	const onInterrupt = () => {
+		if (interrupted) process.exit(130);
+		interrupted = true;
+		console.error('\nEnding the drill…');
+		void client.cancelDrill(drill.id).catch(() => undefined);
+	};
+	// Bun's process typings only augment `memoryPressure`; the Node signal overloads work at runtime.
+	const signals = process as unknown as { on(event: 'SIGINT', listener: () => void): void; off(event: 'SIGINT', listener: () => void): void };
+	signals.on('SIGINT', onInterrupt);
+	try {
+		let marked = false;
+		// The report is final once the node is back, or the drill failed without it.
+		while (drill.status === 'running' || (drill.restoredAt === null && drill.finishedAt === null)) {
+			await new Promise((resolve) => setTimeout(resolve, 3_000));
+			drill = await client.getDrill(drill.id);
+			if (!marked && drill.offlineAt !== null) {
+				marked = true;
+				console.error(`  marked offline ${formatMs(drill.offlineAt - drill.startedAt)} after the start`);
+			}
+		}
+	} finally {
+		signals.off('SIGINT', onInterrupt);
+	}
+	if (json) printJson(drill);
+	else console.log(formatDrill(drill));
+	if (drill.status === 'failed') process.exitCode = 1;
 }

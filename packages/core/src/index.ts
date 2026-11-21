@@ -36,6 +36,7 @@ import { DatabaseReplicaService } from './database-replica-service.ts';
 import { StorageReplicationService } from './storage-replication-service.ts';
 import { IngressHaService } from './ingress-ha.ts';
 import { FailoverService } from './failover-service.ts';
+import { NodeDrillService } from './node-drills.ts';
 import { SchedulingService } from './scheduling-service.ts';
 import { NodeRolloutService } from './node-rollouts.ts';
 import { NodeLinkService } from './link-service.ts';
@@ -152,6 +153,7 @@ export * from './access.ts';
 export * from './deploy.ts';
 export * from './maintenance.ts';
 export * from './failover-service.ts';
+export * from './node-drills.ts';
 export * from './scheduling-service.ts';
 export * from './node-rollouts.ts';
 export * from './node-rollout-plan.ts';
@@ -338,6 +340,8 @@ export interface Core {
 	ingress: IngressHaService;
 	/** The failover controller (CLUSTERING §8.3, §9.3, C8). */
 	failover: FailoverService;
+	/** Node offline drills (D235). */
+	nodeDrills: NodeDrillService;
 	/** Fleet scheduling: utilisation, rebalance and workload moves (CLUSTERING §3.10). */
 	scheduling: SchedulingService;
 	/** Fleet node updates in waves (CLUSTERING §3.11, D217). */
@@ -519,6 +523,7 @@ export function createCore(options: CoreOptions): Core {
 	ctx.storageReplication = new StorageReplicationService(ctx);
 	ctx.ingress = new IngressHaService(ctx);
 	ctx.failover = new FailoverService(ctx);
+	ctx.nodeDrills = new NodeDrillService(ctx);
 	ctx.scheduling = new SchedulingService(ctx);
 	ctx.nodeRollouts = new NodeRolloutService(ctx);
 	ctx.links = new NodeLinkService(ctx);
@@ -622,6 +627,7 @@ export function createCore(options: CoreOptions): Core {
 		storageReplication: ctx.storageReplication,
 		ingress: ctx.ingress,
 		failover: ctx.failover,
+		nodeDrills: ctx.nodeDrills,
 		scheduling: ctx.scheduling,
 		nodeRollouts: ctx.nodeRollouts,
 		links: ctx.links,

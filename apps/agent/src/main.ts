@@ -4,6 +4,8 @@ import {
 	desiredStateSchema,
 	heartbeatSchema,
 	nodeCapabilities,
+	nodeDrillLimits,
+	nodeDrillPollSchema,
 	ENDPOINTS_GATEWAY_CAPABILITY,
 	FUNCTIONS_PYTHON_CAPABILITY,
 	PROCESS_NODE_CAPABILITY,
@@ -34,6 +36,7 @@ import { CertProbe, certProbeTargets, tlsCertReader, tlsCertFingerprint } from '
 import { CERTIFICATE_REFRESH_MS, CertificateDelivery } from './certificates.ts';
 import { ingressHealth, ingressHealthWord } from './ingress-health.ts';
 import { LameDuck } from './lame-duck.ts';
+import { OfflineDrill } from './offline-drill.ts';
 import { buildCaddyConfig, isProductionRoute, tlsSubjects } from './caddy-config.ts';
 import { loadConfig, splitIngressListen, type AgentConfig } from './config.ts';
 import { controlSocketFetch } from './control-socket.ts';
@@ -230,6 +233,8 @@ class AgentRuntime {
 	/** Cached fingerprint of the certificate this node serves (a TLS handshake is not free). */
 	private fingerprintRead: { value: string | null; at: number } | null = null;
 	private readonly lameDuck: LameDuck;
+	/** A node offline drill (D235): while active, this agent is dark to the control plane. */
+	private readonly offlineDrill = new OfflineDrill();
 	private stopping = false;
 	private running = true;
 	private server: ReturnType<typeof Bun.serve> | null = null;
@@ -629,6 +634,7 @@ class AgentRuntime {
 		this.loops = [
 			this.reconcileLoop(),
 			this.heartbeatLoop(),
+			this.offlineDrillLoop(),
 			this.certificateLoop(),
 			this.identityLoop(),
 			this.telemetryLoop(),
@@ -799,6 +805,12 @@ class AgentRuntime {
 	}
 
 	private async pullDesiredState(force = false): Promise<boolean> {
+		// Dark for a drill: keep serving the state in hand, as a partitioned node would. Two seconds
+		// so the reconcile loop takes the short sleep and pulls promptly once the drill ends.
+		if (this.offlineDrill.active(Date.now())) {
+			await sleep(2_000, this.shutdownController.signal).catch(() => undefined);
+			return false;
+		}
 		const headers: Record<string, string> = {
 			authorization: `Bearer ${this.config.nodeToken}`,
 			accept: 'application/json',
@@ -858,6 +870,12 @@ class AgentRuntime {
 		this.desired = state;
 		this.desiredEtag = etagHeader;
 		this.desiredPulledThisRun = true;
+		// Armed only from a fresh pull, never the cache, so restarting the agent ends a drill.
+		if (this.offlineDrill.arm(state.offlineDrill, Date.now()))
+			log(
+				'warn',
+				`Offline drill ${state.offlineDrill!.id}: going dark to the control plane for ${Math.round(this.offlineDrill.remainingMs(Date.now()) / 1000)} s (no heartbeats, no pulls, ingress probe unready). Restart the agent to end it here.`,
+			);
 		this.applyStudio(state.studio);
 		this.applyConsole(state.containerConsole);
 		this.mail.apply(state.mail);
@@ -1397,6 +1415,16 @@ class AgentRuntime {
 
 	private async computeIngressHealth(): Promise<IngressHealth> {
 		const applied = this.appliedState;
+		// Dark for a drill: fail the probe so steering withdraws this ingress like a lost one. A node
+		// cut off from the control plane cannot vouch for its routes, hence `desired-state`.
+		if (this.offlineDrill.active(Date.now()))
+			return {
+				status: 'unready',
+				reason: 'desired-state',
+				desiredStateVersion: this.desired?.version ?? null,
+				appliedStateVersion: applied?.version ?? null,
+				certificateFingerprint: null,
+			};
 		const missingReleases: string[] = [];
 		if (applied) {
 			for (const release of applied.releases) {
@@ -1626,8 +1654,47 @@ class AgentRuntime {
 		}
 	}
 
+	/**
+	 * Offline drills (D235): while dark, ask the control plane every few seconds whether the drill
+	 * was cancelled. That request is not a heartbeat, so it does not bring the node back online.
+	 */
+	private async offlineDrillLoop(): Promise<void> {
+		let wasActive = false;
+		let lastPoll = 0;
+		while (this.running) {
+			const now = Date.now();
+			let active = this.offlineDrill.active(now);
+			if (active && now - lastPoll >= nodeDrillLimits.pollMs) {
+				lastPoll = now;
+				try {
+					const response = await this.control.request('/api/agent/drill', {
+						headers: { authorization: `Bearer ${this.config.nodeToken}`, accept: 'application/json' },
+						signal: this.shutdownController.signal,
+					});
+					if (response.ok) {
+						const parsed = nodeDrillPollSchema.safeParse(await response.json());
+						if (parsed.success && this.offlineDrill.poll(parsed.data.drill, Date.now())) active = false;
+					} else await response.body?.cancel();
+				} catch {
+					// Unreachable is fine: the drill still ends on its own at `endsAt`.
+				}
+			}
+			if (wasActive && !active) {
+				log('info', 'Offline drill over: heartbeats and desired-state pulls resume');
+				void this.refreshIngressHealth().catch(() => undefined);
+			}
+			if (!wasActive && active) void this.refreshIngressHealth().catch(() => undefined);
+			wasActive = active;
+			await sleep(1_000, this.shutdownController.signal).catch(() => undefined);
+		}
+	}
+
 	private async heartbeatLoop(): Promise<void> {
 		while (this.running) {
+			if (this.offlineDrill.active(Date.now())) {
+				await sleep(1_000, this.shutdownController.signal).catch(() => undefined);
+				continue;
+			}
 			let ok = false;
 			try {
 				ok = await this.sendHeartbeat('online');

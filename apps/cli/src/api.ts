@@ -86,6 +86,7 @@ import type { ConfigExportDocument } from './config-export.ts';
 import type { ImportView } from './config-import.ts';
 import type { OperationItemView, OperationView } from './operations.ts';
 import type { HaStatusView } from './ha.ts';
+import type { DrillListView, DrillView } from './drills.ts';
 import type { FleetLinksView, FleetRebalanceResult, FleetStatusView, RelocationStatusView } from './fleet.ts';
 import type { NodeSummary, RolloutCreateInput, RolloutOptions, RolloutPlanView, RolloutView } from './node-rollouts.ts';
 import type { ScaleResultView, ScalingPolicyView, ScalingStatusView } from './scaling.ts';
@@ -552,6 +553,25 @@ export class ApiClient {
 	async getHaStatus(): Promise<{ status: HaStatusView; raw: unknown }> {
 		const raw = await this.request('GET', '/api/v1/ha/status');
 		return { status: raw as HaStatusView, raw };
+	}
+
+	/** Node offline drills (D235): the running drill, recent ones and which nodes may be drilled. */
+	async listDrills(): Promise<{ view: DrillListView; raw: unknown }> {
+		const raw = await this.request('GET', '/api/v1/ha/drills');
+		return { view: raw as DrillListView, raw };
+	}
+
+	async getDrill(id: string): Promise<DrillView> {
+		return (await this.request('GET', `/api/v1/ha/drills/${encodeURIComponent(id)}`)) as DrillView;
+	}
+
+	/** Start a drill; without `node` the control plane picks an eligible node at random. */
+	async startDrill(input: { node?: string; durationSeconds?: number; includeControlNode?: boolean }): Promise<DrillView> {
+		return (await this.request('POST', '/api/v1/ha/drills', { body: input })) as DrillView;
+	}
+
+	async cancelDrill(id: string): Promise<DrillView> {
+		return (await this.request('POST', `/api/v1/ha/drills/${encodeURIComponent(id)}/cancel`, { body: {} })) as DrillView;
 	}
 
 	/** A control-plane standby promotion (W9): a CAS; a stale expectedEpoch is a 409. */

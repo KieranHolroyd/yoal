@@ -59,6 +59,7 @@ import type { DatabaseReplicaService } from './database-replica-service.ts';
 import type { StorageReplicationService } from './storage-replication-service.ts';
 import type { IngressHaService } from './ingress-ha.ts';
 import type { FailoverService } from './failover-service.ts';
+import type { NodeDrillService } from './node-drills.ts';
 import type { SchedulingService } from './scheduling-service.ts';
 import type { NodeRolloutService } from './node-rollouts.ts';
 import type { NodeLinkService } from './link-service.ts';
@@ -194,6 +195,8 @@ export interface CoreContext {
 	ingress: IngressHaService;
 	/** The failover controller: lease, replica moves, ingress rotation, database decide (C8). */
 	failover: FailoverService;
+	/** Node offline drills: take a node off the control plane for a bounded time (D235). */
+	nodeDrills: NodeDrillService;
 	/** Cluster tunables (CLUSTERING). */
 	cluster: ClusterConfigService;
 	/** The HA profile and movable platform dependencies (HA-PLAN H27/H28, W12). */

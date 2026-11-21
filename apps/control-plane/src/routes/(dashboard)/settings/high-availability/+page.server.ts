@@ -21,6 +21,8 @@ export const load: PageServerLoad = ({ locals }) => {
 		editableSlugs: core.projects.list(principal).map((project) => project.slug),
 		timeline: core.slos.timeline(principal, { limit: 50 }),
 		probers: core.externalProber.list(principal),
+		/** Node offline drills: running, recent and which nodes may be drilled (D235). */
+		drills: core.nodeDrills.view(principal),
 		/** The policy editor writes platform settings, which is admin-only. */
 		canEditPolicies: core.ctx.platformIam.canAdminister(principal)
 	};
@@ -33,6 +35,33 @@ function failure(cause: unknown) {
 /** The ingress driver and hold-downs are platform policies, edited here. */
 export const actions: Actions = {
 	savePolicies,
+	/** Disaster drill: take a random (or named) node off the control plane for a while (D235). */
+	startDrill: async ({ request, locals }) => {
+		const principal = locals.principal!;
+		const data = await request.formData();
+		const node = formString(data, 'node');
+		try {
+			const drill = core.nodeDrills.start(principal, {
+				...(node ? { node } : {}),
+				durationSeconds: Number(formString(data, 'durationSeconds')),
+				includeControlNode: formString(data, 'includeControlNode') === 'true'
+			});
+			return {
+				success: `Drill started: ${drill.nodeName} is going offline for ${Math.round(drill.durationSeconds / 60)} min${drill.random ? ' (picked at random)' : ''}.`
+			};
+		} catch (cause) {
+			return failure(cause);
+		}
+	},
+	cancelDrill: async ({ request, locals }) => {
+		const principal = locals.principal!;
+		try {
+			const drill = core.nodeDrills.cancel(principal, formString(await request.formData(), 'id'));
+			return { success: `Drill on ${drill.nodeName} ended; it comes back within about 5 s.` };
+		} catch (cause) {
+			return failure(cause);
+		}
+	},
 	saveProfile: async ({ request, locals }) => {
 		const principal = locals.principal!;
 		const profile = formString(await request.formData(), 'profile');

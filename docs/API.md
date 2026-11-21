@@ -17,7 +17,7 @@ project's public DSN key (`X-Sentry-Auth` or `?sentry_key=`), never a session co
 | Method | Path | Permission | Notes |
 |---|---|---|---|
 | GET | `/whoami` | — | user, org, role, effective permissions |
-| GET | `/install/node.sh` | — | public POSIX installer: takes `--token` and `--name`, requires the signed agent/helper bundle, joins a managed-overlay node |
+| GET | `/install/node.sh` | — | public POSIX installer: takes `--token`, `--name` and optional `--endpoint`; joins a managed-overlay node, first running `install.sh --join` (the control plane's repo and channel) when `yoal-agent` is missing |
 | GET | `/status` | `project:read` | fleet + deployment summary |
 | GET | `/metrics[/<section>[/<name>]]` | `metrics:read` (+ section read) | Prometheus text for the caller's org; sections `usage`, `apps`, `traffic`, `databases`, `storage`, `volumes`, `platform` (platform admin). Same as `/metrics/...` on the platform origin, which also serves an unauthenticated fleet summary at `/metrics`. docs/METRICS.md |
 | GET | `/projects` | `project:read` | `?trash=1` lists the trash (with `deletedAt`, `purgeAt`) |
@@ -119,6 +119,10 @@ project's public DSN key (`X-Sentry-Auth` or `?sentry_key=`), never a session co
 | GET | `/ha/status` | platform admin | the failover controller (`FailoverStatusView`): switch, lease epoch/holder, policy, per-node silence and copies, ingress record set, database promotion candidates, last 50 `failover_events` (C8) |
 | GET | `/ha/preflight` | platform admin | the HA profile, its findings with a fix each, and the platform dependencies: store kind/bucket, registry storage mode and node, identity/mail node and movability, and each node's telemetry spool counters (W12) |
 | PUT | `/ha/profile` | platform admin **session** | `{ profile: single \| ha \| ha-dr }`; a non-single profile is refused while the platform store is local, the registry's blobs are on one node, or another blocker remains (W12) |
+| GET | `/ha/drills` | `platform:ha` | node offline drills (D235): `{ running, recent, candidates, limits }`; each candidate says why it cannot be drilled, and `needsControlOptIn` when only `includeControlNode` is missing |
+| POST | `/ha/drills` | `platform:ha` | `{ node?, durationSeconds? (60–1800, default 300), includeControlNode? }`; without `node` a random eligible node. `201` with the `NodeDrillView`; `409` while one runs or when the node is ineligible |
+| GET | `/ha/drills/:id` | `platform:ha` | one drill with `observations`: start → marked offline, end → first heartbeat, failover events in the window (≤ 50) |
+| POST | `/ha/drills/:id/cancel` | `platform:ha` | ends a running drill; the agent sees it on its next poll (≤ 5 s) |
 | PATCH | `/ha/placement` | platform admin **session** | `{ identityNode?, mailNode? }` (node id/name, or `null` to clear the pin); moves identity or mail and re-renders desired state (W12) |
 | GET | `/scheduling` | platform admin | fleet capacity (`SchedulingView`): per node the admission ceiling, reserved and live memory, CPU, copies and how many may move; every copy with the reason it is pinned, if any; and the moves a rebalance would make (D214) |
 | POST | `/scheduling/rebalance` | platform admin; `apply: true` needs a dashboard session | body `{ apply?, strategy? }`. Previews by default; with `apply` it starts the moves and returns `{ applied, plan, moved, skipped }` |
@@ -470,6 +474,7 @@ listen port and peer list); an external/BYO join omits both and keeps `publicAdd
   (`CONNECTION_IDLE_TIMEOUT`), and re-pulls without `If-None-Match` after a failed converge so
   expired presigned release URLs are reissued. The token is checked before the wait.
 - `POST /api/agent/heartbeat` — stats + actual state version every ~10 s, plus `storage` (what `yoal-storage.service` last applied) and, on a managed overlay node, `wireguard` peer health (public keys, endpoints, handshake times and byte counters).
+- `GET /api/agent/drill` — `{ drill: { id, endsAt } | null }`; the only call a node makes while dark for an offline drill (D235), to see a cancel. Not a heartbeat: it never marks the node online.
 - `GET /api/agent/storage` — `{ dataDir, buildDir }` for the node's root `yoal-storage.service`, which re-reads the paths here instead of trusting the agent (D48).
 - `POST /api/agent/telemetry` — pre-aggregated 1-minute access buckets (never raw requests), plus
   `databases` / `databaseSnapshots` and `objectStorage` / `objectStorageBuckets` samples. Database

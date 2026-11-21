@@ -401,6 +401,10 @@ Each table has one row per path. Where a path takes several methods, they share 
 | POST | `/platform/storage/onboarding` | Mark the setup Storage step `done` or `skipped`. Session only. |
 | GET | `/ingress/status` | Ingress driver and readiness. |
 | GET | `/ha/status` | The failover controller: whether automatic failover is on, the lease (epoch, holder), policy, per-node silence and replica copies, the ingress record set, databases whose primary is lost with the promotion candidate, and the last 50 failover events. Platform admin. |
+| GET | `/ha/drills` | Disaster drills: the running one, recent results, and which nodes can be drilled with the reason for each that cannot. Platform admin. |
+| POST | `/ha/drills` | Start a disaster drill. Body `{ node?, durationSeconds?, includeControlNode? }`; without `node` a random eligible node is picked. `durationSeconds` is 60 to 1800 (300 by default). `409` when a drill is running or no node can be drilled. Platform admin. |
+| GET | `/ha/drills/{id}` | One drill: when the node was marked offline, when it came back, and the failover actions in between. Platform admin. |
+| POST | `/ha/drills/{id}/cancel` | End a running drill; the node is back within about 5 seconds. Platform admin. |
 | GET | `/platform/upgrade/plan` | A read-only plan for upgrading the platform. It never changes the host. |
 | GET, POST | `/backup-targets` | List backup targets, or create one. `?platform=1` makes a platform target. |
 | GET, PATCH, PUT, DELETE | `/backup-targets/{id}` | Read, update or remove a backup target. `DELETE` is refused while backups are stored on the target unless you add `?force=1`. |

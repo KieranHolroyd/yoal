@@ -75,6 +75,13 @@ const handler: RequestHandler = async (event) => {
 			return core.nodes.heartbeat(token, input);
 		}
 
+		// A node in an offline drill asks only this while dark (D235). Not a heartbeat: answering it
+		// must not mark the node online, or the drill would test nothing.
+		if (action === 'drill') {
+			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+			return json(core.nodeDrills.poll(token), 200, { 'cache-control': 'no-store' });
+		}
+
 		if (action === 'storage') {
 			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
 			return core.nodes.storageFor(token);

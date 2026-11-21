@@ -158,6 +158,15 @@ export const init: ServerInit = async () => {
 				reportBackgroundError('flows', error);
 			}
 		}, 5_000).unref?.();
+		// Node offline drills (D235): note the offline mark and fail a drill whose node never came back.
+		setInterval(() => {
+			if (!mayAct()) return;
+			try {
+				core.nodeDrills.tick();
+			} catch (error) {
+				reportBackgroundError('node-drills', error);
+			}
+		}, 5_000).unref?.();
 		// Database members (W9-SPEC §5.5): the 30 s downgrade must not wait for the 60 s sweep. This
 		// is the primary control plane's 5 s tick; a standby returned above and never runs it.
 		let membersBusy = false;

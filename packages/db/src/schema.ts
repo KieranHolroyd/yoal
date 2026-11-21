@@ -3387,6 +3387,35 @@ export const databaseFailoverDrills = sqliteTable(
 	],
 );
 
+/** One node offline drill: a node taken off the control plane for a bounded time (D235). */
+export const nodeDrills = sqliteTable(
+	'node_drills',
+	{
+		id: text('id').primaryKey(),
+		nodeId: text('node_id').notNull(),
+		nodeName: text('node_name').notNull(),
+		status: text('status', { enum: ['running', 'completed', 'cancelled', 'failed'] }).notNull().default('running'),
+		/** Picked at random rather than named. */
+		random: integer('random', { mode: 'boolean' }).notNull().default(false),
+		durationSeconds: integer('duration_seconds').notNull(),
+		startedAt: integer('started_at').notNull(),
+		endsAt: integer('ends_at').notNull(),
+		/** When the control plane marked the node offline during the drill. */
+		offlineAt: integer('offline_at'),
+		cancelledAt: integer('cancelled_at'),
+		/** The first heartbeat after the drill ended or was cancelled. */
+		restoredAt: integer('restored_at'),
+		finishedAt: integer('finished_at'),
+		observationsJson: text('observations_json'),
+		message: text('message'),
+		createdBy: text('created_by').notNull(),
+	},
+	(t) => [
+		index('node_drills_status_idx').on(t.status, t.startedAt),
+		index('node_drills_node_idx').on(t.nodeId, t.startedAt),
+	],
+);
+
 /** W15 SLO objects per project (HA-PLAN W15, Wave 4 foundation). */
 export const sloObjects = sqliteTable(
 	'slo_objects',

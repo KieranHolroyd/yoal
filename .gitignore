@@ -29,3 +29,4 @@ reports/security/
 
 # function-suite e2e diagnostics
 tests/e2e/.out/
+creds/

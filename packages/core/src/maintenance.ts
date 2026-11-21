@@ -168,13 +168,15 @@ export class MaintenanceService {
 			if (offlineForMs === null || offlineForMs < this.ctx.policies.nodeAlertMs()) continue;
 			const key = `node_offline:${node.nodeId}`;
 			alertsFired.push(key);
+			// A drill pages like the real thing (the alert path is part of what it tests), but says so.
+			const drill = this.ctx.nodeDrills?.isRunningOn(node.nodeId) ? ' This is a disaster drill (Settings → High availability); it comes back by itself.' : '';
 			await this.notify({
 				key,
 				title: 'Node offline',
 				detail:
-					node.reason === 'no_heartbeat'
+					(node.reason === 'no_heartbeat'
 						? `Node ${node.name} (${node.nodeId}) has not sent a heartbeat for ${Math.round(offlineForMs / 1000)}s.`
-						: `Node ${node.name} (${node.nodeId}) reports its proxy (Caddy) unreachable for ${Math.round(offlineForMs / 1000)}s.`,
+						: `Node ${node.name} (${node.nodeId}) reports its proxy (Caddy) unreachable for ${Math.round(offlineForMs / 1000)}s.`) + drill,
 				severity: 'critical',
 			});
 		}

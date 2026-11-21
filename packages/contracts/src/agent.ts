@@ -2,6 +2,7 @@ import { registryMirrorDesiredSchema } from './registry.ts';
 import { INGRESS_SET_CAPABILITY, ingressDesiredSchema, ingressHealthSchema } from './ingress.ts';
 import { controlDesiredSchema, controlReportSchema } from './control-plane.ts';
 import * as z from 'zod';
+import { OFFLINE_DRILL_CAPABILITY, nodeOfflineDrillDesiredSchema } from './node-drill.ts';
 import { nodeContainerConsoleDesiredSchema } from './container-console.ts';
 import { nodeStudioDesiredSchema } from './database-studio.ts';
 import { nodeHardwareSchema } from './cluster.ts';
@@ -336,6 +337,11 @@ export const desiredStateSchema = z.object({
 	 * requested is outstanding for this node; the helper verifies the release signature itself.
 	 */
 	nodeUpdate: nodeUpdateTaskSchema.nullable().default(null),
+	/**
+	 * A running offline drill for this node (D235, `./node-drill.ts`): go dark until `endsAt`. Only
+	 * present while one runs and only to an agent that declares `offline-drill`.
+	 */
+	offlineDrill: nodeOfflineDrillDesiredSchema.optional(),
 	/** Managed overlay state for this node (C1); absent on external/pre-C1 nodes. */
 	wireguard: wireguardStateSchema.optional(),
 	/** Consumer-side loopback endpoints for attached remote services (C2). */
@@ -510,6 +516,8 @@ export const nodeCapabilities = [
 	INGRESS_SET_CAPABILITY,
 	// The helper accepts /24 Kubernetes machine subnets in WireGuard peers (docs/KUBERNETES.md §10).
 	'wg-subnets',
+	// Goes dark for a node offline drill (D235): no heartbeats or pulls, failing ingress probe.
+	OFFLINE_DRILL_CAPABILITY,
 ] as const;
 export type NodeCapability = (typeof nodeCapabilities)[number];
 

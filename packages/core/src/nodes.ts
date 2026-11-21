@@ -50,6 +50,7 @@ import {
 	selectIdentityNode,
 	KUBERNETES_CAPABILITY,
 	RELEASE_PHASE_CAPABILITY,
+	OFFLINE_DRILL_CAPABILITY,
 	WG_SUBNETS_CAPABILITY,
 	machineSubnetFor,
 } from '@yoal/contracts';
@@ -648,6 +649,8 @@ export class NodeService {
 		// A fleet rollout waiting on this node's update hears about it now rather than on its next
 		// poll; last, so its checks see the workload statuses this heartbeat carried (CLUSTERING §3.11).
 		if (Object.keys(settled).length > 0) this.ctx.nodeRollouts?.nodeSettled(node.id);
+		// A node back from an offline drill closes it with the measured times (D235).
+		this.ctx.nodeDrills?.onHeartbeat(node.id);
 		return { ok: true, desiredStateVersion: this.stateVersion() };
 	}
 
@@ -1208,11 +1211,14 @@ export class NodeService {
 
 		// Every HA Wave 1 field passes the capability gate last (HA-PLAN §9 "Mixed versions").
 		const controlDesired = await control.desired();
+		const offlineDrill = nodeHasCapability(node, OFFLINE_DRILL_CAPABILITY) ? (this.ctx.nodeDrills?.desiredForNode(node.id) ?? null) : null;
 		return gateDesiredState({
 			version: this.stateVersion(),
 			nodeId: node.id,
 			agentVersion: this.ctx.config.desiredAgentVersion ?? '0.1.0',
 			nodeUpdate: this.updateTaskFor(node),
+			// Only while a drill runs on this node, so every other payload stays byte-identical (D235).
+			...(offlineDrill ? { offlineDrill } : {}),
 			generatedAt: new Date(now).toISOString(),
 			contentDomain: this.ctx.config.contentDomain,
 			platformOrigin: this.ctx.config.platformOrigin,

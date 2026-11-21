@@ -216,6 +216,7 @@
 - [ ] Systemd mount units for disks Yoal mounts (today the agent remounts after boot)
 
 ## Clustering & HA ([CLUSTERING.md](./CLUSTERING.md), D107)
+Execution plan for the unbuilt phases, the gaps beyond them and the agent lanes: [HA-PLAN.md](./HA-PLAN.md).
 - [x] C0: hardware report and derived labels, zones/roles/labels, disk tiers, constraint placement with explained refusals, CPU budget, Topology page and blast radius
 - [x] C1: Yoal-managed overlay (plan 23) generalised to hubs + LAN mesh; `private_address`; peer health (verified on two hosts 2026-11-12; MTU probe and hub loss not yet)
 - [ ] C2: node CA + mTLS, loopback service endpoints (`caddy-l4` or Bun forwarder), cross-node database/storage attachments (partly: process apps over the Bun forwarder with pinned mTLS; the per-install CA and container apps remain, HA-PLAN W4)

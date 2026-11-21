@@ -178,6 +178,30 @@ curl https://control.example.com/api/v1/ha/status -H "Authorization: Bearer yoal
 
 The MCP tool is `get_ha_status`. All three need a platform admin. None of them can change placement or trigger a failover.
 
+### Disaster drills
+
+A disaster drill takes one node off the control plane for a few minutes, so you can see the failover setup above work before a real outage. Start one from **Settings → High availability → Disaster drill**, or from the CLI:
+
+```sh
+yoal ha drill node-offline --wait               # a random eligible node, 5 minutes, then the report
+yoal ha drill node-offline --node worker-2 --minutes 10
+yoal ha drill list                              # which nodes can be drilled, and recent results
+yoal ha drill cancel drl_…                      # end it early
+```
+
+While the drill runs, the node's agent sends no heartbeats, takes no new desired state and fails its ingress health check. To the rest of the platform it looks like a lost node: it is marked offline after about 30 seconds, the failover controller moves its copies after the grace period, ingress steering withdraws it, run-leased workloads on it stop themselves, and you get the usual **Node offline** alert after 2 minutes, with a note that it is a drill. Its other workloads keep running, as they would on a machine that is cut off but still powered.
+
+The node comes back by itself when the time is up, and **End drill now** or `yoal ha drill cancel` brings it back within about 5 seconds. Restarting the agent on the node also ends the drill. When it is back, the drill records how long the control plane took to mark it offline, how long it took to heartbeat again, and every failover action in between.
+
+Rules:
+
+- One drill at a time, from 1 to 30 minutes (5 by default). Choose longer than `replicas.failoverGraceSeconds` if you want copies to actually move.
+- A random drill picks among nodes that are online, run an agent with drill support, and are not the control plane's node. Tick **Allow the control-plane node**, or pass `--include-control`, to include it. The dashboard and API stay up, but ingress through that node is withdrawn.
+- The last online node is never drilled.
+- A drill fails if the node heartbeats in the middle of it (for example, its agent restarted) or does not come back within 3 minutes of the end.
+
+Drills need a platform admin. The REST endpoints are `GET` and `POST /api/v1/ha/drills`, `GET /api/v1/ha/drills/{id}` and `POST /api/v1/ha/drills/{id}/cancel`.
+
 ### Database and storage replicas
 
 A PostgreSQL database can have streaming [read replicas](/data/databases#read-replicas), and a storage instance can have replication targets. Use the **Replicas** section on the database or storage page, `yoal db replica add`, or the REST endpoints `POST /api/v1/databases/{name}/replicas` and `POST /api/v1/storage/{name}/replicas`.
@@ -224,6 +248,7 @@ These are the keys that code reads today:
 - every node, how long since its last heartbeat, how many replica copies it holds, and when they would move
 - databases with replicas, whether the primary is lost, and the replica a promotion would use
 - the ingress driver and the withdraw and re-add hold-downs, which are set on this page, and every node with the ingress role, whether it is ready and whether it is in the DNS record set
+- the [disaster drill](#disaster-drills): start one, follow it, and the results of recent ones
 - the failover history: every move, ingress withdrawal or re-add, database decision and lease change, newest first
 
 **Settings → Clustering** shows a short summary of the same state above the JSON editor.
