@@ -112,7 +112,7 @@ Call `whoami` first to see the client, your role and the permissions that apply 
 
 Every tool carries the MCP hints `readOnlyHint`, `destructiveHint` and `idempotentHint`, so a client can approve reads automatically and ask before destructive calls. Twenty-one tools are marked destructive: the nine deletes, the four detaches, `revoke_share_link`, `revoke_site_session`, `sign_out_all_visitors`, `revoke_database_credential`, `revoke_storage_key`, `remove_email_suppression`, `remove_email_address` and `apply_stack`.
 
-Seventeen tools ask a person to confirm before they act: the nine deletes (`delete_project`, `delete_projects`, `delete_database`, `delete_database_replica`, `delete_storage`, `delete_event_rule`, `delete_dashboard`, `delete_alert_rule`, `delete_log_drain`), plus `sign_out_all_visitors`, `revoke_database_credential`, `revoke_storage_key`, `remove_email_suppression`, `add_email_address`, `remove_email_address`, `send_email` and `apply_stack`. Each prompt names the exact target. The `apply_stack` prompt names the stack, counts what it creates and updates, and lists the first steps; the answer is bound to that exact plan. The `send_email` prompt shows the sender, recipients, subject and the start of the body, and warns that a sent message cannot be recalled.
+Eighteen tools ask a person to confirm before they act: the ten deletes (`delete_project`, `delete_projects`, `delete_database`, `delete_database_replica`, `delete_storage`, `delete_event_rule`, `delete_dashboard`, `delete_alert_rule`, `delete_slo`, `delete_log_drain`), plus `sign_out_all_visitors`, `revoke_database_credential`, `revoke_storage_key`, `remove_email_suppression`, `add_email_address`, `remove_email_address`, `send_email` and `apply_stack`. Each prompt names the exact target. The `apply_stack` prompt names the stack, counts what it creates and updates, and lists the first steps; the answer is bound to that exact plan. The `send_email` prompt shows the sender, recipients, subject and the start of the body, and warns that a sent message cannot be recalled.
 
 How the prompt reaches you depends on the client:
 
@@ -305,6 +305,8 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 | `update_database` | Resize a database, turn its pooler on or off, set its extensions, or move MySQL, MariaDB, Valkey, Redis or ClickHouse forward to a newer listed version | `database:update` |
 | `restart_database` | Restart the database container, or only its pooler | `database:update` |
 | `list_database_replicas` | List a PostgreSQL database's read replicas with status, replay position and lag, and its promotion history | `database:read` |
+| `get_database_failover` | Read a database's automatic-failover policy and every reason `auto` would be refused now, its recent switchovers and its newest move. Read-only: arming failover, drills, switchover, promotion and moves are dashboard and CLI only | `database:read` |
+| `plan_database_upgrade` | Plan a PostgreSQL major upgrade: blockers, warnings and the dump/restore steps. Changes nothing; a person starts it with `yoal db upgrade --apply` | `database:update` |
 | `create_database_replica` | Add an async streaming read replica on a node. Attached apps restart once it streams, to receive `<PREFIX>_READ_URL` | `database:update` |
 | `delete_database_replica` | Remove a read replica and delete its copy. The primary is untouched. Asks to confirm | `database:read`, `database:update` |
 | `rotate_database_credentials` | Rotate the owner or monitor password. Attached apps receive the new value | `database:credentials`, `database:update` |
@@ -365,6 +367,7 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 | `list_storage` | List object storage instances with status, node, usage, buckets and attachments | `storage:read` |
 | `get_storage` | Show one instance: endpoints, buckets, attachments and last-hour usage | `storage:read` |
 | `get_storage_logs` | Show recent storage container log lines. Pass a cursor to poll | `storage:read`, `logs:read` |
+| `list_storage_replicas` | List the replication links an instance is source or target of, with status and lag. Read-only: adding and removing replicas is dashboard and CLI only | `storage:read` |
 | `list_objects` | List objects and folders in a bucket | `storage:read` |
 | `presign_object` | Create a short-lived GET or PUT URL for one object | `storage:read` |
 | `create_object_folder` | Create a folder marker in a bucket | `storage:update` |
@@ -456,9 +459,22 @@ These tools read and change who may do what in the organisation (see [identity a
 | `create_alert_rule` | Create a metric alert rule. The result previews the series that would breach | `metrics:read` |
 | `update_alert_rule` | Change a rule. Pause or resume it with `enabled` | `metrics:read` |
 | `silence_alerts` | Mute notifications for a window, for one rule or by label | `metrics:read` |
+| `list_alert_silences` | List active and upcoming silences; `includeExpired` adds those that ended in the last 30 days | `metrics:read` |
+| `remove_alert_silence` | End a silence now so its alerts notify again. Owners, admins and deployers | `metrics:read` |
 | `acknowledge_alert` | Stop repeat notifications for a firing series until it resolves | `metrics:read` |
 | `get_alert_history` | Show recent alert events, notifications, silences and acknowledgements | `metrics:read` |
 | `delete_alert_rule` | Delete a rule with its series and silences. History is kept. Asks to confirm | `metrics:read` |
+
+### SLOs
+
+Service level objectives with error budgets and burn alerts. These tools are offered only while the platform has `SLO_OBJECTS` turned on.
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_slos` | List a project's SLOs, or without `project` every project's SLOs with their error budget (platform admins) | `project:read` |
+| `evaluate_slos` | Evaluate one SLO or all of a project's against telemetry: error budget left and burn-alert state. A window with no data says so | `project:read` |
+| `set_slo` | Create an SLO, or replace the one with the same name: indicator, target ratio, window and burn alerts | `project:update` |
+| `delete_slo` | Delete an SLO and its burn alerts. Asks to confirm | `project:update` |
 
 ### App errors
 

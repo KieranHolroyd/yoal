@@ -139,11 +139,13 @@ import {
 	haCertificateSources,
 	haInitSteeringDrivers,
 	haProfiles,
+	sloBurnAlertSchema,
+	sloObjectInputSchema,
 } from '@yoal/contracts';
 
 /** The steering drivers `ha init` offers (never `direct`). */
 type HaInitSteering = (typeof haInitSteeringDrivers)[number];
-import { MAX_DURATION_SECONDS, featureEnabled, parseAuditTime, parseManifestYaml } from '@yoal/core';
+import { MAX_DURATION_SECONDS, NotFoundError, featureEnabled, parseAuditTime, parseManifestYaml } from '@yoal/core';
 import { authSecret } from './config';
 import { core } from './core';
 import { principalFromMcp } from './principal';
@@ -274,7 +276,11 @@ export const TOOL_PERMISSIONS: Record<string, Permission> = {
 	update_alert_rule: 'metrics:read',
 	delete_alert_rule: 'metrics:read',
 	silence_alerts: 'metrics:read',
+	remove_alert_silence: 'metrics:read',
 	acknowledge_alert: 'metrics:read',
+	// SLOs (HA-PLAN W15) are project config; their burn alerts page like alert rules.
+	set_slo: 'project:update',
+	delete_slo: 'project:update',
 	// Log drains (DESIGN §8): the service further limits writes to owners and admins.
 	create_log_drain: 'logs:read',
 	test_log_drain: 'logs:read',
@@ -3079,6 +3085,50 @@ function buildServer(
 			})),
 	);
 
+	// Failover, switchover and moves are read-only here: MCP never changes a database's role or
+	// placement (docs/CLUSTERING.md §12.4). Arming, drills, switchover and move are dashboard/CLI/REST.
+	tool(
+		'get_database_failover',
+		{
+			title: 'Get database failover',
+			description:
+				'Read a database\'s failover state (read-only): the automatic-failover policy (mode, whether it is active, the persisted ' +
+				'evidence such as the last passed drill, and every reason `auto` would be refused now), its 20 most recent planned ' +
+				'switchovers with their outcome, and its newest move to another node. Arming failover, drills, switchover, promotion and ' +
+				'moves are not available over MCP: a person does them from the dashboard or `yoal db`.',
+			inputSchema: z.object({ database: z.string().describe('Database name') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('database:read'),
+		},
+		async ({ database }) =>
+			run(() => ({
+				database,
+				failover: core.failoverPolicies.view(principal, database),
+				switchovers: core.databaseMembers.switchovers(principal, database),
+				latestMove: core.moves.latestForDatabase(principal, database),
+			})),
+	);
+
+	tool(
+		'plan_database_upgrade',
+		{
+			title: 'Plan database major upgrade',
+			description:
+				'Plan a PostgreSQL major upgrade (e.g. 17 → 18) without changing anything: the blockers that refuse it now (read replicas, ' +
+				'an in-flight backup or restore, status, variant support), warnings (attached projects, extensions), and the dump/restore ' +
+				'runbook steps. Yoal never switches a major automatically. To start, a person runs `yoal db upgrade <name> --to <version> ' +
+				'--apply`, which queues the pinned pre-upgrade backup. Needs database:update, because planning is an upgrade request.',
+			inputSchema: z.object({
+				database: z.string().describe('Database name'),
+				targetVersion: z.string().min(1).max(16).describe('The PostgreSQL major to move to, e.g. "18"'),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('database:update'),
+		},
+		async ({ database, targetVersion }) =>
+			run(() => ({ plan: core.databases.upgradeDatabase(principal, database, { targetVersion, apply: false }) })),
+	);
+
 	tool(
 		'create_database_replica',
 		{
@@ -4406,6 +4456,20 @@ function buildServer(
 	);
 
 	tool(
+		'list_storage_replicas',
+		{
+			title: 'List storage replicas',
+			description:
+				'List the bucket replication links an object storage instance takes part in, as source or target (read-only): the other ' +
+				'instance, buckets, status and lag. Adding or removing a replica changes placement, so it is dashboard, REST and CLI only.',
+			inputSchema: z.object({ storage: z.string().describe('Storage instance name') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('storage:read'),
+		},
+		async ({ storage }) => run(() => ({ storage, replicas: core.storageReplication.list(principal, storage) })),
+	);
+
+	tool(
 		'list_objects',
 		{
 			title: 'List bucket objects',
@@ -5534,6 +5598,38 @@ function buildServer(
 	);
 
 	tool(
+		'list_alert_silences',
+		{
+			title: 'List alert silences',
+			description:
+				'List the org\'s active and upcoming silences: id, the rule or label matchers they mute, start, end, comment and who created ' +
+				'them. includeExpired adds silences that ended in the last 30 days.',
+			inputSchema: z.object({ includeExpired: z.boolean().default(false) }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('metrics:read'),
+		},
+		async ({ includeExpired }) => run(() => ({ silences: core.alerts.listSilences(principal, { includeExpired }) })),
+	);
+
+	tool(
+		'remove_alert_silence',
+		{
+			title: 'Remove alert silence',
+			description:
+				'End a silence now (id from list_alert_silences), so its alerts notify again. It stays in the list as expired. ' +
+				'Owners, admins and deployers only.',
+			inputSchema: z.object({ id: z.string().min(1).describe('Silence id') }),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+			scopeChallenge: requires('metrics:read'),
+		},
+		async ({ id }) =>
+			run(() => {
+				core.alerts.expireSilence(principal, id);
+				return { ok: true, id };
+			}),
+	);
+
+	tool(
 		'acknowledge_alert',
 		{
 			title: 'Acknowledge alert',
@@ -5613,6 +5709,132 @@ function buildServer(
 					},
 					requestState: mintConfirmation(principal, 'delete_alert_rule', rule),
 				});
+			return remove();
+		},
+	);
+
+	// --- SLOs (HA-PLAN §4 W15): offered only while SLO_OBJECTS is on ------------------------------
+	const sloProject = z.string().describe('Project slug');
+
+	tool(
+		'list_slos',
+		{
+			feature: 'SLO_OBJECTS',
+			title: 'List SLOs',
+			description:
+				'List a project\'s service level objectives: name, indicator (e.g. http_availability), target, window, burn alerts and ' +
+				'enabled. Without `project`, the platform-wide overview of every project\'s SLOs with their current error budget ' +
+				'(platform admins only).',
+			inputSchema: z.object({ project: sloProject.optional() }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async ({ project }) =>
+			run(async () => (project ? { project, slos: core.slos.list(principal, project) } : await core.slos.overview(principal))),
+	);
+
+	tool(
+		'evaluate_slos',
+		{
+			feature: 'SLO_OBJECTS',
+			title: 'Evaluate SLOs',
+			description:
+				'Evaluate one SLO (`id`) or every SLO in a project against telemetry over its window: the measured ratio, the error ' +
+				'budget left and which burn alerts would fire. A window with no data is reported as such, not as healthy. Read-only.',
+			inputSchema: z.object({ project: sloProject, id: z.string().min(1).optional().describe('SLO id (slo_…); omit for all') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async ({ project, id }) => run(async () => ({ project, evaluations: await core.slos.evaluate(principal, project, id) })),
+	);
+
+	tool(
+		'set_slo',
+		{
+			feature: 'SLO_OBJECTS',
+			title: 'Set SLO',
+			description:
+				'Create an SLO, or replace the one with the same name in the project. `target` is a ratio between 0 and 1 (0.999 = 99.9%), ' +
+				'`windowSeconds` the rolling window (1 hour to 90 days). Burn alerts page at their severity when the budget burns faster ' +
+				'than `burnRate` times the allowed rate over `windowSeconds` (and `shortWindowSeconds` when set).',
+			inputSchema: z.object({
+				project: sloProject,
+				name: z.string().min(1).max(100),
+				description: z.string().max(2_000).nullable().optional(),
+				indicator: z.string().min(1).max(100).describe('The signal, e.g. http_availability, database_writable or mail_delivery'),
+				target: z.number().gt(0).lt(1),
+				windowSeconds: z.number().int().min(3_600).max(90 * 24 * 60 * 60),
+				burnAlerts: z.array(sloBurnAlertSchema).max(8).optional(),
+				enabled: z.boolean().optional(),
+			}),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:update'),
+		},
+		async ({ project, ...input }) =>
+			run(async () => {
+				const raw = Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+				return { project, slo: await core.slos.upsert(principal, project, sloObjectInputSchema.parse(raw)) };
+			}),
+	);
+
+	tool(
+		'delete_slo',
+		{
+			feature: 'SLO_OBJECTS',
+			title: 'Delete SLO',
+			description:
+				'Delete an SLO and its burn alerts. To pause it instead, set_slo with enabled:false. Requires confirmation.',
+			inputSchema: z.object({ project: sloProject, id: z.string().min(1).describe('SLO id (slo_…)') }),
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+			scopeChallenge: requires('project:update'),
+		},
+		async ({ project, id }, ctx) => {
+			const remove = () =>
+				run(() => {
+					core.slos.remove(principal, project, id);
+					return { ok: true, project, id };
+				});
+			if (era === 'assistant') return remove();
+			if (era === 'legacy')
+				return {
+					isError: true,
+					...text(
+						`Deleting SLO ${id} needs your confirmation, which this MCP client can't show. ` +
+							`Ask the user to delete it from the Yoal dashboard: ${core.ctx.config.platformOrigin}/settings/slo`,
+					),
+				};
+			const target = `${project}/${id}`;
+			const key = `confirm_delete_slo:${target}`;
+			const schema = z.object({ confirm: z.boolean() });
+			const prompted = verifyConfirmation(ctx.mcpReq.requestState(), principal, 'delete_slo', target);
+			const answer = prompted ? acceptedContent(ctx.mcpReq.inputResponses, key, schema) : undefined;
+			const responded = prompted && ctx.mcpReq.inputResponses?.[key] !== undefined;
+			if (responded && answer?.confirm !== true) {
+				const cancelled = text(`Cancelled: SLO ${id} was not deleted (the user did not confirm).`);
+				declined.add(cancelled);
+				return cancelled;
+			}
+			if (answer?.confirm !== true) {
+				let name: string;
+				try {
+					const slo = core.slos.list(principal, project).find((entry) => entry.id === id);
+					if (!slo) throw new NotFoundError('SLO');
+					name = slo.name;
+				} catch (error) {
+					return run(() => {
+						throw error;
+					});
+				}
+				return inputRequired({
+					inputRequests: {
+						[key]: inputRequired.elicit({
+							message: `Delete SLO "${name}" from ${project}? Its burn alerts stop; this cannot be undone.`,
+							requestedSchema: schema,
+						}),
+					},
+					requestState: mintConfirmation(principal, 'delete_slo', target),
+				});
+			}
 			return remove();
 		},
 	);
