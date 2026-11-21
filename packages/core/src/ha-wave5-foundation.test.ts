@@ -119,7 +119,7 @@ describe('REGIONS off: every region write is refused', () => {
 		expect(() => core.workloads.setSpec(principal, project, { runtime: 'process', placement: { spread: 'region' } })).toThrow(expect.objectContaining(refusedWithFlag));
 	});
 
-	test('blueprint HA keys validate but plan refuses them loudly until lane C', async () => {
+	test('blueprint region keys validate, and plan refuses each one by name while REGIONS is off', async () => {
 		const document = {
 			apiVersion: 'yoal/v1',
 			name: 'w5-stack',
@@ -127,8 +127,11 @@ describe('REGIONS off: every region write is refused', () => {
 		};
 		expect(core.blueprints.validate(principal, document).document.databases.main?.standbyRegion).toBe('ukwest');
 		await expect(core.blueprints.plan(principal, { document })).rejects.toMatchObject({
-			code: 'not_built',
-			message: expect.stringContaining('databases.main.spread, databases.main.standbyRegion'),
+			code: 'validation',
+			issues: [
+				{ path: ['databases.main.standbyRegion'], message: expect.stringContaining('YOAL_FEATURE_REGIONS') },
+				{ path: ['databases.main.spread'], message: expect.stringContaining('YOAL_FEATURE_REGIONS') },
+			],
 		});
 	});
 });

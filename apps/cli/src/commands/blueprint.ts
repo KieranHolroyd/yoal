@@ -6,6 +6,7 @@ import {
 	BLUEPRINT_MAX_BYTES,
 	findBlueprintFile,
 	hasChanges,
+	haLines,
 	issueLines,
 	planLines,
 	planSummary,
@@ -137,6 +138,8 @@ function printPlan(plan: BlueprintPlanView, all: boolean): void {
 	console.log(planSummary(plan));
 	const lines = planLines(plan, { all });
 	if (lines.length) console.log(`\n${lines.join('\n')}`);
+	const ha = haLines(plan);
+	if (ha.length) console.log(`\nHA\n${ha.join('\n')}`);
 	for (const warning of plan.warnings) console.log(`\nwarning: ${warning}`);
 }
 
