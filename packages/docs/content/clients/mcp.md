@@ -83,7 +83,7 @@ These are the permissions the MCP tools use. The tables in the catalogue below n
 
 | Permission | Lets an agent |
 |---|---|
-| `project:read` | List and read projects, environments, volumes, usage, quotas, nodes, status and the audit log |
+| `project:read` | List and read projects, environments, volumes, usage, quotas, nodes, status, app errors and the audit log |
 | `project:create` | Create projects (`deploy_site` also creates a missing project) |
 | `project:update` | Rename or re-place projects, set access, create environments and volumes, and attach or detach resources |
 | `project:delete` | Soft-delete projects |
@@ -99,6 +99,10 @@ These are the permissions the MCP tools use. The tables in the catalogue below n
 | `container:inspect`, `container:files` | Inspect container projects; list and read their files (`container:files` is never pre-ticked) |
 | `logs:read`, `metrics:read` | Read logs and log drains (owners and admins also manage drains); read metrics, dashboards and alerts |
 | `database:credentials`, `storage:credentials`, `broker:credentials`, `database:console` | Rotate database credentials. No MCP tool reveals credentials. |
+| `kubernetes:read`, `kubernetes:create`, `kubernetes:update`, `kubernetes:delete` | Read, create, change and soft-delete managed Kubernetes clusters, their routes, attachments and backups |
+| `kubernetes:view`, `kubernetes:edit` | Read a cluster's shipped pod logs; apply YAML to a cluster as you (the cluster's own RBAC still decides per object) |
+| `iam:read`, `iam:manage-bindings` | List roles and explain, simulate or list who has access; grant and remove role bindings |
+| `serviceAccount:read`, `serviceAccount:create`, `federation:read` | List and create service accounts; list workload-identity federation trusts |
 
 Some tools need a second permission depending on what the call does. For example, `create_database` with a `project` also needs `project:update`, because it attaches the database to that project in the same call.
 
@@ -376,6 +380,26 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 | `create_storage_key` | Create a named access key scoped to some buckets. The secret is not returned | `storage:update` |
 | `revoke_storage_key` | Revoke a named access key. Asks to confirm | `storage:update` |
 
+### Managed Kubernetes
+
+A cluster is a k3s control plane with up to 8 agent machines, on a node that has the optional Kubernetes component. These tools are offered only while the platform has Kubernetes turned on. No tool returns a token or kubeconfig: people get one with `yoal k8s kubeconfig <name>`, and their access inside the cluster follows their Yoal role (`kubernetes:view`, `kubernetes:edit` or `kubernetes:admin`).
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_k8s_clusters` | List the organisation's clusters with version, status, node, size and API endpoint | `kubernetes:read` |
+| `get_k8s_cluster` | Show one cluster: status, version and the minor it may upgrade to, end of support, API URL, tier, machines, nodes ready, routes and attachments | `kubernetes:read` |
+| `create_k8s_cluster` | Create a cluster: version, placement, machine size, agents, 3 servers for HA, purpose and tier | `kubernetes:create` |
+| `update_k8s_cluster` | Upgrade one minor at a time, scale agents, resize machines, change API access, the maintenance window, backups or the log shipper, or move a single server to 3 servers | `kubernetes:update` |
+| `add_k8s_route` | Claim `<name>.<content domain>` for a cluster and route it to the cluster's bundled Traefik ingress | `kubernetes:update` |
+| `attach_to_k8s_cluster` | Write a database's or broker's connection values into the cluster as a Secret. The database or broker must run on the cluster's node | `kubernetes:update`, plus `database:read` or `broker:read` |
+| `generate_k8s_config` | Write Kubernetes YAML from a plain-language request, using the cluster's real facts, then lint and repair it. Applies nothing. Needs a model provider in **Settings → Assistant** | `kubernetes:read` |
+| `apply_k8s_config` | Server-side apply YAML as you. `dryRun: true` validates without changing anything; a real apply asks to confirm | `kubernetes:edit` |
+| `k8s_pod_logs` | Read pod log lines the cluster's log shipper sent to Yoal, filtered by namespace, pod or text | `kubernetes:view` |
+| `backup_k8s_cluster` | Take a datastore snapshot now | `kubernetes:update` |
+| `list_k8s_backups` | List a cluster's scheduled, manual and pre-upgrade snapshots with status, size, version and expiry | `kubernetes:read` |
+| `restore_k8s_backup` | Restore a snapshot into a new cluster. Never overwrites a live cluster | `kubernetes:create` |
+| `delete_k8s_cluster` | Soft-delete a cluster; it can be restored for the trash period. Asks to confirm. Permanent deletion is dashboard and CLI only | `kubernetes:read`, `kubernetes:delete` |
+
 ### Access and share links
 
 | Tool | What it does | Permission |
@@ -387,6 +411,23 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 | `list_site_sessions` | List a project's live share-link visitor sessions | `shareLink:read` |
 | `revoke_site_session` | End one share-link visitor session. The link keeps working | `shareLink:revoke` |
 | `sign_out_all_visitors` | Sign out every visitor of a project on every scope. Asks to confirm | `project:update` |
+
+### Identity and access
+
+These tools read and change who may do what in the organisation (see [identity and access](/cli/identity-and-access) for the same actions in the CLI). Nothing here creates or returns a key, token or secret. Approving, denying and extending access requests, platform bindings and federation trust changes are dashboard, REST and CLI only.
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_roles` | List the built-in and custom roles with the permissions each grants | `iam:read` |
+| `explain_access` | Explain the decision for one permission on a resource: the reason, the binding or guardrail that decided it, and every grant considered | `iam:read` |
+| `who_can` | List everyone who can do something, each with the binding that allows them. Group bindings are expanded to their members | `iam:read` |
+| `simulate_access` | Dry-run a binding or custom-role change and see which permissions it would give or take from one principal. Saves nothing | `iam:read` |
+| `bind_role` | Grant a role to a user, group or service account at a scope, optionally expiring and with a reason | `iam:manage-bindings` |
+| `unbind_role` | Remove a binding by id; its access stops at once. Asks to confirm | `iam:manage-bindings` |
+| `request_access` | Ask for a time-boxed role at a scope, with a reason. Creates a pending request that a different person approves | none |
+| `list_service_accounts` | List service accounts with their description, owner group and disabled state | `serviceAccount:read` |
+| `create_service_account` | Create a service account (`sa_…`). No key or token is issued | `serviceAccount:create` |
+| `list_federation_trusts` | List workload-identity federation trusts: the OIDC issuer, audiences, the service account each exchanges into, and its restriction | `federation:read` |
 
 ### Observability
 
@@ -418,6 +459,16 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 | `acknowledge_alert` | Stop repeat notifications for a firing series until it resolves | `metrics:read` |
 | `get_alert_history` | Show recent alert events, notifications, silences and acknowledgements | `metrics:read` |
 | `delete_alert_rule` | Delete a rule with its series and silences. History is kept. Asks to confirm | `metrics:read` |
+
+### App errors
+
+Exceptions your apps report through a Sentry SDK, grouped into issues (see [app errors](/observe/app-errors)).
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_app_errors` | List one project's issues, newest first. Filter by status (unresolved, resolved or ignored), environment, release, time range or text | `project:read` |
+| `get_app_error` | Show one issue with its newest events and stack traces, and its 24-hour and 14-day counts | `project:read` |
+| `update_app_errors` | Resolve, ignore or reopen one or more issues | `project:update` |
 
 ### Email
 
