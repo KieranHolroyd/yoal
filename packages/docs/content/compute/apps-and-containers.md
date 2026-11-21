@@ -419,8 +419,9 @@ A field you leave out is not managed: it takes the platform default when the res
 
 | Section | Fields |
 | --- | --- |
-| `projects.<slug>` | `name`, `runtime` (`static` by default, fixed for the project's life), `placement`, `access.production` and `access.previews` (`public` or `platform`), `environments.<name>.access`, `domains`. Process and container projects also take `command`, `image` (containers), `port`, `healthPath`, `memoryMb`, `cpus`, `replicas`, `env` and `secrets` |
-| `databases.<name>` | `engine` (`postgres` by default), `version`, `variant`, `memoryMb`, `cpus`, `storageMb`, `extensions`, `pooler` |
+| `cluster` | `requires` and `steering`. See [high availability keys](#high-availability-keys) |
+| `projects.<slug>` | `name`, `runtime` (`static` by default, fixed for the project's life), `placement`, `access.production` and `access.previews` (`public` or `platform`), `environments.<name>.access`, `domains`. Process and container projects also take `command`, `image` (containers), `port`, `healthPath`, `memoryMb`, `cpus`, `replicas`, `env` and `secrets`, and the high availability keys `readinessPath`, `release`, `rollout`, `drainSeconds` and `placement: { spread }` |
+| `databases.<name>` | `engine` (`postgres` by default), `version`, `variant`, `memoryMb`, `cpus`, `storageMb`, `extensions`, `pooler`. PostgreSQL databases also take the high availability keys `replicas`, `spread`, `durability`, `failover`, `acceptDataLoss`, `pitr`, `backups` and `standbyRegion` |
 | `storage.<name>` | `public`, `memoryMb`, `cpus`, `storageMb`, `buckets.<bucket>` with `access`, `versioning` and `quotaMb` |
 | `brokers.<name>` | `engine` (`nats`), `version`, `memoryMb`, `cpus`, `storageMb` |
 | `attachments[]` | `project` and exactly one of `database`, `storage` or `broker`; `prefix` (the engine's default otherwise); `grants` for storage, each a `bucket` and a `mode` of `read` or `read-write` |
@@ -434,6 +435,74 @@ Some rules follow from what the services allow:
 - A new database, private storage instance or broker is placed next to the first project the file attaches it to, so everything an app uses shares one node.
 - Password access cannot be set from a file, because passwords never go in one.
 
+### High availability keys
+
+These keys declare how a stack survives the loss of a node or a zone. They are optional, and a file without them plans exactly as before. A plan that uses them gets an **HA** section: one step for the fleet check, one for the cluster's steering, and one per project and database. The CLI prints it under its own heading after the other resources, up-to-date steps included.
+
+```yaml
+apiVersion: yoal/v1
+name: lynxnet
+cluster:
+  requires: { zones: 3, ingressNodes: 2, dataNodes: 3 }
+  steering: { driver: external-lb, drainSeconds: 20 }
+projects:
+  lynxnet:
+    runtime: container
+    image: registry.example.com/lynxnet:1.4.0
+    port: 3460
+    healthPath: /healthz
+    readinessPath: /readyz
+    replicas: 3
+    placement: { spread: zone }
+    release: { command: [bun, run, "db:migrate"], timeoutSeconds: 300 }
+    rollout: { canary: 1, soakSeconds: 900, maxUnavailable: 1 }
+    drainSeconds: 15
+databases:
+  main:
+    engine: postgres
+    version: "18"
+    replicas: 2
+    spread: zone
+    durability: sync
+    failover: auto
+    pitr: true
+    backups: { target: offsite, immutable: true }
+```
+
+| Key | What it does | Needs |
+| --- | --- | --- |
+| `cluster.requires` | Fails the plan unless the **online** nodes span at least `zones` zones, and at least `ingressNodes` have the ingress role and `dataNodes` the data role. Nothing is provisioned: the plan names the shortfall and the nodes it did not count | A platform admin role |
+| `cluster.steering` | Sets the cluster's steering `driver`, `stacked` drivers and the ingress `drainSeconds`, the same settings as **Settings → High availability** and `yoal ha init`. Whichever writes last wins, and the plan shows the change from the current value | A platform admin signed in to the dashboard, so the CLI and API keys cannot change it. A driver other than `direct` does nothing until `YOAL_FEATURE_STEERING` is on, and the plan warns about that |
+| `readinessPath` | The path that gates traffic to a copy; `healthPath` stays the liveness check | `YOAL_FEATURE_RELEASE_PHASE` |
+| `release` | A command run once per release, before the first copy rolls; a failure stops the deploy | `YOAL_FEATURE_RELEASE_PHASE` |
+| `rollout` | `canary` copies roll first and are judged for `soakSeconds`; `maxUnavailable` limits how many copies are down at once | `YOAL_FEATURE_RELEASE_PHASE` |
+| `drainSeconds` | How long a copy keeps serving after it leaves the routes | `YOAL_FEATURE_RELEASE_PHASE` |
+| `placement: { spread }` | The app's own spread, `node` or `zone`: its copies never share one. The project's `placement` string is unchanged | `YOAL_FEATURE_RELEASE_PHASE` |
+| `replicas` | How many read replicas to keep. Missing ones are added on online data nodes that run replicas, one per new node or zone under `spread`, and the plan names the nodes | A replica-capable agent and an overlay address on each node |
+| `spread` | `node` (the default) or `zone`: the primary and every replica on different nodes or zones. A live database that breaks the rule fails the plan | |
+| `durability` | `async` or `sync` (one recorded synchronous replica) | `YOAL_FEATURE_SYNC_REPLICA`, two streaming replicas in two zones and an arbiter |
+| `failover` | `auto` arms automatic failover exactly as `yoal db failover <name> --arm` does, and `manual` disarms it. `acceptDataLoss: true` is the async acknowledgement | Every arming check; see [automatic failover](/self-hosting/clustering#automatic-failover) |
+| `pitr` | Turns point-in-time recovery on or off | `YOAL_FEATURE_PITR` and a PITR repository; with replicas, `YOAL_FEATURE_PITR_REWIND` |
+| `backups` | Checks where the database's backups go: `target` must be the backup target your organisation uses, and `immutable: true` needs object lock or an immutability policy on it. Nothing is changed | |
+| `standbyRegion` | A region that holds an async replica | `YOAL_FEATURE_REGIONS` |
+
+Each key goes through the same service as the dashboard and the CLI. The plan runs each service's checks without changing anything, and when one refuses, the plan fails and lists every refusal with its path. For a database that includes the feature flags, PITR's requirements, room, disks and memory quota for every new replica together, the durability and arming checks, and whether the database is moving or failing over. Flags are set in the control plane's environment (see [configuration](/self-hosting/configuration#feature-flags)).
+
+Apply runs every check again, first for the whole plan and then in each step before it writes. Two checks can still refuse at the moment a step runs, if something changed after the plan: a durability change writes the arbiter lease, and arming evaluates the failover policy again. The plan warns about both. A database step writes in order (standby region, PITR, replicas, durability, then failover), so if one of those is refused then, the writes before it stay. For a project, the memory quota and port checks of the saved workload settings also run at apply.
+
+AI agents (MCP) cannot change `durability` or `failover` through a blueprint; apply those from the dashboard or the CLI.
+
+Some keys depend on a change that has to settle first, and the plan says which:
+
+- `durability: sync` picks a replica that is already streaming. It cannot be set in the apply that creates the database or adds its replicas: apply once without it, wait until `yoal db replica list <name>` shows the replicas streaming, then add it and apply again.
+- `failover: auto` needs a passed failover drill on that database, so it cannot be set in the apply that creates the database. It also cannot be set in the apply that changes `durability` or adds replicas. The plan shows every unmet arming check by its code, for example `[no-self-fencing-path]`.
+- `failover: manual` disarms and clears `acceptDataLoss`, so the next `failover: auto` on an async database must set `acceptDataLoss: true` again. To clear `acceptDataLoss` on an armed database, set `failover: manual` and apply, then set `failover: auto` without it.
+
+Removing a key from the file stops managing it and keeps its current value, and prune never touches these keys. A blueprint never removes a replica: asking for fewer replicas than the database has fails the plan, so remove one with `yoal db replica remove` first.
+
+> [!NOTE]
+> Not available yet: `spread: region` and `standbyRegion`. With `YOAL_FEATURE_REGIONS` off the plan refuses them as needing regions, and with it on as not built yet.
+
 ### Plan and apply
 
 From the CLI, with `yoal.blueprint.yaml`, `yoal.blueprint.yml` or `yoal.blueprint.json` in the current directory (or a path, or `-` for stdin):
@@ -446,7 +515,7 @@ yoal blueprint apply
 
 `plan` lists every resource as `create`, `update`, `delete` or up to date, with each changed field. `apply` plans, shows the plan, asks, then applies it and follows the progress; `--yes` skips the question. In the dashboard, open **Projects → From template → Apply a blueprint**, paste or open the file, choose **Plan**, review the diff and choose **Apply**.
 
-The steps run in order: projects, environments, databases, storage, buckets, brokers, workload settings, domains, then attachments. Each step re-reads live state and changes only what still differs. The first step that fails stops the run, the later steps are skipped, and nothing is rolled back, so fix the cause and plan again: the new plan lists only what is left. `yoal blueprint apply` exits 0 when everything applied, 3 when the run stopped partway, and 1 when it failed or you declined.
+The steps run in order: projects, environments, databases, storage, buckets, brokers, workload settings, the HA section, domains, then attachments. Each step re-reads live state and changes only what still differs. The first step that fails stops the run, the later steps are skipped, and nothing is rolled back, so fix the cause and plan again: the new plan lists only what is left. `yoal blueprint apply` exits 0 when everything applied, 3 when the run stopped partway, and 1 when it failed or you declined.
 
 A plan lasts one hour and only the person who made it can apply it. Apply re-reads live state first, and if anything the plan covers has changed since, it refuses and asks you to plan again, so what runs is always what you reviewed.
 

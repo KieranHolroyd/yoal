@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { ApiClient } from './api.ts';
 import {
 	findBlueprintFile,
+	haLines,
 	hasChanges,
 	issueLines,
 	planLines,
@@ -59,6 +60,33 @@ describe('blueprint output', () => {
 		expect(planSummary(plan)).toBe('Stack "shop": 1 to create, 1 to update, 1 to delete, 1 up to date.');
 		expect(hasChanges(plan)).toBe(true);
 		expect(hasChanges({ summary: { create: 0, update: 0, delete: 0, noop: 4 } })).toBe(false);
+	});
+
+	test('HA steps render as their own section, up-to-date checks included', () => {
+		const withHa: BlueprintPlanView = {
+			...plan,
+			resources: [
+				...plan.resources,
+				{ key: 'cluster.requires', kind: 'ha', action: 'noop', changes: [], reason: 'online: 3 zones, 2 ingress nodes, 3 data nodes' },
+				{
+					key: 'cluster.steering',
+					kind: 'ha',
+					action: 'update',
+					changes: [{ path: 'steering.driver', from: 'direct', to: 'external-lb' }],
+					reason: 'cluster setting shared with ha init; the last write wins',
+				},
+				{ key: 'databases.main.ha', kind: 'ha', action: 'update', changes: [{ path: 'replicas', from: '0', to: '2' }], reason: null },
+			],
+		};
+		expect(planLines(withHa)).toEqual(planLines(plan));
+		expect(haLines(withHa)).toEqual([
+			'= noop   cluster.requires  (online: 3 zones, 2 ingress nodes, 3 data nodes)',
+			'~ update cluster.steering  (cluster setting shared with ha init; the last write wins)',
+			'      steering.driver: direct → external-lb',
+			'~ update databases.main.ha',
+			'      replicas: 0 → 2',
+		]);
+		expect(haLines(plan)).toEqual([]);
 	});
 
 	test('runs show every step and why one was skipped', () => {

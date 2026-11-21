@@ -245,6 +245,50 @@ export class DatabaseMemberService {
 	): Promise<DatabaseDurabilityStatus> {
 		const database = this.ctx.databases.requireRow(principal, databaseName);
 		this.ctx.iam.require(principal, 'database:update', { type: 'database', id: database.id });
+		const { current, next, unchangedSet } = this.#durabilityPreconditions(database, raw);
+		if (unchangedSet)
+			this.ctx.db
+				.update(databases)
+				.set({ syncTimeoutSeconds: next.syncTimeoutSeconds, onSyncLoss: next.onSyncLoss, updatedAt: this.ctx.now() })
+				.where(eq(databases.id, database.id))
+				.run();
+		else if (next.durability === 'sync') await this.#armSync(database, next, principal);
+		else await this.#setAsync(database, next);
+		this.ctx.audit.record({
+			principal: principal,
+			action: 'database.durability.update',
+			resource: 'database',
+			resourceId: database.id,
+			args: { name: database.name, from: current, to: next },
+			result: 'ok',
+		});
+		this.ctx.projects.bump(database.orgId);
+		return this.status(principal, database.name);
+	}
+
+	/**
+	 * The refusal `setDurability` would throw for this change, or null, without writing anything.
+	 * Blueprint plans (HA-PLAN W14) call it so a plan shows the same refusal the apply would meet;
+	 * it runs the very checks `setDurability` runs (`#durabilityPreconditions`, `#syncTarget`).
+	 */
+	durabilityRefusal(principal: Principal, databaseName: string, raw: DurabilitySettingsUpdate): string | null {
+		const database = this.ctx.databases.requireRow(principal, databaseName);
+		this.ctx.iam.require(principal, 'database:read', { type: 'database', id: database.id });
+		try {
+			const { next, unchangedSet } = this.#durabilityPreconditions(database, raw);
+			if (!unchangedSet && next.durability === 'sync') this.#syncTarget(database, next);
+			return null;
+		} catch (error) {
+			if (error instanceof CoreError) return error.message;
+			throw error;
+		}
+	}
+
+	/** Every check `setDurability` makes before it writes; throws the refusal. */
+	#durabilityPreconditions(
+		database: DatabaseRow,
+		raw: DurabilitySettingsUpdate,
+	): { current: DurabilitySettings; next: DurabilitySettings; unchangedSet: boolean } {
 		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA'))
 			throw new CoreError('unavailable', 'Synchronous replicas are off: enable SYNC_REPLICA first (HA-PLAN H23).', 409);
 		if (database.engine !== 'postgres')
@@ -277,24 +321,7 @@ export class DatabaseMemberService {
 			throw new ConflictError(
 				`"${database.name}" has a sync-set change open (non-promotable, W9-SPEC §5.5). Wait for it to close or fall back before starting another.`,
 			);
-		if (unchangedSet)
-			this.ctx.db
-				.update(databases)
-				.set({ syncTimeoutSeconds: next.syncTimeoutSeconds, onSyncLoss: next.onSyncLoss, updatedAt: this.ctx.now() })
-				.where(eq(databases.id, database.id))
-				.run();
-		else if (next.durability === 'sync') await this.#armSync(database, next, principal);
-		else await this.#setAsync(database, next);
-		this.ctx.audit.record({
-			principal: principal,
-			action: 'database.durability.update',
-			resource: 'database',
-			resourceId: database.id,
-			args: { name: database.name, from: current, to: next },
-			result: 'ok',
-		});
-		this.ctx.projects.bump(database.orgId);
-		return this.status(principal, database.name);
+		return { current, next, unchangedSet };
 	}
 
 	/** Planned switchover: checkpoint, stop writes, LSN equality, promote, re-point (refuse on a gap). */
@@ -1830,11 +1857,8 @@ export class DatabaseMemberService {
 		return null;
 	}
 
-	async #armSync(
-		database: DatabaseRow,
-		settings: DurabilitySettings,
-		principal: Principal,
-	): Promise<void> {
+	/** The replica `#armSync` would make synchronous; throws the refusal when there is none. */
+	#syncTarget(database: DatabaseRow, settings: DurabilitySettings): { nodeId: string } {
 		const replicas = this.ctx.databaseReplicas.rowsFor(database.id).filter((row) => !row.removingAt && row.primaryGeneration === database.primaryGeneration);
 		// HA-PLAN H26: `sync` is only offered inside one region; a replica in another region (a
 		// standby region's in particular) stays async and is never a sync target.
@@ -1866,6 +1890,15 @@ export class DatabaseMemberService {
 				'No arbiter with conditional writes is configured, so a sync set cannot be recorded. `sync` fails closed.',
 				409,
 			);
+		return target;
+	}
+
+	async #armSync(
+		database: DatabaseRow,
+		settings: DurabilitySettings,
+		principal: Principal,
+	): Promise<void> {
+		const target = this.#syncTarget(database, settings);
 		await this.#openChange(database, target.nodeId, this.ctx.now(), settings, principal);
 	}
 

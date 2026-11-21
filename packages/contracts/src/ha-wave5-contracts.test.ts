@@ -415,8 +415,12 @@ describe('drill catalogue', () => {
 		expect(haDrillScenario('node-offline')).toMatchObject({ recordsIn: 'node_drills', resourceKind: 'node', availability: 'fleet', destructive: true, confirmation: 'typed' });
 		expect(haDrillScenario('ingress-offline')).toMatchObject({ destructive: true, confirmation: 'typed' });
 		expect(haDrillScenario('database-failover')).toMatchObject({ recordsIn: 'database_failover_drills', confirmation: 'confirm', flags: ['SYNC_REPLICA'] });
-		for (const id of ['zone-offline', 'control-plane-failover', 'region-failover'] as const)
-			expect(haDrillScenario(id)).toMatchObject({ availability: 'lab', fleetUnavailableReason: expect.any(String) });
+		// Not `toMatchObject({ fleetUnavailableReason: expect.any(String) })`: Bun writes the matcher
+		// into the received object, which corrupted the shared catalogue for later test files.
+		for (const id of ['zone-offline', 'control-plane-failover', 'region-failover'] as const) {
+			expect(haDrillScenario(id).availability).toBe('lab');
+			expect(typeof haDrillScenario(id).fleetUnavailableReason).toBe('string');
+		}
 		for (const entry of HA_DRILL_CATALOGUE) expect(entry.fleetUnavailableReason === null).toBe(entry.availability === 'fleet');
 	});
 
