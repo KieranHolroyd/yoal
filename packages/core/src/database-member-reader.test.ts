@@ -338,6 +338,8 @@ describe('the promotion reader', () => {
 		report(a, 'primary', 2);
 		report(b, 'primary', 2);
 		expect(await core.databaseMembers.reconcilePromotions()).toBe(0);
+		expect(await core.databaseMembers.reconcilePromotions()).toBe(0);
+		expect(auditActions().filter((action) => action === 'database.failover.two_primaries').length).toBe(1);
 		expect(auditActions()).toContain('database.failover.two_primaries');
 		await core.databaseMembers.consumerTarget(database.id);
 		expect(auditActions().filter((action) => action === 'database.failover.two_primaries').length).toBeGreaterThanOrEqual(2);

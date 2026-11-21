@@ -491,6 +491,9 @@ export interface DatabaseFailoverPolicyView {
 	evidence: Record<string, unknown>;
 	armedEvidence: Record<string, unknown> | null;
 	active: boolean;
+	controllerEnabled: boolean;
+	controllerInstalled: boolean;
+	selfFencing: boolean;
 	refusals: FailoverArmRefusalView[];
 }
 

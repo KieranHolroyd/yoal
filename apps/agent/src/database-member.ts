@@ -71,8 +71,8 @@ export interface MemberOperations {
 	fence(workloadId: string, mode: 'stop' | 'readonly'): Promise<void>;
 	/** `pg_ctl promote` on the replica workload; `promoted` may be true with a hand-over error. */
 	promote(workloadId: string, databaseId: string): Promise<{ promoted: boolean; lsn: string | null; error?: string }>;
-	/** Clear the inherited `synchronous_standby_names` as the new primary. */
-	clearSync(databaseId: string): Promise<void>;
+	/** Clear the inherited `synchronous_standby_names` on the promoted workload. */
+	clearSync(workloadId: string): Promise<void>;
 }
 
 export type MemberEventKind =
@@ -278,7 +278,7 @@ export class DatabaseMemberRunner {
 		state.role = role;
 
 		if (role === 'primary') {
-			await this.#keepPrimary(desired, state, wasPrimary);
+			await this.#keepPrimary(desired, state, wasPrimary, workloadId);
 		} else if (desiredRole === 'replica') {
 			await this.#tryCandidate(desired, state, workloadId, state.notices);
 		}
@@ -288,7 +288,12 @@ export class DatabaseMemberRunner {
 	}
 
 	/** Renew, or fence when the lease cannot be proved and the H21 failsafe does not hold. */
-	async #keepPrimary(desired: DatabaseMembersDesired, state: DatabaseMemberState, wasPrimary: boolean): Promise<void> {
+	async #keepPrimary(
+		desired: DatabaseMembersDesired,
+		state: DatabaseMemberState,
+		wasPrimary: boolean,
+		workloadId: string,
+	): Promise<void> {
 		if (!this.arbiter) {
 			state.arbiterReachable = false;
 			return;
@@ -315,7 +320,7 @@ export class DatabaseMemberRunner {
 			higherPrimaryReachable: false,
 		});
 		if (record && action === 'fence') {
-			await this.#fence(desired, state, `a higher generation or another holder is visible (generation ${record.lease.generation})`);
+			await this.#fence(desired, state, workloadId, `a higher generation or another holder is visible (generation ${record.lease.generation})`);
 			return;
 		}
 
@@ -324,7 +329,7 @@ export class DatabaseMemberRunner {
 			// A lease that is already expired by the arbiter clock cannot be resurrected: this member
 			// failed to prove it before the TTL, so it fences rather than renewing back to life.
 			if (!Number.isFinite(expiry) || expiry <= arbiterNow) {
-				await this.#fence(desired, state, 'the lease expired before this member could renew it');
+				await this.#fence(desired, state, workloadId, 'the lease expired before this member could renew it');
 				return;
 			}
 			const due = state.lastRenewAt === null || this.now() - state.lastRenewAt >= this.renewMs || expiry - arbiterNow < this.leaseTtlMs / 2;
@@ -344,7 +349,7 @@ export class DatabaseMemberRunner {
 						// A lost renew is not immediately fatal: re-read and fence if the lease moved.
 						const latest = await this.arbiter.read(desired.databaseId).catch(() => null);
 						if (latest && (latest.lease.generation > state.generation || latest.lease.holderNodeId !== this.nodeId))
-							await this.#fence(desired, state, 'the lease was taken at another generation');
+							await this.#fence(desired, state, workloadId, 'the lease was taken at another generation');
 					}
 				} catch {
 					state.arbiterReachable = false;
@@ -364,7 +369,7 @@ export class DatabaseMemberRunner {
 				return;
 			}
 		}
-		if (wasPrimary && proofAge !== null && proofAge > this.leaseTtlMs) await this.#fence(desired, state, 'cannot prove the lease and the failsafe does not hold');
+		if (wasPrimary && proofAge !== null && proofAge > this.leaseTtlMs) await this.#fence(desired, state, workloadId, 'cannot prove the lease and the failsafe does not hold');
 	}
 
 	/** §4: evaluate candidate conditions and, only if all hold, CAS `generation + 1`. */
@@ -482,13 +487,22 @@ export class DatabaseMemberRunner {
 		if (!proof || proof.lease.generation !== pending.generation || proof.lease.holderNodeId !== this.nodeId) {
 			state.pendingPromotion = null;
 			this.#event('promotion-failed', desired.databaseId, pending.generation, 'pg_ctl promote completed but the lease is no longer held; fencing');
-			await this.#fence(desired, state, 'the lease moved while pg_ctl promote ran');
+			await this.#fence(desired, state, workloadId, 'the lease moved while pg_ctl promote ran');
 			return;
 		}
-		// §5.3: clear the inherited sync setting and become the new primary.
-		await this.helper.clearSync(desired.databaseId).catch((error: unknown) =>
-			this.log('warn', `could not clear the sync setting for ${desired.databaseId}: ${errorText(error)}`),
-		);
+		// §5.3: clear the inherited sync setting **on the promoted replica workload** (the database
+		// primary workload does not exist on this node yet) and become the new primary. A failure is
+		// surfaced, not only logged: the new primary must not keep the old setting.
+		try {
+			await this.helper.clearSync(workloadId);
+		} catch (error) {
+			this.#event(
+				'promotion-failed',
+				desired.databaseId,
+				pending.generation,
+				`promoted, but clearing the inherited sync setting failed on ${workloadId}: ${errorText(error)}`,
+			);
+		}
 		state.generation = pending.generation;
 		state.role = 'primary';
 		state.promoted = { generation: pending.generation, lsn: outcome.lsn };
@@ -546,15 +560,20 @@ export class DatabaseMemberRunner {
 	 * reachable member within 2 s, then report `fenced`. A fence that cannot be confirmed is retried
 	 * and reported (`fence-failed`); the notice is only sent after the primary has stopped serving.
 	 */
-	async #fence(desired: DatabaseMembersDesired, state: DatabaseMemberState, reason: string): Promise<void> {
+	async #fence(
+		desired: DatabaseMembersDesired,
+		state: DatabaseMemberState,
+		workloadId: string,
+		reason: string,
+	): Promise<void> {
 		if (state.role === 'fenced') return;
 		state.role = 'fencing';
 		const decidedAt = this.now();
 		// 1. Stop serving writes and confirm it took effect before promising anything to a peer.
 		let confirmed = false;
 		try {
-			await this.helper.fence(desired.databaseId, 'readonly');
-			const status = await this.helper.status(desired.databaseId);
+			await this.helper.fence(workloadId, 'readonly');
+			const status = await this.helper.status(workloadId);
 			// `readOnly` is the authoritative drain flag; a stopped/moved member is in recovery.
 			confirmed = status.readOnly || status.inRecovery;
 		} catch (error) {
@@ -571,6 +590,10 @@ export class DatabaseMemberRunner {
 			return;
 		}
 		state.fenceFailures = 0;
+		// F3: the 2 s notice window starts **after** the fence is confirmed; a slow fence no longer
+		// consumes it. Report the fence and fan-out times separately.
+		const noticeStartedAt = this.now();
+		const fenceMs = noticeStartedAt - decidedAt;
 		const notice: FenceNotice = {
 			generation: state.generation,
 			// W9's database lease has a generation, not a separate epoch; the notice names both.
@@ -578,8 +601,8 @@ export class DatabaseMemberRunner {
 			from: this.nodeId,
 			at: new Date(this.wallNow()).toISOString(),
 		};
-		// 2. Best-effort fan-out, bounded by §5.0's 2 s from the decision (including peers()).
-		const budget = () => Math.max(0, 2_000 - (this.now() - decidedAt));
+		// Best-effort fan-out, bounded by §5.0's 2 s from the notice attempt (including peers()).
+		const budget = () => Math.max(0, 2_000 - (this.now() - noticeStartedAt));
 		const peers = (await Promise.race([this.peer.peers(desired.databaseId).catch(() => []), deadline(budget())])) ?? [];
 		let delivered = 0;
 		const sends = peers
@@ -594,11 +617,12 @@ export class DatabaseMemberRunner {
 			);
 		await Promise.race([Promise.all(sends), deadline(budget())]);
 		const sentAt = this.now();
+		const noticeMs = sentAt - noticeStartedAt;
 		this.#event(
 			delivered > 0 ? 'fence-notice-sent' : 'fence-notice-missed',
 			desired.databaseId,
 			state.generation,
-			`${reason}; notice reached ${delivered}/${peers.length} peer(s)${fenceNoticeWithinBudget(decidedAt, sentAt) ? '' : ' (over the 2 s budget)'}`,
+			`${reason}; fence ${fenceMs} ms, fan-out ${noticeMs} ms, notice reached ${delivered}/${peers.length} peer(s)${fenceNoticeWithinBudget(noticeStartedAt, sentAt) ? '' : ' (fan-out over the 2 s budget)'}`,
 			notice,
 		);
 		// 3. Only now is the old primary `fenced`.
@@ -691,7 +715,7 @@ export function memberOperations(helper: Pick<HelperApi, 'memberStatus' | 'fence
 		status: (workloadId) => helper.memberStatus(workloadId),
 		fence: (workloadId, mode) => helper.fenceWorkload(workloadId, mode),
 		promote: (workloadId, databaseId) => helper.replicaPromote(workloadId, databaseId),
-		clearSync: (databaseId) => helper.syncConfigure(databaseId, []),
+		clearSync: (workloadId) => helper.syncConfigure(workloadId, []),
 	};
 }
 

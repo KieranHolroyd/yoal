@@ -178,6 +178,11 @@ export class FailoverService {
 		};
 	}
 
+	/** Whether an automatic database promotion handler is installed in this process. */
+	handlerInstalled(): boolean {
+		return this.#handler !== null;
+	}
+
 	/** Milliseconds between ticks: `renewSeconds`, capped at a third of the lease TTL. */
 	intervalMs(config: ClusterConfig = this.ctx.cluster.get()): number {
 		const { leaseTtlSeconds, renewSeconds } = config.controlPlane;

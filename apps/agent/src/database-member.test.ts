@@ -84,6 +84,7 @@ interface Calls {
 	promoted: number;
 	fenced: Array<'stop' | 'readonly'>;
 	cleared: number;
+	clearSyncArgs?: string[];
 	promoteArgs?: Array<[string, string]>;
 	promoteFailures?: number;
 	/** Default true; false simulates a helper that accepted the verb but did not take effect. */
@@ -114,8 +115,9 @@ function ops(status: { inRecovery: boolean; streaming: boolean; readOnly: boolea
 			}
 			return { promoted: true, lsn: '0/300' };
 		},
-		async clearSync() {
+		async clearSync(workloadId) {
 			calls.cleared += 1;
+			(calls.clearSyncArgs ??= []).push(workloadId);
 		},
 	};
 }
@@ -187,6 +189,7 @@ describe('candidate acquisition', () => {
 		expect(calls.promoted).toBe(1);
 		expect(calls.cleared).toBe(1);
 		expect(calls.promoteArgs).toEqual([['db_dbr_a', DB]]);
+		expect(calls.clearSyncArgs).toEqual(['db_dbr_a']);
 		expect(arbiter.renewals).toBe(1);
 		expect(arbiter.record?.lease).toMatchObject({ generation: 2, holderNodeId: A, sync: [], syncState: 'changing' });
 		expect(events.map((event) => event.kind)).toEqual(expect.arrayContaining(['candidate', 'promoted']));
@@ -413,6 +416,40 @@ describe('the fencing primary', () => {
 		await machine.runOnce(state([desired({ holderNodeId: A, leaseGeneration: 2 })]), AbortSignal.timeout(1_000));
 		expect(peers.sent.length).toBeGreaterThan(0);
 		expect(events.map((event) => event.kind)).toContain('fenced');
+	});
+
+	test('a slow fence does not consume the 2 s notice window', async () => {
+		const arbiter = new FakeArbiter(lease({ generation: 2, holderNodeId: A }));
+		const peers = new FakePeers();
+		const calls: Calls = { promoted: 0, fenced: [], cleared: 0 };
+		const events: MemberEvent[] = [];
+		let clock = T0;
+		let fenced = false;
+		const base = ops({ inRecovery: false, streaming: true, readOnly: false }, calls);
+		const machine = runner({
+			nodeId: P,
+			arbiter,
+			peers,
+			events,
+			now: () => clock,
+			ops: {
+				...base,
+				async fence(id, mode) {
+					calls.fenced.push(mode);
+					fenced = true;
+					clock += 3_000; // the helper's drain can take up to 20 s
+				},
+				async status() {
+					return { inRecovery: false, streaming: true, readOnly: fenced, lsn: null };
+				},
+			},
+		});
+		await machine.runOnce(state([desired({ holderNodeId: A, leaseGeneration: 2 })]), AbortSignal.timeout(1_000));
+		expect(peers.sent.length).toBeGreaterThan(0);
+		const sent = events.find((event) => event.kind === 'fence-notice-sent');
+		expect(sent?.detail).toContain('fence 3000 ms');
+		expect(sent?.detail).toContain('fan-out');
+		expect(sent?.detail).not.toContain('fan-out over the 2 s budget');
 	});
 
 	test('does not fence a healthy primary that can still prove the lease', async () => {

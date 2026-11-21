@@ -156,6 +156,10 @@ function fullyEligible(): void {
 	);
 	addDrill({ durability: 'sync', timeToWritableMs: 21_000, lostCommits: 0 });
 	setFeature('DB_AUTO_PROMOTE', true);
+	// `active` is the controller's predicate (F2): the controller must be enabled and a handler
+	// installed, exactly as the W11 install path would do after proving self-fencing.
+	core.cluster.update(principal, { failover: { enabled: true } });
+	core.failover.registerDatabaseHandler({ run: () => ({ status: 'done' }) });
 }
 
 afterAll(() => {
@@ -236,6 +240,9 @@ describe('database failover policy', () => {
 		const view = core.failoverPolicies.view(principal, 'main');
 		expect(view.refusals).toEqual([]);
 		expect(view.active).toBe(true);
+		expect(view.controllerEnabled).toBe(true);
+		expect(view.controllerInstalled).toBe(true);
+		expect(view.selfFencing).toBe(true);
 		expect(view.lastDrill?.durability).toBe('sync');
 		expect(view.lastDrill?.drillDatabaseId).toBe('db_disposable');
 		expect(view.lastFailoverDrillAt).toBe(new Date(clock).toISOString());
@@ -243,6 +250,17 @@ describe('database failover policy', () => {
 		expect(armed.failoverMode).toBe('auto');
 		expect(armed.autoArmedAt).toBe(new Date(clock).toISOString());
 		expect(armed.armedEvidence).toMatchObject({ drillId: view.evidence.drillId, dataNodeCount: 3, autoPromoteEnabled: true });
+	});
+
+	test('active is false while the failover controller is disabled (F2)', async () => {
+		fullyEligible();
+		core.cluster.update(principal, { failover: { enabled: false } });
+		const view = core.failoverPolicies.view(principal, 'main');
+		expect(view.refusals).toEqual([]);
+		expect(view.controllerEnabled).toBe(false);
+		expect(view.active).toBe(false);
+		// The per-database policy is still armed; only the controller is off.
+		expect(view.failoverMode).toBe('auto');
 	});
 
 	test('a running latest attempt does not hide a fresh passed drill', () => {

@@ -69,12 +69,46 @@ export class DatabaseFailoverPolicyService {
 	 * the §1.3 durability condition. Arming separately enforces every §3 refusal.
 	 */
 	autoActiveForRow(
-		database: Pick<DatabaseRow, 'failoverMode' | 'durabilityEffective' | 'acceptDataLoss' | 'syncState'>,
+		database: Pick<DatabaseRow, 'id' | 'nodeId' | 'failoverMode' | 'durabilityEffective' | 'acceptDataLoss' | 'syncState'>,
 	): boolean {
 		if (!featureEnabled(this.ctx.config, 'DB_AUTO_PROMOTE')) return false;
+		if (!this.ctx.cluster.get().failover.enabled) return false;
+		if (!this.ctx.failover.handlerInstalled()) return false;
 		if (database.failoverMode !== 'auto') return false;
 		if (database.syncState !== 'steady') return false;
-		return autoEnabledFor(true, database.durabilityEffective, database.acceptDataLoss);
+		if (!autoEnabledFor(true, database.durabilityEffective, database.acceptDataLoss)) return false;
+		// Re-check node fencing on every decision: a capability removed after boot must disable auto
+		// before the next promotion (review F1), and a zero-member set is never active.
+		return this.#selfFencingFor([database as DatabaseRow]).ok;
+	}
+
+	/**
+	 * F1: the involved member set is the primary and every non-removing replica of the given
+	 * database(s). It must be non-empty, and every member must advertise the real self-fencing
+	 * capability. A fleet with no `data`-role node, or a replica-only node whose role was removed,
+	 * therefore cannot install automatic promotion.
+	 */
+	#selfFencingFor(rows: readonly Pick<DatabaseRow, 'id' | 'nodeId'>[]): {
+		ok: boolean;
+		missing: string[];
+		memberCount: number;
+	} {
+		const ids = new Set<string>();
+		for (const row of rows) {
+			ids.add(row.nodeId);
+			for (const replica of this.ctx.db
+				.select({ nodeId: databaseReplicas.nodeId })
+				.from(databaseReplicas)
+				.where(and(eq(databaseReplicas.databaseId, row.id), isNull(databaseReplicas.removingAt)))
+				.all())
+				ids.add(replica.nodeId);
+		}
+		if (ids.size === 0) return { ok: false, missing: [], memberCount: 0 };
+		const nodes = new Map(this.#allNodes().map((node) => [node.id, node]));
+		const missing = [...ids]
+			.filter((id) => !nodes.get(id)?.capabilities.includes(DB_MEMBER_SELF_FENCING_CAPABILITY))
+			.sort();
+		return { ok: missing.length === 0, missing, memberCount: ids.size };
 	}
 
 	/**
@@ -417,7 +451,8 @@ export class DatabaseFailoverPolicyService {
 	// ---------------------------------------------------------------- reads
 
 	#view(database: DatabaseRow): DatabaseFailoverPolicyView {
-		const { evidence, refusals, latestAttempt, latestPassed } = this.#evaluate(database);		const rawEvidence = database.failoverEvidenceJson
+		const { evidence, refusals, latestAttempt, latestPassed } = this.#evaluate(database);
+		const rawEvidence = database.failoverEvidenceJson
 			? parseJson<unknown>(database.failoverEvidenceJson, null)
 			: null;
 		const armed =
@@ -434,6 +469,9 @@ export class DatabaseFailoverPolicyService {
 			lastDrill: latestAttempt ? this.#drillView(latestAttempt) : null,
 			evidence,
 			armedEvidence: armed?.success ? armed.data : null,
+			controllerEnabled: this.ctx.cluster.get().failover.enabled,
+			controllerInstalled: this.ctx.failover.handlerInstalled(),
+			selfFencing: evidence.selfFencing,
 			// The same predicate the controller uses (review blocker 10): a surface never claims an
 			// `auto` the controller would not act on.
 			active: this.autoActiveForRow(database),
@@ -472,12 +510,11 @@ export class DatabaseFailoverPolicyService {
 		const latestAttempt = this.#latestDrill(database.id);
 		// An explicit drill must be a passed one; it replaces the latest passed drill for arming.
 		const latestPassed = drillId ? this.#passedDrill(database.id, drillId) : this.#latestPassedDrill(database.id);
-		// F1 (review blocker 1): every data node and every involved member must advertise the real
-		// self-fencing capability. Without it the control-plane controller must not promote.
-		const selfFencing =
-			dataNodes.length > 0 &&
-			dataNodes.every((node) => node.capabilities.includes(DB_MEMBER_SELF_FENCING_CAPABILITY)) &&
-			involved.every((node) => node.capabilities.includes(DB_MEMBER_SELF_FENCING_CAPABILITY));
+		// F1: every involved member (the primary and its replicas) must advertise the real
+		// self-fencing capability; a data-role hint alone is not evidence and an empty set is never
+		// active.
+		const selfFencingInfo = this.#selfFencingFor([database]);
+		const selfFencing = selfFencingInfo.ok && selfFencingInfo.memberCount > 0;
 
 		const drillAge =
 			latestPassed?.finishedAt === null || latestPassed?.finishedAt === undefined

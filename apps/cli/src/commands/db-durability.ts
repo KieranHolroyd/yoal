@@ -110,7 +110,8 @@ async function switchover(argv: string[]): Promise<void> {
 	const replicaId = requirePositional(args, 1, `replica id.\n\n${durabilityUsage}`);
 	const client = await authenticatedClient();
 	const current = await client.databaseReplicas(name);
-	const replica = current.replicas.find((item) => item.id === replicaId);	const confirmed = await confirmOrRefuse(
+	const replica = current.replicas.find((item) => item.id === replicaId);
+	const confirmed = await confirmOrRefuse(
 		`Switch "${name}" over to replica ${replicaId}${replica ? ` on ${replica.nodeName ?? replica.nodeId}` : ''}? ` +
 			'Writes stop briefly; a replica that has not replayed the primary is refused and nothing is promoted. ' +
 			`Type ${name} to confirm: `,

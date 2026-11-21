@@ -367,18 +367,46 @@ export class DatabaseReplicaService {
 				reason:
 					'The deployment has not asserted YOAL_DB_MEMBER_SELF_FENCING=1 after the lab proved node-side fencing.',
 			};
-		const missing = this.ctx.db
-			.select({ id: nodes.id, rolesJson: nodes.rolesJson, capabilitiesJson: nodes.capabilitiesJson })
-			.from(nodes)
-			.all()
-			.filter((node) => parseJson<string[]>(node.rolesJson, []).includes('data'))
-			.filter((node) => !parseJson<string[]>(node.capabilitiesJson, []).includes(DB_MEMBER_SELF_FENCING_CAPABILITY))
-			.map((node) => node.id)
+		// F1: the involved set is every member (primary + replicas) of every armed database. It must
+		// be non-empty; a fleet with no `data`-role node or a replica-only node whose role was removed
+		// must never produce `active: true`.
+		const armed = this.ctx.db
+			.select({ id: databases.id, nodeId: databases.nodeId })
+			.from(databases)
+			.where(and(eq(databases.failoverMode, 'auto'), isNull(databases.deletedAt)))
+			.all();
+		const memberIds = new Set<string>();
+		for (const database of armed) {
+			memberIds.add(database.nodeId);
+			for (const replica of this.ctx.db
+				.select({ nodeId: databaseReplicas.nodeId })
+				.from(databaseReplicas)
+				.where(and(eq(databaseReplicas.databaseId, database.id), isNull(databaseReplicas.removingAt)))
+				.all())
+				memberIds.add(replica.nodeId);
+		}
+		if (memberIds.size === 0)
+			return {
+				active: false,
+				reason: 'No database is armed for automatic failover, so there is no member set to fence.',
+			};
+		const nodesById = new Map(
+			this.ctx.db
+				.select({ id: nodes.id, capabilitiesJson: nodes.capabilitiesJson })
+				.from(nodes)
+				.all()
+				.map((node) => [node.id, node]),
+		);
+		const missing = [...memberIds]
+			.filter((id) => {
+				const node = nodesById.get(id);
+				return !node || !parseJson<string[]>(node.capabilitiesJson, []).includes(DB_MEMBER_SELF_FENCING_CAPABILITY);
+			})
 			.sort();
 		if (missing.length > 0)
 			return {
 				active: false,
-				reason: `These data nodes do not advertise ${DB_MEMBER_SELF_FENCING_CAPABILITY}, so a primary cannot fence itself: ${missing.join(', ')}.`,
+				reason: `These involved members do not advertise ${DB_MEMBER_SELF_FENCING_CAPABILITY}, so a primary cannot fence itself: ${missing.join(', ')}.`,
 			};
 		return { active: true, reason: '' };
 	}

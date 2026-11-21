@@ -62,7 +62,8 @@ export class IdentityBridge {
 	private unhealthy = 0;
 	private restarts = 0;
 	private state: UnitState = 'stopped';
-	private processVersion: string | null = null;	private generation: number | null = null;
+	private processVersion: string | null = null;
+	private generation: number | null = null;
 	private pools = 0;
 	private secretsGeneration: number | null = null;
 	private lastSecretsAt = 0;

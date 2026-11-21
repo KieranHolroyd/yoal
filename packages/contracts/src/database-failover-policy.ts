@@ -223,6 +223,12 @@ export const databaseFailoverPolicyViewSchema = z.object({
 	lastDrill: databaseFailoverDrillSchema.nullable(),
 	/** Current eligibility evidence, recomputed from the fleet. */
 	evidence: databaseFailoverEvidenceSchema,
+	/** `config.failover.enabled`: the controller may act at all. */
+	controllerEnabled: z.boolean().default(false),
+	/** An automatic database promotion handler is installed in this process. */
+	controllerInstalled: z.boolean().default(false),
+	/** Every involved member advertises `db-member-self-fencing` right now. */
+	selfFencing: z.boolean().default(false),
 	/** The evidence persisted when the policy was last armed; null for a manual database. */
 	armedEvidence: databaseFailoverEvidenceSchema.nullable(),
 	/** `failoverMode === 'auto'` and the live predicate the controller uses (flag, steady, durability). */

@@ -3,7 +3,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDb, databaseReplicas, databases } from '@yoal/db';
-import { DEFAULT_FEATURES, type FailoverPlan } from '@yoal/contracts';
+import { DEFAULT_FEATURES, DB_MEMBER_SELF_FENCING_CAPABILITY, nodeCapabilities, type FailoverPlan } from '@yoal/contracts';
 import { buildPrincipal } from './orgs.ts';
 import { createCore, type Core } from './index.ts';
 import { LocalObjectStore } from './object-store.ts';
@@ -498,6 +498,12 @@ describe('database primaries', () => {
 			.values({ id: 'dbr_1', databaseId: 'db_1', nodeId: h.node.w2!, status: replicaStatus, replayLsn: '0/16B3740', lagBytes: 0, lagSeconds: 0.2, primaryGeneration: 3 })
 			.run();
 		(h.core.ctx.config.features as Record<string, boolean>).DB_AUTO_PROMOTE = true;
+		// The involved members must advertise the real self-fencing capability (F1/F2).
+		for (const id of [h.node.w1!, h.node.w2!])
+			h.sqlite.run('UPDATE nodes SET capabilities_json = ? WHERE id = ?', [
+				JSON.stringify([...nodeCapabilities, DB_MEMBER_SELF_FENCING_CAPABILITY]),
+				id,
+			]);
 	}
 
 	test('without a handler a lost primary is a manual event and a critical alert, once', async () => {

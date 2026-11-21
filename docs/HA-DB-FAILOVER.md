@@ -59,10 +59,12 @@ observation is audited (`database.failover.*`). Member events (`fence-failed`,
   and it has not answered the primary's keep-alive within one TTL. A valid `fencing {generation,
   epoch}` notice from the lease holder waives the debounce and the TTL block for **that generation
   only**; it never waives the stream-down fact, an unexpired lease or eligibility.
-- Candidate: CAS `generation + 1`, `pg_ctl promote` on the replica workload, clear the sync setting,
-  report the generation/LSN. A lost CAS re-follows. A CAS win whose promote fails keeps renewing the
-  `changing` lease and retries; it never leaves a won generation with no promoter, and it fences if
-  the lease moves while `pg_ctl promote` runs.
+- Candidate: CAS `generation + 1`, `pg_ctl promote` on the replica workload, clear the sync setting
+  **on that same promoted workload**, report the generation/LSN. A lost CAS re-follows. A CAS win
+  whose promote fails keeps renewing the `changing` lease and retries; it never leaves a won
+  generation with no promoter, and it fences if the lease moves while `pg_ctl promote` runs. The 2 s
+  fence-notice window starts after the fence is confirmed; fence and fan-out times are reported
+  separately.
 - Primary: renews from the arbiter; on a higher generation/other holder, an unprovable lease beyond
   one TTL without the failsafe, or an expired lease, it stops writes/read-only **first and confirms**
   it, then sends the notice within 2 s (including the peer lookup), and only then reports `fenced`.

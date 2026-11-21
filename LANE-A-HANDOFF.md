@@ -6,12 +6,25 @@ Spec: `docs/build-plan/W11-SPEC.md` **Revision 4** (unchanged)
 Model: `docs/build-plan/W11-MODEL.md`, `tests/ha/sim/w11/` (unchanged)
 Migration: **none** — `0131` still unused.
 
-## 0. Review blockers — fixed / not fixed
+## 0. Second review (SHIP WITH FIXES) — F1–F8
+
+| # | Verdict | Evidence |
+|---|---|---|
+| F1 | **Fixed** | `selfFencing()` now builds the involved member set from **armed** databases (primary + non-removing replicas), requires it non-empty, and requires every member to advertise `db-member-self-fencing`. `autoActiveForRow()` re-checks the same set on every decision, and `automaticPromotionRefusal()` refuses when it is no longer eligible. Zero-data-role / no-armed-database install is refused. Tests: replica self-fencing (zero armed refused, armed+capability active), policy `no-self-fencing-path`. |
+| F2 | **Fixed** | `autoActiveForRow()` includes `config.failover.enabled` and `ctx.failover.handlerInstalled()` (new public accessor), so `view.active` equals the controller's live predicate. The view also exposes `controllerEnabled`, `controllerInstalled` and `selfFencing` separately for the UI/CLI. Test: `view.active` is false with the controller disabled even when the policy is `auto`. |
+| F3 | **Fixed** | The 2 s notice window starts **after** the fence is confirmed; `peers()` and fan-out share that fresh budget, and the event reports `fence <ms>, fan-out <ms>` separately. Test: a 3 s fence still delivers the notice and is not marked over budget. |
+| F4 | **Fixed** | Promotion's `clearSync` and any post-promotion fence use `workloadIdFor(desired, nodeId)` (the promoted replica workload), not the database id. A clear-sync failure emits `promotion-failed` (audited/alarmed) instead of only logging. Test asserts `clearSync('db_dbr_a')`. |
+| F5 | **Fixed (honest wording)** | The controller's store does not expose the arbiter clock, so the check and refusal now say it is **this process's clock**; the node machine remains the arbiter-clock path. |
+| F6 | **Fixed** | The three tab-joined statements are split (`database-failover-policy-service.ts`, `db-durability.ts`, `identity-bridge.ts`). |
+| F7 | **Fixed** | Added capability-positive self-fencing, zero-member install refusal, `view.active` with the controller disabled, fence-then-notice order, slow-fence-window, `clearSync` workload-id, generation-keyed notice, and CAS-count assertions. |
+| F8 | **Fixed** | The reader's two-primary audit is deduped by `databaseId:generation` (separate from the consumer set). Test calls reconcile twice and asserts one audit. |
+
+## 0.1 First review blockers — fixed
 
 | # | Verdict | Where / evidence |
 |---|---|---|
-| 1 | **Fixed** | `DB_MEMBER_SELF_FENCING_CAPABILITY` (`db-member-self-fencing`) is a separate capability, never in the static `nodeCapabilities`. The agent advertises it only when its member runner has an arbiter transport (`selfFencing === true`). `DatabaseReplicaService.selfFencing()` requires **all data nodes** to advertise it (plus the flag, an arbiter and the `YOAL_DB_MEMBER_SELF_FENCING=1` assertion). Arming has a new named refusal `no-self-fencing-path`. Because this build wires the agent report-only, it advertises nothing and `installAutoPromotion` refuses. Tests: policy `no-self-fencing-path`; replica self-fencing test; agent `reportOnlyPeerTransport` path. |
-| 2 | **Fixed** | `autoActiveForRow()` now includes `DB_AUTO_PROMOTE`, `failoverMode`, `syncState === 'steady'` and the §1.3 durability rule. The controller calls `DatabaseMemberService.automaticPromotionRefusal()` before starting: lease present, same generation, `steady`, expired by the arbiter clock, not already held by the candidate, and for `sync` the candidate is in the lease's `sync` set. A refusal is a `blocked` event, not a promotion. Tests: failover-service lease-gate test (live lease blocks, expired starts). |
+| 1 | **Fixed** | `DB_MEMBER_SELF_FENCING_CAPABILITY` (`db-member-self-fencing`) is a separate capability, never in the static `nodeCapabilities`. The agent advertises it only when its member runner has an arbiter transport (`selfFencing === true`). `DatabaseReplicaService.selfFencing()` now uses the involved member set of every armed database and requires it non-empty with every member advertising the capability (plus the flag, an arbiter and the `YOAL_DB_MEMBER_SELF_FENCING=1` assertion). Arming has a new named refusal `no-self-fencing-path`. Because this build wires the agent report-only, it advertises nothing and `installAutoPromotion` refuses. Tests: policy `no-self-fencing-path`; replica self-fencing (zero-member refused); agent `reportOnlyPeerTransport` path. |
+| 2 | **Fixed** | `autoActiveForRow()` now includes `DB_AUTO_PROMOTE`, `failoverMode`, `syncState === 'steady'`, the §1.3 durability rule, `config.failover.enabled`, the installed handler and the member self-fencing set. The controller calls `DatabaseMemberService.automaticPromotionRefusal()` before starting: lease present, same generation, `steady`, appears expired (this process's clock — the store exposes no arbiter clock), not already held by the candidate, and for `sync` the candidate is in the lease's `sync` set. A refusal is a `blocked` event, not a promotion. Tests: failover-service lease-gate test (live lease blocks, expired starts); foundation `view.active` disabled-controller test. |
 | 3 | **Fixed** | `DatabaseMemberRunner` promotes `workloadId` (the replica workload `db_<replicaId>`), not the database id: `helper.promote(workloadId, databaseId)`. Test asserts `[['db_dbr_a', 'db_main']]`. |
 | 4 | **Fixed** | `#fence` now: set `fencing` → `fenceWorkload(readonly)` → read `memberStatus` and require `readOnly || inRecovery` → **then** send the `fencing {generation, epoch}` notice; `peers()` and the fan-out share the 2 s budget (both raced with a deadline); only then `fenced`. An unconfirmed fence emits `fence-failed`, is retried next pass and does not send a notice. Tests: fence-confirm ordering, fence-failure retry, best-effort miss. |
 | 5 | **Fixed** | Drill start records `arbiterTested = false`, `lostCommits = null`. `completeDrill` reads the arbiter and sets `arbiterTested` only when the drill's generation is held by its target (a real CAS); `lostCommits` stays `null` because no promotion path measures it yet. `arm` therefore refuses a `sync` drill with `lost-commits` (null ≠ 0) instead of claiming RPO 0. Tests: CAS-proven completion, no-CAS completion, measured-null. |
@@ -51,7 +64,7 @@ Migration: **none** — `0131` still unused.
 | Command | Result |
 |---|---|
 | `bun run check` | every workspace package 0; only the pre-existing Svelte registry warning. |
-| `bun test` | **6858 pass, 74 skip, 0 fail** (6932 tests, 614 files, ~207 s). |
+| `bun test` | **6860 pass, 74 skip, 0 fail** (6934 tests, 614 files, ~210 s). |
 | `bun test tests/ha` | **136 pass, 0 fail**. |
 | `bun tests/ha/sim/w11/run.ts --runs 5000` | 0 violating runs; 2,232 notices delivered; 80 notice-less slower paths (allowed, alerted). |
 | `bun tests/ha/sim/w9/run.ts --runs 5000` | 0 violating runs. |
@@ -61,7 +74,7 @@ Migration: **none** — `0131` still unused.
 Focused tests: `packages/contracts/src/database-failover-machine.test.ts` (28),
 `packages/core/src/database-failover-policy-service.test.ts` (15),
 `packages/core/src/database-member-reader.test.ts` (16),
-`apps/agent/src/database-member.test.ts` (17), plus failover/replica/foundation tests.
+`apps/agent/src/database-member.test.ts` (20), plus failover/replica/foundation tests.
 
 ## 3. Not verified, and why
 

@@ -414,20 +414,33 @@ describe('automatic promotion guard (HA-PLAN F1)', () => {
 		expect(on.registered).toHaveLength(1);
 	});
 
-	test('real self-fencing needs the flag, an arbiter and the explicit node-machine assertion', () => {
+	test('real self-fencing needs an involved member set, the capability, the flag and an arbiter', () => {
 		const config = core.ctx.config as { dbMemberSelfFencing?: boolean };
 		const previousArbiter = core.ctx.arbiter;
 		const previous = config.dbMemberSelfFencing;
 		try {
 			core.ctx.arbiter = {} as never;
-			for (const node of [edge, primary, second, third])
+			// No armed database and no data-role nodes: the old roles-based check saw an empty set and
+			// returned active. The involved-member set is empty, so it must refuse.
+			opened.sqlite.run("UPDATE databases SET failover_mode = 'manual'");
+			opened.sqlite.run("UPDATE nodes SET roles_json = '[]'");
+			config.dbMemberSelfFencing = true;
+			expect(withAutoPromote(true, () => core.databaseReplicas.selfFencing())).toMatchObject({ active: false });
+			const refused = withAutoPromote(true, () => core.databaseReplicas.installAutoPromotion());
+			expect(refused.installed).toBe(false);
+			opened.sqlite.run("UPDATE nodes SET roles_json = '[\"data\"]'");
+			const armed = core.databases.create(owner, { name: 'self-fencing', placement: primary.nodeId });
+			core.databaseReplicas.add(owner, armed.name, { node: second.nodeId });
+			opened.sqlite.run("UPDATE databases SET failover_mode = 'auto' WHERE id = ?", [armed.id]);
+			// The involved members now exist but do not advertise the capability yet.
+			config.dbMemberSelfFencing = false;
+			expect(withAutoPromote(true, () => core.databaseReplicas.selfFencing()).active).toBe(false);
+			config.dbMemberSelfFencing = true;
+			for (const node of [primary, second])
 				opened.sqlite.run('UPDATE nodes SET capabilities_json = ? WHERE id = ?', [
 					JSON.stringify([...nodeCapabilities, DB_MEMBER_SELF_FENCING_CAPABILITY]),
 					node.nodeId,
 				]);
-			config.dbMemberSelfFencing = false;
-			expect(withAutoPromote(true, () => core.databaseReplicas.selfFencing())).toMatchObject({ active: false });
-			config.dbMemberSelfFencing = true;
 			expect(withAutoPromote(true, () => core.databaseReplicas.selfFencing())).toMatchObject({ active: true, reason: '' });
 			expect(withAutoPromote(false, () => core.databaseReplicas.selfFencing()).active).toBe(false);
 		} finally {

@@ -75,6 +75,9 @@ export async function failoverCommand(argv: string[]): Promise<void> {
 		const rows: Array<[string, string]> = [
 			['mode', failover.failoverMode],
 			['active', failover.active ? 'yes' : 'no'],
+			['controller enabled', failover.controllerEnabled ? 'yes' : 'no'],
+			['controller handler', failover.controllerInstalled ? 'installed' : 'not installed'],
+			['member self-fencing', failover.selfFencing ? 'advertised' : 'missing'],
 			['accept data loss', failover.acceptDataLoss ? 'yes' : 'no'],
 			['armed at', failover.autoArmedAt ?? '—'],
 			['last drill', failover.lastDrill ? `${failover.lastDrill.status} (${failover.lastDrill.timeToWritableMs ?? '?'} ms)` : '—'],

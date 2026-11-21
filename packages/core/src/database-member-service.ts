@@ -76,6 +76,7 @@ type ReplicaRow = typeof databaseReplicas.$inferSelect;
 
 export class DatabaseMemberService {
 	private readonly twoPrimaryAudited = new Set<string>();
+	private readonly readerTwoPrimaryAudited = new Set<string>();
 
 	constructor(private readonly ctx: CoreContext) {}
 
@@ -488,15 +489,19 @@ export class DatabaseMemberService {
 					'Two primaries at one generation (I3)',
 					`${atTop.map((report) => `${report.node_id}@${report.generation}`).join(' and ')} both report primary. Consumers must fail closed; fence both and page.`,
 				);
-				this.ctx.audit.record({
-					orgId: database.orgId,
-					action: 'database.failover.two_primaries',
-					resource: 'database',
-					resourceId: database.id,
-					args: { name: database.name, generation: top, nodes: atTop.map((report) => report.node_id) },
-					result: 'error',
-					error: `Two primaries at generation ${top}.`,
-				});
+				const key = `${database.id}:${top}`;
+				if (!this.readerTwoPrimaryAudited.has(key)) {
+					this.readerTwoPrimaryAudited.add(key);
+					this.ctx.audit.record({
+						orgId: database.orgId,
+						action: 'database.failover.two_primaries',
+						resource: 'database',
+						resourceId: database.id,
+						args: { name: database.name, generation: top, nodes: atTop.map((report) => report.node_id) },
+						result: 'error',
+						error: `Two primaries at generation ${top}.`,
+					});
+				}
 				continue;
 			}
 			const report = atTop[0]!;
@@ -725,14 +730,22 @@ export class DatabaseMemberService {
 
 	/**
 	 * The W11 controller gate (review blocker 2): the control-plane promotion path may only start
-	 * when the arbiter's lease is steady, at the database's generation, expired by the arbiter clock,
-	 * and names the candidate for `sync` (or the database accepted async data loss). It is not the
-	 * W11 promotion path; the node member machine is, and this refuses when that path is unavailable.
+	 * when the lease is steady, at the database's generation, names the candidate for `sync` (or the
+	 * database accepted async data loss), and appears expired. The store does not expose the
+	 * arbiter's clock, so expiry is necessarily this process's clock; the node member machine, which
+	 * does read the arbiter clock, is the W11 path (review F5).
 	 */
 	async automaticPromotionRefusal(
-		database: Pick<DatabaseRow, 'id' | 'primaryGeneration' | 'acceptDataLoss'>,
+		database: Pick<
+			DatabaseRow,
+			'id' | 'nodeId' | 'primaryGeneration' | 'acceptDataLoss' | 'failoverMode' | 'durabilityEffective' | 'syncState'
+		>,
 		candidateNodeId: string,
 	): Promise<string | null> {
+		// F1: a post-boot capability downgrade (or a controller installed without the flag/handler)
+		// must refuse before the lease is even read.
+		if (!this.ctx.failoverPolicies.autoActiveForRow(database))
+			return 'automatic failover is no longer eligible (policy, controller or node self-fencing changed)';
 		const store = this.#store();
 		if (!store) return 'no arbiter with conditional writes is configured';
 		let record;
@@ -753,7 +766,7 @@ export class DatabaseMemberService {
 			return 'the database is async and has not accepted data loss';
 		const expiresAt = Date.parse(lease.expiresAt);
 		if (Number.isFinite(expiresAt) && expiresAt > this.ctx.now())
-			return 'the lease has not expired by the arbiter clock, so the primary may still be serving';
+			return 'the lease has not expired by this process’s clock (the store does not expose the arbiter clock), so the primary may still be serving';
 		return null;
 	}
 
