@@ -1,4 +1,7 @@
-import { createHash } from 'node:crypto';
+// A namespace import: a browser bundle (the dashboard) imports this file for its constants, and a
+// named import of an externalized Node built-in throws when the module loads there. Only the
+// server calls `certificateFleetFingerprint`.
+import * as nodeCrypto from 'node:crypto';
 import * as z from 'zod';
 
 /** Ingress high availability drivers and health policy (docs/CLUSTERING.md §7.2, C5). */
@@ -321,7 +324,7 @@ export function certificateFleetFingerprint(
 		.map((entry) => `${normalizeCertificateHost(entry.host)}=${entry.fingerprint.toLowerCase()}`)
 		.sort()
 		.join('\n');
-	return createHash('sha256').update(canonical).digest('hex').slice(0, 32);
+	return nodeCrypto.createHash('sha256').update(canonical).digest('hex').slice(0, 32);
 }
 
 /** Lower-case, strip a trailing dot. A leading `*.` is kept (wildcards are certificate hosts). */
