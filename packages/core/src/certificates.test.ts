@@ -337,6 +337,8 @@ describe('bring your own certificate', () => {
 		f.core.certificates.setIssuer(issuer);
 
 		const key = (days: number) => new RegExp(`^certificate:byo:${days}:byo\\.sites\\.test:\\d+$`);
+		// The cert is stamped with the real clock; anchor the fixture to its validity.
+		const base = new X509Certificate(byo.certPem).validFromDate.getTime();
 		f.setClock(clockStart + 1_000);
 		let sweep = f.core.certificates.sweep();
 		expect(sweep.due).toEqual([]);
