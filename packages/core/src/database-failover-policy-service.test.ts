@@ -231,6 +231,22 @@ describe('disarming', () => {
 		// No failover row and no fence intent were written.
 		expect(opened.sqlite.query<{ count: number }, []>('SELECT count(*) AS count FROM database_failovers').get()?.count).toBe(0);
 	});
+
+	test('clears acceptDataLoss, so arming again must assert it again', async () => {
+		eligibleAsync();
+		await core.failoverPolicies.arm(principal, 'main', { confirm: true, acceptDataLoss: true });
+		const view = await core.failoverPolicies.disarm(principal, 'main');
+		expect(view.acceptDataLoss).toBe(false);
+		await expect(core.failoverPolicies.arm(principal, 'main', { confirm: true, acceptDataLoss: false })).rejects.toMatchObject({
+			code: 'conflict',
+			message: expect.stringContaining('acceptDataLoss'),
+		});
+		expect(core.failoverPolicies.armRefusals(principal, 'main', { acceptDataLoss: false }).map((refusal) => refusal.code)).toContain(
+			'data-loss-not-accepted',
+		);
+		const armed = await core.failoverPolicies.arm(principal, 'main', { confirm: true, acceptDataLoss: true });
+		expect(armed).toMatchObject({ failoverMode: 'auto', acceptDataLoss: true });
+	});
 });
 
 describe('drills', () => {

@@ -185,7 +185,9 @@ export class DatabaseFailoverPolicyService {
 
 	/**
 	 * Disarm immediately (W11-SPEC §12). It never fences a healthy primary: turning `auto` off only
-	 * removes the automatic acquisition path, so a live primary keeps serving and its lease.
+	 * removes the automatic acquisition path, so a live primary keeps serving and its lease. It also
+	 * clears `acceptDataLoss`: the acknowledgement belongs to one arming, so arming again must assert
+	 * it again (and `arm` never clears it, so this is the only way back to `false`).
 	 */
 	async disarm(principal: Principal, databaseName: string): Promise<DatabaseFailoverPolicyView> {
 		const database = this.#require(principal, databaseName, 'database:update');
@@ -194,6 +196,7 @@ export class DatabaseFailoverPolicyService {
 			.update(databases)
 			.set({
 				failoverMode: 'manual',
+				acceptDataLoss: false,
 				autoArmedAt: null,
 				// The evidence explained the armed policy; it is stale once the policy is manual.
 				failoverEvidenceJson: '{}',
@@ -206,7 +209,7 @@ export class DatabaseFailoverPolicyService {
 			action: 'database.failover.disarm',
 			resource: 'database',
 			resourceId: database.id,
-			args: { name: database.name, previousMode: database.failoverMode },
+			args: { name: database.name, previousMode: database.failoverMode, previousAcceptDataLoss: database.acceptDataLoss },
 			result: 'ok',
 		});
 		this.ctx.projects.bump(database.orgId);
