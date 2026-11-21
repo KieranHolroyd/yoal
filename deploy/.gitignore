@@ -1,0 +1,7 @@
+# Terraform working state and anything that may hold join tokens or secrets.
+.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+*.tfvars.json
+crash.log
