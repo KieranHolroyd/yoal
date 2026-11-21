@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDb } from '@yoal/db';
@@ -45,6 +45,9 @@ const core: Core = createCore({
 	},
 });
 const owner = buildPrincipal({ kind: 'user', userId: 'user_1', orgId: 'org_1', role: 'owner', platformAdmin: true });
+/** A platform operator (`platform:ha`, not admin): reads the HA views, changes nothing admin-only. */
+core.ctx.platformIam.bind(owner, { userId: 'user_op', roleId: 'platform-operator' });
+const operator = buildPrincipal({ kind: 'user', userId: 'user_op', orgId: 'org_1', role: 'viewer', platformAdmin: false });
 type JoinedNode = { nodeId: string; token: string; name: string };
 let nodeIndex = 1;
 const joinNode = (name: string): JoinedNode => {
@@ -207,6 +210,10 @@ describe('existing attachments move on their own next deploy (item 7)', () => {
 		// A dry run changes nothing.
 		expect(env(bId, workerA.nodeId)).toEqual(before);
 
+		// A platform operator may look, not move (review fix 2).
+		expect(core.endpoints.migrateAttachments(operator, { projects: ['mig-b'] }).apply).toBe(false);
+		expect(() => core.endpoints.migrateAttachments(operator, { apply: true, projects: ['mig-b'] })).toThrow(/platform admin/);
+		expect(env(bId, workerA.nodeId)).toEqual(before);
 		const applied = core.endpoints.migrateAttachments(owner, { apply: true, projects: ['mig-b'] });
 		expect(applied.apply).toBe(true);
 		expect(applied.projects.find((item) => item.slug === 'mig-b')!.status).toBe('moved');
@@ -263,6 +270,38 @@ describe('the read endpoint exists from the first deploy (item 8)', () => {
 	});
 });
 
+describe('an app the upgrade backfill marked gains its read URL only on its own deploy (review fix 1)', () => {
+	test('a neighbour deploying on the same node changes neither its environment nor its version', async () => {
+		const a = await project('up-a', workerA.nodeId);
+		const b = await project('up-b', workerA.nodeId);
+		const c = await project('up-c', workerA.nodeId);
+		const db = core.databases.create(owner, { name: 'up-db', placement: data.nodeId });
+		for (const p of [a, c]) core.databases.attach(owner, core.projects.requireRow(owner, p.slug), { database: 'up-db', envPrefix: 'DATABASE' });
+		deploy(a.slug);
+		// The state main plus migration 0133 leaves: A on the gateway (backfilled), no read row and no
+		// read URL, because no replica ever served reads on main.
+		opened.sqlite.run("DELETE FROM service_endpoints WHERE role = 'read'");
+		opened.sqlite.run('UPDATE database_attachments SET read_endpoint = 0 WHERE project_id = ?', [a.id]);
+		expect(core.endpoints.marked(a.id)).toBe(true);
+		const before = env(a.id, workerA.nodeId);
+		expect(before.env.DATABASE_READ_URL).toBeUndefined();
+		// A neighbour without the database deploys, then one attached to the same database does
+		// (its own deploy gives it a read endpoint on this node, shared by row with A's database).
+		deploy(b.slug);
+		expect(env(a.id, workerA.nodeId)).toEqual(before);
+		deploy(c.slug);
+		expect(env(c.id, workerA.nodeId).env.DATABASE_READ_URL).toBeDefined();
+		expect(env(a.id, workerA.nodeId)).toEqual(before);
+		// A replica coming changes nothing for A either.
+		const replica = core.databaseReplicas.add(owner, 'up-db', { node: workerB.nodeId });
+		streamReplica(db.id, replica.slot!);
+		expect(env(a.id, workerA.nodeId)).toEqual(before);
+		// A's own next deploy gives it the read URL.
+		deploy(a.slug);
+		expect(env(a.id, workerA.nodeId).env.DATABASE_READ_URL).toBeDefined();
+	});
+});
+
 describe('attaching to a running copy renders its endpoint now (item 11)', () => {
 	test('a container on another node gets its URL without a redeploy', async () => {
 		const app = await project('late-attach', workerB.nodeId);
@@ -290,6 +329,9 @@ describe('the install CA in the HA status (item 10)', () => {
 		const member = buildPrincipal({ kind: 'user', userId: 'user_2', orgId: 'org_1', role: 'viewer', platformAdmin: false });
 		expect(() => core.nodeCa.statusFor(member)).toThrow(/platform operators/);
 		expect(() => core.nodeCa.rotateAs(member)).toThrow(/platform admin/);
+		// An operator reads the CA but may not rotate it (review fix 2).
+		expect(core.nodeCa.statusFor(operator).inUse).toBe(true);
+		expect(() => core.nodeCa.rotateAs(operator)).toThrow(/platform admin/);
 		expect(() => core.endpoints.migrationPlan(member)).toThrow(/platform operators/);
 		expect(() => core.endpoints.attachmentsView(member)).toThrow(/platform operators/);
 		const before = core.nodeCa.statusFor(owner).authorities.find((ca) => ca.state === 'active')!;
@@ -300,5 +342,27 @@ describe('the install CA in the HA status (item 10)', () => {
 		// Every leaf issued so far came from the old CA; none has renewed under the new one yet.
 		expect(after.leaves.onPreviousCa).toBe(after.leaves.nodes);
 		expect(opened.sqlite.query<{ n: number }, []>("SELECT count(*) AS n FROM audit_log WHERE action = 'ha.ca.rotate'").get()!.n).toBe(1);
+	});
+
+	test('a second rotation is refused while a node still holds a leaf the previous CA signed (review fix 3)', () => {
+		// worker-a enrols under the current CA, then the CA rotates once: worker-a is on the previous CA.
+		const csrDir = mkdtempSync(join(tmpdir(), 'yoal-attach-csr-'));
+		const result = Bun.spawnSync({
+			cmd: ['openssl', 'req', '-new', '-nodes', '-subj', `/CN=${workerA.nodeId}`, '-newkey', 'ec', '-pkeyopt', 'ec_paramgen_curve:prime256v1',
+				'-addext', `subjectAltName=URI:yoal://node/${workerA.nodeId}`, '-keyout', join(csrDir, 'k.pem'), '-out', join(csrDir, 'r.csr')],
+			stdout: 'pipe',
+			stderr: 'pipe',
+		});
+		expect(result.exitCode).toBe(0);
+		core.nodeCa.signCsr(workerA.nodeId, { csrPem: readFileSync(join(csrDir, 'r.csr'), 'utf8'), reason: 'enrol' });
+		rmSync(csrDir, { recursive: true, force: true });
+		const once = core.nodeCa.rotateAs(owner);
+		expect(once.leaves.onPreviousCa).toBe(1);
+		const activeBefore = once.authorities[0]!.fingerprint;
+		expect(() => core.nodeCa.rotateAs(owner)).toThrow(/still hold/);
+		// Nothing changed: the same CA signs, the previous one is still trusted.
+		const after = core.nodeCa.statusFor(owner);
+		expect(after.authorities.map((ca) => ca.state)).toEqual(['active', 'previous']);
+		expect(after.authorities[0]!.fingerprint).toBe(activeBefore);
 	});
 });

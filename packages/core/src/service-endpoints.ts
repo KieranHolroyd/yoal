@@ -222,7 +222,7 @@ export class ServiceEndpointService {
 						row.upstreamNodeId !== endpoint.upstreamNodeId ||
 						row.upstreamPort !== endpoint.upstreamPort;
 					// A replica joining or leaving the set is a re-point too: the forwarder cuts the
-					// sessions still on a replica that left. A row from before 0132 learns its set
+					// sessions still on a replica that left. A row from before 0133 learns its set
 					// without a bump.
 					const setChanged = row.upstreamsKey !== null && key !== null && row.upstreamsKey !== key;
 					if (repointed || setChanged || row.upstreamsKey !== key) {
@@ -271,7 +271,7 @@ export class ServiceEndpointService {
 		for (const nodeId of consumerNodes) this.reconcile(null, nodeId);
 	}
 
-	/** The project's own last deploy, attach or migration chose the gateway (0132). */
+	/** The project's own last deploy, attach or migration chose the gateway (0133). */
 	marked(projectId: string): boolean {
 		return (
 			this.ctx.db.select({ on: workloads.endpointsGateway }).from(workloads).where(eq(workloads.projectId, projectId)).get()?.on ===
@@ -308,8 +308,20 @@ export class ServiceEndpointService {
 	 */
 	recordGatewayMarker(projectId: string): void {
 		const on = this.gatewayBlocker(projectId) === null;
-		if (this.marked(projectId) === on) return;
-		this.ctx.db.update(workloads).set({ endpointsGateway: on }).where(eq(workloads.projectId, projectId)).run();
+		if (this.marked(projectId) !== on)
+			this.ctx.db.update(workloads).set({ endpointsGateway: on }).where(eq(workloads.projectId, projectId)).run();
+		// Its own deploy is also when it gains (or drops) its read URLs; an app the upgrade backfill put
+		// on the gateway gets them here, never on a neighbour's deploy.
+		this.setReadEndpoints(projectId, on);
+	}
+
+	/** `<P>_READ_*` through the read endpoint for every attachment of the project, or none. */
+	private setReadEndpoints(projectId: string, on: boolean): void {
+		this.ctx.db
+			.update(databaseAttachments)
+			.set({ readEndpoint: on })
+			.where(and(eq(databaseAttachments.projectId, projectId), eq(databaseAttachments.readEndpoint, !on)))
+			.run();
 	}
 
 	/**
@@ -321,6 +333,7 @@ export class ServiceEndpointService {
 		if (!featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS')) return;
 		if (!this.marked(projectId) && this.gatewayBlocker(projectId) === null)
 			this.ctx.db.update(workloads).set({ endpointsGateway: true }).where(eq(workloads.projectId, projectId)).run();
+		if (this.marked(projectId)) this.setReadEndpoints(projectId, true);
 		for (const nodeId of this.copyNodes(projectId)) this.reconcile(projectId, nodeId);
 	}
 
@@ -370,12 +383,16 @@ export class ServiceEndpointService {
 		};
 	}
 
+	/** The dry run under `platform:ha`; `apply` restarts apps, so it is for a platform admin only. */
 	migrateAttachments(principal: Principal, input: { apply?: boolean; projects?: string[] } = {}): AttachmentMigrationView {
 		const plan = this.migrationPlan(principal, { projects: input.projects });
 		if (!input.apply) return plan;
+		if (!this.ctx.platformIam.canAdminister(principal))
+			throw new CoreError('forbidden', 'Only a platform admin role can move apps to their endpoints; a platform operator can run the dry run.', 403);
 		const projects = plan.projects.map((item): AttachmentMigrationItem => {
 			if (item.status !== 'will-move') return item;
 			this.ctx.db.update(workloads).set({ endpointsGateway: true }).where(eq(workloads.projectId, item.projectId)).run();
+			this.setReadEndpoints(item.projectId, true);
 			for (const nodeId of this.copyNodes(item.projectId)) this.reconcile(item.projectId, nodeId);
 			this.ctx.audit.record({
 				principal,
@@ -399,11 +416,12 @@ export class ServiceEndpointService {
 		this.requireHa(principal);
 		const rows = this.ctx.sqlite
 			.query<
-				{ projectId: string; slug: string; runtime: string; databaseId: string; database: string; engine: string; databaseNodeId: string; hostPort: number; envPrefix: string },
+				{ projectId: string; slug: string; runtime: string; databaseId: string; database: string; engine: string; databaseNodeId: string; hostPort: number; envPrefix: string; readEndpoint: number },
 				[]
 			>(
 				`SELECT w.project_id AS projectId, p.slug AS slug, w.runtime AS runtime, d.id AS databaseId, d.name AS database,
-				        d.engine_name AS engine, d.node_id AS databaseNodeId, d.host_port AS hostPort, a.env_prefix AS envPrefix
+				        d.engine_name AS engine, d.node_id AS databaseNodeId, d.host_port AS hostPort, a.env_prefix AS envPrefix,
+				        a.read_endpoint AS readEndpoint
 				 FROM workloads w
 				 JOIN projects p ON p.id = w.project_id AND p.deleted_at IS NULL
 				 JOIN database_attachments a ON a.project_id = w.project_id
@@ -433,7 +451,7 @@ export class ServiceEndpointService {
 						host: container ? databaseAlias(row.databaseId) : '127.0.0.1',
 						port: primary.localPort,
 						poolPort: endpointsByKey.get(`${nodeId}:${row.databaseId}:pool`)?.localPort ?? null,
-						readPort: endpointsByKey.get(`${nodeId}:${row.databaseId}:read`)?.localPort ?? null,
+						readPort: row.readEndpoint ? (endpointsByKey.get(`${nodeId}:${row.databaseId}:read`)?.localPort ?? null) : null,
 						upstreamNode: this.nodeName(primary.upstreamNodeId),
 						version: primary.version,
 					};
@@ -545,6 +563,7 @@ export class ServiceEndpointService {
 				engine: databases.engine,
 				poolerEnabled: databases.poolerEnabled,
 				poolerPort: databases.poolerPort,
+				readEndpoint: databaseAttachments.readEndpoint,
 			})
 			.from(databaseAttachments)
 			.innerJoin(databases, eq(databases.id, databaseAttachments.databaseId))
@@ -575,11 +594,13 @@ export class ServiceEndpointService {
 					upstreamNodeId: row.nodeId,
 					upstreamPort: row.poolerPort,
 				});
-			// A read endpoint exists from the deploy (or attach) on, pointing at the primary until a
-			// replica serves reads, so adding, removing or promoting a replica changes no app's
-			// environment. It follows every readable replica; one representative upstream allocates
-			// it, and the set's key bumps its version when the set changes.
-			if (row.engine === 'postgres') {
+			// A read endpoint exists from the project's own deploy (or attach, or migration) on, pointing
+			// at the primary until a replica serves reads, so adding, removing or promoting a replica
+			// changes no app's environment. Only an attachment that asked for it plans one: a
+			// neighbour's deploy re-plans this node and must not add read URLs to an app the upgrade
+			// backfill put on the gateway. It follows every readable replica; one representative
+			// upstream allocates it, and the set's key bumps its version when the set changes.
+			if (row.engine === 'postgres' && row.readEndpoint) {
 				const upstreams = this.ctx.databaseReplicas.readableUpstreamsFor(row.id);
 				const first = upstreams[0];
 				reads.push({

@@ -10,7 +10,7 @@ import {
 } from '@yoal/contracts';
 import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
-import { CoreError, ValidationError } from './errors.ts';
+import { ConflictError, CoreError, ValidationError } from './errors.ts';
 import { generateInstallCa, issueNodeCertificate, parseNodeCsr } from './node-pki.ts';
 import { decrypt, encrypt, newId, randomBytes, sha256Hex } from './util.ts';
 
@@ -269,12 +269,18 @@ export class NodeCaService {
 	}
 
 	/**
-	 * `POST /api/v1/ha/ca/rotate` and `yoal ha ca rotate`, audited. `platform:ha`, like drills and
-	 * `ha migrate attachments`: there is no dashboard control for it, so a CLI API key must do.
+	 * `POST /api/v1/ha/ca/rotate` and `yoal ha ca rotate`, audited. A platform admin only (a platform
+	 * operator reads the CA). Refused while a node still holds a leaf the previous CA signed: a second
+	 * rotation retires that CA and the node would lose mTLS with every peer until it renews.
 	 */
 	rotateAs(principal: Principal): NodeCaStatus {
-		if (!this.ctx.platformIam.allows(principal, 'platform:ha'))
+		if (!this.ctx.platformIam.canAdminister(principal))
 			throw new CoreError('forbidden', 'Only a platform admin role can rotate the install CA.', 403);
+		const waiting = this.status().leaves.onPreviousCa;
+		if (waiting > 0)
+			throw new ConflictError(
+				`${waiting} ${waiting === 1 ? 'node still holds a certificate' : 'nodes still hold certificates'} the previous CA signed. Rotating again would retire that CA and cut ${waiting === 1 ? 'it' : 'them'} off from every peer; wait until each has renewed (yoal ha ca shows the count).`,
+			);
 		const before = this.activeRow()?.fingerprint ?? null;
 		const active = this.rotate();
 		this.ctx.audit.record({
