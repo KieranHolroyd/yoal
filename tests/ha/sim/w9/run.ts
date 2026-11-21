@@ -10,7 +10,8 @@
  * Seeds run from --seed to --seed + --runs − 1; the family is seed % FAMILIES.length unless
  * --family is given, so the default run covers every schedule family evenly.
  *
- * A violation exits 1. Revision 1 (the three-step non-promotable sync change) must produce none.
+ * A violation exits 1. Revision 2 (the three-step non-promotable sync change plus the
+ * node-applied on_sync_loss path and the stale-report rule) must produce none.
  */
 import { parseArgs } from 'node:util';
 import { W9World } from './model.ts';
@@ -104,6 +105,12 @@ interface FamilyStats {
 	fellBack: number;
 	downgraded: number;
 	killedChanging: number;
+	reports: number;
+	sameEtags: number;
+	staleReports: number;
+	reopens: number;
+	alerts: number;
+	localApplies: number;
 	violations: number;
 	seeds: number[];
 }
@@ -128,6 +135,12 @@ for (let seed = firstSeed; seed < firstSeed + runs; seed++) {
 		fellBack: 0,
 		downgraded: 0,
 		killedChanging: 0,
+		reports: 0,
+		sameEtags: 0,
+		staleReports: 0,
+		reopens: 0,
+		alerts: 0,
+		localApplies: 0,
 		violations: 0,
 		seeds: [],
 	};
@@ -142,6 +155,12 @@ for (let seed = firstSeed; seed < firstSeed + runs; seed++) {
 	stats.fellBack += result.stats.syncChangesFellBack;
 	stats.downgraded += result.stats.syncChangesDowngraded;
 	stats.killedChanging += result.stats.primaryKilledChanging;
+	stats.reports += result.stats.syncReports;
+	stats.sameEtags += result.stats.syncSameEtags;
+	stats.staleReports += result.stats.syncStaleReconciled;
+	stats.reopens += result.stats.syncReopens;
+	stats.alerts += result.stats.syncAlerts;
+	stats.localApplies += result.stats.localSyncLossApplied;
 	stats.violations += result.violations.length;
 	perFamily.set(family, stats);
 	if (result.violations.length > 0) {
@@ -173,6 +192,10 @@ for (const family of FAMILIES) {
 	console.log(
 		`sync changes in ${family}: opened ${stats.opened}, closed ${stats.closed}, fell back ${stats.fellBack}, downgraded ${stats.downgraded}, primary killed while changing ${stats.killedChanging}`,
 	);
+	if (stats.reports > 0)
+		console.log(
+			`sync reconciliation in ${family}: reports ${stats.reports}, same-etag ${stats.sameEtags}, stale ${stats.staleReports}, reopens ${stats.reopens}, alerts ${stats.alerts}, local applies ${stats.localApplies}`,
+		);
 }
 console.log(`\nviolating runs: ${failures.length}`);
 

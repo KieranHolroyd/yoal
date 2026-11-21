@@ -96,8 +96,8 @@ class FakeHelper implements HelperApi {
 	async fenceWorkload(): Promise<never> {
 		throw new Error('fenceWorkload not used in this test');
 	}
-	async replicaRewind(): Promise<never> {
-		throw new Error('replicaRewind not used in this test');
+	async rewindReplica(): Promise<never> {
+		throw new Error('rewindReplica not used in this test');
 	}
 	async pitrConfigure(): Promise<never> {
 		throw new Error('pitrConfigure not used in this test');

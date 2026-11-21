@@ -1784,9 +1784,9 @@ replica container (not a C2 endpoint, which a container cannot reach), the slot 
 refused, the `pg_hba` rule is `host replication yoal_repl all scram-sha-256` (the source address
 behind the loopback publish is the container gateway, not a fixed endpoint address), and the
 fence is "leave the old node's desired state, confirmed by its heartbeat" rather than the
-object-store lease, so automatic promotion is opt-in. `pg_rewind`, `db_replica_metrics_1m`, lag
-alerts, the stable read port and other engines are still plan. The unit of HA is the individual
-database (§8.1, §13 for its shape).
+object-store lease, so automatic promotion is opt-in. `pg_rewind` (behind `PITR_REWIND`) can re-attach
+the old primary as a replica; `db_replica_metrics_1m`, lag alerts, the stable read port and other
+engines are still plan. The unit of HA is the individual database (§8.1, §13 for its shape).
 
 ### 9.1 Engine capability
 
@@ -1863,8 +1863,8 @@ databases get `wal_log_hints=on` until a major upgrade or move re-creates them (
 `yoal_repl` is `LOGIN REPLICATION`, its password is sealed on the row and fetched at activation, and
 `pg_hba` allows it only from the endpoint address for `replication`; streaming crosses the overlay inside the
 mTLS endpoint path (§4.3), no port is public (D56), and an app credential cannot promote. Limits: two
-replicas; none cascading in C7; none across a major version; none for a PITR database until its image gap
-closes.
+replicas; none cascading in C7; none across a major version; none for a PITR database while
+`PITR_REWIND` is off (with it on, a replica runs the PITR image and the same stanza — docs/PITR.md).
 
 ### 9.3 Failover orchestration
 
@@ -2127,6 +2127,10 @@ uploads, telemetry Parquet, Litestream replicas and database dumps (D83). It is 
 `storage_instances` resource and never becomes one. If R2 is unreachable, new deploys (DESIGN §9) and
 backups fail and Litestream stalls, while serving continues (D23); under §6.3 the control plane also
 becomes read-only after one TTL.
+
+The registry can already keep its blobs here (REGISTRY.md §6, `platform` storage mode), so losing
+the registry node loses no images and a move needs no copy; the `ha` profile's preflight refuses a
+disk or managed-RustFS registry (§W12).
 
 **Multi-target replication** is the plan for this store, not built (ROADMAP). `ObjectStore` already
 abstracts `local` and `s3`, so it means a list of write targets with one primary for reads: a write

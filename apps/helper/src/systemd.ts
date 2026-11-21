@@ -77,10 +77,8 @@ import {
 	renderReplicationConfigureSql,
 	renderReplicationTeardownSql,
 	renderResumeWritesSql,
-	renderRewindArgs,
 	renderStopWritesSql,
 	renderSyncConfigureSql,
-	rewindOutcome,
 	withReplicationHba,
 	type MemberStatus,
 	type ReplicationSlotStatus,
@@ -121,6 +119,7 @@ import {
 	assertId,
 	assertRelativePath,
 	databaseAlias,
+	databaseImage,
 	functionNeedsDurableStorage,
 	postgresPitrImage,
 	renderRegistryAuthFile,
@@ -134,17 +133,24 @@ import {
 } from './validate.ts';
 import {
 	computePitrWindow,
+	PG_REWIND_TRANSPORT_ATTEMPTS,
 	parseArchiverStats,
+	parseDataChecksums,
 	parsePgBackRestInfo,
 	parsePitrBackupType,
 	parsePitrRepo,
+	parsePitrStanza,
+	pgRewindFailureKind,
 	pitrContainerName,
 	pitrPaths,
 	pitrRecoveryContainerName,
 	pitrRestoreContainerName,
-	pitrStanzaFor,
+	pitrRewindMarkerPath,
 	renderPgBackRestConfig,
+	renderPgBackRestKey,
+	renderPgControldataArgs,
 	renderPgPass,
+	renderPgRewindArgs,
 	renderPitrArchiverArgs,
 	renderPitrBackupArgs,
 	renderPitrExecArgs,
@@ -152,6 +158,8 @@ import {
 	renderPitrRecoveryPsqlArgs,
 	renderPitrRenameSql,
 	renderPitrRestoreArgs,
+	renderPitrRewindMarker,
+	validatePitrStanza,
 	validatePitrTargetTime,
 	type HelperPitrStatus,
 	type PitrBaseBackupType,
@@ -1548,62 +1556,6 @@ export class SystemdDriver {
 			throw new Error(`${label} failed (${result.code}): ${result.stderr.trim().slice(0, 500) || 'no detail'}`);
 	}
 
-	/**
-	 * Re-attach an old primary (W10, §9.3): stop its unit, run `pg_rewind` in a one-shot container
-	 * against the new primary, then start it as a standby. A failed rewind is reported as
-	 * `rebuild`; the control plane removes the copy and bootstraps a fresh replica. Never a merge.
-	 */
-	async replicaRewind(
-		id: string,
-		raw: { databaseId?: unknown; source?: unknown; password?: unknown; image?: unknown },
-	): Promise<{ status: 'rewound' | 'rebuild'; error?: string }> {
-		const replicaId = assertReplicaWorkloadId(id, 'replica id');
-		const databaseId = assertPrimaryDatabaseId(raw.databaseId, 'databaseId');
-		if (typeof raw.password !== 'string' || !/^[A-Za-z0-9_-]{16,200}$/.test(raw.password))
-			throw new ValidationError('password must be base64url (16–200 characters)');
-		const image =
-			typeof raw.image === 'string' && /^[a-z0-9][a-z0-9._/:@-]{0,199}$/.test(raw.image)
-				? raw.image
-				: await this.#imageFor(databaseId).catch(() => this.#imageFor(replicaId));
-		const source = raw.source;
-		if (!source || typeof source !== 'object') throw new ValidationError('source is required');
-		const record = source as Record<string, unknown>;
-		const host = typeof record.host === 'string' ? record.host : '';
-		const port = typeof record.port === 'number' ? record.port : 0;
-		const user = typeof record.user === 'string' ? record.user : '';
-		const database = typeof record.database === 'string' ? record.database : '';
-		const oldDir = await this.dataDirFor(databaseId);
-		const targetDir = await this.dataDirFor(replicaId);
-		// Both units must be stopped: the old primary is being replaced, and the replica unit must
-		// not run its first-start base backup into the directory the rewind is about to fill.
-		await this.systemctl(['stop', serviceUnitName(databaseId)], { allowFailure: true });
-		await this.systemctl(['stop', serviceUnitName(replicaId)], { allowFailure: true });
-		const sourceExists = await fs.lstat(oldDir).then((stat) => stat.isDirectory()).catch(() => false);
-		const targetExists = await fs.lstat(targetDir).then((stat) => stat.isDirectory()).catch(() => false);
-		if (sourceExists && !targetExists) {
-			await fs.mkdir(dirname(targetDir), { recursive: true });
-			try {
-				await fs.rename(oldDir, targetDir);
-			} catch {
-				// Volume-backed old copy on another filesystem: copy, then remove the source.
-				await fs.cp(oldDir, targetDir, { recursive: true });
-				await fs.rm(oldDir, { recursive: true, force: true });
-			}
-		} else if (!targetExists) {
-			return { status: 'rebuild', error: 'The old primary has no data directory on this node.' };
-		}
-		const result = await this.runner.run(
-			renderRewindArgs({ podmanPath: this.podmanPath, image, dataDir: targetDir, source: { host, port, user, database } }),
-			{ env: { PGPASSWORD: raw.password } },
-		);
-		const outcome = rewindOutcome(result.code);
-		if (outcome === 'rebuild') {
-			// Never a partial merge: the replica unit's standby script copies the new primary.
-			await fs.rm(targetDir, { recursive: true, force: true }).catch(() => undefined);
-			return { status: 'rebuild', error: `pg_rewind failed (${result.code}): ${result.stderr.trim().slice(0, 500) || 'no detail'}` };
-		}
-		return { status: 'rewound' };
-	}
 
 	/** The image a workload's unit runs, for a one-shot beside a stopped container. */
 	async #imageFor(id: string): Promise<string> {
@@ -1613,7 +1565,173 @@ export class SystemdDriver {
 		return match[1].trim();
 	}
 
-	/** `podman exec` psql as the database owner over the container's loopback; no secret in argv. */
+	/**
+	 * Re-attach an old primary as a replica without a full rebuild (HA-PLAN W10). The diverged data
+	 * dir `<state root>/<databaseId>` is stopped, checked for `pg_rewind` support (data checksums or
+	 * `wal_log_hints=on`), rewound against the new primary through the replica's link socket, and
+	 * renamed to `<state root>/<replicaId>` so the replica unit starts on it. Any failure falls back
+	 * to a rebuild: the diverged dir is deleted and the replica's normal `pg_basebackup` start runs.
+	 * Re-running it is safe: an adopted target reports success again.
+	 */
+	async rewindReplica(
+		replicaId: string,
+		raw: { databaseId?: unknown; walLogHints?: unknown; user?: unknown; password?: unknown },
+	): Promise<{ replicaId: string; rewound: boolean; fallback: 'rebuild' | null; reason: string | null }> {
+		const id = assertReplicaWorkloadId(replicaId);
+		const databaseId = assertPrimaryDatabaseId(raw.databaseId, 'databaseId');
+		if (raw.walLogHints !== undefined && typeof raw.walLogHints !== 'boolean')
+			throw new ValidationError('walLogHints must be a boolean');
+		// The control plane rendered `-c wal_log_hints=on` on the old primary's unit; a runtime `-c`
+		// flag is not visible in its config files, so the config probe below would miss it.
+		const walLogHints = raw.walLogHints === true;
+		const user = typeof raw.user === 'string' ? raw.user : '';
+		if (!/^[a-z_][a-z0-9_]{0,62}$/.test(user)) throw new ValidationError('user must be a plain Postgres identifier');
+		if (typeof raw.password !== 'string' || raw.password.length < 8 || raw.password.length > 200)
+			throw new ValidationError('password must be 8–200 characters');
+		const password = raw.password;
+
+		const source = await this.dataDirFor(databaseId);
+		const target = resolve(dirname(source), id);
+		// A previous run wrote the adoption marker for THIS database and replica: report success
+		// again. Never infer this from `PG_VERSION`, which a fallback rebuild's fresh directory has.
+		if (await this.rewindMarkerPresent(target, databaseId, id))
+			return { replicaId: id, rewound: true, fallback: null, reason: null };
+		const sourceReady = await fs
+			.lstat(join(source, 'pgdata', 'PG_VERSION'))
+			.then((stat) => stat.isFile())
+			.catch(() => false);
+		if (!sourceReady)
+			return {
+				replicaId: id,
+				rewound: false,
+				fallback: 'rebuild',
+				reason: `There is no old primary data directory at ${source}; the replica will bootstrap.`,
+			};
+
+		const image = databaseImage({ engine: 'postgres', version: await this.readPgVersion(databaseId) });
+		// The old primary is fenced before the rewind; stopping idempotently also handles a node that
+		// came back after the fence had already removed it from desired state.
+		await this.systemctl(['stop', serviceUnitName(databaseId)], { allowFailure: true });
+		if (await this.containerRunning(databaseId))
+			throw new Error(`The old primary container for ${databaseId} is still running; refusing to rewind or delete it.`);
+		const path = join(source, 'pgdata');
+		const controldata = await this.runner.run(
+			renderPgControldataArgs({ podmanPath: this.podmanPath, image, replicaId: id, targetRoot: source }),
+		);
+		if (controldata.code !== 0)
+			return this.rebuildAfterRewind(source, id, `pg_controldata failed (${controldata.code}): ${commandDetail(controldata)}`);
+		if (!parseDataChecksums(controldata.stdout) && !walLogHints && !(await this.walLogHintsEnabled(path)))
+			return this.rebuildAfterRewind(
+				source,
+				id,
+				'The old primary has neither data checksums nor wal_log_hints=on, so pg_rewind cannot run.',
+			);
+
+		const linkDir = join(this.replicationDir, id);
+		const runRewind = () =>
+			this.runner.run(
+				renderPgRewindArgs({
+					podmanPath: this.podmanPath,
+					image,
+					replicaId: id,
+					targetRoot: source,
+					linkDir,
+					user,
+				}),
+				{ env: { PGPASSWORD: password } },
+			);
+		let rewound = await runRewind();
+		let attempts = 1;
+		// A transport failure leaves the diverged dir intact, so retry it before paying for a full
+		// rebuild. Three attempts in total (the first run plus two retries). Anything else (no
+		// common ancestor, hint logging off) cannot succeed by retrying.
+		while (
+			rewound.code !== 0 &&
+			pgRewindFailureKind(rewound.stderr) === 'transport' &&
+			attempts < PG_REWIND_TRANSPORT_ATTEMPTS
+		) {
+			attempts += 1;
+			await Bun.sleep(this.restorePollMs);
+			rewound = await runRewind();
+		}
+		if (rewound.code !== 0) {
+			const transport = pgRewindFailureKind(rewound.stderr) === 'transport';
+			const suffix = transport && attempts > 1 ? ` after ${attempts} transport attempts (${attempts - 1} retries)` : '';
+			return this.rebuildAfterRewind(
+				source,
+				id,
+				`pg_rewind failed${suffix} (${rewound.code}): ${commandDetail(rewound)}`,
+			);
+		}
+
+		const existingTarget = await fs.lstat(target).catch(() => null);
+		if (existingTarget) {
+			if (!existingTarget.isDirectory()) throw new ValidationError(`${target} is not a directory; refusing to adopt it.`);
+			await fs.rm(target, { recursive: true, force: true });
+		}
+		await fs.rename(source, target);
+		// Only a real rewind writes this; a fallback leaves the replica to bootstrap and the control
+		// plane sees `fallback` instead of a false success.
+		await this.writeAtomic(
+			pitrRewindMarkerPath(target),
+			renderPitrRewindMarker({ databaseId, replicaId: id, rewoundAt: new Date().toISOString() }),
+			0o600,
+		);
+		return { replicaId: id, rewound: true, fallback: null, reason: null };
+	}
+
+	/** True when a previous successful `pg_rewind` adopted this exact database/replica pair. */
+	private async rewindMarkerPresent(target: string, databaseId: string, replicaId: string): Promise<boolean> {
+		const text = await fs.readFile(pitrRewindMarkerPath(target), 'utf8').catch(() => null);
+		if (text === null) return false;
+		try {
+			const marker = JSON.parse(text) as Record<string, unknown>;
+			return marker.databaseId === databaseId && marker.replicaId === replicaId;
+		} catch {
+			return false;
+		}
+	}
+
+	/** True while a workload's container is running; used before touching a fenced primary's data. */
+	private async containerRunning(id: string): Promise<boolean> {
+		const result = await this.runner.run([
+			this.podmanPath,
+			'inspect',
+			'--format',
+			'{{.State.Running}}',
+			pitrContainerName(id),
+		]);
+		return result.code === 0 && result.stdout.trim() === 'true';
+	}
+
+	/** Remove a diverged old primary and let the replica's next start run `pg_basebackup`. */
+	private async rebuildAfterRewind(
+		source: string,
+		replicaId: string,
+		reason: string,
+	): Promise<{ replicaId: string; rewound: false; fallback: 'rebuild'; reason: string }> {
+		await fs.rm(source, { recursive: true, force: true });
+		return { replicaId, rewound: false, fallback: 'rebuild', reason: reason.slice(0, 1_000) };
+	}
+
+	/** `wal_log_hints` from either config file, the fallback when a cluster predates data checksums. */
+	private async walLogHintsEnabled(pgdata: string): Promise<boolean> {
+		for (const name of ['postgresql.auto.conf', 'postgresql.conf']) {
+			const text = await fs.readFile(join(pgdata, name), 'utf8').catch(() => '');
+			if (/^\s*wal_log_hints\s*=\s*['"]?(?:on|true)['"]?\s*$/m.test(text)) return true;
+		}
+		return false;
+	}
+
+	/** The major version of an existing data dir, used only to pick a postgres image with pg_rewind. */
+	private async readPgVersion(id: string): Promise<string> {
+		const version = await fs.readFile(join(await this.dataDirFor(id), 'pgdata', 'PG_VERSION'), 'utf8').catch(() => '');
+		const major = version.trim().split('.')[0] ?? '';
+		if (!/^\d+$/.test(major)) throw new ValidationError(`Database ${id} has no readable PG_VERSION.`);
+		return major;
+	}
+
+
 	private psqlArgs(id: string, env: { user: string; database: string }, extra: string[]): string[] {
 		return [
 			this.podmanPath,
@@ -2105,11 +2223,15 @@ END $$;`];
 	 * container sees a rewrite at once and nothing restarts. `/run` is a tmpfs: the agent calls
 	 * this before every PITR task, which is what puts the files back after a reboot.
 	 */
-	async pitrConfigure(id: string, rawRepo: unknown): Promise<{ stanza: string; configPath: string }> {
+	async pitrConfigure(id: string, rawRepo: unknown, rawStanza: unknown): Promise<{ stanza: string; configPath: string }> {
 		assertDatabaseId(id, 'database id');
 		const repo = parsePitrRepo(rawRepo);
+		// The stanza belongs to the DATABASE, not to the container a backup happens to run in
+		// (a replica's workload id differs). It is carried on the fixed verb and validated, never
+		// re-derived here: a derived replica stanza would write to an orphan stanza and restores
+		// against the primary's stanza would see nothing.
+		const stanza = validatePitrStanza(rawStanza, 'pitr.stanza');
 		const env = await this.readPostgresEnv(id);
-		const stanza = pitrStanzaFor(id);
 		const paths = pitrPaths(this.runtimeDir, id);
 		await this.ensurePitrConfigDir(id);
 		const files: Array<[string, string]> = [
@@ -2117,6 +2239,8 @@ END $$;`];
 			// pgBackRest and psql reach Postgres over the container's Unix socket.
 			[paths.pgpass, renderPgPass(env.user, env.password)],
 		];
+		const key = renderPgBackRestKey(repo);
+		if (key) files.push([paths.gcsKey, key]);
 		for (const [path, content] of files) {
 			// Podman may once have created a directory at a bind-mount source (pre-0070 layout).
 			const stat = await fs.lstat(path).catch(() => null);
@@ -2125,6 +2249,8 @@ END $$;`];
 			// Postgres (archive-push) and the restore containers run as uid 70: keep 0400, hand over.
 			await this.chown(path, DATABASE_ENGINES.postgres.uid, DATABASE_ENGINES.postgres.gid);
 		}
+		// A repository kind change must not leave a stale key behind (it is a credential).
+		if (!key) await fs.rm(paths.gcsKey, { force: true });
 		return { stanza, configPath: paths.config };
 	}
 
@@ -2133,11 +2259,21 @@ END $$;`];
 	 * `podman exec` inside the database's own container: pgBackRest must share the host with
 	 * Postgres and talks to it over the Unix socket.
 	 */
-	async pitrBaseBackup(id: string, rawType: unknown): Promise<{ stanza: string; type: PitrBaseBackupType }> {
+	async pitrBaseBackup(
+		id: string,
+		rawType: unknown,
+		rawStanza: unknown,
+	): Promise<{ stanza: string; type: PitrBaseBackupType }> {
 		assertDatabaseId(id, 'database id');
 		const type = parsePitrBackupType(rawType);
-		const stanza = pitrStanzaFor(id);
-		await this.requirePitrConfig(id);
+		const stanza = validatePitrStanza(rawStanza, 'pitr.stanza');
+		const configured = await this.requirePitrConfig(id);
+		// Refuse a stanza the config on this node was not written for: that would create an empty,
+		// orphan stanza in the repository instead of backing up into the database's own history.
+		if (configured.stanza !== stanza)
+			throw new ValidationError(
+				`Database ${id} is configured for stanza "${configured.stanza}", not "${stanza}".`,
+			);
 		for (const args of renderPitrBackupArgs(stanza, type)) {
 			const result = await this.runner.run(renderPitrExecArgs({ podmanPath: this.podmanPath, workloadId: id, args }));
 			if (result.code !== 0)
@@ -2153,7 +2289,6 @@ END $$;`];
 	 */
 	async pitrStatus(id: string): Promise<HelperPitrStatus> {
 		assertDatabaseId(id, 'database id');
-		const stanza = pitrStanzaFor(id);
 		const paths = pitrPaths(this.runtimeDir, id);
 		const configured = await fs
 			.lstat(paths.config)
@@ -2161,7 +2296,10 @@ END $$;`];
 			.catch(() => false);
 		const empty: HelperPitrStatus = {
 			configured: false,
-			stanza,
+			// No stanza is derived here: the id may be a replica workload id (`db_dbr_…`), whose
+			// derived stanza would be an orphan. The config written by `pitr/configure` is the only
+			// source of the database's stanza.
+			stanza: '',
 			repo: { bucket: null, region: null, endpoint: null, path: null },
 			archiveStatus: 'unknown',
 			recoverableFrom: null,
@@ -2175,14 +2313,28 @@ END $$;`];
 		};
 		if (!configured) return empty;
 		const text = await fs.readFile(paths.config, 'utf8');
+		const stanza = parsePitrStanza(text);
+		if (!stanza)
+			throw new ValidationError(`Database ${id} has a pgBackRest config without a stanza; configure PITR first.`);
 		const value = (key: string) => {
 			const line = text.split('\n').find((entry) => entry.startsWith(`${key}=`));
 			return line ? line.slice(key.length + 1).trim() || null : null;
 		};
+		const repoType = value('repo1-type');
 		const repo = {
-			bucket: value('repo1-s3-bucket'),
+			bucket:
+				repoType === 'azure'
+					? value('repo1-azure-container')
+					: repoType === 'gcs'
+						? value('repo1-gcs-bucket')
+						: value('repo1-s3-bucket'),
 			region: value('repo1-s3-region'),
-			endpoint: value('repo1-s3-endpoint'),
+			endpoint:
+				repoType === 'azure'
+					? value('repo1-azure-endpoint')
+					: repoType === 'gcs'
+						? value('repo1-gcs-endpoint')
+						: value('repo1-s3-endpoint'),
 			path: value('repo1-path'),
 		};
 		const env = await this.readPostgresEnv(id);
@@ -2241,8 +2393,8 @@ END $$;`];
 		if (targetDatabaseId === id)
 			throw new ValidationError('A PITR restore must target a different database; in-place restore is not supported.');
 		const targetTime = validatePitrTargetTime(input.targetTime, Date.now());
-		const stanza = pitrStanzaFor(id);
-		await this.requirePitrConfig(id);
+		const config = await this.requirePitrConfig(id);
+		const stanza = config.stanza;
 		const configDir = pitrPaths(this.runtimeDir, id).dir;
 		const sourceDir = await this.dataDirFor(id);
 		// The one-shots must run the pgBackRest that wrote the repository: the source's PITR image,
@@ -2371,14 +2523,16 @@ END $$;`];
 		return dir;
 	}
 
-	private async requirePitrConfig(id: string): Promise<{ config: string; pgpass: string }> {
+	private async requirePitrConfig(id: string): Promise<{ config: string; pgpass: string; stanza: string }> {
 		const paths = pitrPaths(this.runtimeDir, id);
 		const ready = await fs
 			.lstat(paths.config)
 			.then((stat) => stat.isFile())
 			.catch(() => false);
 		if (!ready) throw new ValidationError(`Database ${id} has no pgBackRest config; configure PITR first.`);
-		return { config: paths.config, pgpass: paths.pgpass };
+		const stanza = parsePitrStanza(await fs.readFile(paths.config, 'utf8'));
+		if (!stanza) throw new ValidationError(`Database ${id} has a pgBackRest config without a stanza; configure PITR first.`);
+		return { config: paths.config, pgpass: paths.pgpass, stanza };
 	}
 
 	/** Resolve a managed database's data dir from the same roots `purge` uses (D78). */

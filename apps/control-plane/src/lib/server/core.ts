@@ -103,6 +103,19 @@ export const core = createCore({
 		platformOrigin,
 		contentDomain,
 		objectStore,
+		platformStore: r2
+			? {
+					kind: 'r2',
+					s3: {
+						endpoint: r2.endpoint ?? `https://${r2.accountId}.r2.cloudflarestorage.com`,
+						bucket: r2.bucket,
+						region: r2.region ?? 'auto',
+						accessKeyId: r2.accessKeyId,
+						secretAccessKey: r2.secretAccessKey,
+						pathStyle: r2.forcePathStyle ?? true,
+					},
+				}
+			: { kind: objectStoreKind ?? 'local' },
 		masterKey,
 		siteCookieSecret,
 		objectStoreSecret,

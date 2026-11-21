@@ -66,6 +66,7 @@ import { ReleaseState } from './desired-state/releases.ts';
 import { EndpointState } from './desired-state/endpoints.ts';
 import { DatabaseState } from './desired-state/databases.ts';
 import { IngressState } from './desired-state/ingress.ts';
+import { ControlState } from './desired-state/control.ts';
 
 const JOIN_TTL_MS = 60 * 60 * 1000;
 
@@ -547,6 +548,8 @@ export class NodeService {
 		// `SHARED_CERTIFICATES` is off, so the single-node install reports nothing new.
 		if (input.certificateFingerprint !== undefined)
 			this.ctx.certificates.report(node.id, input.certificateFingerprint);
+		// Control-plane HA (W9): a control node's last role/epoch/lease, recorded on the primary.
+		if (input.control) this.ctx.controlPlane.report({ ...input.control, nodeId: node.id });
 		// Every peer's desired state now carries this node's key.
 		if (adoptedKey) this.bump();
 		if (input.workloads?.length) {
@@ -573,7 +576,9 @@ export class NodeService {
 				.catch((error: unknown) =>
 					this.ctx.databaseMembers.onPromotionResultFailure(input.databaseReplicaPromotionResults?.[0]?.failoverId, error),
 				);
-		// W10: member roles, sync steps, switchover drain/resume and rewind outcomes.
+		if (input.databaseReplicaRewindResults?.length)
+			this.ctx.databaseReplicas.applyRewindResults(node.id, input.databaseReplicaRewindResults);
+		// W10: member roles, sync steps and switchover drain/resume outcomes.
 		if (input.databaseMembers?.length) this.ctx.databaseMembers.applyMemberReports(node.id, input.databaseMembers);
 		if (input.databaseSyncResults?.length)
 			void this.ctx.databaseMembers
@@ -583,8 +588,6 @@ export class NodeService {
 			void this.ctx.databaseMembers
 				.applySwitchoverResults(node.id, input.databaseSwitchoverResults)
 				.catch((error: unknown) => console.error(`[database-members] switchover result: ${(error as Error).message}`));
-		if (input.databaseRewindResults?.length)
-			this.ctx.databaseMembers.applyRewindResults(node.id, input.databaseRewindResults);
 		if (input.databaseBackupResults?.length)
 			this.ctx.databases.applyBackupResults(node.id, input.databaseBackupResults);
 		if (input.databasePitrResults?.length)
@@ -1168,6 +1171,7 @@ export class NodeService {
 		const { now, allNodes, ingressId, isIngress } = state;
 		const routeState = new RouteState(state);
 		const ingress = new IngressState(state);
+		const control = new ControlState(state);
 		const releaseState = new ReleaseState(state);
 		const endpoints = new EndpointState(this.ctx);
 
@@ -1203,6 +1207,7 @@ export class NodeService {
 		);
 
 		// Every HA Wave 1 field passes the capability gate last (HA-PLAN §9 "Mixed versions").
+		const controlDesired = await control.desired();
 		return gateDesiredState({
 			version: this.stateVersion(),
 			nodeId: node.id,
@@ -1251,6 +1256,8 @@ export class NodeService {
 			// Ingress-set payload (H17/G5): listeners, TLS and the platform route on every member,
 			// only while the flag is on and the agent declares `ingress-set` (gate strips it).
 			...(ingress.ingress() ? { ingress: ingress.ingress() } : {}),
+			// Control-plane HA (W9): the address list and highest epoch, only with CONTROL_STANDBY on.
+			...(controlDesired ? { control: controlDesired } : {}),
 			serviceEndpoints: endpoints.serviceEndpointsForNode(node.id),
 			readEndpoints: endpoints.readEndpointsForNode(node.id),
 			nodeTrust: endpoints.nodeTrustForNode(node.id),

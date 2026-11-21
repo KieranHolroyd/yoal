@@ -15,12 +15,15 @@ type DatabaseFields =
 	| 'databaseReplicaPromotions';
 
 /** W10 fields, omitted entirely while SYNC_REPLICA is off so the golden desired state is unchanged. */
-type DurabilityFields = 'databaseMembers' | 'databaseSyncTasks' | 'databaseRewindTasks' | 'databaseSwitchovers';
+type DurabilityFields = 'databaseMembers' | 'databaseSyncTasks' | 'databaseSwitchovers';
 
 /** Databases: purges, backups, PITR, rotations, credentials, pooler restarts and replication (C7). */
 export class DatabaseState extends DesiredStatePart {
-	async tasks(): Promise<Pick<DesiredState, DatabaseFields | DurabilityFields>> {
+	async tasks(): Promise<
+		Pick<DesiredState, DatabaseFields | DurabilityFields> & Pick<Partial<DesiredState>, 'databaseReplicaRewinds'>
+	> {
 		const { node } = this.state;
+		const rewinds = this.ctx.databaseReplicas.rewindsForNode(node.id);
 		const base: Pick<DesiredState, DatabaseFields> = {
 			// Trashed databases plus the old copy a finished (or rolled-back) move left here.
 			databasePurges: [
@@ -41,22 +44,26 @@ export class DatabaseState extends DesiredStatePart {
 			databaseReplicaLinks: this.ctx.databaseReplicas.linksForNode(node.id),
 			databaseReplicaPromotions: await this.ctx.databaseReplicas.promotionsForNode(node.id),
 		};
+		// Lane C's rewinds are omitted while empty, so the flag-off desired state (and the golden
+		// fixtures) stay byte-identical.
+		const withRewinds = rewinds.length > 0 ? { databaseReplicaRewinds: rewinds } : {};
 		// W10 (SYNC_REPLICA): the keys are absent, not empty, with the flag off. That keeps every
 		// existing desired state byte-identical (the golden test) and an older agent unaffected.
 		// The exception is a resume task: it is a recovery path and must reach the node even after
 		// the flag is turned off, so it is included only when one exists.
 		const switchovers = this.ctx.databaseMembers.switchoverTasksForNode(node.id);
 		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA')) {
-			return (switchovers.length > 0 ? { ...base, databaseSwitchovers: switchovers } : base) as Pick<
-				DesiredState,
-				DatabaseFields | DurabilityFields
-			>;
+			return {
+				...base,
+				...withRewinds,
+				...(switchovers.length > 0 ? { databaseSwitchovers: switchovers } : {}),
+			} as Pick<DesiredState, DatabaseFields | DurabilityFields> & Pick<Partial<DesiredState>, 'databaseReplicaRewinds'>;
 		}
 		return {
 			...base,
+			...withRewinds,
 			databaseMembers: this.ctx.databaseMembers.membersDesiredAll(),
 			databaseSyncTasks: this.ctx.databaseMembers.syncTasksForNode(node.id),
-			databaseRewindTasks: this.ctx.databaseMembers.rewindTasksForNode(node.id),
 			databaseSwitchovers: switchovers,
 		};
 	}

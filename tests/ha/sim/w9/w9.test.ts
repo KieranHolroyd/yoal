@@ -9,6 +9,11 @@ import {
 	syncChangeCloseRace,
 	syncChangeDowngrade,
 	syncChangeFallback,
+	syncControlLoss,
+	syncControlSameEtage,
+	syncControlStaleReopen,
+	syncControlStaleSync,
+	syncControlTransient,
 	wallClockFenceScenario,
 } from './schedules.ts';
 import { FAMILIES, type Family } from './spec.ts';
@@ -67,6 +72,70 @@ describe('W9 model, Revision 1 (W9-SPEC §5.5, §7)', () => {
 		expect(result.trace.map((e) => e.text).join('\n')).toContain(
 			're-read shows the transition closed; adopting steady',
 		);
+	});
+
+	test('Rev 2: a control outage with the sync standby lost applies async locally and alerts', () => {
+		const result = new W9World({ seed: 1, scenario: syncControlLoss(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.localSyncLossApplied).toBe(1);
+		expect(result.stats.syncStaleReconciled).toBe(1);
+		expect(result.stats.syncAlerts).toBeGreaterThan(0);
+		expect(result.stats.syncReopens).toBe(0);
+		const trace = result.trace.map((e) => e.text).join('\n');
+		expect(trace).toContain('applied on_sync_loss async locally');
+		expect(trace).toContain('never recording sync');
+		expect(trace).toContain('recorded async: sync [], steady');
+	});
+
+	test('Rev 2: a transient control outage with no sync loss does not disturb traffic', () => {
+		const result = new W9World({ seed: 1, scenario: syncControlTransient(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.syncReports).toBe(0);
+		expect(result.stats.syncAlerts).toBe(0);
+		expect(result.stats.acks).toBeGreaterThan(0);
+	});
+
+	test('Rev 2: a stale report re-opens a fresh barrier to a healthy named member', () => {
+		const result = new W9World({ seed: 1, scenario: syncControlStaleReopen(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.syncReopens).toBeGreaterThan(0);
+		expect(result.stats.syncAlerts).toBeGreaterThan(0);
+		const trace = result.trace.map((e) => e.text).join('\n');
+		expect(trace).toContain('re-opening a fresh barrier');
+		expect(trace).toContain('close: sync {b}, syncState steady');
+	});
+
+	test('Rev 2: an ETag-equal or stale report records the outcome and alerts', () => {
+		const result = new W9World({ seed: 1, scenario: syncControlSameEtage(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.syncReports).toBe(1);
+		expect(result.stats.syncAlerts).toBeGreaterThan(0);
+		expect(result.stats.syncSameEtags + result.stats.syncStaleReconciled).toBe(1);
+	});
+
+	test('Rev 2: the normal reconciler refuses a sync report from a stale ETag', () => {
+		const result = new W9World({
+			seed: 1,
+			scenario: syncControlStaleSync(),
+			mutant: 'node-applies-sync',
+			trace: true,
+		}).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.syncStaleReconciled).toBe(1);
+		expect(result.stats.syncReopens).toBe(0);
+		expect(result.stats.promotions).toBe(1);
+		expect(result.trace.map((e) => e.text).join('\n')).toContain('never recording sync');
+	});
+
+	test('Rev 2: recording sync from a stale report loses acknowledged commits (checker)', () => {
+		const result = new W9World({
+			seed: 1,
+			scenario: syncControlStaleSync(),
+			mutant: 'record-sync-on-stale',
+			trace: true,
+		}).run();
+		expect(result.violations.some((v) => v.kind === 'stale-sync-recorded')).toBe(true);
+		expect(result.violations.some((v) => v.kind === 'missing-ack-at-promotion')).toBe(true);
 	});
 
 	test('I11: a control-plane outage keeps traffic and completes the database failover', () => {

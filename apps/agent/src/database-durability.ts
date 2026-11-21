@@ -1,7 +1,5 @@
 import {
-	databaseRewindActivationSchema,
 	type DatabaseMemberReport,
-	type DatabaseRewindResult,
 	type DatabaseSwitchoverResult,
 	type DatabaseSyncResult,
 	type DesiredState,
@@ -9,15 +7,13 @@ import {
 import type { HelperApi } from './helper-client.ts';
 
 /**
- * The node half of W10 (H23 sync set, planned switchover and rewind). It applies the fixed helper
+ * The node half of W10 (H23 sync set and planned switchover). It applies the fixed helper
  * verbs the control plane asks for through desired state and reports structured outcomes:
  *
  * - `databaseSyncTasks` — set or clear `synchronous_standby_names`, write the barrier and report its
  *   LSN. The *decision* to open/close is the lease's (`database-sync.ts`); this only executes.
  * - `databaseSwitchovers` — drain (`checkpoint`, stop writes, report the primary LSN) and resume.
  *   Promotion itself reuses the existing `databaseReplicaPromotions` task.
- * - `databaseRewindTasks` — fetch the new primary's replication password, `pg_rewind`, and report
- *   `rewound` or `rebuild`.
  * - `databaseMembers` — probe each member on this node for role, generation and replay position.
  *
  * Lane A owns the keeper/fence machine (`database-member.ts`); this runner is the seam it consumes,
@@ -30,7 +26,7 @@ export interface DatabaseDurabilityRunnerOptions {
 	nodeId: string;
 	helper: Pick<
 		HelperApi,
-		'syncConfigure' | 'syncBarrier' | 'writesStop' | 'writesResume' | 'checkpoint' | 'memberStatus' | 'replicationStatus' | 'replicaRewind'
+		'syncConfigure' | 'syncBarrier' | 'writesStop' | 'writesResume' | 'checkpoint' | 'memberStatus' | 'replicationStatus'
 	>;
 	log?: (level: 'info' | 'warn' | 'error', message: string) => void;
 	now?: () => number;
@@ -55,7 +51,6 @@ export class DatabaseDurabilityRunner {
 	private readonly pollMs: number;
 	private readonly syncResults = new Map<string, DatabaseSyncResult>();
 	private readonly switchoverResults = new Map<string, DatabaseSwitchoverResult>();
-	private readonly rewindResults = new Map<string, DatabaseRewindResult>();
 	private readonly appliedSync = new Set<string>();
 	private readonly inFlight = new Set<string>();
 	/** First observation of "the named synchronous standby is not streaming", per database. */
@@ -78,7 +73,6 @@ export class DatabaseDurabilityRunner {
 		await this.#sync(state, signal);
 		await this.#watchdog(state, signal);
 		await this.#switchovers(state, signal);
-		await this.#rewinds(state, signal);
 		// Forget results whose instruction is gone (the control plane applied or abandoned it).
 		// A watchdog result has no task, so its own desired entry keeps it until the next heartbeat
 		// applies it or the lease snapshot changes.
@@ -88,7 +82,6 @@ export class DatabaseDurabilityRunner {
 		}
 		this.#prune(this.syncResults, present);
 		this.#prune(this.switchoverResults, new Set((state.databaseSwitchovers ?? []).map((task) => `${task.switchoverId}:${task.version}`)));
-		this.#prune(this.rewindResults, new Set((state.databaseRewindTasks ?? []).map((task) => task.databaseId)));
 	}
 
 	/** One probe per member on this node. Safe to call every heartbeat. */
@@ -141,9 +134,6 @@ export class DatabaseDurabilityRunner {
 		return [...this.switchoverResults.values()].slice(0, 20);
 	}
 
-	pendingRewindResults(): DatabaseRewindResult[] {
-		return [...this.rewindResults.values()].slice(0, 20);
-	}
 
 	async #sync(state: DesiredState, signal: AbortSignal): Promise<void> {
 		for (const task of state.databaseSyncTasks ?? []) {
@@ -372,48 +362,6 @@ export class DatabaseDurabilityRunner {
 				this.log('error', `Switchover ${task.step} for ${task.databaseId} failed: ${errorText(error)}`);
 			} finally {
 				this.inFlight.delete(key);
-			}
-		}
-	}
-
-	async #rewinds(state: DesiredState, signal: AbortSignal): Promise<void> {
-		for (const task of state.databaseRewindTasks ?? []) {
-			if (signal.aborted) return;
-			if (this.rewindResults.has(task.databaseId) || this.inFlight.has(task.databaseId)) continue;
-			this.inFlight.add(task.databaseId);
-			try {
-				const response = await this.fetcher(
-					`${this.controlUrl}/api/agent/database-rewind/${encodeURIComponent(task.databaseId)}`,
-					{ headers: { authorization: `Bearer ${this.nodeToken}`, accept: 'application/json' }, signal },
-				);
-				if (!response.ok) throw new Error(`rewind activation -> ${response.status}`);
-				const activation = databaseRewindActivationSchema.parse(await response.json());
-				// The path is the rewind replica's workload id (`db_dbr_…`); the body names the
-				// database whose old data dir is moved into it. Both helper assertions pass.
-				const result = await this.helper.replicaRewind(task.workloadId, {
-					databaseId: task.databaseId,
-					source: { host: activation.source.address ?? '', port: activation.source.port, user: 'yoal_repl', database: 'postgres' },
-					password: activation.password,
-					image: activation.image,
-				});
-				this.rewindResults.set(task.databaseId, {
-					databaseId: task.databaseId,
-					status: result.status,
-					...(result.error ? { error: result.error.slice(0, 2_000) } : {}),
-				});
-				this.log(
-					result.status === 'rewound' ? 'info' : 'warn',
-					`${task.databaseId} ${result.status === 'rewound' ? 'rewound and follows the new primary' : 'could not rewind; rebuilding'}`,
-				);
-			} catch (error) {
-				this.rewindResults.set(task.databaseId, {
-					databaseId: task.databaseId,
-					status: 'rebuild',
-					error: errorText(error).slice(0, 2_000),
-				});
-				this.log('error', `Rewind for ${task.databaseId} failed: ${errorText(error)}`);
-			} finally {
-				this.inFlight.delete(task.databaseId);
 			}
 		}
 	}

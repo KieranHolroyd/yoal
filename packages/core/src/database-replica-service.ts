@@ -16,6 +16,7 @@ import {
 	DATABASE_REPLICA_REPORT_STALE_SECONDS,
 	DATABASE_REPLICAS_CAPABILITY,
 	DATABASE_REPLICATION_MAX_SLOTS,
+	PITR_REWIND_CAPABILITY,
 	databaseAlias,
 	databaseCapabilities,
 	databaseEngineRegistry,
@@ -28,6 +29,7 @@ import {
 	databaseReplicaWorkloadId,
 	isDatabaseReplicaWorkloadId,
 	orgNetworkName,
+	postgresPitrImage,
 	type DatabaseFailoverStage,
 	type DatabaseFailoverView,
 	type DatabaseReplicaCreate,
@@ -36,6 +38,9 @@ import {
 	type DatabaseReplicaPromote,
 	type DatabaseReplicaPromotionResult,
 	type DatabaseReplicaPromotionTask,
+	type DatabaseReplicaRewindResult,
+	type DatabaseReplicaRewindTask,
+	type DatabaseReplicaRewindActivation,
 	type DatabaseReplicaStatus,
 	type DatabaseReplicaView,
 	type DatabaseReplicationActivation,
@@ -130,9 +135,9 @@ export class DatabaseReplicaService {
 			throw new ValidationError(
 				`"${database.name}" is async. Set its durability to sync first (\`yoal db durability ${database.name} --sync\`), then add a sync-capable replica.`,
 			);
-		if (this.pitrEnabled(database.id))
+		if (this.pitrEnabled(database.id) && !featureEnabled(this.ctx.config, 'PITR_REWIND'))
 			throw new ValidationError(
-				`"${database.name}" has point-in-time recovery on; replicas of a PITR database are not supported yet.`,
+				`"${database.name}" has point-in-time recovery on; replicas of a PITR database need YOAL_FEATURE_PITR_REWIND.`,
 			);
 		this.ctx.moves.assertNotMoving(database);
 		if (this.activeFailover(database.id))
@@ -141,6 +146,13 @@ export class DatabaseReplicaService {
 			?? this.ctx.db.select().from(nodes).where(eq(nodes.name, input.node)).get();
 		if (!node) throw new NotFoundError('Node');
 		if (node.status !== 'online') throw new ConflictError(`"${node.name}" is ${node.status}.`);
+		if (
+			this.pitrEnabled(database.id) &&
+			(!this.ctx.databases.pitrRewindForNode(database.nodeId) || !this.ctx.databases.pitrRewindForNode(node.id))
+		)
+			throw new ConflictError(
+				`A replica of a PITR database needs "${PITR_REWIND_CAPABILITY}" on both nodes; update the older agent first.`,
+			);
 		const sameNode = node.id === database.nodeId;
 		const primaryNode = this.ctx.db.select().from(nodes).where(eq(nodes.id, database.nodeId)).get();
 		if (!sameNode && !node.privateAddress)
@@ -184,7 +196,7 @@ export class DatabaseReplicaService {
 		const disk = this.ctx.disks.pick(plan, node.id, database.storageMb);
 		this.ctx.quota.assertCanAdmitMemory(database.orgId, null, database.memoryMb);
 
-		const view = this.insertReplica(database, node.id, disk?.id ?? null, input.mode);
+		const view = this.insertReplica(database, node.id, disk?.id ?? null, { mode: input.mode });
 		this.ctx.audit.record({
 			principal,
 			action: 'database.replica.add',
@@ -424,44 +436,6 @@ export class DatabaseReplicaService {
 		return this.rowsFor(databaseId).some((row) => !row.removingAt);
 	}
 
-	/**
-	 * A switchover leaves the old primary's copy on its node (W10). Create the replica row that
-	 * keeps it in desired state; the node moves the old data dir into this replica's directory and
-	 * rewinds it. Creating the row first also gives the new primary a slot to stream to.
-	 */
-	prepareRewindReplica(databaseId: string, nodeId: string): string | null {
-		const database = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
-		if (!database || database.deletedAt || database.nodeId === nodeId) return null;
-		const existing = this.rowsFor(databaseId).find((row) => row.nodeId === nodeId && !row.removingAt);
-		if (existing) return existing.id;
-		try {
-			const view = this.insertReplica(database, nodeId, null);
-			// No slot yet, so `desiredForNode` does not start a replica unit that would run
-			// `pg_basebackup` into the directory the rewind is about to fill. `activateRewindReplica`
-			// adds the slot once the node has moved and rewound the old copy.
-			this.ctx.db
-				.update(databaseReplicas)
-				.set({ slot: null, updatedAt: this.ctx.now() })
-				.where(eq(databaseReplicas.id, view.id))
-				.run();
-			return view.id;
-		} catch {
-			return null;
-		}
-	}
-
-	/** The rewound (or rebuilt) copy is in place: give the replica its slot so desired state starts it. */
-	activateRewindReplica(replicaId: string): void {
-		const row = this.ctx.db.select().from(databaseReplicas).where(eq(databaseReplicas.id, replicaId)).get();
-		if (!row || row.removingAt || row.slot) return;
-		this.ctx.db
-			.update(databaseReplicas)
-			.set({ slot: slotName(row.id), status: 'pending', updatedAt: this.ctx.now() })
-			.where(eq(databaseReplicas.id, row.id))
-			.run();
-		this.ctx.projects.bump();
-	}
-
 	isReplicaWorkloadId(id: string): boolean {
 		return isDatabaseReplicaWorkloadId(id);
 	}
@@ -586,8 +560,15 @@ export class DatabaseReplicaService {
 			if (!replica.slot || replica.hostPort === null || database.engine !== 'postgres') return [];
 			// A replica of an older generation follows a primary that no longer exists.
 			if (replica.primaryGeneration !== database.primaryGeneration) return [];
+			// HA-PLAN W10: an old primary is adopted only after pg_rewind (or its fallback) finished;
+			// starting the unit first would race the rewind with a fresh base backup.
+			if (replica.rewindFromDatabaseId && replica.rewindDoneAt === null) return [];
 			const id = databaseReplicaWorkloadId(replica.id);
 			const env = replicaContainerEnv(database);
+			// Only a node whose helper understands W10 may receive a replica PITR profile or
+			// `database.pgRewind`; an older helper rejects both (fail closed, no surprise restart).
+			const rewind = this.ctx.databases.pitrRewindForNode(nodeId);
+			const pitr = rewind ? this.ctx.databases.pitrRuntimeFor(database) : null;
 			return [
 				{
 					id,
@@ -598,7 +579,9 @@ export class DatabaseReplicaService {
 					runtime: 'container' as const,
 					status: 'running' as const,
 					release: null,
-					image: databaseImage(database.engine, database.version, database.variant),
+					// HA-PLAN W10: a replica of a PITR database runs the pgBackRest image and its
+					// stanza, so a backup can run from it and the stanza follows it after promotion.
+					image: pitr ? postgresPitrImage(database.version) : databaseImage(database.engine, database.version, database.variant),
 					upstream: `127.0.0.1:${replica.hostPort}`,
 					memoryMb: database.memoryMb,
 					cpus: database.cpus,
@@ -615,6 +598,8 @@ export class DatabaseReplicaService {
 						version: database.version,
 						...(database.variant !== 'standard' ? { variant: database.variant } : {}),
 						...(tls ? { tls: true } : {}),
+						...(pitr ? { pitr } : {}),
+						...(rewind ? { pgRewind: true } : {}),
 						replica: { slot: replica.slot },
 					},
 				},
@@ -743,6 +728,62 @@ export class DatabaseReplicaService {
 		};
 	}
 
+	/** Replicas on this node that must be rewound onto the new primary before they start. */
+	rewindsForNode(nodeId: string): DatabaseReplicaRewindTask[] {
+		if (!this.ctx.databases.pitrRewindForNode(nodeId)) return [];
+		return this.ctx.db
+			.select()
+			.from(databaseReplicas)
+			.where(
+				and(
+					eq(databaseReplicas.nodeId, nodeId),
+					isNull(databaseReplicas.removingAt),
+					isNotNull(databaseReplicas.rewindFromDatabaseId),
+					isNull(databaseReplicas.rewindDoneAt),
+					isNull(databaseReplicas.rewindError),
+					isNotNull(databaseReplicas.slot),
+				),
+			)
+			.all()
+			.flatMap((row) => {
+				const database = this.ctx.db.select().from(databases).where(eq(databases.id, row.databaseId)).get();
+				const replication = this.replicationRow(row.databaseId);
+				if (!database || !replication) return [];
+				// Wait until the NEW primary applied its replication task: that is what creates the
+				// slot and rewrites its `pg_hba` for streaming. Rewinding earlier would race it and
+				// fall back to a full rebuild for no reason.
+				if (replication.appliedVersion !== this.taskFor(database, replication).version) return [];
+				return [
+					{
+						databaseId: row.databaseId,
+						replicaId: row.id,
+						replicaWorkloadId: databaseReplicaWorkloadId(row.id),
+						// The old primary ran with `-c wal_log_hints=on` since `pgRewind` was rendered
+						// for its unit; a runtime flag is invisible to the helper's config probe.
+						walLogHints: true,
+					},
+				];
+			});
+	}
+
+	/** The owner role and password for one rewind; only the replica's own node may fetch it. */
+	rewindActivation(nodeId: string, replicaId: string): DatabaseReplicaRewindActivation {
+		const row = this.ctx.db.select().from(databaseReplicas).where(eq(databaseReplicas.id, replicaId)).get();
+		if (!row || row.removingAt || !row.rewindFromDatabaseId || row.rewindDoneAt !== null)
+			throw new NotFoundError('Database replica rewind');
+		if (row.nodeId !== nodeId) throw new CoreError('forbidden', 'This replica rewind belongs to another node.', 403);
+		const database = this.ctx.db.select().from(databases).where(eq(databases.id, row.databaseId)).get();
+		if (!database || database.deletedAt) throw new NotFoundError('Database');
+		return {
+			databaseId: row.databaseId,
+			replicaId: row.id,
+			// `pg_rewind --source-server` needs a superuser; the owner is one and exists on the new
+			// primary because it is a physical copy of this cluster.
+			user: databaseIdentifier(database.name),
+			password: this.ctx.secrets.open(database.orgId, database.ownerSecret),
+		};
+	}
+
 	/** Replicas this node must promote, once their old primary is fenced. */
 	async promotionsForNode(nodeId: string): Promise<DatabaseReplicaPromotionTask[]> {
 		const rows = this.ctx.db
@@ -778,6 +819,59 @@ export class DatabaseReplicaService {
 		return tasks;
 	}
 
+	/** Rewind outcomes from the old primary's node: the replica may now start, or it rebuilds. */
+	applyRewindResults(nodeId: string, results: readonly DatabaseReplicaRewindResult[]): void {
+		const now = this.ctx.now();
+		let changed = false;
+		for (const result of results) {
+			const row = this.ctx.db.select().from(databaseReplicas).where(eq(databaseReplicas.id, result.replicaId)).get();
+			if (!row || row.nodeId !== nodeId || row.rewindFromDatabaseId === null || row.rewindDoneAt !== null) continue;
+			if (result.status === 'failed') {
+				// A failed rewind must not leave the row pending forever or the diverged dir on disk:
+				// the replica becomes a removal that rebuilds a fresh copy once the node confirms the
+				// purge. Its slot goes too, so the new primary's next replication task drops it.
+				if (row.removingAt) continue;
+				this.ctx.db
+					.update(databaseReplicas)
+					.set({
+						removingAt: now,
+						rebuildOnPurge: true,
+						slot: null,
+						rewindError: (result.error ?? result.reason ?? 'The rewind failed on the node.').slice(0, 2_000),
+						message: 'pg_rewind failed; the old data directory is purged and a fresh replica is rebuilt on this node.',
+						updatedAt: now,
+					})
+					.where(eq(databaseReplicas.id, row.id))
+					.run();
+			} else {
+				this.ctx.db
+					.update(databaseReplicas)
+					.set({
+						rewindDoneAt: now,
+						rewindFallback: result.status === 'fallback',
+						rewindError: null,
+						...(result.status === 'fallback'
+							? { message: result.reason ? `Rebuilding instead of rewinding: ${result.reason}` : 'Rebuilding instead of rewinding.' }
+							: {}),
+						updatedAt: now,
+					})
+					.where(eq(databaseReplicas.id, row.id))
+					.run();
+			}
+			this.ctx.audit.record({
+				orgId: this.ctx.db.select({ orgId: databases.orgId }).from(databases).where(eq(databases.id, row.databaseId)).get()?.orgId,
+				action: `database.replica.${result.status === 'failed' ? 'rewind-failed' : result.status === 'fallback' ? 'rebuild' : 'rewind'}`,
+				resource: 'database',
+				resourceId: row.databaseId,
+				args: { replicaId: row.id, node: nodeId, reason: result.reason ?? null, error: result.error ?? null },
+				result: result.status === 'failed' ? 'error' : 'ok',
+				...(result.error ? { error: result.error.slice(0, 500) } : {}),
+			});
+			changed = true;
+		}
+		if (changed) this.ctx.projects.bump();
+	}
+
 	/**
 	 * Data dirs this node must delete: removed replicas, the leftover of a promoted (or failed)
 	 * replica, and the fenced old primary once its database lives on another node.
@@ -809,12 +903,30 @@ export class DatabaseReplicaService {
 				failover.status === 'completed' &&
 				failover.fromNodeId === nodeId &&
 				failover.oldPurgedAt === null &&
-				currentNode !== nodeId &&
-				// A planned switchover rewinds the old primary back into service (W10); only a failed
-				// rewind's rebuild deletes the divergent copy.
-				(failover.kind !== 'switchover' || failover.rewindStatus === 'rebuild')
-			)
-				ids.add(failover.databaseId);
+
+				currentNode !== nodeId
+			) {
+				// A rewind replica on this node adopts the old dir; deleting it first would force the
+				// full rebuild this path exists to avoid (HA-PLAN W10). A failed rewind is not
+				// adopting: it is marked removing with an error, so the old dir is purged and a
+				// fresh replica is rebuilt below.
+				const adopting = this.ctx.db
+					.select({ id: databaseReplicas.id })
+					.from(databaseReplicas)
+					.where(
+						and(
+							eq(databaseReplicas.nodeId, nodeId),
+							eq(databaseReplicas.databaseId, failover.databaseId),
+							eq(databaseReplicas.rewindFromDatabaseId, failover.databaseId),
+							isNull(databaseReplicas.rewindDoneAt),
+							isNull(databaseReplicas.rewindError),
+							isNull(databaseReplicas.removingAt),
+						),
+					)
+					.get();
+				if (!adopting) ids.add(failover.databaseId);
+			}
+
 		}
 		return [...ids].sort();
 	}
@@ -1126,7 +1238,12 @@ export class DatabaseReplicaService {
 
 	// ---------------------------------------------------------------- internals
 
-	private insertReplica(database: DatabaseRow, nodeId: string, diskId: string | null, mode: DatabaseReplicaMode = 'async'): DatabaseReplicaView {
+	private insertReplica(
+		database: DatabaseRow,
+		nodeId: string,
+		diskId: string | null,
+		options: { mode?: DatabaseReplicaMode; rewindFromDatabaseId?: string } = {},
+	): DatabaseReplicaView {
 		const now = this.ctx.now();
 		const id = newId('dbr_');
 		const hostPort = this.ctx.databases.allocatePort(nodeId);
@@ -1152,7 +1269,10 @@ export class DatabaseReplicaService {
 					primaryGeneration: database.primaryGeneration,
 					hostPort,
 					diskId,
-					mode,
+					mode: options.mode ?? 'async',
+					...(options.rewindFromDatabaseId
+						? { rewindFromDatabaseId: options.rewindFromDatabaseId, rewindRequestedAt: now }
+						: {}),
 					createdAt: now,
 					updatedAt: now,
 				})
@@ -1302,6 +1422,8 @@ export class DatabaseReplicaService {
 		const now = this.ctx.now();
 		const poolerPort = database.poolerEnabled ? this.ctx.databases.allocatePoolerPort(replica.nodeId) : null;
 		const others = this.rowsFor(database.id).filter((row) => row.id !== replica.id && !row.removingAt);
+		const fromNodeId = database.nodeId;
+		const fromDiskId = database.diskId;
 		this.ctx.sqlite.transaction(() => {
 			this.ctx.db.delete(databaseReplicas).where(eq(databaseReplicas.id, replica.id)).run();
 			this.ctx.db
@@ -1336,19 +1458,6 @@ export class DatabaseReplicaService {
 				.where(eq(databaseFailovers.id, failover.id))
 				.run();
 		})();
-		// A switchover keeps the old primary's copy: the old node gets a replica row, moves the
-		// divergent data dir into it and rewinds it against the new primary (W10). A failover
-		// purges it as before.
-		const rewindReplicaId =
-			failover.kind === 'switchover' && failover.fromNodeId
-				? this.prepareRewindReplica(database.id, failover.fromNodeId)
-				: null;
-		if (rewindReplicaId)
-			this.ctx.db
-				.update(databaseFailovers)
-				.set({ rewindReplicaId })
-				.where(eq(databaseFailovers.id, failover.id))
-				.run();
 		this.ctx.audit.record({
 			orgId: database.orgId,
 			action: 'database.failover.repoint',
@@ -1361,12 +1470,17 @@ export class DatabaseReplicaService {
 				generation: failover.generation,
 				lsn,
 				rebuilt: others.map((row) => row.id),
-				rewindReplicaId,
 			},
 			result: 'ok',
 		});
 		this.ctx.endpoints.reconcileForDatabase(database.id);
 		this.ctx.projects.bump(database.orgId);
+		// A promoted primary needs its PITR config on the new node's tmpfs at once, not at the next
+		// 15-minute check; the status task also reports the post-promotion window.
+		this.ctx.databases.queuePitrStatusFor(database.id);
+		// Lane C's rewind row is created synchronously before the lease CAS: the heartbeat contract
+		// still makes the failover visible to callers immediately after the promotion result.
+		this.reattachOldPrimary(database.id, fromNodeId, fromDiskId);
 		// Take the lease at the new generation and re-arm the Revision 1 transition. A failure here
 		// leaves the promoted database live but without a lease: it must be surfaced, not hidden.
 		try {
@@ -1380,6 +1494,44 @@ export class DatabaseReplicaService {
 				.run();
 			throw error;
 		}
+	}
+
+	/**
+	 * HA-PLAN W10: after a promotion, put a replica on the old primary's node that adopts its
+	 * diverged data dir by `pg_rewind`, instead of purging it and copying the whole database again.
+	 * With `PITR_REWIND` off (or the old node offline) nothing is created and the old dir is purged
+	 * as before. The replica stays out of desired state until the rewind task reports (or falls
+	 * back to a rebuild), so the adopted directory is never raced by a fresh `pg_basebackup`.
+	 */
+	private reattachOldPrimary(databaseId: string, fromNodeId: string, fromDiskId: string | null): void {
+		if (!featureEnabled(this.ctx.config, 'PITR_REWIND')) return;
+		if (!this.ctx.databases.pitrRewindForNode(fromNodeId)) return;
+		const database = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
+		if (!database || database.deletedAt || database.nodeId === fromNodeId) return;
+		if (!this.ctx.databases.pitrRewindForNode(database.nodeId)) return;
+		const node = this.ctx.db.select().from(nodes).where(eq(nodes.id, fromNodeId)).get();
+		if (!node || node.status !== 'online') return;
+		if (!parseJson<string[]>(node.capabilitiesJson, []).includes(DATABASE_REPLICAS_CAPABILITY)) return;
+		// The rewind reaches the new primary through the replica link, which needs both nodes'
+		// overlay addresses (same path a normal cross-node replica uses).
+		if (!node.privateAddress) return;
+		const primaryNode = this.ctx.db.select().from(nodes).where(eq(nodes.id, database.nodeId)).get();
+		if (!primaryNode?.privateAddress) return;
+		// A row on the old node already (including the same-node read replica being rebuilt after the
+		// promotion) owns that (database, node) pair; let that path run, or a second row would violate
+		// the pair index.
+		const existing = this.rowsFor(databaseId).find((row) => row.nodeId === fromNodeId);
+		if (existing) return;
+		const view = this.insertReplica(database, fromNodeId, fromDiskId, { rewindFromDatabaseId: databaseId });
+		this.ctx.audit.record({
+			orgId: database.orgId,
+			action: 'database.replica.rewind-request',
+			resource: 'database',
+			resourceId: database.id,
+			args: { name: database.name, replicaId: view.id, from: fromNodeId, oldDatabaseId: databaseId },
+			result: 'ok',
+		});
+		this.ctx.projects.bump(database.orgId);
 	}
 
 	private failFailover(failover: FailoverRow, message: string): void {
@@ -1441,6 +1593,8 @@ export class DatabaseReplicaService {
 
 	private replicaActivationVersion(database: DatabaseRow, replica: ReplicaRow, env: Record<string, string>, tls: boolean): string {
 		const replication = this.replicationRow(database.id);
+		const rewind = this.ctx.databases.pitrRewindForNode(replica.nodeId);
+		const pitrStanza = rewind ? (this.ctx.databases.pitrRuntimeFor(database)?.stanza ?? null) : null;
 		return sha256Hex(
 			JSON.stringify({
 				id: replica.id,
@@ -1454,6 +1608,9 @@ export class DatabaseReplicaService {
 				restartGeneration: database.restartGeneration,
 				...(tls ? { tls: true } : {}),
 				env,
+				// A PITR stanza or the rewind profile changes the unit (image, archive settings).
+				...(pitrStanza ? { pitr: pitrStanza } : {}),
+				...(rewind ? { pgRewind: true } : {}),
 				// A new replication secret must reach the walreceiver's env.
 				secret: replication ? sha256Hex(replication.secretSealed) : null,
 			}),
@@ -1500,6 +1657,15 @@ export class DatabaseReplicaService {
 			message: row.message,
 			removing: row.removingAt !== null,
 			reportedAt: row.reportedAt ? new Date(row.reportedAt).toISOString() : null,
+			rewind: row.rewindFromDatabaseId
+				? {
+						fromDatabaseId: row.rewindFromDatabaseId,
+						requestedAt: row.rewindRequestedAt ? new Date(row.rewindRequestedAt).toISOString() : null,
+						doneAt: row.rewindDoneAt ? new Date(row.rewindDoneAt).toISOString() : null,
+						fallback: row.rewindFallback,
+						error: row.rewindError,
+					}
+				: null,
 			createdAt: new Date(row.createdAt).toISOString(),
 		};
 	}

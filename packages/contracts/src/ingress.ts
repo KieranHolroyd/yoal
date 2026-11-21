@@ -133,6 +133,23 @@ export const ingressDesiredSchema = ingressSettingsSchema
 			})
 			.nullable()
 			.default(null),
+		/**
+		 * Control-node upstreams for the platform route (HA-PLAN H21, W9). Rendered only while
+		 * `CONTROL_STANDBY` is on. The node's own socket is first, then peers; Caddy health-checks
+		 * `/readyz` with `lb_policy first`, so a fenced or dead primary is skipped. Absent with the
+		 * flag off, which keeps a single-node payload byte-identical.
+		 */
+		platformUpstreams: z
+			.array(
+				z.object({
+					nodeId: z.string().min(1).max(64),
+					/** `unix//run/yoal/control.sock` or `https://<address>`. */
+					upstream: z.string().min(1).max(512),
+					priority: z.number().int().min(0).max(100).default(0),
+				}),
+			)
+			.max(8)
+			.optional(),
 	})
 	.strict();
 

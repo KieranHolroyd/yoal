@@ -1,9 +1,10 @@
-import type { DatabasePitrRepoConfig, DatabasePitrRepository, FeatureFlags, FeatureName } from '@yoal/contracts';
+import type { DatabasePitrRepoConfig, DatabasePitrRepository, FeatureFlags, FeatureName, PlatformObjectStoreKind } from '@yoal/contracts';
 import { CONTAINER_CONSOLE_DEFAULT_PORT, FEATURE_FLAGS, parseFeatureFlags, STUDIO_DEFAULT_PORT } from '@yoal/contracts';
 import { readFileSync } from 'node:fs';
 import type { ObjectStore } from './object-store.ts';
 import type { DnsProvider } from './steering/dns/provider.ts';
 import type { IngressProber } from './steering/dns-failover/probe.ts';
+import type { VipControl } from './steering/vip/driver.ts';
 import { hmac } from './util.ts';
 
 export interface EmailMessage {
@@ -16,6 +17,12 @@ export interface EmailMessage {
 /** SES SMTP in v1 (D22); the interface keeps webhooks and future transports symmetric. */
 export interface EmailTransport {
 	send(message: EmailMessage): Promise<void>;
+}
+
+/** One directly reachable control node, declared by the operator as `nodeId=url`. */
+export interface ControlAddress {
+	nodeId: string;
+	url: string;
 }
 
 /**
@@ -40,6 +47,24 @@ export interface Notifier {
 	notify(alert: AlertMessage): Promise<void>;
 }
 
+/** This install's platform object store and, when it is S3-compatible, how to reach it. */
+export interface PlatformStoreInfo {
+	/** `YOAL_OBJECT_STORE`: `local` on a single-node install, otherwise the external store. */
+	kind: PlatformObjectStoreKind;
+	/**
+	 * Present only for an S3-compatible store (`r2`, or an S3 target). The registry renders zot's
+	 * S3 driver from it (HA-PLAN H28/W12); Azure and GCS are refused there with a named fix.
+	 */
+	s3?: {
+		endpoint: string;
+		bucket: string;
+		region: string;
+		accessKeyId: string;
+		secretAccessKey: string;
+		pathStyle: boolean;
+	};
+}
+
 export interface CoreConfig {
 	dataDir: string;
 	/** Platform origin, e.g. `https://control.example.com`. */
@@ -47,6 +72,11 @@ export interface CoreConfig {
 	/** Content domain, e.g. `examplecloud.com`. */
 	contentDomain: string;
 	objectStore: ObjectStore;
+	/**
+	 * The platform store's kind and S3 coordinates (HA-PLAN H28/W12). Optional so storage-only
+	 * tests and embedders keep working: absent means a `local` store.
+	 */
+	platformStore?: PlatformStoreInfo;
 	/** 32-byte master key for envelope encryption (systemd-creds in production). */
 	masterKey: Uint8Array;
 	/** HMAC secret for host-only site cookies; agents receive per-project derived keys. */
@@ -75,6 +105,22 @@ export interface CoreConfig {
 	cloudflareApiToken?: string;
 	/** The platform upstream an ingress on the control node dials (`unix//run/yoal/control.sock`). */
 	platformUpstream?: string;
+	/** This control node's identity in the lease; `YOAL_NODE_ID` or the host name when unset. */
+	controlNodeId?: string;
+	/** `YOAL_CONTROL_ROLE=standby` marks an enrolled warm standby; absent means primary-capable. */
+	controlRole?: 'primary' | 'standby';
+	/**
+	 * Direct control endpoints an agent may try, bound to a node id (`YOAL_CONTROL_ADDRESSES`,
+	 * comma separated, each `nodeId=url`). A node without a declared address falls back to the
+	 * platform origin. Position is never used to pair an address with a node.
+	 */
+	controlAddresses?: ControlAddress[];
+	/** The allowlisted config digest the primary delivered at enrolment; promotion compares it. */
+	controlConfigDigest?: string;
+	/** File the enrolment wrote with the expected key/config fingerprints (default under dataDir). */
+	controlEnrolmentPath?: string;
+	/** File the restore/enrolment writes with control replica replay status. */
+	controlReplicaStatusPath?: string;
 	/**
 	 * Loopback port of the edge's internal S3 gateway (Caddy). The control plane reaches every
 	 * managed instance through it to browse and manage objects (D82).
@@ -125,6 +171,13 @@ export interface CoreConfig {
 	/** Injected ingress prober for the steering drivers; production probes the public addresses. */
 	ingressProber?: IngressProber;
 	/**
+	 * Injected keepalived transport for the `vip` driver (HA-PLAN H18). Production uses the helper
+	 * sockets named by `YOAL_VIP_HELPER_SOCKETS`; tests supply a fake so no node is touched.
+	 */
+	vipControl?: VipControl | null;
+	/** Injected webhook transport for the `webhook` driver; production uses the global fetch. */
+	webhookFetch?: typeof fetch;
+	/**
 	 * Resolved `YOAL_FEATURE_*` flags. Optional so existing tests and embedders keep working;
 	 * services must read them through `featureEnabled`, which falls back to the registry defaults.
 	 */
@@ -136,6 +189,36 @@ export interface CoreConfig {
 	 */
 	/** S3 from the environment today; an Azure or GCS store (HA-PLAN W3) is lane E's to configure. */
 	pitrRepository?: DatabasePitrRepository;
+}
+
+/**
+ * `YOAL_CONTROL_ROLE` is fail-closed: an unknown value is a configuration error, not a silent
+ * `primary`. Absent still means primary-capable for an existing single-node install.
+ */
+export function parseControlRole(value: string | undefined): 'primary' | 'standby' | undefined {
+	if (value === undefined || value.trim() === '') return undefined;
+	const normalized = value.trim().toLowerCase();
+	if (normalized === 'primary' || normalized === 'standby') return normalized;
+	throw new Error(`Invalid YOAL_CONTROL_ROLE "${value}": use primary or standby.`);
+}
+
+/** `YOAL_CONTROL_ADDRESSES=nodeId=url,nodeId=url`; the node id is the binding, never the order. */
+export function parseControlAddresses(value: string | undefined): ControlAddress[] | undefined {
+	if (value === undefined || value.trim() === '') return undefined;
+	const addresses: ControlAddress[] = [];
+	for (const entry of value.split(',')) {
+		const text = entry.trim();
+		if (!text) continue;
+		const separator = text.indexOf('=');
+		if (separator <= 0)
+			throw new Error(`Invalid YOAL_CONTROL_ADDRESSES entry "${text}": use nodeId=url.`);
+		const nodeId = text.slice(0, separator).trim();
+		const url = text.slice(separator + 1).trim().replace(/\/+$/, '');
+		if (!nodeId || !/^https?:\/\/[^\s]+$/i.test(url))
+			throw new Error(`Invalid YOAL_CONTROL_ADDRESSES entry "${text}": use nodeId=http(s)://url.`);
+		addresses.push({ nodeId, url });
+	}
+	return addresses.length > 0 ? addresses : undefined;
 }
 
 /**
@@ -175,6 +258,14 @@ export function coreConfigFromEnv(
 					? readSecretFileSync(env.YOAL_CLOUDFLARE_API_TOKEN_FILE)
 					: undefined)),
 		platformUpstream: overrides.platformUpstream ?? (env.YOAL_PLATFORM_UPSTREAM?.trim() || undefined),
+		controlNodeId: overrides.controlNodeId ?? (env.YOAL_NODE_ID?.trim() || undefined),
+		controlRole: overrides.controlRole ?? parseControlRole(env.YOAL_CONTROL_ROLE),
+		controlAddresses: overrides.controlAddresses ?? parseControlAddresses(env.YOAL_CONTROL_ADDRESSES),
+		controlConfigDigest: overrides.controlConfigDigest ?? (env.YOAL_CONTROL_CONFIG_DIGEST?.trim() || undefined),
+		controlEnrolmentPath:
+			overrides.controlEnrolmentPath ?? (env.YOAL_CONTROL_ENROLMENT_FILE?.trim() || undefined),
+		controlReplicaStatusPath:
+			overrides.controlReplicaStatusPath ?? (env.YOAL_CONTROL_REPLICA_STATUS?.trim() || undefined),
 		storageGatewayPort:
 			overrides.storageGatewayPort ?? positiveInteger(env.YOAL_STORAGE_GATEWAY_PORT, 8081),
 		storageGatewayUrl: overrides.storageGatewayUrl ?? (env.YOAL_STORAGE_GATEWAY_URL?.replace(/\/+$/, '') || undefined),

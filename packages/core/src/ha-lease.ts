@@ -65,6 +65,12 @@ export interface ControlLeaseStatus {
 	skewExceeded: boolean;
 	/** Monotonic ms of the last confirmed write by this node as primary. */
 	lastConfirmedAt: number | null;
+	/**
+	 * The last read actually reached the arbiter. A standby that cannot read keeps its previous
+	 * role in `role` so it never serves, but `false` is what lets the state machine turn an outage
+	 * into `unavailable` after one TTL instead of mistaking the stale role for a healthy lease.
+	 */
+	reachable: boolean;
 	/** Why the role is what it is, for status pages and logs. */
 	reason: string;
 }
@@ -79,6 +85,12 @@ export interface ControlLeaseOptions {
 	monotonic?: () => number;
 	/** Wall clock, used only to report skew. */
 	wallClock?: () => number;
+	/**
+	 * The highest epoch durably recorded on this host (the epoch file), read fresh for a create or
+	 * takeover. A lease epoch is `max(observed, durable) + 1`, so a stale object can never drag an
+	 * agent that saw a higher epoch backwards.
+	 */
+	durableEpoch?: () => number | Promise<number>;
 }
 
 export class ControlLeaseError extends Error {}
@@ -91,6 +103,7 @@ export class ControlLease {
 	readonly #version: string | undefined;
 	readonly #monotonic: () => number;
 	readonly #wallClock: () => number;
+	readonly #durableEpoch: () => number | Promise<number>;
 
 	#role: ControlLeaseRole = 'unknown';
 	#epoch = 0;
@@ -100,6 +113,7 @@ export class ControlLease {
 	#observedEtag: string | null = null;
 	#observedSince = 0;
 	#skewMs: number | null = null;
+	#reachable = false;
 	#reason = 'not read yet';
 
 	constructor(options: ControlLeaseOptions) {
@@ -114,6 +128,7 @@ export class ControlLease {
 		this.key = options.key ?? CONTROL_LEASE_KEY;
 		this.#monotonic = options.monotonic ?? (() => performance.now());
 		this.#wallClock = options.wallClock ?? Date.now;
+		this.#durableEpoch = options.durableEpoch ?? (() => 0);
 	}
 
 	status(): ControlLeaseStatus {
@@ -126,6 +141,7 @@ export class ControlLease {
 			skewMs: this.#skewMs,
 			skewExceeded: this.#skewMs !== null && Math.abs(this.#skewMs) > this.policy.skewToleranceMs,
 			lastConfirmedAt: this.#lastConfirmedAt,
+			reachable: this.#reachable,
 			reason: this.#reason,
 		};
 	}
@@ -156,8 +172,9 @@ export class ControlLease {
 				throw new ControlLeaseError(`The lease already exists and names ${read.record.holderNodeId} at epoch ${read.record.epoch}.`);
 			return this.tick();
 		}
+		const createEpoch = Math.max(epoch, (await this.#durable()) + 1);
 		const write = await this.#write(
-			{ epoch, holderNodeId: this.#nodeId, expiresAt: this.#expiry(read.serverDate) },
+			{ epoch: createEpoch, holderNodeId: this.#nodeId, expiresAt: this.#expiry(read.serverDate) },
 			{ ifNoneMatch: '*' },
 		);
 		if (write.outcome === 'won') return this.status();
@@ -241,17 +258,51 @@ export class ControlLease {
 	}
 
 	/**
+	 * Operator promotion (CLUSTERING §6.5). The default is not break-glass: the same expiry and
+	 * 40 s unchanged-object gate as an automatic takeover, with `expectedEpoch` compared against the
+	 * record just read. `breakGlass` is the explicit §18.5 path for a stopped old primary; it still
+	 * CASes at the ETag from the same read, so two operators cannot both win.
+	 */
+	async operatorTakeOver(
+		options: { expectedEpoch?: number; breakGlass?: boolean } = {},
+	): Promise<ControlLeaseStatus> {
+		if (this.#role === 'fenced') throw new ControlLeaseError('A fenced node is re-seeded before it can be promoted.');
+		const read = await this.#read();
+		if (read.kind === 'error') throw new ControlLeaseError(`The lease store is unavailable: ${read.reason}`);
+		if (read.kind === 'absent') throw new ControlLeaseError('No lease exists; bootstrap HA instead.');
+		this.#record = read.record;
+		this.#etag = read.etag;
+		if (options.expectedEpoch !== undefined && read.record.epoch !== options.expectedEpoch)
+			throw new ControlLeaseError(
+				`the lease is at epoch ${read.record.epoch}, not ${options.expectedEpoch}`,
+			);
+		if (read.record.holderNodeId === this.#nodeId && this.#role === 'primary') return this.status();
+
+		// Track the object we just read, so a refused operator attempt still starts (or continues)
+		// the unchanged-object clock rather than silently shortening it.
+		this.#follow(read.record, read.etag, `following ${read.record.holderNodeId} at epoch ${read.record.epoch}`);
+		const expired = read.serverDate !== null && read.serverDate >= read.record.expiresAt;
+		const observedFor = this.#monotonic() - this.#observedSince;
+		const allowed =
+			options.breakGlass === true ||
+			read.record.released === true ||
+			(expired && observedFor >= this.policy.takeoverAfterMs);
+		if (!allowed) {
+			this.#reason = read.record.released
+				? 'the lease was not released'
+				: `the lease has not expired and been unchanged for ${Math.round(this.policy.takeoverAfterMs / 1000)} s; use --break-glass only after stopping the old primary`;
+			throw new ControlLeaseError(this.#reason);
+		}
+		return this.#takeOver(read.record, read.etag, read.serverDate);
+	}
+
+	/**
 	 * Break-glass promotion (§18.5): take the lease now, without waiting for expiry. Only after an
 	 * operator has confirmed the old primary's units are stopped. Still a compare-and-swap against
 	 * the object just read, so two operators cannot both win.
 	 */
 	async forcePromote(): Promise<ControlLeaseStatus> {
-		if (this.#role === 'fenced') throw new ControlLeaseError('A fenced node is re-seeded before it can be promoted.');
-		const read = await this.#read();
-		if (read.kind === 'error') throw new ControlLeaseError(`The lease store is unavailable: ${read.reason}`);
-		if (read.kind === 'absent') throw new ControlLeaseError('No lease exists; bootstrap HA instead.');
-		if (read.record.holderNodeId === this.#nodeId && this.#role === 'primary') return this.status();
-		return this.#takeOver(read.record, read.etag, read.serverDate);
+		return this.operatorTakeOver({ breakGlass: true });
 	}
 
 	/** Operator acknowledgement after a fenced node was re-seeded from the new primary (§6.6). */
@@ -262,9 +313,26 @@ export class ControlLease {
 		this.#reason = 're-seeded; not read yet';
 	}
 
+	/**
+	 * A read that does not change this node's role. Used by the state machine to decide whether a
+	 * fenced node may rejoin as a standby: an unreachable arbiter must not be mistaken for a stable
+	 * holder. It still updates the server-clock skew estimate.
+	 */
+	async probe(): Promise<
+		| { reachable: true; absent: true; holderNodeId: null; epoch: number }
+		| { reachable: true; absent: false; holderNodeId: string; epoch: number }
+		| { reachable: false; absent: false; holderNodeId: null; epoch: number; reason: string }
+	> {
+		const read = await this.#read();
+		if (read.kind === 'error')
+			return { reachable: false, absent: false, holderNodeId: null, epoch: this.#epoch, reason: read.reason };
+		if (read.kind === 'absent') return { reachable: true, absent: true, holderNodeId: null, epoch: this.#epoch };
+		return { reachable: true, absent: false, holderNodeId: read.record.holderNodeId, epoch: read.record.epoch };
+	}
+
 	async #takeOver(record: ControlLeaseRecord, etag: string, serverDate: number | null): Promise<ControlLeaseStatus> {
 		const next: ControlLeaseRecord = {
-			epoch: record.epoch + 1,
+			epoch: Math.max(record.epoch, await this.#durable()) + 1,
 			holderNodeId: this.#nodeId,
 			...(this.#version ? { holderVersion: this.#version } : {}),
 			expiresAt: this.#expiry(serverDate),
@@ -293,6 +361,7 @@ export class ControlLease {
 	}
 
 	#onUnreachable(reason: string): void {
+		this.#reachable = false;
 		if (this.#role === 'primary') {
 			const since = this.#lastConfirmedAt === null ? Number.POSITIVE_INFINITY : this.#monotonic() - this.#lastConfirmedAt;
 			if (since >= this.policy.fenceAfterMs) {
@@ -327,17 +396,43 @@ export class ControlLease {
 		try {
 			response = await this.#store.readVersioned(this.key);
 		} catch (error) {
+			this.#reachable = false;
 			return { kind: 'error', reason: error instanceof Error ? error.message : String(error) };
 		}
 		this.#noteSkew(response.serverDate);
-		if (response.serverDate === null && (response.status === 200 || response.status === 404))
+		if (response.serverDate === null && (response.status === 200 || response.status === 404)) {
+			this.#reachable = false;
 			return { kind: 'error', reason: 'the store sent no Date header, and expiry is judged only on its clock' };
-		if (response.status === 404) return { kind: 'absent', serverDate: response.serverDate };
-		if (response.status !== 200) return { kind: 'error', reason: `GET ${response.status}` };
-		if (!response.etag) return { kind: 'error', reason: 'the store returned no ETag, so it cannot arbitrate a lease' };
+		}
+		if (response.status === 404) {
+			this.#reachable = true;
+			return { kind: 'absent', serverDate: response.serverDate };
+		}
+		if (response.status !== 200) {
+			this.#reachable = false;
+			return { kind: 'error', reason: `GET ${response.status}` };
+		}
+		if (!response.etag) {
+			this.#reachable = false;
+			return { kind: 'error', reason: 'the store returned no ETag, so it cannot arbitrate a lease' };
+		}
 		const record = parseRecord(response.body);
-		if (!record) return { kind: 'error', reason: 'the lease object is not a valid lease' };
+		if (!record) {
+			this.#reachable = false;
+			return { kind: 'error', reason: 'the lease object is not a valid lease' };
+		}
+		this.#reachable = true;
 		return { kind: 'present', record, etag: response.etag, serverDate: response.serverDate };
+	}
+
+	/** The durable epoch on this host, clamped to a safe non-negative integer. */
+	async #durable(): Promise<number> {
+		try {
+			const value = await this.#durableEpoch();
+			return Number.isInteger(value) && value >= 0 ? value : 0;
+		} catch {
+			return 0;
+		}
 	}
 
 	async #write(

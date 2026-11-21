@@ -1225,6 +1225,12 @@ export const workloadDatabaseSchema = z.object({
 			slot: z.string().regex(/^yoal_[a-z0-9_]{1,56}$/),
 		})
 		.optional(),
+	/**
+	 * HA-PLAN W10: render `wal_log_hints=on` so `pg_rewind` can adopt a cluster created before data
+	 * checksums were required. Sent only while `PITR_REWIND` is on, so with the flag off desired
+	 * state and the golden fixtures are unchanged.
+	 */
+	pgRewind: z.boolean().optional(),
 });
 export type WorkloadDatabase = z.infer<typeof workloadDatabaseSchema>;
 

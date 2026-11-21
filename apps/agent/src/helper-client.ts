@@ -121,17 +121,19 @@ export interface HelperApi {
 	checkpoint(id: string): Promise<void>;
 	fenceWorkload(id: string, mode: 'stop' | 'readonly'): Promise<void>;
 	memberStatus(id: string): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean; readOnly: boolean }>;
-	replicaRewind(
-		id: string,
-		input: { databaseId: string; source: { host: string; port: number; user: string; database: string }; password: string; image: string },
-	): Promise<{ status: 'rewound' | 'rebuild'; error?: string }>;
-	/** Write the 0400 pgBackRest config for PITR (docs/PITR.md). */
+	/** Rewind an old primary onto the new primary and adopt it as `replicaId` (HA-PLAN W10). */
+	rewindReplica(
+		replicaId: string,
+		input: { databaseId: string; walLogHints: boolean; user: string; password: string },
+	): Promise<{ rewound: boolean; fallback: 'rebuild' | null; reason: string | null }>;
+	/** Write the 0400 pgBackRest config for PITR (docs/PITR.md); `stanza` belongs to the database. */
 	pitrConfigure(
 		id: string,
 		repo: unknown,
+		stanza: string,
 	): Promise<{ stanza: string; configPath: string }>;
-	/** Run a full or differential base backup. */
-	pitrBaseBackup(id: string, type: string): Promise<{ stanza: string; type: string }>;
+	/** Run a full or differential base backup in the database's stanza. */
+	pitrBaseBackup(id: string, type: string, stanza: string): Promise<{ stanza: string; type: string }>;
 	/** Restore to a timestamp into a new database and verify it. */
 	pitrRestore(
 		id: string,
@@ -447,16 +449,22 @@ export class HelperClient
 		};
 	}
 
-	async replicaRewind(
-		id: string,
-		input: { databaseId: string; source: { host: string; port: number; user: string; database: string }; password: string; image: string },
-	): Promise<{ status: 'rewound' | 'rebuild'; error?: string }> {
-		const body = (await this.request('POST', `/v1/workloads/${encodeURIComponent(id)}/replica/rewind`, input, 180_000)) as {
-			status?: unknown;
-			error?: unknown;
+	async rewindReplica(
+		replicaId: string,
+		input: { databaseId: string; walLogHints: boolean; user: string; password: string },
+	): Promise<{ rewound: boolean; fallback: 'rebuild' | null; reason: string | null }> {
+		// pg_rewind copies only the diverged blocks, but a large data dir can still take minutes.
+		const body = (await this.request(
+			'POST',
+			`/v1/workloads/${encodeURIComponent(replicaId)}/replica/rewind`,
+			input,
+			600_000,
+		)) as { rewound?: unknown; fallback?: unknown; reason?: unknown };
+		return {
+			rewound: body.rewound === true,
+			fallback: body.fallback === 'rebuild' ? 'rebuild' : null,
+			reason: typeof body.reason === 'string' ? body.reason : null,
 		};
-		if (body.status !== 'rewound' && body.status !== 'rebuild') throw new Error('The helper returned no rewind outcome.');
-		return { status: body.status, ...(typeof body.error === 'string' ? { error: body.error } : {}) };
 	}
 
 	async studioStart(): Promise<void> {
@@ -606,11 +614,11 @@ export class HelperClient
 		}
 	}
 
-	async pitrConfigure(id: string, repo: unknown): Promise<{ stanza: string; configPath: string }> {
+	async pitrConfigure(id: string, repo: unknown, stanza: string): Promise<{ stanza: string; configPath: string }> {
 		const body = await this.request(
 			'POST',
 			`/v1/workloads/${encodeURIComponent(id)}/pitr/configure`,
-			{ repo },
+			{ repo, stanza },
 			60_000,
 		);
 		const record = asRecord(body);
@@ -620,11 +628,11 @@ export class HelperClient
 		};
 	}
 
-	async pitrBaseBackup(id: string, type: string): Promise<{ stanza: string; type: string }> {
+	async pitrBaseBackup(id: string, type: string, stanza: string): Promise<{ stanza: string; type: string }> {
 		const body = await this.request(
 			'POST',
 			`/v1/workloads/${encodeURIComponent(id)}/pitr/basebackup`,
-			{ type },
+			{ type, stanza },
 			60 * 60_000,
 		);
 		const record = asRecord(body);

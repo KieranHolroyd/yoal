@@ -25,6 +25,7 @@ import {
 	type WireguardStatus,
 	type WorkloadActivation,
 	INGRESS_SET_CAPABILITY,
+	HA_EPOCH_CAPABILITY,
 } from '@yoal/contracts';
 import type { TlsOptions } from '@yoal/site-config';
 import { startAnalyticsSink, type AnalyticsSink } from './analytics-sink.ts';
@@ -42,6 +43,8 @@ import { ShareMountRunner } from './share-mounts.ts';
 import { DiskMountRunner } from './disk-mounts.ts';
 import { VolumeProfileRunner } from './volume-profiles.ts';
 import { LinkTestRunner } from './link-tests.ts';
+import { ControlEndpoints } from './control-endpoints.ts';
+import { readControlReport } from './control-report.ts';
 import { RunLeaseClock, leaseState } from './run-lease.ts';
 import { DatabasePitrRunner } from './database-pitr.ts';
 import { DatabaseCredentialRunner } from './database-credentials.ts';
@@ -127,6 +130,10 @@ class Backoff {
 class AgentRuntime {
 	private readonly config: AgentConfig;
 	private readonly store: DesiredStateStore;
+	/** The control address list and persisted epoch (W9). Rotates on silence or a non-primary. */
+	private readonly control: ControlEndpoints;
+	/** This host's local control-plane `/readyz` for the heartbeat, or null when not co-located. */
+	private readonly controlReadyzUrl: string | null;
 	private readonly releases: ReleaseManager;
 	private readonly caddy: CaddyAdmin;
 	private readonly stats: StatsCollector;
@@ -276,6 +283,16 @@ class AgentRuntime {
 					: this.refreshIngressHealth(),
 		});
 		this.store = new DesiredStateStore(config.dataDir);
+		this.control = new ControlEndpoints({
+			dataDir: config.dataDir,
+			initialUrl: config.controlUrl,
+			log: (level, message) => log(level, message),
+		});
+		// The socket path is what makes `controlUrl/readyz` this host's control plane. Without one, an
+		// explicit local URL is required: reading the public origin would report another node.
+		this.controlReadyzUrl =
+			config.controlLocalUrl ??
+			(config.controlSocket ? `${config.controlUrl.replace(/\/+$/, '')}/readyz` : null);
 		this.releases = new ReleaseManager(config.dataDir);
 		this.caddy = new CaddyAdmin(config.caddyAdminSocket);
 		this.stats = new StatsCollector(config.dataDir);
@@ -535,6 +552,7 @@ class AgentRuntime {
 		await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o755 });
 		await this.releases.init();
 		this.ingressSecrets = this.ingressSecretsStore.load();
+		await this.control.load();
 
 		const cached = await this.store.readCached();
 		if (cached) {
@@ -567,6 +585,11 @@ class AgentRuntime {
 				nodeToken: this.config.nodeToken,
 				nodeId: this.config.nodeId,
 				accessLogPath: this.config.caddyAccessLog,
+				// HA-PLAN H28: pending buckets survive a control-plane outage on disk, bounded so a
+				// long outage cannot fill the node. The gap list rides the next telemetry POST.
+				spoolDir: join(this.config.dataDir, 'telemetry-spool'),
+				spoolMaxBuckets: this.config.telemetrySpoolBuckets,
+				spoolMaxBytes: this.config.telemetrySpoolBytes,
 				// Access-log aggregation is the request signal scale-to-zero measures (FN4). Resolve
 				// first, then record activity, so telemetry behaviour itself is unchanged.
 				resolveProject: (host) => {
@@ -793,8 +816,8 @@ class AgentRuntime {
 
 		let response: Response;
 		try {
-			response = await fetch(
-				`${this.config.controlUrl}/api/agent/desired-state?wait=${request.waitSeconds}`,
+			response = await this.control.request(
+				`/api/agent/desired-state?wait=${request.waitSeconds}`,
 				{ headers, signal },
 			);
 		} catch (error) {
@@ -817,6 +840,14 @@ class AgentRuntime {
 		const state = parsed.data;
 		if (state.nodeId !== this.config.nodeId) {
 			throw new Error(`desired-state is for node ${state.nodeId}, not ${this.config.nodeId}`);
+		}
+		// W9: persist the epoch before applying anything at it, and refuse a lower one outright.
+		if (state.control) {
+			const control = await this.control.apply(state.control);
+			if (!control.ok) {
+				this.control.refuseCurrent();
+				throw new Error(control.reason);
+			}
 		}
 
 		const etagHeader = response.headers.get('etag') ?? desiredStateEtag(state);
@@ -1109,14 +1140,23 @@ class AgentRuntime {
 			...(state.ingress
 				? { ingress: state.ingress, ingressHealthDir: this.config.ingressHealthDir }
 				: {}),
-			...(state.ingress?.platform ?? this.config.platformHost
-				? {
-						platform: state.ingress?.platform ?? {
-							host: this.config.platformHost!,
-							upstream: this.config.platformUpstream,
-						},
-					}
-				: {}),
+			...(() => {
+				const upstreams = state.ingress?.platformUpstreams?.map((entry) => ({
+					dial: entry.upstream,
+					priority: entry.priority,
+				}));
+				const platform = state.ingress?.platform ?? (this.config.platformHost ? {
+					host: this.config.platformHost,
+					upstream: this.config.platformUpstream,
+				} : null);
+				if (!platform) return {};
+				return {
+					platform: {
+						...platform,
+						...(upstreams && upstreams.length > 0 ? { upstreams, healthUri: '/readyz' } : {}),
+					},
+				};
+			})(),
 		});
 		const caddyJson = JSON.stringify(caddyConfig);
 		if (caddyJson !== this.appliedCaddyJson) {
@@ -1460,14 +1500,14 @@ class AgentRuntime {
 			const state = this.desired;
 			if (!state || state.databasePitrTasks.length === 0) continue;
 			try {
-				// Ready = running on its current activation (the sampler's targets carry that check).
-				const ready = new Set(
-					this.workloads
-						.databaseTargets()
-						.filter((target) => target.status === 'running')
-						.map((target) => target.id),
+				// Ready = desired activation applied and the last report is running. A replica has no
+				// held monitor, so the stats sampler's `databaseTargets()` must not be the source.
+				const ready = this.workloads.readyWorkloadIds();
+				await this.databasePitr.runOnce(
+					state,
+					(id) => ready.has(id),
+					this.shutdownController.signal,
 				);
-				await this.databasePitr.runOnce(state, (id) => ready.has(id), this.shutdownController.signal);
 			} catch (error) {
 				log('warn', `Database PITR task failed: ${errorText(error)}`);
 			}
@@ -1667,7 +1707,7 @@ class AgentRuntime {
 		const memberReports = this.desired ? await this.databaseDurability.memberReports(this.desired) : [];
 		const syncResults = this.databaseDurability.pendingSyncResults();
 		const switchoverResults = this.databaseDurability.pendingSwitchoverResults();
-		const rewindResults = this.databaseDurability.pendingRewindResults();
+		const rewindResults = this.databaseReplication.pendingRewindResults();
 		const nodeUpdateResult = this.nodeUpdate.pendingResult();
 		const databaseTls = databaseTlsHeartbeat(reports);
 		// Release commands this node ran or refused; re-sent until the control plane drops the task.
@@ -1687,6 +1727,7 @@ class AgentRuntime {
 			.catch((error: unknown) => log('warn', `Could not request a storage move: ${errorText(error)}`));
 		// The endpoint is Caddy's answer from the state file; refresh it so the fleet view matches.
 		await this.refreshIngressHealth().catch((error) => log('warn', `Ingress health update failed: ${errorText(error)}`));
+		const controlReport = this.controlReadyzUrl ? await readControlReport(this.controlReadyzUrl) : null;
 		const body: Heartbeat = {
 			nodeId: this.config.nodeId,
 			agentVersion: this.config.agentVersion,
@@ -1699,6 +1740,9 @@ class AgentRuntime {
 			certificateFingerprint: this.certificateDelivery.fingerprint(),
 			stats,
 			...(this.latestIngressHealth ? { ingressHealth: this.latestIngressHealth } : {}),
+			// A control node reports its own lease view so `/api/v1/ha/status` can show standbys
+			// instead of only the primary's row (W9-SPEC §4.6).
+			...(controlReport ? { control: controlReport } : {}),
 			...(hardware ? { hardware } : {}),
 			...(nodeCertificate ? { nodeCertificate } : {}),
 			...(nodeCsr ? { nodeCsr } : {}),
@@ -1718,7 +1762,7 @@ class AgentRuntime {
 			...(memberReports.length > 0 ? { databaseMembers: memberReports } : {}),
 			...(syncResults.length > 0 ? { databaseSyncResults: syncResults } : {}),
 			...(switchoverResults.length > 0 ? { databaseSwitchoverResults: switchoverResults } : {}),
-			...(rewindResults.length > 0 ? { databaseRewindResults: rewindResults } : {}),
+			...(rewindResults.length > 0 ? { databaseReplicaRewindResults: rewindResults } : {}),
 			...(nodeUpdateResult ? { nodeUpdateResult } : {}),
 			...(releaseCommandResults.length > 0 ? { releaseCommandResults } : {}),
 			...(databaseTls.length > 0 ? { databaseTls } : {}),
@@ -1751,7 +1795,7 @@ class AgentRuntime {
 		const parsed = heartbeatSchema.safeParse(body);
 		if (!parsed.success) throw new Error(`heartbeat failed validation: ${parsed.error.message}`);
 
-		const response = await fetch(`${this.config.controlUrl}/api/agent/heartbeat`, {
+		const response = await this.control.request('/api/agent/heartbeat', {
 			method: 'POST',
 			signal: AbortSignal.any([
 				this.shutdownController.signal,
@@ -1776,6 +1820,7 @@ class AgentRuntime {
 		this.studioPrincipals.acknowledge(studioPrincipalResults);
 		this.databasePoolerRestarts.acknowledge(poolerRestarted);
 		this.databaseReplication.acknowledgePromotions(promotionResults);
+		this.databaseReplication.acknowledgeRewinds(rewindResults.map((result) => result.replicaId));
 		await this.nodeUpdate.acknowledge(nodeUpdateResult);
 		// The control plane accepted a heartbeat from this binary: stand the rollback guard down.
 		await this.nodeUpdate.confirmHealthy(this.shutdownController.signal);
@@ -2086,6 +2131,24 @@ class AgentRuntime {
 				telemetry?.dropped ?? 0,
 			],
 			[
+				'yoal_agent_telemetry_spool_queued',
+				'Buckets waiting in the bounded on-disk telemetry spool.',
+				'gauge',
+				telemetry?.spoolQueued ?? 0,
+			],
+			[
+				'yoal_agent_telemetry_spool_bytes',
+				'Bytes used by the bounded on-disk telemetry spool.',
+				'gauge',
+				telemetry?.spoolBytes ?? 0,
+			],
+			[
+				'yoal_agent_telemetry_spool_dropped_total',
+				'Buckets dropped when the telemetry spool reached its bound.',
+				'counter',
+				telemetry?.spoolDropped ?? 0,
+			],
+			[
 				'yoal_agent_database_samples_dropped_total',
 				'Database samples and snapshots dropped to keep memory bounded.',
 				'counter',
@@ -2289,6 +2352,8 @@ export function advertisedCapabilities(
 	if (nodeCaAvailable) capabilities.push(ENDPOINTS_GATEWAY_CAPABILITY);
 	// This build serves the full edge payload and the health endpoint (W6/W8).
 	capabilities.push(INGRESS_SET_CAPABILITY);
+	// W9: holds the control address list in `control`, persists the epoch and refuses a lower one.
+	capabilities.push(HA_EPOCH_CAPABILITY);
 	return capabilities;
 }
 

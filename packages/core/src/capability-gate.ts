@@ -1,5 +1,6 @@
 import {
 	ENDPOINTS_GATEWAY_CAPABILITY,
+	HA_EPOCH_CAPABILITY,
 	INGRESS_SET_CAPABILITY,
 	OBJECT_STORE_KINDS_CAPABILITY,
 	RELEASE_PHASE_CAPABILITY,
@@ -115,6 +116,8 @@ function mapIfChanged<T>(items: T[], fn: (item: T) => T): T[] {
 export type CapabilityGateFlags = Pick<FeatureFlags, 'ENDPOINTS_GATEWAY' | 'RELEASE_PHASE'> & {
 	/** Optional so Wave 1 tests written before W6 keep their literal shape; absent means off. */
 	INGRESS_SET?: boolean;
+	/** Optional for the same reason: absent means CONTROL_STANDBY is off. */
+	CONTROL_STANDBY?: boolean;
 };
 
 export function featureFlagsForGate(config: Pick<CoreConfig, 'features'>): CapabilityGateFlags {
@@ -122,6 +125,7 @@ export function featureFlagsForGate(config: Pick<CoreConfig, 'features'>): Capab
 		ENDPOINTS_GATEWAY: featureEnabled(config, 'ENDPOINTS_GATEWAY'),
 		RELEASE_PHASE: featureEnabled(config, 'RELEASE_PHASE'),
 		INGRESS_SET: featureEnabled(config, 'INGRESS_SET'),
+		CONTROL_STANDBY: featureEnabled(config, 'CONTROL_STANDBY'),
 	};
 }
 
@@ -141,11 +145,22 @@ export function gateDesiredState(state: DesiredState, capabilities: readonly str
 	const gateway = flags.ENDPOINTS_GATEWAY && capabilities.includes(ENDPOINTS_GATEWAY_CAPABILITY);
 	const release = flags.RELEASE_PHASE && capabilities.includes(RELEASE_PHASE_CAPABILITY);
 	const ingress = Boolean(flags.INGRESS_SET) && capabilities.includes(INGRESS_SET_CAPABILITY);
-	if (gateway && release && ingress) return state;
+	const control = Boolean(flags.CONTROL_STANDBY) && capabilities.includes(HA_EPOCH_CAPABILITY);
+	if (gateway && release && ingress && control) return state;
 	let next: DesiredState = state;
 	const set = <K extends keyof DesiredState>(key: K, value: DesiredState[K]) => {
 		if (value !== next[key]) next = { ...next, [key]: value };
 	};
+	if (!control && next.control !== undefined) {
+		const { control: _control, ...rest } = next;
+		next = rest;
+	}
+	// An agent without `ha-epoch` must not receive the W9 upstream list either: its strict ingress
+	// schema would reject the payload. Older installs keep the single `platform` relay.
+	if (!control && next.ingress?.platformUpstreams !== undefined) {
+		const { platformUpstreams: _upstreams, ...ingress } = next.ingress;
+		next = { ...next, ingress };
+	}
 	if (!ingress && next.ingress !== undefined) {
 		const { ingress: _ingress, ...rest } = next;
 		next = rest;

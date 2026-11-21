@@ -31,7 +31,12 @@ export interface CompileAgentConfigOptions {
 	/** When present, Caddy manages certs and serves :80 as a redirect. */
 	tls?: TlsOptions;
 	/** Platform route preserved across full-config reloads. */
-	platform?: { host: string; upstream: string };
+	platform?: {
+		host: string;
+		upstream: string;
+		upstreams?: Array<{ dial: string; priority: number }>;
+		healthUri?: string;
+	};
 	/** Caddy JSON access log the agent tails for telemetry (DESIGN §8). */
 	accessLog?: string | null;
 	/**
@@ -660,7 +665,8 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 	// a non-control ingress relays `control.<domain>` to the first ingress until W9's upstream
 	// list). site-config dials a bare address, so add the TLS transport here: SNI is the platform
 	// host, which is what the relay's certificate covers.
-	if (options.platform?.upstream.startsWith('https://')) securePlatformRoute(server, options.platform);
+	if (options.platform?.upstream.startsWith('https://') && !options.platform.upstreams?.length)
+		securePlatformRoute(server, options.platform);
 
 	// User-pool issuers (`auth.<contentDomain>`) rewrite to the control-plane OIDC and hosted paths.
 	// Put them before the platform route: an operator may point the platform at the same host.

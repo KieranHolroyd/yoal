@@ -251,20 +251,19 @@ const handler: RequestHandler = async (event) => {
 			return core.databaseReplicas.replicationActivation(node.id, replication[1]!);
 		}
 
-		// The new primary's `yoal_repl` password for rewinding an old primary (W10); only the old
-		// primary's node may fetch it.
-		const rewind = /^database-rewind\/([^/]+)$/.exec(action);
-		if (rewind) {
-			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
-			const node = core.nodes.authenticate(token);
-			return core.databaseMembers.rewindActivation(node.id, rewind[1]!);
-		}
-
 		const pitrTask = /^database-pitr\/([^/]+)$/.exec(action);
 		if (pitrTask) {
 			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
 			const node = core.nodes.authenticate(token);
 			return core.databases.pitrActivation(node.id, pitrTask[1]!);
+		}
+
+		// The `yoal_repl` password and slot for one pg_rewind (W10); never in desired state.
+		const rewind = /^database-rewind\/([^/]+)$/.exec(action);
+		if (rewind) {
+			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+			const node = core.nodes.authenticate(token);
+			return core.databaseReplicas.rewindActivation(node.id, rewind[1]!);
 		}
 
 		// SMB credentials for one share mount (docs/STORAGE.md §3, D143); never in desired state.
@@ -421,6 +420,15 @@ const handler: RequestHandler = async (event) => {
 				batch.brokers,
 				batch.brokerQueues
 			);
+			// The spool is disk state on the node; record its gaps even without ClickHouse so the
+			// traffic chart and the HA page can show what an outage cost (HA-PLAN H28/W12).
+			if (batch.spool) {
+				try {
+					core.telemetrySpool.record(node.id, batch.spool);
+				} catch {
+					// Observability metadata must never fail the node's telemetry POST.
+				}
+			}
 			if (!core.ctx.telemetry || !(await core.ctx.telemetry.ready()))
 				return json({
 					ok: true,

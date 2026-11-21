@@ -8,6 +8,10 @@ import { buildPrincipal } from '../orgs.ts';
 import { createCore, type Core } from '../index.ts';
 import { LocalObjectStore } from '../object-store.ts';
 import { SteeringService } from '../ingress-service.ts';
+import type { CoreConfig } from '../config.ts';
+import { verifyWebhookSignature } from '../webhook-signature.ts';
+import { setVipSettings } from './vip/core.ts';
+import { setWebhookSettings } from './webhook/core.ts';
 
 const dirs: string[] = [];
 afterAll(() => {
@@ -17,7 +21,7 @@ afterAll(() => {
 const T0 = Date.parse('2026-11-20T12:00:00Z');
 const principal = buildPrincipal({ kind: 'user', userId: 'user_1', orgId: 'org_1', role: 'owner', platformAdmin: true });
 
-function harness(features: Partial<typeof DEFAULT_FEATURES> = {}) {
+function harness(features: Partial<typeof DEFAULT_FEATURES> = {}, overrides: Partial<CoreConfig> = {}) {
 	const dir = mkdtempSync(join(tmpdir(), 'yoal-steering-'));
 	dirs.push(dir);
 	const opened = createDb({ path: ':memory:' });
@@ -37,6 +41,7 @@ function harness(features: Partial<typeof DEFAULT_FEATURES> = {}) {
 			desiredAgentVersion: '0.1.0',
 			now: () => clock.now,
 			features: { ...DEFAULT_FEATURES, ...features },
+			...overrides,
 		},
 	});
 	const nodes: Record<string, { id: string; token: string }> = {};
@@ -190,10 +195,10 @@ describe('steering selection and the STEERING flag (H18)', () => {
 		const h = harness({ STEERING: true });
 		h.addNode('edge');
 		h.beat('edge');
-		h.core.cluster.update(principal, { steering: { driver: 'vip' } });
+		h.core.cluster.update(principal, { steering: { driver: 'cloud-lb' } });
 		expect(h.core.steering.preflight().findings[0]).toMatchObject({ nodeId: null });
 		expect(h.core.steering.preflight().findings[0]!.reason).toContain('not implemented');
-		expect(await h.core.steering.reconcile()).toMatchObject({ kind: 'vip', active: true, error: expect.stringContaining('not implemented') });
+		expect(await h.core.steering.reconcile()).toMatchObject({ kind: 'cloud-lb', active: true, error: expect.stringContaining('not implemented') });
 		// The controller tick records the reason instead of throwing.
 		expect((await h.core.failover.tick()).steering.error).toContain('not implemented');
 	});
@@ -222,5 +227,96 @@ describe('steering settings validation (H18)', () => {
 			/cannot also be stacked/,
 		);
 		expect(() => h.core.cluster.update(principal, { steering: { driver: 'not-a-driver' as never } })).toThrow();
+	});
+});
+
+describe('vip and webhook through the controller lease (W8 lane E)', () => {
+	class RecordingVipControl {
+		readonly states = new Map<string, unknown>();
+		readonly started = new Set<string>();
+		writes = 0;
+		available(): boolean {
+			return true;
+		}
+		async configure(nodeId: string, state: unknown) {
+			this.writes += 1;
+			this.states.set(nodeId, state);
+			return { changed: true };
+		}
+		async start(nodeId: string) {
+			this.writes += 1;
+			this.started.add(nodeId);
+		}
+		async stop() {
+			this.writes += 1;
+		}
+		async status() {
+			return { running: true, interface: 'eth0', virtualAddress: '192.0.2.100', addressPresent: true };
+		}
+	}
+
+	test('vip writes the floating address through the helper control and keeps the secret out of observe', async () => {
+		const control = new RecordingVipControl();
+		const h = harness({ STEERING: true, INGRESS_SET: true }, { vipControl: control });
+		const node = h.addNode('edge');
+		const second = h.addNode('edge-b');
+		h.beat('edge');
+		h.beat('edge-b');
+		h.core.ctx.sqlite.run(`UPDATE nodes SET roles_json = '["ingress","compute"]', public_address = ? WHERE id = ?`, ['10.0.0.21', node.id]);
+		h.core.ctx.sqlite.run(`UPDATE nodes SET roles_json = '["ingress","compute"]', public_address = ? WHERE id = ?`, ['10.0.0.22', second.id]);
+		h.core.cluster.update(principal, { steering: { driver: 'vip' } });
+		setVipSettings(h.core.ctx, {
+			address: '192.0.2.100',
+			interface: 'eth0',
+			routerId: 51,
+			authPass: 'vrrppass',
+			sockets: {},
+		});
+		expect(h.core.steering.preflight().findings).toEqual([]);
+		const tick = await h.core.steering.reconcile({ epoch: 1, holds: () => true });
+		expect(tick).toMatchObject({ kind: 'vip', active: true, applied: true, writes: true });
+		expect(control.writes).toBeGreaterThan(0);
+		expect(JSON.stringify(control.states.get(node.id))).toContain('192.0.2.100');
+		expect(JSON.stringify(await h.core.steering.driver('vip').observe())).not.toContain('vrrppass');
+	});
+
+	test('webhook posts a signed set and never stores the secret in plaintext', async () => {
+		const calls: Array<{ headers: Record<string, string>; body: string }> = [];
+		const fetchImpl = (async (_input: string, init?: RequestInit) => {
+			calls.push({ headers: Object.fromEntries(new Headers(init?.headers ?? {}).entries()), body: String(init?.body ?? '') });
+			return Response.json({ accepted: true });
+		}) as unknown as typeof fetch;
+		const h = harness({ STEERING: true, INGRESS_SET: true }, { webhookFetch: fetchImpl });
+		h.addNode('edge');
+		h.beat('edge');
+		h.core.cluster.update(principal, { steering: { driver: 'webhook' } });
+		const stored = setWebhookSettings(h.core.ctx, {
+			url: 'https://ops.example.com/yoal',
+			secret: 'sealed-webhook-secret',
+			allowHosts: ['ops.example.com'],
+		});
+		const row = h.core.ctx.sqlite
+			.query<{ value: string }, [string]>('SELECT value FROM settings WHERE key = ?')
+			.get('ha:steering_webhook')!;
+		expect(row.value).not.toContain('sealed-webhook-secret');
+		expect(stored.secretSealed.length).toBeGreaterThan(10);
+		expect(h.core.steering.preflight().findings).toEqual([]);
+		const tick = await h.core.steering.reconcile({ epoch: 1, holds: () => true });
+		expect(tick).toMatchObject({ kind: 'webhook', active: true, applied: true, writes: true });
+		expect(calls).toHaveLength(1);
+		expect(calls[0]!.body).not.toContain('sealed-webhook-secret');
+		expect(verifyWebhookSignature('sealed-webhook-secret', calls[0]!.body, calls[0]!.headers['x-yoal-signature'], { nowMs: T0 })).toBe(true);
+	});
+
+	test('with the flag off neither driver is selected or writes', async () => {
+		const calls: unknown[] = [];
+		const h = harness({}, { webhookFetch: (async () => { calls.push(1); return Response.json({ accepted: true }); }) as unknown as typeof fetch });
+		h.addNode('edge');
+		h.beat('edge');
+		h.core.cluster.update(principal, { steering: { driver: 'webhook' } });
+		setWebhookSettings(h.core.ctx, { url: 'https://ops.example.com/yoal', secret: 'x', allowHosts: ['ops.example.com'] });
+		expect(h.core.steering.selection().kind).toBe('direct');
+		expect((await h.core.steering.reconcile({ epoch: 1, holds: () => true })).kind).toBe('direct');
+		expect(calls).toHaveLength(0);
 	});
 });

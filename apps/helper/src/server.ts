@@ -49,6 +49,7 @@ import {
 } from './app-volumes.ts';
 import { assertRunId, parseJobRequest, type JobApi } from './jobs.ts';
 import { routePipelineRequest, type PipelineJobApi } from './pipeline-jobs.ts';
+import type { KeepalivedStatus } from './keepalived.ts';
 
 /**
  * The helper's entire network surface is a fixed set of verbs (slice, apply, status, remove, logs,
@@ -115,8 +116,6 @@ export interface HelperRuntime {
 	fenceWorkload?(id: string, mode: 'stop' | 'readonly'): Promise<void>;
 	/** Role, replay position and read-only state of one member (W9-SPEC §5.6). */
 	memberStatus?(id: string): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean; readOnly: boolean }>;
-	/** Rewind an old primary against the new primary; a failure reports `rebuild` (W10). */
-	replicaRewind?(id: string, input: { databaseId?: unknown; source?: unknown; password?: unknown; image?: unknown }): Promise<{ status: 'rewound' | 'rebuild'; error?: string }>;
 	/** Remove images no unit or container needs (docs/REGISTRY.md R3). Optional for test fakes. */
 	pruneImages?(): Promise<ImagePruneResult>;
 	/** The platform registry's pull-through mirror (docs/REGISTRY.md G4). Optional for test fakes. */
@@ -135,10 +134,14 @@ export interface HelperRuntime {
 	stopIdentity?(): Promise<void>;
 	/** Restore a custom-format dump into a managed database. */
 	restoreDatabase(id: string, body: ReadableStream<Uint8Array> | null): Promise<void>;
-	/** Write the 0400 pgBackRest config for PITR (docs/PITR.md). */
-	pitrConfigure(id: string, repo: unknown): Promise<{ stanza: string; configPath: string }>;
-	/** Run a full or differential pgBackRest base backup. */
-	pitrBaseBackup(id: string, type: unknown): Promise<{ stanza: string; type: 'full' | 'diff' | 'incr' }>;
+	/** Write the 0400 pgBackRest config for PITR (docs/PITR.md). `stanza` is the database's. */
+	pitrConfigure(id: string, repo: unknown, stanza: unknown): Promise<{ stanza: string; configPath: string }>;
+	/** Run a full or differential pgBackRest base backup in the database's stanza. */
+	pitrBaseBackup(
+		id: string,
+		type: unknown,
+		stanza: unknown,
+	): Promise<{ stanza: string; type: 'full' | 'diff' | 'incr' }>;
 	/** Restore a stanza to a timestamp into a new database and verify it. */
 	pitrRestore(
 		id: string,
@@ -146,6 +149,16 @@ export interface HelperRuntime {
 	): Promise<{ targetDatabaseId: string; targetTime: number; verified: true }>;
 	/** Credential-free archive/repository status and the recoverable window. */
 	pitrStatus(id: string): Promise<HelperPitrStatus>;
+	/** Rewind an old primary onto the new primary and adopt it as `replicaId` (W10). */
+	rewindReplica?(
+		replicaId: string,
+		input: {
+			databaseId?: unknown;
+			walLogHints?: unknown;
+			user?: unknown;
+			password?: unknown;
+		},
+	): Promise<{ replicaId: string; rewound: boolean; fallback: 'rebuild' | null; reason: string | null }>;
 	/** Mounts and block devices, from which Settings → Storage lists disk candidates (D72). */
 	volumesInventory(): Promise<HelperInventory>;
 	/** Replace the disk registry from desired state (D76). */
@@ -158,6 +171,15 @@ export interface WireguardApi {
 	keygen(): Promise<{ publicKey: string }>;
 	apply(state: unknown): Promise<{ peers: number }>;
 	status(): Promise<WireguardStatus>;
+}
+
+/** keepalived/VRRP through fixed verbs (HA-PLAN H18); absent on a helper that predates `vip`. */
+export interface KeepalivedApi {
+	install(state: unknown): Promise<{ changed: boolean; service: string }>;
+	configure(state: unknown): Promise<{ changed: boolean; service: string }>;
+	start(): Promise<{ service: string }>;
+	stop(): Promise<{ service: string }>;
+	status(): Promise<KeepalivedStatus>;
 }
 
 export interface HandlerOptions {
@@ -173,6 +195,8 @@ export interface HandlerOptions {
 	};
 	/** Managed overlay verbs (C1); absent on a helper that predates the overlay. */
 	wireguard?: WireguardApi;
+	/** keepalived/VRRP fixed verbs (HA-PLAN H18); absent on a helper that predates `vip`. */
+	keepalived?: KeepalivedApi;
 	/** The endpoint guard nftables table (HA-PLAN H24); absent = 404. */
 	endpointGuard?: { apply(): Promise<{ table: string }> };
 	/** Profiling of a registered disk (docs/STORAGE.md §5.1); absent = 404. */
@@ -305,6 +329,29 @@ export function createHandler(
 					return json({ ok: true, ...(await options.wireguard.status()) });
 				}
 				return json({ error: 'not_found' }, 404);
+			}
+
+			// --- keepalived/VRRP (HA-PLAN H18): fixed verbs, structured fields only ------------
+			if (path.startsWith('/v1/keepalived/')) {
+				if (!options.keepalived) return json({ error: 'keepalived is not available on this helper' }, 404);
+				const verb = path.slice('/v1/keepalived/'.length);
+				if (verb === 'status') {
+					if (method !== 'GET') return methodNotAllowed('GET');
+					assertNoVerbInput({ search: url.search, body: await readText(request, maxBodyBytes) });
+					return json({ ok: true, ...(await options.keepalived.status()) });
+				}
+				if (verb === 'start' || verb === 'stop') {
+					if (method !== 'POST') return methodNotAllowed('POST');
+					assertNoVerbInput({ search: url.search, body: await readText(request, maxBodyBytes) });
+					return json({ ok: true, ...(verb === 'start' ? await options.keepalived.start() : await options.keepalived.stop()) });
+				}
+				if (verb === 'install' || verb === 'configure') {
+					if (method !== 'POST') return methodNotAllowed('POST');
+					if (url.search) throw new ValidationError('keepalived takes no query parameters');
+					const state = assertRecord(await readJson(request, maxBodyBytes), 'state');
+					return json({ ok: true, ...(verb === 'install' ? await options.keepalived.install(state) : await options.keepalived.configure(state)) });
+				}
+				return json({ error: 'not_found', path }, 404);
 			}
 
 			// --- cluster share mounts (C3): fixed mount/unmount, no shell ---------------------
@@ -793,7 +840,7 @@ export function createHandler(
 				return json({ ok: true, ...(await runtime.replicaPromote(id, body)) });
 			}
 
-			// --- Synchronous set, switchover steps and rewind (H23, W10): fixed verbs ---
+			// --- Synchronous set, switchover steps and the member probe (H23, W10): fixed verbs ---
 			const syncMatch = /^\/v1\/workloads\/([^/]+)\/sync\/(configure|barrier)$/.exec(path);
 			if (syncMatch) {
 				const id = assertDatabaseId(decodeURIComponent(syncMatch[1]!), 'database id');
@@ -846,18 +893,16 @@ export function createHandler(
 				const id = assertDatabaseId(decodeURIComponent(memberMatch[1]!), 'database id');
 				return json({ ok: true, ...(await runtime.memberStatus(id)) });
 			}
+			// --- Lane C's rewind (W10): adopt the old primary's data dir as `replicaId` ----------
 			const rewindMatch = /^\/v1\/workloads\/([^/]+)\/replica\/rewind$/.exec(path);
-			if (rewindMatch) {
+			if (rewindMatch && runtime.rewindReplica) {
 				if (method !== 'POST') return methodNotAllowed('POST');
-				if (!runtime.replicaRewind) return json({ error: 'not supported by this helper' }, 501);
-				// The path is the rewind replica's workload id; the body names the database whose old
-				// data dir is moved into it. Both assertions must be satisfiable (W10 review blocker 7).
-				const id = assertReplicaWorkloadId(decodeURIComponent(rewindMatch[1]!), 'replica id');
+				const id = assertDatabaseId(decodeURIComponent(rewindMatch[1]!), 'replica id');
 				const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
 				for (const key of Object.keys(body))
-					if (key !== 'databaseId' && key !== 'source' && key !== 'password' && key !== 'image')
+					if (key !== 'databaseId' && key !== 'walLogHints' && key !== 'user' && key !== 'password')
 						throw new ValidationError(`request.${key} is not supported`);
-				return json({ ok: true, ...(await runtime.replicaRewind(id, body)) });
+				return json({ ok: true, ...(await runtime.rewindReplica(id, body)) });
 			}
 
 			const rotateMatch = /^\/v1\/workloads\/([^/]+)\/rotate$/.exec(path);
@@ -884,11 +929,11 @@ export function createHandler(
 				if (method !== 'POST') return methodNotAllowed('POST');
 				if (verb === 'configure') {
 					const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
-					return json({ ok: true, ...(await runtime.pitrConfigure(id, body.repo)) });
+					return json({ ok: true, ...(await runtime.pitrConfigure(id, body.repo, body.stanza)) });
 				}
 				if (verb === 'basebackup') {
 					const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
-					return json({ ok: true, ...(await runtime.pitrBaseBackup(id, body.type)) });
+					return json({ ok: true, ...(await runtime.pitrBaseBackup(id, body.type, body.stanza)) });
 				}
 				const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
 				return json({
@@ -993,7 +1038,7 @@ export interface RunningHelper {
 export async function startHelperServer(
 	config: HelperConfig,
 	runtime: HelperRuntime,
-	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'endpointGuard' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler' | 'extraRoutes'> = {},
+	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'keepalived' | 'endpointGuard' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler' | 'extraRoutes'> = {},
 ): Promise<RunningHelper> {
 	const directory = dirname(config.socketPath);
 	const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;

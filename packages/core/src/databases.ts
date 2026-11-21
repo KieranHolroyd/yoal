@@ -17,11 +17,13 @@ import {
 	DATABASE_MONITOR_USER,
 	DATABASE_PORT_MAX,
 	DATABASE_PORT_MIN,
+	DB_MEMBER_CAPABILITY,
 	PITR_ARCHIVE_TIMEOUT_SECONDS,
 	PITR_DIFF_SCHEDULE,
 	PITR_FULL_SCHEDULE,
 	PITR_RETENTION_DIFF,
 	PITR_RETENTION_FULL,
+	PITR_REWIND_CAPABILITY,
 	PITR_STATUS_INTERVAL_MS,
 	DATABASE_POOLER_PORT_MAX,
 	DATABASE_POOLER_PORT_MIN,
@@ -2172,9 +2174,18 @@ export class DatabaseService {
 			// Only the standard Postgres 18 image has a pgBackRest build (docs/PITR.md).
 			const unsupported = pitrUnsupportedReason(row.engine, row.version, row.variant);
 			if (unsupported) throw new ValidationError(unsupported);
-			// The PITR image and WAL archive are not wired for replicas yet (docs/CLUSTERING.md §9.2).
-			if (this.ctx.databaseReplicas.hasReplicas(row.id))
-				throw new ValidationError(`"${row.name}" has read replicas; remove them before turning point-in-time recovery on.`);
+			// The PITR image and WAL archive follow a replica only once rewind/PITR with replicas is
+			// opted in (HA-PLAN W10) and every node has an agent that understands it; off, the old
+			// refusal stands.
+			if (this.ctx.databaseReplicas.hasReplicas(row.id)) {
+				const capable =
+					this.pitrRewindForNode(row.nodeId) &&
+					this.ctx.databaseReplicas.rowsFor(row.id).every((replica) => !replica.removingAt && this.pitrRewindForNode(replica.nodeId));
+				if (!capable)
+					throw new ValidationError(
+						`"${row.name}" has read replicas; turning point-in-time recovery on needs YOAL_FEATURE_PITR_REWIND and the "${PITR_REWIND_CAPABILITY}" agent capability on every member, or remove the replicas first.`,
+					);
+			}
 		}
 		const now = this.ctx.now();
 		const existing = this.ctx.db
@@ -2377,25 +2388,30 @@ export class DatabaseService {
 			.from(databasePitrTasks)
 			.innerJoin(databases, eq(databases.id, databasePitrTasks.databaseId))
 			.leftJoin(databasePitr, eq(databasePitr.databaseId, databasePitrTasks.databaseId))
-			.where(
-				and(
-					eq(databasePitrTasks.status, 'pending'),
-					eq(databases.nodeId, nodeId),
-					isNull(databases.deletedAt),
-				),
-			)
+			.where(and(eq(databasePitrTasks.status, 'pending'), isNull(databases.deletedAt), eq(databases.nodeId, nodeId)))
 			.all();
-		return rows.map(({ task, db, state }) => ({
-			id: task.id,
-			action: task.action,
-			databaseId: db.id,
-			databaseName: databaseIdentifier(db.name),
-			engine: db.engine,
-			stanza: state?.stanza ?? pitrStanzaFor(db.id),
-			baseBackupType: task.baseBackupType ?? null,
-			targetDatabaseId: task.targetDatabaseId ?? null,
-			targetTime: task.targetTime ?? null,
-		}));
+		return rows.flatMap(({ task, db, state }) => {
+			// Every PITR task runs on the primary's node. pgBackRest cannot back up from a standby
+			// with this single-host config (`backup-standby` needs both `pg1-*` and `pg2-*` hosts);
+			// routing a backup to a replica is deferred until that two-host config exists. The
+			// stanza is still the database's, so a later replica path writes the same history.
+			const workload = this.pitrWorkloadFor(db);
+			if (workload.nodeId !== nodeId) return [];
+			return [
+				{
+					id: task.id,
+					action: task.action,
+					databaseId: db.id,
+					databaseName: databaseIdentifier(db.name),
+					...(workload.workloadId === db.id ? {} : { workloadId: workload.workloadId }),
+					engine: db.engine,
+					stanza: state?.stanza ?? pitrStanzaFor(db.id),
+					baseBackupType: task.baseBackupType ?? null,
+					targetDatabaseId: task.targetDatabaseId ?? null,
+					targetTime: task.targetTime ?? null,
+				},
+			];
+		});
 	}
 
 	/** Repository credentials for one node task; never reaches desired state or SQLite. */
@@ -2409,6 +2425,8 @@ export class DatabaseService {
 			.where(eq(databasePitrTasks.id, taskId))
 			.get();
 		if (!row) throw new NotFoundError('PITR task');
+		// PITR tasks run on the primary's node; backing up from a replica is deferred until the
+		// two-host `pg1`/`pg2` pgBackRest configuration exists.
 		if (row.db.nodeId !== nodeId)
 			throw new CoreError('forbidden', 'This PITR task belongs to another node.', 403);
 		const repo = this.ctx.config.pitrRepository;
@@ -2438,7 +2456,9 @@ export class DatabaseService {
 				.innerJoin(databases, eq(databases.id, databasePitrTasks.databaseId))
 				.where(eq(databasePitrTasks.id, result.taskId))
 				.get();
-			if (!row || row.db.nodeId !== nodeId) continue;
+			if (!row) continue;
+			// Every PITR task (backup, restore, status) belongs to the primary's node.
+			if (row.db.nodeId !== nodeId) continue;
 			if (row.task.status === 'ok' || row.task.status === 'failed') continue;
 			const ok = result.status === 'ok';
 			this.ctx.db
@@ -2612,6 +2632,54 @@ export class DatabaseService {
 		}
 		if (queued + statusQueued > 0) this.ctx.projects.bump();
 		return queued + statusQueued;
+	}
+
+	/**
+	 * The PITR stanza a database's workload and a backup task use, or null when PITR is not active.
+	 * Public so the replica service can give a replica of a PITR database the same image and stanza
+	 * (HA-PLAN W10): the stanza follows the primary across a promotion.
+	 */
+	pitrRuntimeFor(row: DatabaseRow): { stanza: string; archiveTimeoutSeconds: number } | null {
+		const state = this.activePitr(row);
+		if (!state) return null;
+		return { stanza: state.stanza, archiveTimeoutSeconds: PITR_ARCHIVE_TIMEOUT_SECONDS };
+	}
+
+	/** HA-PLAN W10: the opt-in flag that permits replicas of PITR databases and pg_rewind. */
+	pitrRewindEnabled(): boolean {
+		return featureEnabled(this.ctx.config, 'PITR_REWIND');
+	}
+
+	/**
+	 * True when the flag is on and this node's agent advertises the W10 capability (fail closed).
+	 * `db-member` is the Wave 3 name lane B/B' advertises; accept it as equivalent so a mixed fleet
+	 * is not fail-closed while some nodes still report the lane-C capability name.
+	 */
+	pitrRewindForNode(nodeId: string): boolean {
+		if (!this.pitrRewindEnabled()) return false;
+		const node = this.ctx.db
+			.select({ capabilitiesJson: nodes.capabilitiesJson })
+			.from(nodes)
+			.where(eq(nodes.id, nodeId))
+			.get();
+		return node
+			? nodeHasCapability(node, PITR_REWIND_CAPABILITY) || nodeHasCapability(node, DB_MEMBER_CAPABILITY)
+			: false;
+	}
+
+	/**
+	 * The workload a PITR task runs in: the primary's own container. A replica's workload id would
+	 * only exist on that replica's node, and pgBackRest needs the primary for this single-host
+	 * config; backing up from a standby is deferred until `pg1`/`pg2` two-host configuration ships.
+	 */
+	pitrWorkloadFor(database: DatabaseRow): { workloadId: string; nodeId: string } {
+		return { workloadId: database.id, nodeId: database.nodeId };
+	}
+
+	/** Queue a status check for one database now (a promotion writes the new primary's config). */
+	queuePitrStatusFor(databaseId: string): void {
+		const row = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
+		if (row && this.activePitr(row) && this.queuePitrStatus(row, this.ctx.now())) this.ctx.projects.bump();
 	}
 
 	private requirePitrFeature(): void {
@@ -3044,6 +3112,10 @@ export class DatabaseService {
 				const capabilities = databaseCapabilities(row.engine);
 				const env = databaseContainerEnv(row);
 				const pitr = this.activePitr(row);
+				const rewind = this.pitrRewindForNode(nodeId);
+				// HA-PLAN W10: a new database must have data checksums so pg_rewind can adopt it.
+				// Only new clusters run initdb, so an existing database keeps its files.
+				if (rewind && row.engine === 'postgres') env.POSTGRES_INITDB_ARGS = '--data-checksums';
 				const tls = capabilities.tls && this.tlsEnabled();
 				const isolated = featureEnabled(this.ctx.config, 'ORG_NETWORKS');
 				return {
@@ -3065,7 +3137,7 @@ export class DatabaseService {
 					port: row.hostPort,
 					healthPath: '/',
 					socketActivation: false,
-					activationVersion: databaseActivationVersion(row, env, pitr?.stanza ?? null, tls),
+					activationVersion: databaseActivationVersion(row, env, pitr?.stanza ?? null, tls, rewind && row.engine === 'postgres'),
 					env,
 					secrets: [],
 					dataSizeMb: null,
@@ -3083,6 +3155,7 @@ export class DatabaseService {
 									},
 								}
 							: {}),
+						...(rewind && row.engine === 'postgres' ? { pgRewind: true } : {}),
 						...(tls ? { tls: true } : {}),
 					},
 					...(capabilities.pooler && row.poolerEnabled && row.poolerPort ? { pooler: { port: row.poolerPort } } : {}),
@@ -3905,6 +3978,7 @@ function databaseActivationVersion(
 	env: Record<string, string>,
 	pitrStanza: string | null = null,
 	tls = false,
+	pgRewind = false,
 ): string {
 	return sha256Hex(
 		JSON.stringify({
@@ -3920,6 +3994,7 @@ function databaseActivationVersion(
 			restartGeneration: row.restartGeneration,
 			// Omitted when off so enabling the flag is the only change that restarts databases.
 			...(tls ? { tls: true } : {}),
+			...(pgRewind ? { pgRewind: true } : {}),
 			env,
 			extensions: row.extensionsJson,
 			pitrStanza,

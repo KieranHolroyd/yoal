@@ -46,7 +46,11 @@ export type Mutant =
 	/** The candidate CASes at the same generation (breaks I3 by construction). */
 	| 'cas-same-generation'
 	/** A buggy member that promotes while `syncState: 'changing'` (Revision 1's forbidden case). */
-	| 'promote-while-changing';
+	| 'promote-while-changing'
+	/** Revision 2: the node applies a new sync member during an outage and reports it. */
+	| 'node-applies-sync'
+	/** Revision 2: the reconciler records `sync` from a stale report (forbidden). */
+	| 'record-sync-on-stale';
 
 export interface DbLease {
 	generation: number;
@@ -73,6 +77,7 @@ export type FaultKind =
 	| 'clock-step'
 	| 'sync-change'
 	| 'lag'
+	| 'sync-control-outage'
 	| 'kill-primary'
 	| 'kill-after-open'
 	| 'kill-after-barrier'
@@ -134,6 +139,9 @@ export const FAMILIES = [
 	'sync-change',
 	'keepalive-acquire',
 	'control-outage',
+	'control-sync-loss',
+	'control-sync-stale',
+	'control-transient',
 	'mixed',
 ] as const;
 
@@ -145,6 +153,7 @@ export type ViolationKind =
 	| 'two-control-primary-same-epoch'
 	| 'promotion-not-in-sync-set'
 	| 'promotion-during-sync-change'
+	| 'stale-sync-recorded'
 	| 'missing-ack-at-promotion'
 	| 'ack-lost-to-higher-primary'
 	| 'end-primary-missing-ack'
@@ -188,6 +197,12 @@ export interface RunStats {
 	syncChangesFellBack: number;
 	syncChangesDowngraded: number;
 	primaryKilledChanging: number;
+	syncReports: number;
+	syncSameEtags: number;
+	syncStaleReconciled: number;
+	syncReopens: number;
+	syncAlerts: number;
+	localSyncLossApplied: number;
 }
 
 export interface RunResult {

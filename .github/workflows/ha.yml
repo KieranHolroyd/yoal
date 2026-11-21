@@ -97,6 +97,10 @@ jobs:
       - run: bun install --frozen-lockfile
       - name: Simulate the lease and failover state machines (seeded, 2000 runs)
         run: bun tests/ha/sim/run.ts --runs 2000
+      - name: W9 control-plane and database-member model (Revision 1, 5000 runs)
+        run: bun tests/ha/sim/w9/run.ts --runs 5000
+      - name: W9 model unit tests
+        run: bun test tests/ha/sim/w9
 
   ha-integration:
     name: ha-integration (nested-container lab)

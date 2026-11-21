@@ -5,23 +5,18 @@ import {
 	databaseReplication,
 	databases,
 	controlState,
-	nodeCertificates,
 	nodes,
 } from '@yoal/db';
 import {
 	DATABASE_REPLICA_REPORT_STALE_SECONDS,
 	DB_MEMBER_CAPABILITY,
-	databaseImage,
 	databaseReplicaReadable,
-	databaseReplicaWorkloadId,
 	type DatabaseDurability,
 	type DatabaseDurabilityStatus,
 	type DatabaseLease,
 	type DatabaseMember,
 	type DatabaseMemberReport,
 	type DatabaseMembersDesired,
-	type DatabaseRewindResult,
-	type DatabaseRewindTask,
 	type DatabaseSwitchoverRequest,
 	type DatabaseSwitchoverResult,
 	type DatabaseSwitchoverTask,
@@ -731,64 +726,6 @@ export class DatabaseMemberService {
 		});
 	}
 
-	/** The old primary of a completed switchover, to rewind against the new primary. */
-	rewindTasksForNode(nodeId: string): DatabaseRewindTask[] {
-		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA') || !this.#nodeHasDbMember(nodeId)) return [];
-		const rows = this.ctx.db
-			.select({ failover: databaseFailovers, database: databases })
-			.from(databaseFailovers)
-			.innerJoin(databases, eq(databases.id, databaseFailovers.databaseId))
-			.where(
-				and(
-					eq(databaseFailovers.fromNodeId, nodeId),
-					eq(databaseFailovers.kind, 'switchover'),
-					eq(databaseFailovers.status, 'completed'),
-					isNull(databaseFailovers.rewoundAt),
-				),
-			)
-			.all();
-		return rows.flatMap(({ failover, database }) => {
-			if (database.nodeId === nodeId || !failover.rewindReplicaId) return [];
-			const source = this.ctx.db.select().from(nodes).where(eq(nodes.id, database.nodeId)).get();
-			return [
-				{
-					databaseId: database.id,
-					workloadId: databaseReplicaWorkloadId(failover.rewindReplicaId),
-					generation: database.primaryGeneration,
-					source: {
-						nodeId: database.nodeId,
-						address: source?.privateAddress ?? null,
-						port: database.hostPort,
-						tlsFingerprint: this.#fingerprint(database.nodeId),
-					},
-				},
-			];
-		});
-	}
-
-	/** The `yoal_repl` password for a rewind, for the old primary's node only. */
-	rewindActivation(nodeId: string, databaseId: string): {
-		databaseId: string;
-		version: string;
-		source: DatabaseRewindTask['source'];
-		image: string;
-		password: string;
-	} {
-		const database = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
-		if (!database || database.deletedAt) throw new NotFoundError('Database');
-		const task = this.rewindTasksForNode(nodeId).find((item) => item.databaseId === databaseId);
-		if (!task) throw new ConflictError('This database has no rewind waiting on this node.');
-		const replication = this.ctx.db.select().from(databaseReplication).where(eq(databaseReplication.databaseId, databaseId)).get();
-		if (!replication) throw new ConflictError('The new primary has no replication role yet.');
-		return {
-			databaseId,
-			version: sha256Hex(JSON.stringify({ v: 1, source: task.source, secret: sha256Hex(replication.secretSealed) })),
-			source: task.source,
-			image: databaseImage(database.engine, database.version, database.variant),
-			password: this.ctx.secrets.open(database.orgId, replication.secretSealed),
-		};
-	}
-
 	// ---------------------------------------------------------------- heartbeat
 
 	/** Member reports (role, generation, replay position) from every node. */
@@ -1192,47 +1129,6 @@ export class DatabaseMemberService {
 				result: 'ok',
 			});
 			this.ctx.projects.bump(database.orgId);
-		}
-	}
-
-	/** Rewind outcomes: `rewound` re-attaches; `rebuild` adds a fresh replica on the same node. */
-	applyRewindResults(nodeId: string, results: readonly DatabaseRewindResult[]): void {
-		for (const result of results) {
-			const failover = this.ctx.db
-				.select()
-				.from(databaseFailovers)
-				.where(
-					and(
-						eq(databaseFailovers.databaseId, result.databaseId),
-						eq(databaseFailovers.fromNodeId, nodeId),
-						eq(databaseFailovers.kind, 'switchover'),
-					),
-				)
-				.orderBy(desc(databaseFailovers.startedAt))
-				.get();
-			if (!failover || failover.rewoundAt) continue;
-			this.ctx.db
-				.update(databaseFailovers)
-				.set({
-					rewoundAt: this.ctx.now(),
-					rewindStatus: result.status,
-					message: result.status === 'rewound' ? 'The old primary was rewound and follows the new primary.' : (result.error ?? 'The rewind failed; rebuilding.'),
-				})
-				.where(eq(databaseFailovers.id, failover.id))
-				.run();
-			// The copy is in place (rewound, or deleted for a rebuild): start the replica workload.
-			if (failover.rewindReplicaId) this.ctx.databaseReplicas.activateRewindReplica(failover.rewindReplicaId);
-			const database = this.ctx.db.select().from(databases).where(eq(databases.id, result.databaseId)).get();
-			if (database)
-				this.ctx.audit.record({
-					orgId: database.orgId,
-					action: `database.rewind.${result.status}`,
-					resource: 'database',
-					resourceId: database.id,
-					args: { name: database.name, nodeId, error: result.error ?? null },
-					result: 'ok',
-				});
-			this.ctx.projects.bump();
 		}
 	}
 
@@ -1885,9 +1781,7 @@ export class DatabaseMemberService {
 		return this.ctx.db.select().from(nodes).where(eq(nodes.id, nodeId)).get();
 	}
 
-	#fingerprint(nodeId: string): string | null {
-		return this.ctx.db.select({ serial: nodeCertificates.serial }).from(nodeCertificates).where(eq(nodeCertificates.nodeId, nodeId)).get()?.serial ?? null;
-	}
+
 
 	#activeFailover(databaseId: string): FailoverRow | undefined {
 		return this.ctx.db

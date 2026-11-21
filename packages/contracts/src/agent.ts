@@ -1,5 +1,6 @@
 import { registryMirrorDesiredSchema } from './registry.ts';
 import { INGRESS_SET_CAPABILITY, ingressDesiredSchema, ingressHealthSchema } from './ingress.ts';
+import { controlDesiredSchema, controlReportSchema } from './control-plane.ts';
 import * as z from 'zod';
 import { nodeContainerConsoleDesiredSchema } from './container-console.ts';
 import { nodeStudioDesiredSchema } from './database-studio.ts';
@@ -40,11 +41,13 @@ import {
 	kubernetesStatusSampleSchema,
 } from './kubernetes.ts';
 import { databaseBackupResultSchema, databaseBackupTaskSchema } from './database-backup.ts';
-import { databasePitrResultSchema, databasePitrTaskSchema } from './database-pitr.ts';
+import { PITR_REWIND_CAPABILITY, databasePitrResultSchema, databasePitrTaskSchema } from './database-pitr.ts';
 import {
 	databaseReplicaLinkSchema,
 	databaseReplicaPromotionResultSchema,
 	databaseReplicaPromotionTaskSchema,
+	databaseReplicaRewindResultSchema,
+	databaseReplicaRewindTaskSchema,
 	databaseReplicationReportSchema,
 	databaseReplicationTaskSchema,
 } from './database-replication.ts';
@@ -52,8 +55,6 @@ import {
 	DB_MEMBER_CAPABILITY,
 	databaseMemberReportSchema,
 	databaseMembersDesiredSchema,
-	databaseRewindResultSchema,
-	databaseRewindTaskSchema,
 	databaseSwitchoverResultSchema,
 	databaseSwitchoverTaskSchema,
 	databaseSyncResultSchema,
@@ -286,6 +287,8 @@ export const desiredStateSchema = z.object({
 	databaseReplicaLinks: z.array(databaseReplicaLinkSchema).default([]),
 	/** Replicas on this node to promote and hand over to their database id (§9.3). */
 	databaseReplicaPromotions: z.array(databaseReplicaPromotionTaskSchema).default([]),
+	/** Old primaries on this node to rewind onto the new primary and adopt as replicas (W10). */
+	databaseReplicaRewinds: z.array(databaseReplicaRewindTaskSchema).optional(),
 	/**
 	 * Members of every database on this node, for role discovery (W9-SPEC §5.6) and for the
 	 * primary's node to keep the sync setting in force. No secret rides here.
@@ -293,8 +296,6 @@ export const desiredStateSchema = z.object({
 	databaseMembers: z.array(databaseMembersDesiredSchema).default([]),
 	/** Sync-set steps the primary's node must apply (H23). Fixed verbs, never SQL. */
 	databaseSyncTasks: z.array(databaseSyncTaskSchema).default([]),
-	/** The old primary of a switchover to rewind against the new primary (§5.4, W10). */
-	databaseRewindTasks: z.array(databaseRewindTaskSchema).default([]),
 	/** Drain/resume steps of a planned switchover on the old primary's node (W10). */
 	databaseSwitchovers: z.array(databaseSwitchoverTaskSchema).default([]),
 	/** Disks this node must know about, so disk-backed data dirs can be verified (D76, D169). */
@@ -414,6 +415,12 @@ export const desiredStateSchema = z.object({
 	 * else, which keeps a flag-off payload byte-identical. Carries no secret.
 	 */
 	ingress: ingressDesiredSchema.optional(),
+	/**
+	 * Control-plane HA (HA-PLAN H21, W9). Present only while `CONTROL_STANDBY` is on: the control
+	 * address list in preference order and the highest epoch the primary asserts. Omitted with the
+	 * flag off, so a single-node install receives a byte-identical payload.
+	 */
+	control: controlDesiredSchema.optional(),
 });
 export type DesiredState = z.infer<typeof desiredStateSchema>;
 
@@ -490,6 +497,8 @@ export const nodeCapabilities = [
 	'database-replicas',
 	// W10: applies the sync set, barrier, switchover drain/resume, rewind and member probes.
 	DB_MEMBER_CAPABILITY,
+	// HA-PLAN W10: replica PITR/backup-from-replica and the pg_rewind verb.
+	PITR_REWIND_CAPABILITY,
 	'share-mounts',
 	'volume-profiles',
 	'disk-mounts',
@@ -568,6 +577,12 @@ export const heartbeatSchema = z.object({
 	 */
 	ingressHealth: ingressHealthSchema.optional(),
 	/**
+	 * A control node's view of the arbitrated lease (HA-PLAN H21, W9). Present only on a control
+	 * node while `CONTROL_STANDBY` is on; the control plane records it in `control_state` for
+	 * `/api/v1/ha/status`. Omitted with the flag off, so a single-node payload is unchanged.
+	 */
+	control: controlReportSchema.optional(),
+	/**
 	 * Per-upstream request counters since the previous heartbeat (HA-PLAN H25 "Canary"), from this
 	 * node's own Caddy. Sent by an agent that declares `release-phase`.
 	 */
@@ -645,12 +660,12 @@ export const heartbeatSchema = z.object({
 	databaseReplication: z.array(databaseReplicationReportSchema).max(100).optional(),
 	/** Outcomes of `databaseReplicaPromotions` since the last heartbeat. */
 	databaseReplicaPromotionResults: z.array(databaseReplicaPromotionResultSchema).max(20).optional(),
+	/** Outcomes of `databaseReplicaRewinds` since the last heartbeat. */
+	databaseReplicaRewindResults: z.array(databaseReplicaRewindResultSchema).max(20).optional(),
 	/** Role, generation and replay position of each member on this node (W9-SPEC §5.6). */
 	databaseMembers: z.array(databaseMemberReportSchema).max(50).optional(),
 	/** Outcomes of `databaseSyncTasks` since the last heartbeat. */
 	databaseSyncResults: z.array(databaseSyncResultSchema).max(20).optional(),
-	/** Outcomes of `databaseRewindTasks` since the last heartbeat. */
-	databaseRewindResults: z.array(databaseRewindResultSchema).max(20).optional(),
 	/** Outcomes of `databaseSwitchovers` since the last heartbeat. */
 	databaseSwitchoverResults: z.array(databaseSwitchoverResultSchema).max(20).optional(),
 	/**
@@ -743,6 +758,33 @@ export const functionTailEventSchema = z.object({
 });
 export type FunctionTailEvent = z.infer<typeof functionTailEventSchema>;
 
+/** One uncovered range from an agent's bounded telemetry spool (HA-PLAN H28/W12). */
+export const telemetrySpoolGapSchema = z.object({
+	/** The host whose buckets were lost, or `*` when the spool could not attribute them. */
+	host: z.string().min(1).max(253),
+	/** Epoch ms, inclusive. */
+	from: z.number().int().nonnegative(),
+	/** Epoch ms, exclusive. */
+	to: z.number().int().nonnegative(),
+	/** Buckets dropped in the range. */
+	buckets: z.number().int().nonnegative().default(0),
+});
+export type TelemetrySpoolGap = z.infer<typeof telemetrySpoolGapSchema>;
+
+/**
+ * The agent's disk spool (HA-PLAN H28): pending access-log buckets survive a control-plane outage
+ * on disk, bounded by count and bytes. `gaps` names what the bound dropped, so the dashboard can
+ * shade minutes it knows are missing rather than drawing them as zero traffic.
+ */
+export const telemetrySpoolSchema = z.object({
+	queued: z.number().int().nonnegative().default(0),
+	bytes: z.number().int().nonnegative().default(0),
+	/** Buckets dropped since this spool was created (its bound was reached). */
+	dropped: z.number().int().nonnegative().default(0),
+	gaps: z.array(telemetrySpoolGapSchema).max(200).default([]),
+});
+export type TelemetrySpoolReport = z.infer<typeof telemetrySpoolSchema>;
+
 export const telemetryBatchSchema = z.object({
 	nodeId: z.string(),
 	buckets: z.array(metricBucketSchema).max(5000).default([]),
@@ -762,6 +804,8 @@ export const telemetryBatchSchema = z.object({
 	analytics: z.array(analyticsEventSchema).max(5000).default([]),
 	/** Structured tail-worker items from function invocations (phase 3). */
 	tails: z.array(functionTailEventSchema).max(2000).default([]),
+	/** The agent's telemetry spool state; absent from older agents. */
+	spool: telemetrySpoolSchema.optional(),
 });
 export type TelemetryBatch = z.infer<typeof telemetryBatchSchema>;
 

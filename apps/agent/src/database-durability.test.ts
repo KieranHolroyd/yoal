@@ -4,7 +4,7 @@ import { DatabaseDurabilityRunner } from './database-durability.ts';
 
 /**
  * The node half of W10 (apps/agent/src/database-durability.ts): the barrier proof, the drain
- * order, the rewind workload id and the node-hosted sync-loss watchdog. These are the defects an
+ * order and the node-hosted sync-loss watchdog. These are the defects an
  * independent review found; each test pins the behaviour rather than the implementation.
  */
 
@@ -19,7 +19,6 @@ interface Call {
 	checkpoint: string[];
 	stop: string[];
 	resume: string[];
-	rewinds: Array<{ id: string; databaseId: string }>;
 }
 
 function harness(options: {
@@ -28,7 +27,7 @@ function harness(options: {
 	now?: () => number;
 	barrierWaitMs?: number;
 } = {}) {
-	const calls: Call = { syncConfigure: [], barrier: [], checkpoint: [], stop: [], resume: [], rewinds: [] };
+	const calls: Call = { syncConfigure: [], barrier: [], checkpoint: [], stop: [], resume: [] };
 	let sample = 0;
 	const helper = {
 		async syncConfigure(id: string, members: string[]): Promise<void> {
@@ -66,13 +65,6 @@ function harness(options: {
 				lagSeconds: 0,
 				syncState: slot.syncState,
 			}));
-		},
-		async replicaRewind(
-			id: string,
-			input: { databaseId: string; source: { host: string; port: number; user: string; database: string }; password: string; image: string },
-		) {
-			calls.rewinds.push({ id, databaseId: input.databaseId });
-			return { status: 'rewound' as const };
 		},
 	};
 	const runner = new DatabaseDurabilityRunner({
@@ -189,7 +181,7 @@ describe('the agent barrier proof', () => {
 	});
 });
 
-describe('the agent drain and rewind', () => {
+describe('the agent drain', () => {
 	test('the drain checkpoints before stopping writes and samples after', async () => {
 		const { calls, runner } = harness({ slots: [{ slot: SLOT, replayLsn: '0/3000148', syncState: 'sync' }] });
 		await runner.runOnce(
@@ -210,24 +202,7 @@ describe('the agent drain and rewind', () => {
 		});
 	});
 
-	test('the rewind calls the helper with the rewind workload id and the database id in the body', async () => {
-		const { calls, runner } = harness();
-		const workloadId = 'db_dbr_0123456789abcdef';
-		await runner.runOnce(
-			state({
-				databaseRewindTasks: [
-					{
-						databaseId: DATABASE,
-						workloadId,
-						generation: 1,
-						source: { nodeId: OTHER, address: '10.0.0.2', port: 5432, tlsFingerprint: null },
-					},
-				],
-			}),
-			new AbortController().signal,
-		);
-		expect(calls.rewinds).toEqual([{ id: workloadId, databaseId: DATABASE }]);
-	});
+
 });
 
 describe('the shipped drain path can lose an in-flight commit', () => {
@@ -293,9 +268,6 @@ describe('the shipped drain path can lose an in-flight commit', () => {
 						syncState: 'sync',
 					},
 				];
-			},
-			async replicaRewind() {
-				return { status: 'rewound' as const };
 			},
 		};
 		const runner = new DatabaseDurabilityRunner({

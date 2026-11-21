@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import type { AnalyticsEvent, FunctionTailEvent, MetricBucket, TelemetryBatch } from '@yoal/contracts';
+import { TelemetrySpool } from './telemetry-spool.ts';
 import { normalizeHost } from './verify.ts';
 
 /**
@@ -366,6 +367,10 @@ export interface TelemetryClientOptions {
 	accessLogPath: string;
 	resolveProject: (host: string) => string | null;
 	now?: () => number;
+	/** Bounded disk spool for buckets that cannot reach the control plane (HA-PLAN H28). */
+	spoolDir?: string | null;
+	spoolMaxBuckets?: number;
+	spoolMaxBytes?: number;
 }
 
 /** Owns the tailer + aggregator and ships batches to `POST /api/agent/telemetry`. */
@@ -373,6 +378,7 @@ export class TelemetryClient {
 	private readonly options: TelemetryClientOptions;
 	private readonly aggregator: AccessLogAggregator;
 	private readonly tailer: AccessLogTailer;
+	private readonly spool: TelemetrySpool | null;
 	/** Analytics Engine datapoints from function bindings, waiting for the next POST. */
 	private readonly analytics: AnalyticsEvent[] = [];
 	private analyticsDropped = 0;
@@ -388,6 +394,12 @@ export class TelemetryClient {
 		this.options = options;
 		this.aggregator = new AccessLogAggregator(options.resolveProject, options.now);
 		this.tailer = new AccessLogTailer(options.accessLogPath, this.aggregator);
+		this.spool = options.spoolDir
+			? new TelemetrySpool(options.spoolDir, {
+					...(options.spoolMaxBuckets !== undefined ? { maxBuckets: options.spoolMaxBuckets } : {}),
+					...(options.spoolMaxBytes !== undefined ? { maxBytes: options.spoolMaxBytes } : {}),
+				})
+			: null;
 	}
 
 	get stats(): {
@@ -397,7 +409,11 @@ export class TelemetryClient {
 		dropped: number;
 		analyticsDropped: number;
 		tailsDropped: number;
+		spoolQueued: number;
+		spoolBytes: number;
+		spoolDropped: number;
 	} {
+		const spool = this.spool?.report();
 		return {
 			flushFailures: this.flushFailures,
 			batchesSent: this.batchesSent,
@@ -405,6 +421,9 @@ export class TelemetryClient {
 			dropped: this.aggregator.dropped,
 			analyticsDropped: this.analyticsDropped,
 			tailsDropped: this.tailsDropped,
+			spoolQueued: spool?.queued ?? 0,
+			spoolBytes: spool?.bytes ?? 0,
+			spoolDropped: spool?.dropped ?? 0,
 		};
 	}
 
@@ -414,6 +433,9 @@ export class TelemetryClient {
 
 	async start(): Promise<void> {
 		if (this.started) return;
+		// A spool that cannot be created must not stop telemetry: fall back to the memory buffer
+		// exactly as an older agent behaves.
+		await this.spool?.open().catch(() => undefined);
 		await this.tailer.open();
 		this.started = true;
 	}
@@ -447,6 +469,46 @@ export class TelemetryClient {
 	async flush(force = false): Promise<void> {
 		if (!this.started) return;
 		this.aggregator.flushReady(force);
+
+		// Persist this minute's buckets before the POST. A failed append falls back to the memory
+		// path: telemetry must keep working on a node with a broken disk.
+		let spool: TelemetrySpool | null = null;
+		if (this.spool) {
+			const pending = this.aggregator.takePending();
+			if (pending.length > 0) {
+				try {
+					await this.spool.append(pending);
+					spool = this.spool;
+				} catch {
+					this.aggregator.requeue(pending);
+				}
+			} else {
+				spool = this.spool;
+			}
+		}
+
+		if (spool) {
+			for (;;) {
+				const taken = await spool.take();
+				const analytics = this.analytics.splice(0, this.analytics.length);
+				const tails = this.tails.splice(0, this.tails.length);
+				if (taken.buckets.length === 0 && analytics.length === 0 && tails.length === 0) return;
+				try {
+					await this.post(taken.buckets, analytics, tails);
+					await spool.ack(taken.segments);
+					this.batchesSent += 1;
+					this.bucketsSent += taken.buckets.length;
+				} catch (error) {
+					this.flushFailures += 1;
+					this.analytics.unshift(...analytics);
+					this.trimAnalytics();
+					this.tails.unshift(...tails);
+					this.trimTails();
+					throw error;
+				}
+			}
+		}
+
 		for (;;) {
 			const batch = this.aggregator.takePending();
 			const analytics = this.analytics.splice(0, this.analytics.length);
@@ -486,10 +548,12 @@ export class TelemetryClient {
 		analytics: AnalyticsEvent[],
 		tails: FunctionTailEvent[],
 	): Promise<void> {
+		const spool = this.spool?.report();
 		await postTelemetryBatch(this.options, {
 			buckets,
 			...(analytics.length > 0 ? { analytics } : {}),
 			...(tails.length > 0 ? { tails } : {}),
+			...(spool ? { spool } : {}),
 		});
 	}
 

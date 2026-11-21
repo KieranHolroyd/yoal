@@ -50,6 +50,17 @@ const core: Core = createCore({
 		platformOrigin: 'https://control.test',
 		contentDomain: 'sites.test',
 		objectStore: store,
+		platformStore: {
+			kind: 'r2',
+			s3: {
+				endpoint: 'https://r2.example.com',
+				bucket: 'platform',
+				region: 'auto',
+				accessKeyId: 'PLATFORM_KEY',
+				secretAccessKey: 'platform-secret-123',
+				pathStyle: true,
+			},
+		},
 		masterKey: new Uint8Array(32).fill(7),
 		siteCookieSecret: 'site-cookie-secret-123',
 		objectStoreSecret: 'object-secret-123',
@@ -553,6 +564,49 @@ describe('mirrors, signatures, CVEs, S3 and quotas (G2, G4–G6)', () => {
 	test('managed S3 refuses a storage instance on another node', () => {
 		const instance = core.storage.create(admin, { name: 'edge-media', placement: edgeId });
 		expect(() => core.registry.update(admin, { s3: { mode: 'managed', storage: instance.id } })).toThrow(/another node/);
+	});
+
+	test('platform S3: blobs live in the platform object store and the node can move', () => {
+		const view = core.registry.update(admin, { s3: { mode: 'platform' } });
+		expect(view.s3).toEqual({
+			mode: 'platform',
+			endpoint: 'https://r2.example.com',
+			bucket: 'platform',
+			region: 'auto',
+			storage: null,
+		});
+		expect(JSON.stringify(view)).not.toContain('platform-secret-123');
+		expect(core.registry.storagePlacement()).toMatchObject({ mode: 'platform', bucket: 'platform' });
+
+		const [desired] = core.registry.desiredForNode(workerId);
+		expect(desired!.registry!.s3).toEqual({
+			endpoint: 'r2.example.com',
+			bucket: 'platform',
+			region: 'auto',
+			secure: true,
+		});
+		const activation = core.workloads.activation(workerId, desired!.id);
+		expect(activation.env.YOAL_REGISTRY_S3_ACCESS_KEY).toBe('PLATFORM_KEY');
+		expect(activation.env.YOAL_REGISTRY_S3_SECRET_KEY).toBe('platform-secret-123');
+
+		// Unlike managed S3, a platform bucket is not tied to the registry node.
+		expect(core.registry.update(admin, { node: 'edge' }).node).toMatchObject({ id: edgeId, name: 'edge' });
+		expect(core.registry.update(admin, { node: 'homelab' }).node).toMatchObject({ id: workerId, name: 'homelab' });
+		core.registry.update(admin, { s3: null });
+	});
+
+	test('platform S3 refuses a local, Azure or GCS platform store with the fix', () => {
+		const original = core.ctx.config.platformStore;
+		try {
+			core.ctx.config.platformStore = { kind: 'local' };
+			expect(() => core.registry.update(admin, { s3: { mode: 'platform' } })).toThrow(/platform object store is local/i);
+			core.ctx.config.platformStore = { kind: 'azure' };
+			expect(() => core.registry.update(admin, { s3: { mode: 'platform' } })).toThrow(/zot cannot use directly/i);
+			core.ctx.config.platformStore = { kind: 'gcs' };
+			expect(() => core.registry.update(admin, { s3: { mode: 'platform' } })).toThrow(/zot cannot use directly/i);
+		} finally {
+			core.ctx.config.platformStore = original;
+		}
 	});
 
 	test('signatures: keys upload as the zot admin; enforce refuses an unsigned own image, warn deploys it', async () => {

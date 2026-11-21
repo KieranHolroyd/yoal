@@ -23,12 +23,12 @@ describe('steering registry', () => {
 	test('every implemented kind has a factory and every factory has a kind', () => {
 		const kinds = implementedSteeringDrivers();
 		expect(new Set(kinds).size).toBe(kinds.length);
-		expect(kinds.sort()).toEqual(['direct', 'external-lb']);
+		expect(kinds.sort()).toEqual(['direct', 'external-lb', 'vip', 'webhook']);
 		for (const kind of kinds) expect(typeof STEERING_DRIVER_FACTORIES[kind]).toBe('function');
 	});
 
 	test('a kind the build has not built throws a named error instead of steering nothing', () => {
-		expect(STEERING_DRIVER_FACTORIES['dns-failover']).toBeUndefined();
-		expect(() => createSteeringDriver('dns-failover', steeringContext([]))).toThrow(/not implemented/);
+		expect(STEERING_DRIVER_FACTORIES['cloud-lb']).toBeUndefined();
+		expect(() => createSteeringDriver('cloud-lb', steeringContext([]))).toThrow(/not implemented/);
 	});
 });

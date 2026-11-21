@@ -77,6 +77,32 @@ revision fixes the independent review in `REVIEW-FINDINGS.md`. No merge to `main
 | 5 | `#switchoverStalls` runs before the `SYNC_REPLICA` gate; a `resume` switchover task is emitted even with the flag off or the capability gone, and desired state includes a non-empty resume task while keeping the flag-off golden byte-identical. | `tick`, `switchoverTasksForNode`, `desired-state/databases.ts`; parked test with the flag off and the desired-state assertion. |
 | 6 | Helper promote polls for 60 s (was 30) matching the client comment; tests added for flag-off lease retry, ack-then-re-run and the thrown post-promote probe. | `systemd.ts`; the three named tests. |
 
+## Merge reconciliation (main `18619260`)
+
+Merged `origin/main` (lanes A, C, D, E) into this branch. Lane C owns rewind, so B's duplicate rewind
+design was dropped and C's kept:
+
+- **Kept (C):** `databaseReplicaRewinds`/`databaseReplicaRewindResults`, `rewindsForNode`,
+  `rewindActivation`, `applyRewindResults`, `reattachOldPrimary`, `rewindReplica` in the helper and
+  its `/replica/rewind` route (body `databaseId`/`walLogHints`/`user`/`password`), and the
+  `database_rewind` tests. C's rewind row is created synchronously in `repoint` so a heartbeat still
+  sees it immediately.
+- **Kept (B):** `databaseMembers`, `databaseSyncTasks`, `databaseSwitchovers` and their heartbeat
+  results; `DatabaseMemberService` lease/sync/switchover logic; the checkpoint/writes/fence/member
+  helper routes; the sync/switchover/member agent runner; the promotion/lease fixes.
+- **Dropped (B duplicate):** `databaseRewindTasks`/`databaseRewindResults` and their desired-state
+  rendering, `DatabaseRewindTask`/`Result`/`Activation` contracts, the helper `replicaRewind`
+  route/method, the agent rewind runner and `/api/agent/database-rewind` B handler.
+- **Combined:** capabilities list (DB_MEMBER + PITR_REWIND), desired state (C rewinds only when
+  non-empty; B members/sync/switchovers gated by the flag except resume tasks), promotion results
+  (B async/lease-aware) with C's PITR status/reattach, agent heartbeat (B members/sync/switchovers
+  + C rewind results), helper routes, and migration stream 0126/0127/0128.
+- **Conflicts resolved by hand:** `apps/agent/{main,database-replication,helper-client,log-drain.test,
+  runtime.test,database-replication.test}.ts`, `apps/helper/{server,systemd}.ts`,
+  `packages/contracts/agent.ts`, `packages/core/{database-replica-service,nodes,desired-state/
+  databases}.ts`, `packages/db/{migrations,migrations.test}.ts`. No A control-lease fields or C
+  rewind fields were removed; no D/E fields were touched.
+
 ## What is implemented
 
 - **Durability per database** (`async`/`sync`, `sync_timeout_seconds`, `on_sync_loss`) through
@@ -105,16 +131,11 @@ revision fixes the independent review in `REVIEW-FINDINGS.md`. No merge to `main
 
 - `bun run check` — all packages, 0 errors (one pre-existing Svelte warning in
   `settings/registry/+page.svelte`). `iam lint: no new role/kind checks`.
-- `bun test` — 6,528 pass, 74 skip, 0 fail across 592 files.
+- `bun test` — 6,683 pass, 74 skip, 0 fail across 606 files (6,757 tests).
 - `YOAL_MIGRATION_BASE_REF=origin/main bun scripts/check-migrations.ts` — ok, 128 embedded
   migrations, no unreviewed destructive statement.
-- Focused: 126 tests across `database-sync.test.ts`, `database-switchover.test.ts`,
-  `database-member-service.test.ts`, `database-replica-service.test.ts`,
-  `apps/helper/src/replication.test.ts`, `apps/agent/src/database-durability.test.ts`,
-  `apps/agent/src/database-replication.test.ts`,
-  `apps/control-plane/src/lib/server/if-match.test.ts`, plus the CLI dispatcher and migration
-  tests. Both switchover harnesses (the core model and the shipped agent drain) include a 100-run
-  zero-loss assertion and a negative control that loses an in-flight commit.
+- Focused: 172 tests across the merged core/agent/helper/migration suites; `bun test tests/ha` —
+  92 pass, 0 fail across 5 files.
 - Flag-off golden desired state: 1 pass, byte-identical; the W10 keys are absent, not empty.
 
 ## Not verified / deliberately left

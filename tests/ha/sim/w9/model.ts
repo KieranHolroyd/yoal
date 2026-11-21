@@ -73,6 +73,7 @@ interface DbMember {
 	changeTarget: MemberId | null;
 	changeOld: MemberId | null;
 	changeOpenedAt: number;
+	localAsync: boolean;
 	changeTimeoutAt: number;
 	barrierId: number;
 	barrierSnapshot: Set<number>;
@@ -131,6 +132,12 @@ interface Write {
 	ackedAt: number | null;
 	deliveredAt: number | null;
 	timedOut: boolean;
+}
+
+interface SyncReport {
+	etag: string;
+	applied: 'async' | 'block' | { sync: MemberId };
+	at: number;
 }
 
 interface Stored<T> {
@@ -240,6 +247,12 @@ export class W9World {
 		syncChangesFellBack: 0,
 		syncChangesDowngraded: 0,
 		primaryKilledChanging: 0,
+		syncReports: 0,
+		syncSameEtags: 0,
+		syncStaleReconciled: 0,
+		syncReopens: 0,
+		syncAlerts: 0,
+		localSyncLossApplied: 0,
 	};
 
 	#queue = new EventQueue();
@@ -260,6 +273,8 @@ export class W9World {
 	#syncLoss: 'downgrade' | 'block';
 
 	#commits = new Map<number, Commit>();
+	#reconciler = { available: true, reports: [] as SyncReport[], reconciling: false };
+	#controlOutageUntil = 0;
 	#acked = new Map<number, { gen: number; member: MemberId; t: number; durability: Durability }>();
 	#missingAcksReported = new Set<number>();
 	#writes: Write[] = [];
@@ -327,6 +342,7 @@ export class W9World {
 				changeTarget: null,
 				changeOld: null,
 				changeOpenedAt: 0,
+				localAsync: false,
 				changeTimeoutAt: 0,
 				barrierId: 0,
 				barrierSnapshot: new Set<number>(),
@@ -411,7 +427,7 @@ export class W9World {
 	}
 
 	#isAlive(id: string): boolean {
-		if (id === 'arb' || id === 'consumer') return true;
+		if (id === 'arb' || id === 'consumer' || id === 'reconciler') return true;
 		const member = this.db.find((m) => m.id === id);
 		if (member) return member.alive;
 		const control = this.control.find((c) => c.id === id);
@@ -730,7 +746,7 @@ export class W9World {
 
 		// I13 at rest: the primary the run ends with holds every acknowledged commit.
 		const finalPrimary = this.#highestPrimary();
-		if (finalPrimary) {
+		if (finalPrimary && (finalPrimary.lease?.durabilityEffective ?? 'sync') === 'sync') {
 			for (const [id, ack] of this.#acked) {
 				if (ack.durability !== 'sync') continue;
 				if (this.#missingAcksReported.has(id)) continue;
@@ -832,6 +848,19 @@ export class W9World {
 				this.#lagged.set(fault.target as MemberId, until);
 				this.#log('wal', `replication to ${fault.target} dropped until ${(until / 1000).toFixed(1)} s (fault #${fault.id})`);
 				break;
+			case 'sync-control-outage': {
+				const end = this.T + (fault.durationMs ?? 0);
+				this.#controlOutageUntil = Math.max(this.#controlOutageUntil, end);
+				this.#reconciler.available = false;
+				this.#log('reconciler', `control plane unreachable for ${((fault.durationMs ?? 0) / 1000).toFixed(1)} s (fault #${fault.id})`);
+				this.#timer(end, () => {
+					if (this.T < this.#controlOutageUntil) return;
+					this.#reconciler.available = true;
+					this.#log('reconciler', 'control plane returned; reconciling reports');
+					this.#reconcile();
+				});
+				break;
+			}
 			case 'kill-primary': {
 				const primary = this.#highestPrimary();
 				if (!primary) break;
@@ -862,6 +891,7 @@ export class W9World {
 			member.state = member.state === 'primary' ? 'fencing' : member.state;
 			member.streamFrom = null;
 			member.effectiveSync = null;
+			member.localAsync = false;
 			member.changePhase = null;
 			member.changeTarget = null;
 			member.changeOld = null;
@@ -1226,9 +1256,18 @@ export class W9World {
 	 * `changing` with an empty sync set, so no member may acquire automatically.
 	 */
 	#maybeStartSyncChange(member: DbMember): void {
+		if (member.localAsync) return;
 		if (member.durability !== 'sync') return;
 		if ((member.lease?.syncState ?? 'steady') !== 'steady') return;
 		const lost = member.effectiveSync !== null && this.#streamDown(member, member.effectiveSync);
+		if (!this.#reconciler.available) {
+			// Revision 2: the control plane is away. The node may apply the on_sync_loss setting
+			// locally and report it, but it must not touch the lease.
+			if (member.effectiveSync !== null && !lost) return;
+			if (member.syncLostSince === 0) member.syncLostSince = this.T;
+			if (this.T - member.syncLostSince >= SPEC.syncDowngradeAfterMs) this.#applyLocalSyncLoss(member);
+			return;
+		}
 		if (lost) {
 			if (member.syncLostSince === 0) {
 				member.syncLostSince = this.T;
@@ -1246,6 +1285,201 @@ export class W9World {
 		if (target) {
 			this.#openSyncChange(member, target.id);
 		}
+	}
+
+	/**
+	 * Revision 2: while the control plane is unreachable the primary may apply the on_sync_loss
+	 * setting locally, before any lease CAS, and report the applied value with the ETag it last
+	 * observed. The lease stays as it was until the control plane reconciles.
+	 */
+	#applyLocalSyncLoss(member: DbMember): void {
+		if (member.localAsync || member.state !== 'primary') return;
+		member.localAsync = true;
+		member.syncLostSince = 0;
+		member.syncDowngradeAt = 0;
+		const reportEtag = member.leaseEtag ?? '';
+		const buggy = this.mutant === 'node-applies-sync' || this.mutant === 'record-sync-on-stale';
+		if (buggy) {
+			const target =
+				(['a', 'b'] as MemberId[]).find((id) => id !== member.id && id !== member.effectiveSync) ?? 'a';
+			member.effectiveSync = target;
+			member.durabilityEffective = 'sync';
+			this.#reconciler.reports.push({ etag: reportEtag, applied: { sync: target }, at: this.T });
+			this.#log(
+				member.id,
+				`control plane away; applied synchronous_standby_names = ${target} locally (mutant); report ${reportEtag}`,
+			);
+		} else {
+			member.effectiveSync = null;
+			member.durabilityEffective = 'async';
+			this.#reconciler.reports.push({ etag: reportEtag, applied: 'async', at: this.T });
+			this.#log(member.id, `control plane away; applied on_sync_loss async locally at ${reportEtag}; report queued`);
+		}
+		this.stats.localSyncLossApplied++;
+		this.stats.syncReports++;
+		this.#checkPendingAcks();
+		if (this.#reconciler.available) this.#timer(this.T + 100, () => this.#reconcile());
+	}
+
+	#reconcile(): void {
+		if (!this.#reconciler.available || this.#reconciler.reconciling) return;
+		const reports = this.#reconciler.reports.splice(0);
+		if (reports.length === 0) return;
+		this.#reconciler.reconciling = true;
+		let remaining = reports.length;
+		const done = () => {
+			remaining--;
+			if (remaining > 0) return;
+			this.#reconciler.reconciling = false;
+			if (this.#reconciler.reports.length > 0) this.#timer(this.T + 1000, () => this.#reconcile());
+		};
+		for (const report of reports) {
+			this.#arbReadDb('reconciler', (err, lease, etag) => {
+				if (err || !lease || !etag) {
+					this.#reconciler.reports.push(report);
+					done();
+					return;
+				}
+				this.#reconcileReport(report, lease, etag);
+				done();
+			});
+		}
+	}
+
+	#reconcileReport(report: SyncReport, lease: DbLease, etag: string): void {
+		const holder = this.db.find((m) => m.id === lease.holderNodeId);
+		const holderServing = holder !== undefined && holder.state === 'primary' && holder.alive && this.T >= holder.frozenUntil;
+		if (report.etag === etag) {
+			this.stats.syncSameEtags++;
+			this.stats.syncAlerts++;
+			this.#log('reconciler', `report at ${report.etag}: same ETag; recording the applied value and alerting`);
+			const applied = report.applied;
+			if (typeof applied === 'object') this.#recordSync(holder, lease, etag, applied.sync, false);
+			else this.#recordAsync(holder, lease, etag, applied);
+			return;
+		}
+		this.stats.syncStaleReconciled++;
+		this.stats.syncAlerts++;
+		this.#log(
+			'reconciler',
+			`stale report ${report.etag} (current ${etag}): never recording sync; alert`,
+		);
+		if (this.mutant === 'record-sync-on-stale' && typeof report.applied === 'object') {
+			this.#recordSync(holder, lease, etag, report.applied.sync, true);
+			return;
+		}
+		const first = lease.sync[0];
+		const named = lease.syncState === 'steady' && lease.sync.length === 1 && first !== undefined ? this.#dbMember(first) : null;
+		if (holderServing && named && this.#healthyForSync(holder, named)) {
+			this.stats.syncReopens++;
+			this.#log('reconciler', `re-opening a fresh barrier to the healthy named member ${named.id}`);
+			this.#openSyncChange(holder, named.id);
+			return;
+		}
+		if (holderServing) {
+			this.#recordAsync(holder, lease, etag, this.#syncLoss === 'downgrade' ? 'async' : 'block');
+			return;
+		}
+		this.#log('reconciler', 'no serving holder; leaving the lease for the next primary');
+	}
+
+	#healthyForSync(holder: DbMember, peer: DbMember): boolean {
+		return (
+			peer.alive &&
+			this.T >= peer.frozenUntil &&
+			peer.streamFrom === holder.id &&
+			(peer.state === 'streaming' || peer.state === 'rewind') &&
+			this.#edge(holder.id, peer.id) === 'up'
+		);
+	}
+
+	/** Revision 2's forbidden act: record `sync` from a report whose ETag is stale. */
+	#recordSync(
+		holder: DbMember | undefined,
+		lease: DbLease,
+		etag: string,
+		member: MemberId,
+		stale: boolean,
+	): void {
+		if (stale)
+			this.#violate(
+				'support',
+				'stale-sync-recorded',
+				`reconciler recorded sync {${member}} from a stale report at ${etag}`,
+			);
+		const body: DbLease = {
+			generation: lease.generation,
+			holderNodeId: lease.holderNodeId,
+			expiresAt: Math.max(lease.expiresAt, this.T + SPEC.db.ttlMs),
+			sync: [member],
+			syncState: 'steady',
+			durability: 'sync',
+			durabilityEffective: 'sync',
+			syncSetAt: this.T,
+		};
+		this.#arbWriteDb('reconciler', { ifMatch: etag }, body, (err, result) => {
+			if (err || !result || result.status !== 200) {
+				this.#log('reconciler', `recording sync {${member}} failed (${err ?? result?.status ?? 'no answer'}); retrying`);
+				this.#reconciler.reports.push({ etag: '', applied: { sync: member }, at: this.T });
+				if (this.#reconciler.available) this.#timer(this.T + 1000, () => this.#reconcile());
+				return;
+			}
+			if (holder) {
+				holder.lease = body;
+				holder.leaseEtag = result.etag;
+				holder.lastServerDate = result.date;
+				holder.serverAt = this.T;
+				holder.effectiveSync = member;
+				holder.durability = 'sync';
+				holder.durabilityEffective = 'sync';
+				holder.localAsync = false;
+				holder.changePhase = null;
+				holder.changeTarget = null;
+				holder.changeOld = null;
+				holder.barrierSnapshot.clear();
+				holder.syncDowngradeAt = 0;
+				this.#checkPendingAcks();
+			}
+			this.#log('reconciler', `recorded sync {${member}}${stale ? ' (MUTANT, from a stale report)' : ''}`);
+		});
+	}
+
+	#recordAsync(holder: DbMember | undefined, lease: DbLease, etag: string, outcome: 'async' | 'block'): void {
+		const body: DbLease = {
+			generation: lease.generation,
+			holderNodeId: lease.holderNodeId,
+			expiresAt: Math.max(lease.expiresAt, this.T + SPEC.db.ttlMs),
+			sync: [],
+			syncState: 'steady',
+			durability: outcome === 'async' ? 'async' : 'sync',
+			durabilityEffective: outcome === 'async' ? 'async' : 'sync',
+			syncSetAt: this.T,
+		};
+		this.#arbWriteDb('reconciler', { ifMatch: etag }, body, (err, result) => {
+			if (err || !result || result.status !== 200) {
+				this.#log('reconciler', `recording ${outcome} failed (${err ?? result?.status ?? 'no answer'}); retrying`);
+				this.#reconciler.reports.push({ etag: '', applied: outcome, at: this.T });
+				if (this.#reconciler.available) this.#timer(this.T + 1000, () => this.#reconcile());
+				return;
+			}
+			if (holder) {
+				holder.lease = body;
+				holder.leaseEtag = result.etag;
+				holder.lastServerDate = result.date;
+				holder.serverAt = this.T;
+				holder.effectiveSync = null;
+				holder.durability = body.durability;
+				holder.durabilityEffective = body.durabilityEffective;
+				holder.localAsync = false;
+				holder.changePhase = null;
+				holder.changeTarget = null;
+				holder.changeOld = null;
+				holder.barrierSnapshot.clear();
+				holder.syncDowngradeAt = 0;
+				this.#checkPendingAcks();
+			}
+			this.#log('reconciler', `recorded ${outcome}: sync [], steady`);
+		});
 	}
 
 	#streamDown(primary: DbMember, peerId: MemberId): boolean {
@@ -1270,6 +1504,7 @@ export class W9World {
 	/** Step 1 of §5.5: open the transition (sync [], changing) before touching the setting. */
 	#openSyncChange(member: DbMember, target: MemberId): void {
 		if (member.state !== 'primary' || !member.leaseEtag) return;
+		if (!this.#reconciler.available) return;
 		if (member.changePhase !== null) return;
 		if ((member.lease?.syncState ?? 'steady') !== 'steady') return;
 		const old = member.effectiveSync;
@@ -1328,6 +1563,7 @@ export class W9World {
 		}
 		member.changePhase = 'switching';
 		member.effectiveSync = target;
+		member.localAsync = false;
 		const id = ++this.#nextCommit;
 		const barrier: Commit = {
 			id,
@@ -1359,6 +1595,7 @@ export class W9World {
 	/** Step 3 of §5.5: only now is the new member eligible. */
 	#closeSyncChange(member: DbMember, target: MemberId | null): void {
 		if (member.state !== 'primary' || !member.leaseEtag || !target) return;
+		if (!this.#reconciler.available) return;
 		const body: DbLease = {
 			generation: member.generation,
 			holderNodeId: member.id,
@@ -1414,6 +1651,7 @@ export class W9World {
 
 	#fallbackSyncChange(member: DbMember, old: MemberId): void {
 		if (member.state !== 'primary' || !member.leaseEtag) return;
+		if (!this.#reconciler.available) return;
 		const body: DbLease = {
 			generation: member.generation,
 			holderNodeId: member.id,
@@ -1436,6 +1674,7 @@ export class W9World {
 			member.lastServerDate = result.date;
 			member.serverAt = this.T;
 			member.effectiveSync = old;
+			member.localAsync = false;
 			member.changePhase = null;
 			member.changeTarget = null;
 			member.changeOld = null;
@@ -1450,6 +1689,7 @@ export class W9World {
 	/** `on_sync_loss: block`: close the transition steady with no eligible member and no downgrade. */
 	#blockSyncChange(member: DbMember): void {
 		if (member.state !== 'primary' || !member.leaseEtag) return;
+		if (!this.#reconciler.available) return;
 		const body: DbLease = {
 			generation: member.generation,
 			holderNodeId: member.id,
@@ -1472,6 +1712,7 @@ export class W9World {
 			member.lastServerDate = result.date;
 			member.serverAt = this.T;
 			member.effectiveSync = null;
+			member.localAsync = false;
 			member.changePhase = null;
 			member.changeTarget = null;
 			member.changeOld = null;
@@ -1483,6 +1724,7 @@ export class W9World {
 
 	#downgrade(member: DbMember): void {
 		if (member.state !== 'primary' || !member.leaseEtag) return;
+		if (!this.#reconciler.available) return;
 		const body: DbLease = {
 			generation: member.generation,
 			holderNodeId: member.id,
@@ -1749,6 +1991,7 @@ export class W9World {
 		member.effectiveSync = inherited[0] ?? null;
 		member.syncDowngradeAt = 0;
 		member.syncLostSince = 0;
+		member.localAsync = false;
 		member.changePhase = null;
 		member.changeTarget = null;
 		member.changeOld = null;
@@ -1788,6 +2031,7 @@ export class W9World {
 			);
 		for (const [id, ack] of this.#acked) {
 			if (ack.durability !== 'sync') continue;
+			if (acquired.body.durabilityEffective !== 'sync') continue;
 			if (!member.history.has(id))
 				this.#violate(
 					'I13',
@@ -1929,7 +2173,13 @@ export class W9World {
 		this.stats.acks++;
 		if (this.#verbose) this.#log(commit.waitFor ? commit.waitFor : member, `commit #${commit.id} acknowledged (generation ${commit.gen})`);
 		const higher = this.#highestPrimary();
-		if (durability === 'sync' && higher && higher.generation > commit.gen && !higher.history.has(commit.id))
+		if (
+			durability === 'sync' &&
+			higher &&
+			higher.generation > commit.gen &&
+			(higher.lease?.durabilityEffective ?? 'sync') === 'sync' &&
+			!higher.history.has(commit.id)
+		)
 			this.#violate(
 				'I13',
 				'ack-lost-to-higher-primary',

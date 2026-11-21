@@ -511,8 +511,7 @@ describe('sync-set safety (W10 review blockers)', () => {
 	test('an async lease is renewed by the tick too', async () => {
 		const db = database('asyncrenew');
 		reportSlots(db.id, db.replicas);
-		await core.databaseMembers.onPromotion(db.id, second.nodeId, 1);
-		opened.sqlite.run('UPDATE databases SET node_id = ? WHERE id = ?', [second.nodeId, db.id]);
+		await core.databaseMembers.onPromotion(db.id, primary.nodeId, 1);
 		const before = (await lease(db.id))!;
 		clock = Date.parse(before.expiresAt as string) - 3_000;
 		await core.databaseMembers.tick();
@@ -615,17 +614,6 @@ describe('planned switchover (W10)', () => {
 		const moved = core.databases.get(owner, 'billing');
 		expect(moved.nodeId).toBe(second.nodeId);
 		expect(moved.primaryGeneration).toBe(1);
-
-		// The old primary is not purged: it is a rewind task for its node.
-		const rewinds = core.databaseMembers.rewindTasksForNode(primary.nodeId);
-		expect(rewinds).toHaveLength(1);
-		expect(rewinds[0]).toMatchObject({ databaseId: db.id, generation: 1 });
-		expect(rewinds[0]!.workloadId.startsWith('db_dbr_')).toBe(true);
-		expect(rewinds[0]!.source.nodeId).toBe(second.nodeId);
-		// A rewind that cannot run becomes a rebuild, never a merge.
-		core.databaseMembers.applyRewindResults(primary.nodeId, [{ databaseId: db.id, status: 'rebuild', error: 'timeline diverged' }]);
-		expect(core.databaseMembers.rewindTasksForNode(primary.nodeId)).toHaveLength(0);
-		expect(core.databaseReplicas.rowsFor(db.id).some((row) => row.nodeId === primary.nodeId && !row.removingAt)).toBe(true);
 	});
 
 	test('a non-zero gap is refused, writes resume, and nothing is promoted', async () => {

@@ -1194,23 +1194,25 @@ export class WorkloadService {
 			if (spec.runtime !== 'container' || !spec.image) continue;
 			const image = desiredImage(spec);
 			if (!image) continue;
-			const copies = this.ctx.db
-				.select()
-				.from(workloadReplicas)
-				.where(eq(workloadReplicas.workloadId, workload.id))
-				.all()
-				.sort((a, b) => a.replicaIndex - b.replicaIndex);
+			// `copyPlacements` synthesises the single-copy shape when there are no replica rows,
+			// which is exactly the steady state of the apps that need a failover reserve.
+			const copies = this.copyPlacements(workload);
 			const here = copies.find((copy) => copy.nodeId === nodeId);
 			const rolling = workload.rolloutStatus === 'rolling';
 			if (here) {
 				// Already on this image: nothing to pull.
-				const running = here.deploymentId && here.deploymentId !== workload.deploymentId ? this.copyRelease(here.deploymentId) : null;
+				const hereDeployment = (here as { deploymentId?: string | null }).deploymentId ?? null;
+				const running = hereDeployment && hereDeployment !== workload.deploymentId ? this.copyRelease(hereDeployment) : null;
 				if (running && desiredImage(running.spec) === image) continue;
 				pulls.push({ workloadId: workload.id, image });
 				continue;
 			}
-			if (!rolling) continue;
-			// The failover reserve: one possible destination for a copy while the app rolls.
+			// A spread set has another copy to serve while this one moves, so its reserve is only
+			// needed during a rollout. A single-copy app has no such copy: every eligible node is
+			// its failover reserve, and the image must be there before the node that dies does.
+			if (!rolling && copies.length !== 1) continue;
+			// The failover reserve: one possible destination for a copy while the app rolls or if
+			// its only node is lost (HA-PLAN H28).
 			const candidate = this.copyCandidates(project as ProjectRow, spec, workload.id).find((node) => node.id === nodeId);
 			if (candidate) pulls.push({ workloadId: workload.id, image });
 		}

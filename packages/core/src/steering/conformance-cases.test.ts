@@ -131,6 +131,6 @@ describe('steering conformance', () => {
 		const service = new SteeringService({} as CoreContext, { ...STEERING_DRIVER_FACTORIES, 'dns-failover': () => dns.driver });
 		expect(service.driver('direct').kind).toBe('direct');
 		expect(service.driver('dns-failover')).toBe(dns.driver);
-		expect(() => service.driver('vip')).toThrow('not implemented');
+		expect(() => service.driver('cloud-lb')).toThrow('not implemented');
 	});
 });

@@ -371,4 +371,29 @@ describe('compileCaddyConfig', () => {
 		expect(json).toContain('"host":["control.example.dev"]');
 		expect(json).toContain('"dial":"unix//run/yoal/control.sock"');
 	});
+
+	test('W9: a control upstream list uses lb_policy first and a /readyz health check', () => {
+		const config = compileCaddyConfig({
+			listen: [':443'],
+			sites: [base],
+			platform: {
+				host: 'control.example.dev',
+				upstream: 'unix//run/yoal/control.sock',
+				upstreams: [
+					{ dial: 'http://192.0.2.20:8080', priority: 1 },
+					{ dial: 'unix//run/yoal/control.sock', priority: 0 },
+				],
+				healthUri: '/readyz',
+			},
+		});
+		const platform = ((config as any).apps.http.servers.content.routes as any[]).find((route) => route['@id'] === 'platform');
+		const proxy = platform.handle.find((handler: any) => handler.handler === 'reverse_proxy');
+		expect(proxy.lb_policy).toBe('first');
+		// The list is sorted by priority: this node's socket first, the peer second.
+		expect(proxy.upstreams).toEqual([
+			{ dial: 'unix//run/yoal/control.sock' },
+			{ dial: '192.0.2.20:8080' },
+		]);
+		expect(proxy.health_checks.active).toMatchObject({ uri: '/readyz', interval: '5s' });
+	});
 });

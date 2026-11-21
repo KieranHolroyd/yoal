@@ -35,7 +35,7 @@
 	let registryOpen = $state(false);
 	let editOpen = $state(false);
 	let editing = $state<RegistryCredentialView | null>(null);
-	let s3Mode = $state<'disk' | 'managed' | 'external'>(data.registry.s3?.mode ?? 'disk');
+	let s3Mode = $state<'disk' | 'managed' | 'external' | 'platform'>(data.registry.s3?.mode ?? 'disk');
 	function edit(credential: RegistryCredentialView) {
 		editing = credential;
 		editOpen = true;
@@ -109,7 +109,9 @@
 					{data.registry.s3
 						? data.registry.s3.mode === 'managed'
 							? `Yoal storage ${data.registry.s3.storage?.name ?? '…'} · bucket ${data.registry.s3.bucket}`
-							: `s3 ${data.registry.s3.bucket}@${data.registry.s3.endpoint}`
+							: data.registry.s3.mode === 'platform'
+								? `Platform object store · bucket ${data.registry.s3.bucket}`
+								: `s3 ${data.registry.s3.bucket}@${data.registry.s3.endpoint}`
 						: "node's disk"}
 				</dd>
 			</DetailList>
@@ -343,7 +345,9 @@
 					{#if data.registry.s3}
 						{data.registry.s3.mode === 'managed'
 							? `Blobs are in bucket ${data.registry.s3.bucket} on ${data.registry.s3.storage?.name ?? 'a Yoal storage instance'}.`
-							: `Blobs are in s3 ${data.registry.s3.bucket}@${data.registry.s3.endpoint}.`}
+							: data.registry.s3.mode === 'platform'
+								? `Blobs are in the platform object store, bucket ${data.registry.s3.bucket}. They survive this node.`
+								: `Blobs are in s3 ${data.registry.s3.bucket}@${data.registry.s3.endpoint}.`}
 					{:else}
 						Blobs are on the node's disk.
 					{/if}
@@ -357,13 +361,21 @@
 							>Yoal object storage (automatic)</NativeSelect.Option
 						>
 						<NativeSelect.Option value="external">Another S3 endpoint</NativeSelect.Option>
+						<NativeSelect.Option value="platform">The platform object store</NativeSelect.Option>
 					</NativeSelect.Root>
 					<Field.Description>
 						Yoal object storage creates a RustFS instance on the registry node when needed, a
-						bucket, and a key that can reach only that bucket.
+						bucket, and a key that can reach only that bucket. The platform object store is the
+						external store in <code>yoal.env</code>; the registry then survives losing its node.
 					</Field.Description>
 				</Field.Field>
-				{#if s3Mode === 'managed'}
+				{#if s3Mode === 'platform'}
+					<div class="rounded-md border bg-muted/40 px-3 py-2 text-sm text-muted-foreground">
+						Blobs go to the bucket named by <code>R2_BUCKET</code> (or the S3 platform store's
+						bucket), under <code>/zot</code>. The platform credential stays in
+						<code>yoal.env</code>; Yoal never copies it into registry settings.
+					</div>
+				{:else if s3Mode === 'managed'}
 					<div class="grid gap-4 sm:grid-cols-2">
 						<Field.Field>
 							<Field.Label for="registry-s3-storage">Storage instance</Field.Label>

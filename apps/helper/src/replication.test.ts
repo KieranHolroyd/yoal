@@ -16,10 +16,8 @@ import {
 	renderBarrierSql,
 	renderPromoteArgs,
 	renderResumeWritesSql,
-	renderRewindArgs,
 	renderStopWritesSql,
 	renderSyncConfigureSql,
-	rewindOutcome,
 	syncStandbyNames,
 	renderReplicaStartScript,
 	renderReplicationConfigureSql,
@@ -429,37 +427,6 @@ describe('synchronous set and rewind (H23, W10)', () => {
 		expect(() => parseMemberStatus('nope')).toThrow();
 	});
 
-	test('the rewind route accepts the rewind replica id and the database id in the body (200)', async () => {
-		const f = await driverFixture();
-		await fs.mkdir(join(f.stateDir, PRIMARY, 'pgdata'), { recursive: true });
-		await fs.writeFile(join(f.stateDir, PRIMARY, 'pgdata', 'PG_VERSION'), '17\n');
-		const handler = createHandler(f.driver, { version: 'test' });
-		const body = {
-			databaseId: PRIMARY,
-			source: { host: '10.0.0.2', port: 5432, user: 'yoal_repl', database: 'postgres' },
-			password: PASSWORD,
-			image: 'postgres:18',
-		};
-		const response = await handler(
-			new Request(`http://helper/v1/workloads/${REPLICA}/replica/rewind`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify(body),
-			}),
-		);
-		expect(response.status).toBe(200);
-		expect(await response.json()).toMatchObject({ ok: true, status: 'rewound' });
-		// The path must be a replica id: the primary id is not a rewind workload.
-		const wrong = await handler(
-			new Request(`http://helper/v1/workloads/${PRIMARY}/replica/rewind`, {
-				method: 'POST',
-				headers: { 'content-type': 'application/json' },
-				body: JSON.stringify(body),
-			}),
-		);
-		expect(wrong.status).toBe(400);
-	});
-
 	test('the checkpoint route is a fixed, argument-free verb', async () => {
 		const f = await driverFixture();
 		await f.envFor(PRIMARY);
@@ -471,24 +438,5 @@ describe('synchronous set and rewind (H23, W10)', () => {
 		expect(withQuery.status).toBe(400);
 	});
 
-	test('rewind runs in a container against the new primary, password only in the environment', () => {
-		const args = renderRewindArgs({
-			podmanPath: '/usr/bin/podman',
-			image: 'postgres:18',
-			dataDir: '/var/lib/yoal/state/db_abc',
-			source: { host: '10.47.1.2', port: 15432, user: 'yoal_repl', database: 'postgres' },
-		});
-		expect(args).toContain('pg_rewind');
-		expect(args).toContain('--write-recovery-conf');
-		expect(args.join(' ')).toContain('host=10.47.1.2 port=15432 user=yoal_repl dbname=postgres');
-		expect(args.join(' ')).not.toContain('password=');
-		expect(() => renderRewindArgs({
-			podmanPath: '/usr/bin/podman',
-			image: 'postgres:18',
-			dataDir: '/data',
-			source: { host: 'x; rm -rf /', port: 1, user: 'yoal_repl', database: 'postgres' },
-		})).toThrow();
-		expect(rewindOutcome(0)).toBe('rewound');
-		expect(rewindOutcome(1)).toBe('rebuild');
-	});
+
 });

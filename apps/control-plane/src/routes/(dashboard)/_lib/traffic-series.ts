@@ -38,6 +38,28 @@ export interface ChartSeries {
 
 export const MAX_CHART_POINTS = 160;
 
+/** A shaded range on the traffic chart: minutes an agent knows it could not report. */
+export interface TrafficGapBand {
+	host: string;
+	start: Date;
+	end: Date;
+}
+
+/**
+ * Clip and order gap ranges for a chart window. A spool gap is reported in epoch milliseconds and
+ * may start before the visible range; the band covers only the intersection, like the series.
+ */
+export function trafficGapBands(
+	gaps: ReadonlyArray<{ host: string; from: number; to: number }>,
+	fromMs: number,
+	toMs: number,
+): TrafficGapBand[] {
+	return gaps
+		.filter((gap) => gap.to > gap.from && gap.from < toMs && gap.to > fromMs)
+		.map((gap) => ({ host: gap.host, start: new Date(Math.max(gap.from, fromMs)), end: new Date(Math.min(gap.to, toMs)) }))
+		.sort((a, b) => +a.start - +b.start || a.host.localeCompare(b.host));
+}
+
 /** Spans that keep chart buckets on round clock boundaries. */
 const NICE_SPANS: Record<BaseInterval, number[]> = {
 	'1m': [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440],

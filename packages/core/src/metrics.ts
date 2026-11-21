@@ -1,6 +1,6 @@
 import { and, eq, isNull, ne, sql } from 'drizzle-orm';
 import { deployments, nodes, projects, releases } from '@yoal/db';
-import type { Principal } from '@yoal/contracts';
+import type { Principal, TelemetrySpoolGap } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { ValidationError } from './errors.ts';
 import {
@@ -30,6 +30,11 @@ export interface TrafficView {
 	permitted: boolean;
 	available: boolean;
 	report: TrafficReport;
+	/**
+	 * Minutes this range is known to be missing because an agent's bounded telemetry spool dropped
+	 * them (HA-PLAN H28). The dashboard shades them instead of drawing zero traffic.
+	 */
+	gaps?: TelemetrySpoolGap[];
 	/** Why telemetry is unavailable, when it is not. */
 	reason?: string;
 	/** False when the optional telemetry store is not installed (a normal state, D101). */
@@ -102,7 +107,7 @@ export class MetricsService {
 			return { permitted: true, available: false, report: emptyTrafficReport(), reason: unavailableReason(telemetry), installed: telemetry?.installed ?? false };
 		}
 		const report = await telemetry.report({ ...window, projectId: project.id });
-		return { permitted: true, available: true, report };
+		return { permitted: true, available: true, report, gaps: this.#gaps(report, window, report.hosts.map((host) => host.key)) };
 	}
 
 	/**
@@ -135,7 +140,7 @@ export class MetricsService {
 			return { permitted: true, available: false, report: emptyTrafficReport(), reason: unavailableReason(telemetry), installed: telemetry?.installed ?? false };
 		}
 		const report = await telemetry.report({ ...window, host });
-		return { permitted: true, available: true, report };
+		return { permitted: true, available: true, report, gaps: this.#gaps(report, window, [host]) };
 	}
 
 	/** Fleet traffic for every project this principal can read. */
@@ -162,7 +167,26 @@ export class MetricsService {
 			return { permitted: true, available: true, report: emptyTrafficReport() };
 		}
 		const report = await telemetry.report({ ...window, projectIds });
-		return { permitted: true, available: true, report };
+		return {
+			permitted: true,
+			available: true,
+			report,
+			gaps: this.#gaps(report, window, scope === 'all' ? null : report.hosts.map((host) => host.key)),
+		};
+	}
+
+	/**
+	 * Gap ranges for a traffic view. A project or deployment chart is filtered to the hosts that
+	 * appears in its own report; the fleet overview sees every host. The spool is fleet-wide, so a
+	 * project only inherits a gap when one of its hosts had buckets dropped.
+	 */
+	#gaps(report: TrafficReport, window: TrafficWindow, hosts: string[] | null): TelemetrySpoolGap[] {
+		const fromMs = new Date(window.from).getTime();
+		const toMs = new Date(window.to).getTime();
+		if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) return [];
+		// null means the fleet overview; an empty list means "none of my hosts", not "every host".
+		const wanted = hosts === null ? null : hosts;
+		return this.ctx.telemetrySpool.gapsFor(wanted, fromMs, toMs);
 	}
 
 	/**

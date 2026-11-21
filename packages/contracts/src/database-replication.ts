@@ -134,3 +134,51 @@ export const databaseReplicaPromotionResultSchema = z.object({
 	error: z.string().max(2_000).optional(),
 });
 export type DatabaseReplicaPromotionResult = z.infer<typeof databaseReplicaPromotionResultSchema>;
+
+/**
+ * Re-attach an old primary as a replica (HA-PLAN W10; docs/CLUSTERING.md §9.3 "healing"). The
+ * node adopts the old primary's diverged data directory (`databaseId`), rewinds it against the new
+ * primary through the replica's link socket and renames it to the replica's workload id. When
+ * `pg_rewind` cannot run (no data checksums, timeline divergence), the helper falls back to a
+ * rebuild: the diverged directory is removed and the replica's normal `pg_basebackup` start takes
+ * over.
+ */
+export const databaseReplicaRewindTaskSchema = z.object({
+	databaseId: z.string().min(1).max(100),
+	replicaId: z.string().min(1).max(100),
+	replicaWorkloadId: z.string().min(1).max(100),
+	/**
+	 * The control plane rendered `wal_log_hints=on` for the old primary's unit (HA-PLAN W10), so
+	 * the helper may skip the config-file probe. `pg_rewind` failing is still the backstop: an old
+	 * agent/helper that ignored this simply falls back to a rebuild.
+	 */
+	walLogHints: z.boolean().default(false),
+});
+export type DatabaseReplicaRewindTask = z.infer<typeof databaseReplicaRewindTaskSchema>;
+
+/**
+ * The owner role and password for one rewind. The node that holds the old primary fetches it only
+ * after the control plane has recorded the rewind task; it is never in desired state. `pg_rewind`
+ * connects as the database owner (a superuser) because it needs the catalog file functions; the
+ * same role exists on the new primary because its data is a physical copy. The rewind does not need
+ * the replica's slot: the adopted directory starts as a standby and the replica unit supplies
+ * `primary_slot_name` from its own desired-state profile.
+ */
+export const databaseReplicaRewindActivationSchema = z.object({
+	databaseId: z.string().min(1).max(100),
+	replicaId: z.string().min(1).max(100),
+	user: z.string().regex(/^[a-z_][a-z0-9_]{0,62}$/),
+	password: z.string().min(8).max(200),
+});
+export type DatabaseReplicaRewindActivation = z.infer<typeof databaseReplicaRewindActivationSchema>;
+
+export const databaseReplicaRewindResultSchema = z.object({
+	replicaId: z.string().min(1).max(100),
+	status: z.enum(['ok', 'fallback', 'failed']),
+	/** True when `pg_rewind` adopted the data dir; false for a rebuild or a failure. */
+	rewound: z.boolean(),
+	/** Why a rebuild was chosen, when it was (missing checksums, an incompatible timeline). */
+	reason: z.string().max(1_000).optional(),
+	error: z.string().max(2_000).optional(),
+});
+export type DatabaseReplicaRewindResult = z.infer<typeof databaseReplicaRewindResultSchema>;

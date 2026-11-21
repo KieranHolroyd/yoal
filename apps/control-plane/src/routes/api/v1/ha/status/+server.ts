@@ -3,9 +3,11 @@ import { core } from '#lib/server/core.js';
 import { route } from '#lib/server/api.js';
 import { requirePrincipal } from '#lib/server/principal.js';
 
-/** The failover controller: lease, policy, lost nodes, ingress rotation, database candidates, history. */
+/** The failover controller, plus the control-plane standby view while `CONTROL_STANDBY` is on. */
 export const GET: RequestHandler = (event) =>
 	route(() => {
 		const principal = requirePrincipal(event);
-		return core.failover.status(principal);
+		const status = core.failover.status(principal);
+		if (!core.controlPlane.enabled()) return status;
+		return { ...status, controlPlane: core.controlPlane.status() };
 	});

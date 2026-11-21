@@ -85,9 +85,16 @@ describe('ReplicaLinkForwarder', () => {
 class FakeHelper {
 	configured: Array<{ id: string; slots: string[]; password: string | null }> = [];
 	promoted: string[] = [];
+	rewinds: Array<{ replicaId: string; databaseId: string; walLogHints: boolean }> = [];
 	failConfigure = false;
 	failPromote = false;
 	failHandover = false;
+	failRewind = false;
+	rewindResult: { rewound: boolean; fallback: 'rebuild' | null; reason: string | null } = {
+		rewound: true,
+		fallback: null,
+		reason: null,
+	};
 	slots: DatabaseReplicationSlotStatus[] = [];
 	async replicationConfigure(id: string, input: { slots: string[]; password: string | null }): Promise<void> {
 		if (this.failConfigure) throw new Error('psql exited 2');
@@ -108,6 +115,14 @@ class FakeHelper {
 		if (this.failHandover) return { lsn: null, promoted: true, error: 'data dir rename failed' };
 		return { lsn: '0/5000060', promoted: true };
 	}
+	async rewindReplica(
+		replicaId: string,
+		input: { databaseId: string; walLogHints: boolean; user: string; password: string },
+	): Promise<{ rewound: boolean; fallback: 'rebuild' | null; reason: string | null }> {
+		if (this.failRewind) throw new Error('no such container');
+		this.rewinds.push({ replicaId, databaseId: input.databaseId, walLogHints: input.walLogHints });
+		return this.rewindResult;
+	}
 }
 
 function runnerWith(options: { version?: string; slots?: string[] } = {}) {
@@ -122,7 +137,16 @@ function runnerWith(options: { version?: string; slots?: string[] } = {}) {
 		runtime: { hold: (id) => held.push(id), release: (id) => held.splice(held.indexOf(id), 1) },
 		now: () => clock,
 		fetch: (async (url: string | URL | Request) => {
-			requests.push(String(url));
+			const href = String(url);
+			requests.push(href);
+			if (href.includes('/api/agent/database-rewind/')) {
+				return Response.json({
+					databaseId: PRIMARY,
+					replicaId: 'dbr_1',
+					user: 'orders',
+					password: 'Abcdefghijklmnop_qrstu',
+				});
+			}
 			return Response.json({
 				databaseId: PRIMARY,
 				version: options.version ?? 'v1',
@@ -288,6 +312,30 @@ describe('DatabaseReplicationRunner', () => {
 		r.advance(10_000);
 		await r.runner.runOnce(promotion, signal);
 		expect(r.helper.promoted).toHaveLength(2);
+	});
+
+	test('a rewind fetches its own activation and reports success or a rebuild once', async () => {
+		const r = runnerWith();
+		const rewind = { databaseId: PRIMARY, replicaId: 'dbr_1', replicaWorkloadId: REPLICA, walLogHints: true };
+		await r.runner.runOnce(state({ databaseReplicaRewinds: [rewind] }), signal);
+		await r.runner.runOnce(state({ databaseReplicaRewinds: [rewind] }), signal);
+		expect(r.helper.rewinds).toEqual([{ replicaId: REPLICA, databaseId: PRIMARY, walLogHints: true }]);
+		expect(r.requests).toContain('https://control.test/api/agent/database-rewind/dbr_1');
+		expect(r.runner.pendingRewindResults()).toEqual([{ replicaId: 'dbr_1', status: 'ok', rewound: true }]);
+		r.runner.acknowledgeRewinds(['dbr_1']);
+		expect(r.runner.pendingRewindResults()).toEqual([]);
+
+		const fallback = runnerWith();
+		fallback.helper.rewindResult = { rewound: false, fallback: 'rebuild', reason: 'no checksums' };
+		await fallback.runner.runOnce(state({ databaseReplicaRewinds: [rewind] }), signal);
+		expect(fallback.runner.pendingRewindResults()).toEqual([
+			{ replicaId: 'dbr_1', status: 'fallback', rewound: false, reason: 'no checksums' },
+		]);
+
+		const failed = runnerWith();
+		failed.helper.failRewind = true;
+		await failed.runner.runOnce(state({ databaseReplicaRewinds: [rewind] }), signal);
+		expect(failed.runner.pendingRewindResults()[0]).toMatchObject({ replicaId: 'dbr_1', status: 'failed', rewound: false });
 	});
 
 	test('the replica slot reaches the helper request', () => {

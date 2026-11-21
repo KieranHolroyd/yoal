@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import type { TrafficSeriesPoint } from '@yoal/core';
-import { downsampleSeries, spanLabel } from './traffic-series.ts';
+import { downsampleSeries, spanLabel, trafficGapBands } from './traffic-series.ts';
 
 const MINUTE = 60_000;
 const HOUR = 3_600_000;
@@ -108,5 +108,25 @@ describe('spanLabel', () => {
 		expect(spanLabel(180, '1m')).toBe('3 h');
 		expect(spanLabel(24, '1h')).toBe('1 d');
 		expect(spanLabel(6, '1h')).toBe('6 h');
+	});
+});
+
+describe('trafficGapBands', () => {
+	test('clips a spool gap to the chart window and drops the ones outside it', () => {
+		const from = Date.parse('2026-11-20T10:00:00.000Z');
+		const to = from + 60 * MINUTE;
+		const bands = trafficGapBands(
+			[
+				{ host: 'shop.test', from: from - 10 * MINUTE, to: from + 2 * MINUTE },
+				{ host: 'other.test', from: from + 5 * MINUTE, to: from + 6 * MINUTE },
+				{ host: 'gone.test', from: to + MINUTE, to: to + 2 * MINUTE },
+			],
+			from,
+			to
+		);
+		expect(bands.map((band) => [band.host, +band.start, +band.end])).toEqual([
+			['shop.test', from, from + 2 * MINUTE],
+			['other.test', from + 5 * MINUTE, from + 6 * MINUTE],
+		]);
 	});
 });

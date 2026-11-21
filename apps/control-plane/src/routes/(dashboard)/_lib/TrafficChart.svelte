@@ -8,7 +8,7 @@
 	import { Chart } from '@tanstack/charts/svelte';
 	import { tooltip } from '@tanstack/charts/tooltip';
 	import { CHART_GRID, CHART_TOOLTIP_CLASS, utcTimeFormat } from '#lib/charts.js';
-	import { downsampleSeries } from './traffic-series.js';
+	import { downsampleSeries, trafficGapBands } from './traffic-series.js';
 
 	/**
 	 * Traffic chart. Long series are merged into clock-aligned chart buckets (at most ~160 points)
@@ -18,8 +18,15 @@
 	let {
 		series,
 		interval,
+		gaps = [],
 		class: className = ''
-	}: { series: TrafficSeriesPoint[]; interval: '1m' | '1h'; class?: string } = $props();
+	}: {
+		series: TrafficSeriesPoint[];
+		interval: '1m' | '1h';
+		/** Minutes an agent's bounded spool dropped, shaded so a gap is not read as zero traffic. */
+		gaps?: Array<{ host: string; from: number; to: number }>;
+		class?: string;
+	} = $props();
 
 	const chart = $derived(downsampleSeries(series, interval));
 	const rows = $derived(
@@ -28,6 +35,10 @@
 			const end = new Date(point.end);
 			return { ...point, startAt: start, endAt: end, at: new Date((+start + +end) / 2) };
 		})
+	);
+	// Clip the spool bands to the plotted range; a gap outside it must not widen the x axis.
+	const gapRanges = $derived(
+		trafficGapBands(gaps, rows[0]?.startAt.getTime() ?? 0, rows.at(-1)?.endAt.getTime() ?? 0)
 	);
 	const topRate = $derived(Math.max(0, ...rows.map((row) => row.requestRate)));
 	// Bars fill the middle 60% of their bucket and keep a sliver of height, so a single error in a
@@ -65,6 +76,21 @@
 		defineChart(
 			{
 				marks: [
+					// Behind the series: the minutes an agent knows it could not report. A band makes
+					// the loss visible even where a zero-rate line would otherwise look like quiet.
+					...gapRanges.map((gap, index) =>
+						decorative(
+							rect([gap], {
+								id: `spool-gap-${index}`,
+								x1: 'start',
+								x2: 'end',
+								y1: () => 0,
+								y2: () => Math.max(topRate, 1),
+								fill: 'var(--color-warning)',
+								fillOpacity: 0.14
+							})
+						)
+					),
 					decorative(
 						areaY(rows, {
 							id: 'requests-area',
@@ -167,6 +193,12 @@
 				<span class="size-2 rounded-[2px] bg-destructive"></span>
 				5xx
 			</span>
+			{#if gapRanges.length > 0}
+				<span class="flex items-center gap-1.5">
+					<span class="h-2 w-3 rounded-[2px] bg-warning/25"></span>
+					no data (agent spool)
+				</span>
+			{/if}
 		</span>
 	</div>
 	<Chart

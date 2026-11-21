@@ -21,6 +21,13 @@ export interface SteeringConformanceSubject {
 	apply?: () => Promise<void>;
 	/** A simulation that fails every ingress. Required for a driver that writes records. */
 	lastHealthy?: () => Promise<{ withdrawn: string[]; records: string[] }> | { withdrawn: string[]; records: string[] };
+	/**
+	 * What a records-style driver does when every node fails. DNS keeps the last record (negative
+	 * answers outlive the TTL); a floating address withdraws (a stale VIP is worse than none).
+	 */
+	lastHealthyAllFail?: 'keep' | 'withdraw';
+	/** Driver-specific contract cases (a signature, a VRRP address) run beside the shared ones. */
+	extraCases?: SteeringConformanceCase[];
 }
 
 export interface SteeringConformanceCase {
@@ -78,10 +85,16 @@ export function steeringConformanceCases(subject: SteeringConformanceSubject): S
 				if (!driver.capabilities.writes) return;
 				if (!subject.lastHealthy) throw new Error('a writing driver must declare its last-healthy simulation');
 				const result = await subject.lastHealthy();
+				if (subject.lastHealthyAllFail === 'withdraw') {
+					if (result.records.length) throw new Error('the record set kept a stale holder with every node failing');
+					if (!result.withdrawn.length) throw new Error('no node was withdrawn with every node failing');
+					return;
+				}
 				expectEqual(result.withdrawn.length, 0, 'withdrawals with every node failing');
 				if (!result.records.length) throw new Error('the record set was emptied');
 			},
 		},
+		...(subject.extraCases ?? []),
 	];
 }
 

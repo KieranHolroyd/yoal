@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { formatHaStatus, type HaStatusView } from './ha.ts';
+import { formatControlStatus, formatHaStatus, type HaStatusView } from './ha.ts';
 
 const view: HaStatusView = {
 	enabled: true,
@@ -50,5 +50,37 @@ describe('yoal ha status', () => {
 		expect(text).toContain('off (drains still move replica copies)');
 		expect(text).toContain('No failover events yet.');
 		expect(formatHaStatus(view, { events: 0 })).not.toContain('events');
+	});
+
+	test('prints control-plane roles, epochs and canPromote', () => {
+		const text = formatControlStatus([
+			{
+				nodeId: 'nod_a',
+				name: 'edge-a',
+				role: 'primary',
+				epoch: 7,
+				holderNodeId: 'nod_a',
+				leaseExpiresAt: '2026-11-20T20:41:12.000Z',
+				canPromote: true,
+				replicationLagSeconds: null,
+				version: '0.16.3',
+				updatedAt: '2026-11-20T20:41:00.000Z',
+			},
+			{
+				nodeId: 'nod_b',
+				name: 'edge-b',
+				role: 'standby-behind',
+				epoch: 7,
+				holderNodeId: 'nod_a',
+				leaseExpiresAt: '2026-11-20T20:41:12.000Z',
+				canPromote: false,
+				replicationLagSeconds: 12,
+				version: '0.16.3',
+				updatedAt: null,
+			},
+		]);
+		expect(text).toMatch(/edge-a\s+primary\s+7\s+nod_a\s+yes/);
+		expect(text).toMatch(/edge-b\s+standby-behind\s+7\s+nod_a\s+no\s+12s/);
+		expect(formatControlStatus([])).toContain('No control nodes have reported');
 	});
 });

@@ -89,6 +89,7 @@ root:yoal`.
 | `YOAL_EDGE_NODE_ID` | empty | no | Node identity for single-node mode. |
 | `YOAL_CONTROL_URL` | — | no | Agent only (`/etc/yoal/agent.env`): control-plane origin, `http(s)://…`. |
 | `YOAL_CONTROL_SOCKET` | `/run/yoal/control.sock` on the control-plane host | no | Agent only: send control-plane requests to this unix socket instead of through Caddy (D105). Set for the edge agent by the installer and by Settings → Domains; leave unset on worker nodes. |
+| `YOAL_CONTROL_LOCAL_URL` | derived from `YOAL_CONTROL_URL` when `YOAL_CONTROL_SOCKET` is set | no | Agent on a control-plane host only: this host's own `/readyz`, read each heartbeat and reported as `control` for `yoal ha control status`. Leave unset on worker nodes so they never report another node's role. |
 | `YOAL_NODE_ID` | — | no | Agent only: node id from `yoal-agent join`. |
 | `YOAL_NODE_TOKEN` | — | **yes** | Agent only: bearer token from the single-use join token. |
 | `YOAL_CADDY_LISTEN` | `:443,:80` | no | Agent only: listeners Caddy should bind. |
@@ -823,6 +824,58 @@ Cloudflare (or lists them to copy), and Caddy obtains the `smtp.` certificate, a
 submission on 587/465 comes up. `journalctl -u yoal-mail` shows the MTA; the spool is
 `/var/lib/yoal/mail` and survives restarts. New orgs start in the sandbox (D119); move an org out
 in Email → Mail server.
+
+### 3.9 HA profile and movable platform dependencies
+
+The `ha` profile is an assertion that nothing the request path or a failover needs lives on one
+node (HA-PLAN H28). It is off by default, and turning it on is refusal-first. The same data is on
+**Settings → High availability** and `GET /api/v1/ha/preflight`; W14 adds `yoal ha init|preflight`
+on top of these.
+
+1. **External platform object store.** `YOAL_OBJECT_STORE` must not be `local`. Set `r2` (or
+   another external S3 store) and its `R2_*` keys in `/etc/yoal/yoal.env`, then restart the control
+   plane. The store holds releases, uploads, Litestream replicas and backups; a local store loses
+   all of them with the control host.
+2. **Registry blobs off the node.** Settings → Registry → Storage → **The platform object store**
+   (or an external S3 endpoint). Blobs then live under `/zot` in the platform bucket, and the
+   registry can move to another node without copying data. Azure/GCS platform stores cannot back
+   zot directly; use an external S3 endpoint for the registry in that case. A managed Yoal storage
+   instance (RustFS) is still one node and is refused by the `ha` preflight.
+   **Existing blobs are not copied by the switch.** Images pushed before it are only in the old
+   backend: re-push them (or copy the bucket) before moving the registry, and confirm a pull of an
+   old digest afterwards.
+3. **Agents spool telemetry to disk.** Every agent keeps buckets in a bounded spool under
+   `<YOAL_DATA_DIR>/telemetry-spool` when the control plane is unreachable. The defaults are 5,000
+   buckets and 32 MiB; raise them with `YOAL_TELEMETRY_SPOOL_BUCKETS` and
+   `YOAL_TELEMETRY_SPOOL_BYTES` (bytes) on nodes that must ride out long outages. Past the bound
+   the oldest minutes are dropped and shaded on the traffic chart as a gap; the spool counters are
+   on `/metrics` (`yoal_agent_telemetry_spool_*`). Update every agent to this release: an older
+   agent has only the in-memory buffer.
+4. **Identity and mail are movable.** Both stay on one node by design, but the node is a setting,
+   never a hostname. Settings → High availability → **Identity** and **Mail** list capable nodes;
+   the API is `PATCH /api/v1/ha/placement` with `{ "identityNode": "nod_…" }` or
+   `{ "mailNode": "nod_…" }` (`null` clears the pin).
+
+Moving identity, in order:
+
+1. Join a node whose agent declares `identity` and make sure its clock is in sync.
+2. Stop writes that create pool users (there is no maintenance mode; the pin changes desired state
+   immediately).
+3. The identity process owns one SQLite file, currently **not** replicated. Copy it (or restore its
+   Litestream backup) to the target's identity data directory; the per-pool signing keys live in the
+   control-plane ring, so tokens stay valid on the new node.
+4. Move the pin in Settings → High availability (or the API above). Desired state removes
+   `identity` from the old node and renders it on the new one; `auth.<content domain>` follows
+   through the edge with no DNS change.
+5. Confirm hosted sign-in and `/.well-known/openid-configuration` on the new node before deleting
+   the old copy. This is a move with a short outage, not a live migration; per-pool replicas remain
+   deferred (IAM.md §11.2).
+
+Moving mail: choose the target in Settings → High availability or Settings → Email → Mail server.
+The target must advertise `mail` and have a public IPv4 for the PTR (OPS §3.8). The outbox is only
+deleted after the mail node has spooled a message, so queued mail stays on the control plane and is
+claimed by the new node; messages already in `/var/lib/yoal/mail` on the old node are not moved and
+should be allowed to drain first.
 
 ## 4. Upgrade
 

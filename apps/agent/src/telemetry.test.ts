@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import type { AnalyticsEvent, FunctionTailEvent } from '@yoal/contracts';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync, appendFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AccessLogAggregator, TelemetryClient } from './telemetry.ts';
@@ -56,9 +56,11 @@ const clients: TelemetryClient[] = [];
 const directories: string[] = [];
 const restores: Array<() => void> = [];
 
-function makeClient(): TelemetryClient {
-	const directory = mkdtempSync(join(tmpdir(), 'yoal-agent-telemetry-'));
-	directories.push(directory);
+function makeClient(
+	options: { directory?: string; spoolDir?: string; spoolMaxBuckets?: number } = {},
+): TelemetryClient {
+	const directory = options.directory ?? mkdtempSync(join(tmpdir(), 'yoal-agent-telemetry-'));
+	if (!directories.includes(directory)) directories.push(directory);
 	const accessLogPath = join(directory, 'access.log');
 	writeFileSync(accessLogPath, '');
 	const client = new TelemetryClient({
@@ -67,6 +69,8 @@ function makeClient(): TelemetryClient {
 		nodeId: 'nod_1',
 		accessLogPath,
 		resolveProject: () => null,
+		...(options.spoolDir ? { spoolDir: options.spoolDir } : {}),
+		...(options.spoolMaxBuckets !== undefined ? { spoolMaxBuckets: options.spoolMaxBuckets } : {}),
 	});
 	clients.push(client);
 	return client;
@@ -282,5 +286,59 @@ describe('TelemetryClient tail batching', () => {
 		// A flush after stop is a no-op, not a second POST.
 		await client.flush(true);
 		expect(posts).toHaveLength(1);
+	});
+});
+
+describe('telemetry spool (HA-PLAN H28, W12)', () => {
+	test('a failed flush survives on disk and a later client replays it', async () => {
+		const directory = mkdtempSync(join(tmpdir(), 'yoal-agent-telemetry-'));
+		directories.push(directory);
+		const spoolDir = join(directory, 'spool');
+		const posts = stubControlPlane([500, 500, 200]);
+		const first = makeClient({ directory, spoolDir });
+		await first.start();
+		writeFileSync(join(directory, 'access.log'), `${line()}\n`);
+		await first.poll();
+		await expect(first.flush(true)).rejects.toThrow('Telemetry POST -> 500');
+		expect(first.stats).toMatchObject({ spoolQueued: 1, spoolDropped: 0 });
+		// Stop under the still-failing stub so shutdown does not race the next client.
+		await first.stop();
+
+		const secondDirectory = mkdtempSync(join(tmpdir(), 'yoal-agent-telemetry-'));
+		directories.push(secondDirectory);
+		const second = makeClient({ directory: secondDirectory, spoolDir });
+		await second.start();
+		await second.flush();
+
+		expect(posts).toHaveLength(3);
+		const last = posts.at(-1)!;
+		expect(last.body.buckets).toHaveLength(1);
+		expect(last.body.spool).toMatchObject({ queued: 1 });
+		expect(second.stats).toMatchObject({ spoolQueued: 0 });
+	});
+
+	test('the bound drops the oldest minute and the next POST carries its gap', async () => {
+		const directory = mkdtempSync(join(tmpdir(), 'yoal-agent-telemetry-'));
+		directories.push(directory);
+		const spoolDir = join(directory, 'spool');
+		const posts = stubControlPlane([500, 500, 200]);
+		const client = makeClient({ directory, spoolDir, spoolMaxBuckets: 1 });
+		await client.start();
+
+		writeFileSync(join(directory, 'access.log'), `${line({ ts: 60.2 })}\n`);
+		await client.poll();
+		await expect(client.flush(true)).rejects.toThrow();
+		appendFileSync(join(directory, 'access.log'), `${line({ ts: 120.2 })}\n`);
+		await client.poll();
+		await expect(client.flush(true)).rejects.toThrow();
+		expect(client.stats.spoolDropped).toBe(1);
+
+		await client.flush();
+		const last = posts.at(-1)!;
+		expect(last.body.buckets).toHaveLength(1);
+		expect(last.body.spool).toMatchObject({
+			dropped: 1,
+			gaps: [{ host: 'site.example.com', buckets: 1 }],
+		});
 	});
 });

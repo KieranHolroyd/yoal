@@ -26,6 +26,14 @@ this document, not the code.
    promote automatically. The cost is a brief no-auto-failover window during a deliberate change;
    the alternative is RPO > 0 in a `sync` database.
 
+**Revision 2 (W10 implementation, 2026-11-21).** A `sync` database must not block writes forever while
+the control plane is unreachable (I11). The **node that holds the last observed lease ETag** may apply
+`synchronous_standby_names` for the `on_sync_loss` decision before the control-plane CAS, and reports
+the applied setting with that ETag. The control plane reconciles: at the same ETag it records the
+change; at a stale ETag it must **never record `sync`** — it re-opens the transition through a fresh
+barrier if the lease names a healthy member, otherwise records the `on_sync_loss` outcome — and
+alerts either way. The model must cover a control-plane outage with sync-standby loss.
+
 **Revision 1 (model, 2026-11-20).** The model's minimal trace: primary acks a commit via replica B,
 records `sync: [A]`, dies before switching the setting; A is eligible at generation+1 and is missing
 that commit. §5.5 was rewritten to make the transition non-promotable; the model is re-run against
@@ -235,6 +243,10 @@ Supporting rules:
      is healthy, or to the `on_sync_loss` policy.
   3. **Close the transition.** CAS the lease to `sync: [new]`, `syncState: 'steady'`. Only now is the
      new member eligible to promote.
+- **Control-plane outage (Revision 2).** While the control plane is unreachable, the primary may
+  apply the `on_sync_loss` setting at the last lease ETag it observed and report the applied value.
+  When the control plane returns, a stale ETag is never recorded as `sync`: it re-opens with a fresh
+  barrier if a healthy member is named, else records the policy outcome, and alerts.
 - If the primary dies while `syncState: 'changing'`, no automatic promotion happens. The fleet pages
   and a person chooses: promote the old member if it is known caught up, or `accept_data_loss` for
   the new one. This is deliberate: the alternative is silently losing an acknowledged commit.
@@ -277,7 +289,8 @@ The model is written from this spec only and checks:
 - **I13**: under `sync`, no acknowledged commit is absent from the promoted primary's history —
   including a promotion after a primary dies in the middle of a sync-set change.
 - **I11**: with the control plane unavailable, traffic continues and database failover (when the
-  arbiter is reachable) still completes.
+  arbiter is reachable) still completes, including a `sync` database losing its synchronous standby
+  (Revision 2: the node applies the setting, the stale CAS is reconciled, never recorded as sync).
 
 Schedules to explore: lease renewal loss, CAS races between two candidates, arbiter outage with and
 without member loss, asymmetric partition (A reaches arbiter, B reaches A), clock step back during a

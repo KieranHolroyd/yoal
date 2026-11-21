@@ -1,23 +1,26 @@
-# W9 model — control-plane and database member machines (Revision 1)
+# W9 model — control-plane and database member machines (Revision 2)
 
-Step 2 of HA-PLAN §6.4, written from [`W9-SPEC.md`](./W9-SPEC.md) **Revision 1** alone. The
+Step 2 of HA-PLAN §6.4, written from [`W9-SPEC.md`](./W9-SPEC.md) **Revision 2** alone. The
 production lease and database-member code (`packages/core/src/ha-lease.ts` and the member machine)
 was not read; the only existing code reused is the simulator's event-queue/RNG style
 (`tests/ha/sim/`).
 
-**Result: no counterexample under Revision 1.** The first model's counterexample — recording the
-new sync set before changing `synchronous_standby_names` — is now the regression schedule
-`sync-change-minimal`, and it is safe: the lease is `syncState: 'changing'` with an empty `sync` set,
-so no member promotes, and I13 is zero. The full suite is **5,000 schedules with 0 violations**,
-including **557 sync-set transitions opened, 209 closed, 55 fallbacks, 87 downgrades and 209
-primaries killed while `changing`**, plus explicit before-barrier and after-barrier schedules.
+**Result: no counterexample under Revision 2.** The Revision 1 counterexample is the regression
+schedule `sync-change-minimal` and is safe (`changing`, no promotion, I13 zero). Revision 2 adds
+the control-plane outage path: the node applies the `on_sync_loss` setting at its last observed ETag
+while the control plane is away, reports it, and the control plane reconciles a stale ETag by
+**never recording `sync`** — it re-opens a fresh barrier if the lease names a healthy member,
+otherwise records the policy outcome — and alerts. The full suite is **5,000 schedules over 13
+families with 0 violations**: 384 control-plane outages with the sync standby lost, 384 local
+`on_sync_loss` applications, 11 same-ETag and 763 stale reconciliations, 337 fresh-barrier
+re-opens, 774 alerts, and 384 transient outages with no reports and no alert.
 
 | | |
 |---|---|
 | Model | `tests/ha/sim/w9/` (`spec.ts`, `model.ts`, `schedules.ts`, `run.ts`, `w9.test.ts`) |
 | Command | `bun tests/ha/sim/w9/run.ts --runs 5000` |
-| Runtime | 5,000 schedules in ~8 s on a laptop (~1.6 ms/schedule); 16 unit tests in ~0.8 s |
-| Exit code | `1` if any violation; Revision 1 produces none |
+| Runtime | 5,000 schedules in ~7.5 s on a laptop (~1.5 ms/schedule); 22 unit tests in ~0.7 s |
+| Exit code | `1` if any violation; Revision 2 produces none |
 
 ---
 
@@ -81,7 +84,8 @@ response still applied the write; the caller sees a timeout and must re-read.
 `streamEpoch` (invalidates in-flight WAL on a stream gap), `replAt` (per-peer ordered delivery),
 `lastProof` / `lastProofWall` (the renewal proof window), `lastRenewOk`, `peerLastAnswer` (the
 primary's keep-alive view), `lastAnsweredToPrimary` (the member's own view, which gates
-acquisition).
+acquisition), `localAsync` (Revision 2: the node applied the on_sync_loss setting locally while the
+control plane was away).
 
 **Revision 1 change fields:** `effectiveSync` (the PG setting in force), `changePhase`
 (`null | 'opening' | 'switching'`), `changeTarget`, `changeOld`, `changeOpenedAt`,
@@ -90,6 +94,13 @@ issue), `killAfterOpen`, `killAfterBarrier` (schedule hooks), `syncLostSince`, `
 
 The lease's `syncState` (`'steady' | 'changing'`) is the authority; the local change fields are the
 primary's progress through it.
+
+### Sync reconciler (Revision 2)
+
+A logical control-plane writer for the sync fields, separate from the control-lease nodes. It has
+`available`, a queue of `SyncReport { etag, applied: 'async' | 'block' | { sync }, at }`, and an
+alert count. The database renewals go straight to the arbiter; the reconciler outage is a logical
+control-plane outage, not an arbiter outage.
 
 ### Commit / write
 
@@ -177,6 +188,30 @@ A new primary with `durability: sync` and no effective standby runs the same tra
 A fallback is safe because the old member was the effective sync standby during `opening`, and a
 barrier that fails means no later commit was acknowledged through the new member (ordered WAL).
 
+### Revision 2: the control-plane outage path
+
+When the sync reconciler is unavailable the primary cannot open or close a transition (the CAS is
+the control plane's). After a sync standby is lost it waits `SYNC_DOWNGRADE_AFTER` (30 s), then:
+
+1. **Apply locally.** Set `effectiveSync` off (or to block) and `durabilityEffective = async` on the
+   node, acknowledge the blocked writes, and keep renewing the lease. The lease is **not** touched;
+   it still records the last `sync`/`syncState`/durability. The local setting is the effective
+   durability for acknowledgements from this moment.
+2. **Report.** Queue `{ etag: the last observed lease etag, applied: 'async' | 'block' }`. The node
+   does not write the lease.
+3. **Reconcile on return.** The reconciler reads the current lease:
+   - **Same ETag**: record the applied value (CAS `sync: [], durability_effective = async/block,
+     steady`) and alert.
+   - **Stale ETag**: **never record `sync`**. If the lease is `steady` and names a healthy member,
+     re-open a fresh transition with that member (open → switch → barrier → close); otherwise record
+     the `on_sync_loss` outcome (`sync: []`, async, steady) or `block`. Alert either way.
+   - A report whose lease has no serving holder is left for the next primary; that primary queues
+     its own report.
+
+The same-ETag path is a narrow race with the 5 s renewal: a report that lands after a renewal is
+stale. Both paths are safe; only the stale path forbids `sync`. `record-sync-on-stale` is the
+deliberately wrong mutant.
+
 ### Ordered WAL
 
 A primary appends a commit to its history on acceptance and ships it to every member whose
@@ -197,10 +232,16 @@ its divergent tail.
 - **I12.** At the transition to `primary`, the lease read at the successful CAS is the authority:
   if its `syncState` is not `steady`, report `promotion-during-sync-change`; if `durability` is
   `sync` and its `sync` does not contain the promoter, report `promotion-not-in-sync-set`.
-- **I13.** At every promotion, every commit in the global `acked` map with `durability === 'sync'`
-  must be in the promoter's history. At the end of the run, the final highest-generation primary
-  must hold every such commit. At every ack, if a higher-generation primary exists and does not hold
-  the commit, report `ack-lost-to-higher-primary`. Commits acknowledged under `async` are exempt.
+- **I13.** Judged under the durability the acquired lease records. At every promotion from a
+  `durability_effective: 'sync'` lease, every commit in the global `acked` map with
+  `durability === 'sync'` must be in the promoter's history; a promotion from a lease that records
+  `async` is an async failover (the `on_sync_loss` downgrade's accepted RPO > 0) and is exempt. At
+  the end of the run, the final primary's lease decides. At every ack, if a higher-generation primary
+  exists, records `sync`, and does not hold the commit, report `ack-lost-to-higher-primary`. A
+  commit's `durability` is the one in force when the client was told it committed, so commits
+  acknowledged after the local async application are exempt.
+- **Revision 2 rule.** A `sync` record written from a report whose ETag differs from the current
+  lease is `support/stale-sync-recorded`. The normal reconciler never does it; the mutant does.
 - **I11.** Each schedule may attach `controlOutage`, `requireAcks`, `failover` and `noPrimary`
   expectations; `finalize()` counts delivered acks in the windows and the first promotion after the
   loss. The failover bound is 35 s (H22's budget is 25 s; the model allows the detection/keep-alive
@@ -233,24 +274,36 @@ These are the model's reading of Revision 1. A different reading changes the res
    spec's `SYNC_CHANGE_TIMEOUT`. A crash between any two steps is a schedule.
 7. **WAL is ordered and gap-free per member** (the stream detaches on a gap and re-attaches only
    after a catch-up copy). This is what the barrier argument depends on; the model enforces it.
-8. **Promotions are automatic only.** `accept_data_loss` is never set automatically; a member not in
-   the sync set, or any member while `changing`, cannot promote. `on_sync_loss` defaults to
-   `downgrade` after 30 s.
-9. **One database, three members, three control nodes.** `p` is the initial primary; `a` and `b` are
-   replicas; `b` is the initial synchronous standby. A two-member fleet and a multi-database fleet
-   are not modelled.
-10. **A fenced/crashed old primary does not serve.** A restart is `fenced`; a freeze is fenced on
+8. **Revision 2's sync reconciler is a logical control-plane writer**, separate from the
+   control-lease nodes. Its outage (`sync-control-outage`) does not stop database renewals, the
+   arbiter, or traffic; it stops the sync-state CAS.
+9. **The node's locally applied setting is the effective durability at ack time.** The lease can lag
+   during the outage by design; the reconciler records the outcome on return. A promotion from the
+   stale sync lease is safe because only the recorded sync standby is eligible and it holds the
+   pre-loss sync acks; a promotion after the reconciler records `async` is an async failover.
+10. **The report carries the last observed lease ETag.** A renewal changes it, so a report older than
+    the next renewal is stale; the same-ETag path is a race. The reconciler never treats a stale
+    report as a `sync` record.
+11. **The normal node applies only the on_sync_loss outcome** (async or block) locally. A new `sync`
+    selection needs the fresh barrier; `node-applies-sync` is a deliberately wrong node.
+12. **Promotions are automatic only.** `accept_data_loss` is never set automatically; a member not in
+    the sync set, or any member while `changing`, cannot promote. `on_sync_loss` defaults to
+    `downgrade` after 30 s.
+13. **One database, three members, three control nodes.** `p` is the initial primary; `a` and `b` are
+    replicas; `b` is the initial synchronous standby. A two-member fleet and a multi-database fleet
+    are not modelled.
+14. **A fenced/crashed old primary does not serve.** A restart is `fenced`; a freeze is fenced on
     resume if the proof expired; it can rewind and rejoin as a replica.
-11. **After a mid-change death the model does not perform the human's manual promotion**; those
+15. **After a mid-change death the model does not perform the human's manual promotion**; those
     runs simply have no primary.
-12. **No operator force-promote, no control-plane-driven failover.** The control plane is a separate
+16. **No operator force-promote, no control-plane-driven failover.** The control plane is a separate
     process that reads and writes its own lease; the database never consults it (H22).
 
 ---
 
 ## 6. Schedules
 
-Each family is generated from the seed (family = `seed % 10`; `--family` fixes it). A schedule is
+Each family is generated from the seed (family = `seed % 13`; `--family` fixes it). A schedule is
 data, printed by `--scenario`/`--trace`.
 
 | Family | What it does |
@@ -264,6 +317,9 @@ data, printed by `--scenario`/`--trace`.
 | `sync-change` | the sync standby is lost and the primary runs the Revision 1 transition; the primary is killed in one of seven phases (see below) |
 | `keepalive-acquire` | a member answers a keep-alive, is cut off from the primary, and reaches the arbiter; it must wait one TTL after its answer before acquiring |
 | `control-outage` | all control nodes lose the arbiter (or crash) and the database primary is killed 3 s later; I11 requires traffic before the kill and a failover within the bound |
+| `control-sync-loss` | the sync reconciler is away 38–55 s and the sync standby is lost; the primary applies async locally at the last ETag and reports, the control plane returns stale and records async + alert; 30% also kill the primary after the local application |
+| `control-sync-stale` | the sync reconciler is away 40–55 s, the standby is lost 31–45 s: the local async report is stale on return, and if the standby healed the reconciler re-opens a fresh barrier; otherwise it records async |
+| `control-transient` | the sync reconciler is away 8–20 s with no sync loss; traffic must not notice, and there is no report and no alert |
 | `mixed` | 2–4 of the above with random targets/timings, healed by 100 s |
 
 **`sync-change` phases** (one per run): (0) killed before the open — the old sync standby `b`
@@ -284,6 +340,16 @@ Fixed scenarios:
 - `sync-change-downgrade` — the barrier times out and `b` is not healthy; `on_sync_loss` downgrades.
 - `sync-change-close-race` — the close CAS applies but its response is lost; the primary adopts the
   steady lease and the new standby still promotes safely.
+- `sync-control-loss` — Rev 2: outage + lost standby; local async, stale report, record async + alert.
+- `sync-control-stale-reopen` — Rev 2: the standby heals before the control plane returns; stale
+  report, fresh barrier to the healthy named member, close steady.
+- `sync-control-same-etag` — Rev 2: the return races the next renewal (same ETag or stale); either
+  way the applied value is recorded and an alert fires.
+- `sync-control-transient` — Rev 2: a transient outage with nothing else failing; acks continue, no
+  report, no alert.
+- `sync-control-stale-sync` — Rev 2's forbidden act: a buggy node reports a new sync member from
+  inside the outage; the normal reconciler refuses it, `--mutant record-sync-on-stale` records it and
+  a lagging member promotes with missing acknowledged commits.
 - `control-outage-minimal` — the I11 positive case.
 - `wall-clock-fence` — a renewal loss plus a 90 s backward wall step; the `fence-wall-clock` mutant
   overlaps two primaries, the monotonic machine does not.
@@ -292,43 +358,60 @@ Fixed scenarios:
 
 ## 7. Results
 
-`bun tests/ha/sim/w9/run.ts --runs 5000`, 5,000 schedules, **~8 s**:
+`bun tests/ha/sim/w9/run.ts --runs 5000`, 5,000 schedules over 13 families, **~7.5 s**:
 
 | Family | Runs | DB promotions | Control takeovers | Acks | Strict-overlap ms (max/run) | Violations |
 |---|---:|---:|---:|---:|---:|---|
-| `renew-loss` | 500 | 316 | 0 | 100,941 | 335 (121) | none |
-| `cas-race` | 500 | 500 | 500 | 103,437 | 2,656 (587) | none |
-| `arbiter-outage` | 500 | 287 | 0 | 98,066 | 0 | none |
-| `asymmetric` | 500 | 500 | 0 | 97,138 | 844 (631) | none |
-| `clock-step` | 500 | 7 | 0 | 106,212 | 0 | none |
-| `stale-leader` | 500 | 370 | 130 | 97,415 | 0 | none |
-| `sync-change` | 500 | 147 | 0 | 14,068 | 0 | none |
-| `keepalive-acquire` | 500 | 500 | 0 | 98,806 | 202 (86) | none |
-| `control-outage` | 500 | 500 | 407 | 94,481 | 0 | none |
-| `mixed` | 500 | 162 | 220 | 86,471 | 0 | none |
-| **total** | **5,000** | **3,289** | **1,257** | **897,035** | **4,037** | **0** |
+| `renew-loss` | 384 | 229 | 0 | 75,835 | 193 (101) | none |
+| `cas-race` | 385 | 385 | 385 | 79,546 | 478 (199) | none |
+| `arbiter-outage` | 385 | 205 | 0 | 75,991 | 0 | none |
+| `asymmetric` | 385 | 385 | 0 | 75,284 | 8 (7) | none |
+| `clock-step` | 385 | 5 | 0 | 81,738 | 0 | none |
+| `stale-leader` | 385 | 295 | 90 | 74,705 | 0 | none |
+| `sync-change` | 385 | 110 | 0 | 10,664 | 0 | none |
+| `keepalive-acquire` | 385 | 385 | 0 | 75,849 | 59 (59) | none |
+| `control-outage` | 385 | 385 | 318 | 72,724 | 0 | none |
+| `control-sync-loss` | 384 | 109 | 0 | 51,433 | 0 | none |
+| `control-sync-stale` | 384 | 0 | 0 | 53,956 | 0 | none |
+| `control-transient` | 384 | 0 | 0 | 32,319 | 0 | none |
+| `mixed` | 384 | 112 | 165 | 66,325 | 0 | none |
+| **total** | **5,000** | **2,605** | **958** | **826,369** | **738** | **0** |
 
 - **I3, I11, I12 and I13: zero violations.** The same is true of every fixed scenario.
 - The strict overlap is two primaries at *different* generations. I3's letter permits it; the
-  plan's intent does not. Total 4.0 s over 5,000 runs (~0.8 ms/run), worst 631 ms in `asymmetric`.
-  No write was acknowledged during an overlap (I13's ack check would have fired).
+  plan's intent does not. Total 738 ms over 5,000 runs, worst 199 ms in `cas-race`. No write was
+  acknowledged during an overlap (I13's ack check would have fired).
 - `arbiter-outage`: variant A keeps the primary for the whole outage; variant B fences it and no
   promotion happens until the arbiter returns — the designed availability loss.
-- `clock-step`: 7 promotions (some schedules also lose the arbiter); the other 493 are inert.
+- `clock-step`: 5 promotions (some schedules also lose the arbiter); the rest are inert.
 
-**Revision 1 coverage in the `sync-change` family** (500 runs):
+**Revision 1 coverage in the `sync-change` family** (385 runs): 440 transitions opened (a run can
+open a second after a promotion), 170 closed, 52 fell back to the healthy old member, 62 downgraded
+and 158 primaries were killed while `changing` with no automatic promotion. The fixed schedules
+cover a death **before the barrier** and **after the barrier before the close**, both **0 promotions
+and 0 violations**.
 
-| Outcome | Count |
-|---|---:|
-| transitions opened | 557 (some runs open a second one after a promotion) |
-| transitions closed `steady` | 209 |
-| barrier timeout → fallback to the healthy old member | 55 |
-| barrier timeout → `on_sync_loss` downgrade | 87 |
-| primary killed while `changing` (no auto promotion) | 209 |
+**Revision 2 coverage** (the three new families):
 
-The fixed schedules additionally cover a death **before the barrier** (`sync-change-minimal`) and
-**after the barrier before the close** (`sync-change-after-barrier`), both with **0 promotions and
-0 violations**.
+| | `control-sync-loss` | `control-sync-stale` | `control-transient` |
+|---|---:|---:|---:|
+| runs | 384 | 384 | 384 |
+| local `on_sync_loss` applications | 384 | 382 | 0 |
+| reports reconciled | 384 | 382 | 0 |
+| same ETag | 11 | 0 | 0 |
+| stale ETag | 379 | 384 | 0 |
+| fresh-barrier re-opens | 1 | 336 | 0 |
+| alerts | 390 | 384 | 0 |
+| acks | 51,433 | 53,956 | 32,319 |
+| promotions | 109 | 0 | 0 |
+
+`control-sync-loss` is the outage + lost standby: every run applies async locally, the report is
+stale on return, the reconciler refuses `sync`, records async and alerts; 30 % also kill the primary
+after the local application, and those promote a new primary within the bound (I11). `control-sync-
+stale` heals the standby during the outage: the stale report finds a healthy named member and
+re-opens a fresh barrier/close (336/382), otherwise records async. `control-transient` has no sync
+loss: no reports, no alerts, and 32,319 acknowledged writes during the outage windows. The extra
+stale counts over reports are retries after a CAS raced a renewal.
 
 ### Checker validation (not part of the 5,000 count)
 
@@ -337,6 +420,8 @@ The model is not vacuous. Deliberately wrong variants are selectable with `--mut
 | Mutant | Run | Caught by |
 |---|---|---|
 | `promote-while-changing` | `--scenario sync-change-minimal` | **I12/promotion-during-sync-change**, and **I13/missing-ack** (the gate is what prevents the loss) |
+| `node-applies-sync` | `--scenario sync-control-stale-sync` | the normal reconciler refuses the stale `sync` report and records async; the lagging member promotes from the async lease with **no I13** |
+| `record-sync-on-stale` | `--scenario sync-control-stale-sync` | **support/stale-sync-recorded** and **I13/missing-ack-at-promotion** — the forbidden act loses the pre-loss sync commits |
 | `ignore-eligibility` | `--family sync-change`, 50 runs | **I12/promotion-not-in-sync-set** in 6 runs |
 | `ignore-keepalive` | `--family keepalive-acquire`, 100 runs | **support/acquired-too-early** in 6 runs |
 | `cas-same-generation` | `--family keepalive-acquire`, 100 runs | **I3** at seed 58, plus the holder-change support rule in all 100 |
@@ -348,10 +433,10 @@ The I3 checker is also exercised directly: `forcePrimaryForTest('a',1)` +
 
 ---
 
-## 8. Revision 1: the counterexample and the regression
+## 8. History: the counterexample and the revisions
 
 The first model (Revision 0) found this trace. It is kept here because it is the reason Revision 1
-exists, and it is now a regression schedule.
+exists (and Revision 2 extends the outage path); it is now a regression schedule.
 
 ### Revision 0 (defect)
 
@@ -418,6 +503,54 @@ the new standby still promotes with every acknowledged commit.
 scenarios: before/after the barrier, fallback, downgrade, close-response loss, and a primary killed
 inside every phase of the transition.
 
+### Revision 2: the control-plane outage path
+
+`sync-control-loss` (`--scenario sync-control-loss`):
+
+```
+ 2.000s reconciler control plane unreachable for 43.0 s
+34.161s p        control plane away; applied on_sync_loss async locally at "e9"; report queued
+45.000s reconciler control plane returned; reconciling reports
+45.102s reconciler stale report "e9" (current "e14"): never recording sync; alert
+45.218s reconciler recorded async: sync [], steady
+ no violation; 0 promotions
+```
+
+The primary blocked writes for the 30 s `SYNC_DOWNGRADE_AFTER`, applied async locally so traffic
+resumed, and left the lease stale. On return the ETag was stale (a renewal had moved it); the
+reconciler refused `sync`, recorded the policy outcome and alerted. The writes acked after the local
+application are async; the pre-loss sync acks are on `b`, which is the only eligible member of the
+stale `sync {b}` lease. I13 holds.
+
+`sync-control-stale-reopen` (the standby heals before the control plane returns):
+
+```
+34.161s p        applied on_sync_loss async locally at "e9"; report queued
+55.106s reconciler stale report "e9" (current "e16"): never recording sync; alert
+55.106s reconciler re-opening a fresh barrier to the healthy named member b
+55.287s p        open: sync [], syncState changing (target b)
+55.287s p        switch: synchronous_standby_names = b; barrier #79
+55.566s p        close: sync {b}, syncState steady
+ no violation; 0 promotions
+```
+
+The re-open uses a **fresh barrier**; the stale report itself is never recorded as `sync`.
+
+`sync-control-transient` (nothing else fails): no report, no alert, 56 acknowledged writes in the
+outage window. Traffic does not depend on the reconciler.
+
+The wrong node and the wrong reconciler:
+
+- `node-applies-sync` (the node reports `sync a` from inside the outage): the normal reconciler
+  refuses the stale `sync` report, records `async`, and the lagging `a` later promotes from an
+  **async** lease — no I13. This is the safe path.
+- `record-sync-on-stale` (the reconciler records the stale `sync a`): `support/stale-sync-recorded`
+  plus three `I13/missing-ack-at-promotion` violations when the lagging `a` promotes from the
+  re-created **sync** lease. This is the checker validation, not a spec counterexample.
+
+**No Revision 2 counterexample was found.** The normal reconciler never records `sync` from a stale
+ETag; the 5,000-schedule run and every fixed scenario have zero I3/I11/I12/I13 violations.
+
 ---
 
 ## 9. What is not modelled
@@ -426,6 +559,16 @@ inside every phase of the transition.
   `changing`; a person promotes the old member or uses `accept_data_loss` for the new one. The model
   stops at "no auto promotion" and does not perform the manual action, so those runs end without a
   primary. That is the designed safety outcome.
+- **The real control-plane process and desired state.** The Revision 2 reconciler is a logical
+  writer of the sync fields with an availability flag; the control-plane service, its endpoints and
+  its desired-state reconciliation are not modelled. The alert is a counter/log, not a page.
+- **The Revision 2 local-async window's I13 reading.** I13 is judged under the durability in force
+  when the ack was issued and under the acquired lease's recorded durability. The local async
+  application makes the post-application acks async; a promotion from the stale sync lease is safe
+  because only the recorded sync standby is eligible and it holds the pre-loss sync acks. A
+  promotion from a lease the reconciler recorded as `async` is an async failover (the downgrade's
+  accepted RPO > 0). This is the model's reading; the spec's "lease is the authority" is about the
+  recorded state, and Revision 2 explicitly allows the local setting to precede the record.
 - **`accept_data_loss`** as a manual, audited action; `block` is implemented but not exercised by
   the default families.
 - **Run leases, desired state, the platform route, audits.** The control plane's `primary` is a
@@ -463,6 +606,14 @@ bun tests/ha/sim/w9/run.ts --scenario sync-change-after-close --trace
 bun tests/ha/sim/w9/run.ts --scenario sync-change-fallback --trace
 bun tests/ha/sim/w9/run.ts --scenario sync-change-downgrade --trace
 bun tests/ha/sim/w9/run.ts --scenario sync-change-close-race --trace
+
+# Revision 2: the control-plane outage path and the stale report
+bun tests/ha/sim/w9/run.ts --scenario sync-control-loss --trace
+bun tests/ha/sim/w9/run.ts --scenario sync-control-stale-reopen --trace
+bun tests/ha/sim/w9/run.ts --scenario sync-control-same-etag --trace
+bun tests/ha/sim/w9/run.ts --scenario sync-control-transient --trace
+bun tests/ha/sim/w9/run.ts --scenario sync-control-stale-sync --mutant node-applies-sync
+bun tests/ha/sim/w9/run.ts --scenario sync-control-stale-sync --mutant record-sync-on-stale
 
 # the I11 case and the checker validation
 bun tests/ha/sim/w9/run.ts --scenario control-outage-minimal
