@@ -179,7 +179,7 @@ interface Options {
 	 * `--object-store azure://…|gcs://…|s3://…` (HA Wave 5): the `yoal.env` keys for the store, its
 	 * flag line for Azure/GCS, and any required key no source had. Credentials never come from argv.
 	 */
-	objectStoreTarget?: { env: Map<string, string>; missing: string[]; label: string };
+	objectStoreTarget?: { env: Map<string, string>; missing: string[]; label: string; copy?: { from: string; to: string } };
 	/** `--profile` (HA Wave 5): writes the same YOAL_FEATURE_* lines `yoal ha init` prints. */
 	profile?: InstallProfile;
 	/** `--zone` (HA Wave 5): this machine's zone, sent with its join. */
@@ -337,9 +337,18 @@ try {
 				credentialsJson = text.trimStart().startsWith('{');
 				if (!credentialsJson) file = readEnvFile(credentialsPath);
 			}
-			const target = objectStoreEnv(choice, { env: process.env, file, existing: existingEnv, credentialsPath, credentialsJson });
+			// The endpoint and region are not secrets, so they may be flags; keys never are.
+			const endpoint = value('--object-store-endpoint');
+			const target = objectStoreEnv(choice, {
+				env: { ...process.env, ...(endpoint && choice.kind === 's3' ? { R2_ENDPOINT: endpoint } : {}) },
+				file,
+				existing: existingEnv,
+				credentialsPath,
+				credentialsJson,
+				region: value('--object-store-region'),
+			});
 			options.objectStore = choice.kind === 's3' ? 'r2' : choice.kind;
-			options.objectStoreTarget = { env: target.set, missing: target.missing, label: rawStore };
+			options.objectStoreTarget = { env: target.set, missing: target.missing, label: rawStore, ...(target.copy ? { copy: target.copy } : {}) };
 		}
 	}
 	if (has('--profile')) {
@@ -365,6 +374,7 @@ if (options.profile || options.zone || options.roles || options.objectStoreTarge
 	if (options.objectStoreTarget) {
 		const keys = [...options.objectStoreTarget.env.keys()].join(', ');
 		console.log(`  object store ${options.objectStoreTarget.label}: ${keys}${options.objectStoreTarget.missing.length > 0 ? `; missing ${options.objectStoreTarget.missing.join(', ')}` : ''}`);
+		if (options.objectStoreTarget.copy) console.log(`  GCS key ${options.objectStoreTarget.copy.from} is copied to ${options.objectStoreTarget.copy.to} (root:yoal 0640)`);
 	}
 }
 
@@ -1179,6 +1189,14 @@ function writeSecrets(): Map<string, string> {
 	}
 	// `--object-store azure://|gcs://|s3://` (HA Wave 5): the store's keys and, for Azure/GCS, its flag.
 	if (options.objectStoreTarget) for (const [key, value] of options.objectStoreTarget.env) env.set(key, value);
+	// A GCS service-account key is copied where the control plane (user yoal) can read it.
+	const keyCopy = options.objectStoreTarget?.copy;
+	if (keyCopy && !options.dryRun) {
+		copyFileSync(keyCopy.from, keyCopy.to);
+		run('chown', ['root:yoal', keyCopy.to], { allowFailure: true });
+		run('chmod', ['0640', keyCopy.to], { allowFailure: true });
+		log(`copied the GCS key to ${keyCopy.to} (root:yoal 0640)`);
+	} else if (keyCopy) log(`would copy ${keyCopy.from} to ${keyCopy.to} (root:yoal 0640)`);
 	// `--profile` (HA Wave 5): the same flag lines `yoal ha init` prints; yoal.env stays the only flag store.
 	if (options.profile) for (const [key, value] of profileFlagLines(options.profile)) env.set(key, value);
 	if (!options.dryRun) {

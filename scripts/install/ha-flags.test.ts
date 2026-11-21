@@ -3,7 +3,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { haInitPlan } from '../../packages/contracts/src/ha-init.ts';
-import { objectStoreEnv, parseObjectStore, parseProfile, parseRoles, parseZone, profileFlagLines } from './ha-flags.ts';
+import { parsePlatformObjectStoreKind } from '../../packages/contracts/src/platform-config.ts';
+import { GCS_CREDENTIALS_COPY, objectStoreEnv, parseObjectStore, parseProfile, parseRoles, parseZone, profileFlagLines } from './ha-flags.ts';
 
 describe('installer HA flags (HA-PLAN §8 steps 1–2)', () => {
 	test('--profile writes exactly the flag lines yoal ha init prints, and single writes none', () => {
@@ -31,6 +32,9 @@ describe('installer HA flags (HA-PLAN §8 steps 1–2)', () => {
 		expect(parseObjectStore('s3://yoal')).toEqual({ kind: 's3', name: 'yoal' });
 		expect(() => parseObjectStore('azure://')).toThrow(/--object-store/);
 		expect(() => parseObjectStore('azure://Bad_Name')).toThrow(/not a valid/);
+		// The platform's own bucket rules (bucketNameSchema): no dots, no double hyphens.
+		expect(() => parseObjectStore('s3://my.bucket')).toThrow(/not a valid/);
+		expect(() => parseObjectStore('gcs://a--b')).toThrow(/not a valid/);
 		expect(() => parseObjectStore('ftp://x')).toThrow(/--object-store must be/);
 	});
 
@@ -46,19 +50,51 @@ describe('installer HA flags (HA-PLAN §8 steps 1–2)', () => {
 		expect(azure.missing).toEqual([]);
 		expect(objectStoreEnv({ kind: 'azure', name: 'platform' }, { env: {} }).missing).toEqual(['YOAL_AZURE_ACCOUNT', 'YOAL_AZURE_ACCOUNT_KEY or YOAL_AZURE_SAS_TOKEN']);
 
-		const gcs = objectStoreEnv({ kind: 'gcs', name: 'bucket-1' }, { env: {}, credentialsPath: '/etc/yoal/gcs.json', credentialsJson: true });
-		expect(Object.fromEntries(gcs.set)).toMatchObject({ YOAL_OBJECT_STORE: 'gcs', YOAL_FEATURE_OBJECT_STORE_GCS: '1', YOAL_GCS_CREDENTIALS_FILE: '/etc/yoal/gcs.json', YOAL_GCS_BUCKET: 'bucket-1' });
+		// The service-account key is copied into /etc/yoal (root:yoal 0640) so the control plane can
+		// read it, and yoal.env names the copy by its absolute path.
+		const exists = (path: string) => path === '/root/sa.json' || path === '/srv/key.json';
+		const gcs = objectStoreEnv({ kind: 'gcs', name: 'bucket-1' }, { env: {}, credentialsPath: '/root/sa.json', credentialsJson: true, exists });
+		expect(Object.fromEntries(gcs.set)).toMatchObject({
+			YOAL_OBJECT_STORE: 'gcs',
+			YOAL_FEATURE_OBJECT_STORE_GCS: '1',
+			YOAL_GCS_CREDENTIALS_FILE: GCS_CREDENTIALS_COPY,
+			YOAL_GCS_BUCKET: 'bucket-1',
+		});
+		expect(gcs.copy).toEqual({ from: '/root/sa.json', to: GCS_CREDENTIALS_COPY });
+		expect(GCS_CREDENTIALS_COPY).toBe('/etc/yoal/gcs-credentials.json');
+		expect(objectStoreEnv({ kind: 'gcs', name: 'bucket-1' }, { env: { YOAL_GCS_CREDENTIALS_FILE: 'key.json' }, exists }).missing).toEqual([
+			'YOAL_GCS_CREDENTIALS_FILE (an absolute path)',
+		]);
+		expect(objectStoreEnv({ kind: 'gcs', name: 'bucket-1' }, { env: { YOAL_GCS_CREDENTIALS_FILE: '/nope.json' }, exists }).missing).toEqual([
+			'YOAL_GCS_CREDENTIALS_FILE (/nope.json does not exist)',
+		]);
+		expect(objectStoreEnv({ kind: 'gcs', name: 'bucket-1' }, { env: { YOAL_GCS_CREDENTIALS_FILE: '/srv/key.json' }, exists }).copy).toEqual({
+			from: '/srv/key.json',
+			to: GCS_CREDENTIALS_COPY,
+		});
 
-		const s3 = objectStoreEnv({ kind: 's3', name: 'yoal' }, { env: { R2_ACCESS_KEY_ID: 'AK' }, existing: new Map([['R2_SECRET_ACCESS_KEY', 'old'], ['R2_ENDPOINT', 'https://s3.example.com']]) });
+		// s3:// is the platform's S3 kind (YOAL_OBJECT_STORE=r2 parses as it) with an explicit endpoint
+		// and region, and no placeholder account id.
+		const s3 = objectStoreEnv(
+			{ kind: 's3', name: 'yoal' },
+			{ env: { R2_ACCESS_KEY_ID: 'AK' }, region: 'eu-west-2', existing: new Map([['R2_SECRET_ACCESS_KEY', 'old'], ['R2_ENDPOINT', 'https://s3.eu-west-2.amazonaws.com']]) },
+		);
 		expect(Object.fromEntries(s3.set)).toEqual({
 			YOAL_OBJECT_STORE: 'r2',
-			R2_ENDPOINT: 'https://s3.example.com',
-			R2_ACCOUNT_ID: 's3',
+			R2_ENDPOINT: 'https://s3.eu-west-2.amazonaws.com',
+			R2_REGION: 'eu-west-2',
 			R2_ACCESS_KEY_ID: 'AK',
 			R2_SECRET_ACCESS_KEY: 'old',
 			R2_BUCKET: 'yoal',
 		});
-		expect(objectStoreEnv({ kind: 's3', name: 'yoal' }, { env: {} }).missing).toEqual(['R2_ENDPOINT', 'R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY']);
+		expect(parsePlatformObjectStoreKind(s3.set.get('YOAL_OBJECT_STORE'))).toBe('r2');
+		expect(objectStoreEnv({ kind: 's3', name: 'yoal' }, { env: {} }).missing).toEqual([
+			'R2_ENDPOINT',
+			'--object-store-region (R2_REGION)',
+			'R2_ACCESS_KEY_ID',
+			'R2_SECRET_ACCESS_KEY',
+		]);
+		expect(objectStoreEnv({ kind: 's3', name: 'yoal' }, { env: { R2_ENDPOINT: 'http://s3.example.com' }, region: 'x' }).missing).toContain('R2_ENDPOINT (https://)');
 	});
 });
 

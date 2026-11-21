@@ -30,12 +30,14 @@ export const load: PageServerLoad = async ({ locals }) => {
 };
 
 function r2Fields(data: FormData) {
+	// The account id only derives an R2 endpoint: with an explicit endpoint (any S3 store) it is optional.
+	const endpoint = formString(data, 'endpoint') || process.env.R2_ENDPOINT || '';
 	return collect([
 		{
 			field: 'accountId',
 			key: 'R2_ACCOUNT_ID',
 			value: formString(data, 'accountId').toLowerCase(),
-			required: true,
+			required: !endpoint,
 			label: 'Account ID'
 		},
 		{

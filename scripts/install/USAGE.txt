@@ -36,7 +36,12 @@ Options:
                               An external store (HA-PLAN W3). Azure and GCS also turn on their
                               YOAL_FEATURE_OBJECT_STORE_* flag. Credentials come from the
                               environment (YOAL_AZURE_*, YOAL_GCS_*, R2_*) or the file below,
-                              never from the command line; s3:// needs R2_ENDPOINT.
+                              never from the command line. s3:// needs an https endpoint and a
+                              region. A GCS key is copied to /etc/yoal/gcs-credentials.json.
+  --object-store-endpoint <https-url>
+                              The S3 endpoint for s3:// (or R2_ENDPOINT).
+  --object-store-region <region>
+                              The S3 region for s3:// (or R2_REGION). Required for s3://.
   --object-store-credentials-file <path>
                               The store's keys, one KEY=value per line; for gcs:// it may be the
                               service-account JSON itself. Also YOAL_OBJECT_STORE_CREDENTIALS_FILE.
