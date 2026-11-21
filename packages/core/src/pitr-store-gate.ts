@@ -23,6 +23,10 @@ import { missingCapabilityMessage, nodeCapabilityList, objectStoreKindAllowed } 
 export function pitrStoreProblem(ctx: Pick<CoreContext, 'config' | 'db'>, repo: DatabasePitrRepository, nodeId: string | null): string | null {
 	const kind = pitrRepositoryKind(repo);
 	if (kind === 's3') return null;
+	// W10 owns the non-S3 data path (the helper's pgBackRest Azure/GCS client). With its flag off
+	// PITR stays S3-only, exactly as it shipped, even if an object-store kind is otherwise enabled.
+	if (!featureEnabled(ctx.config, 'PITR_REWIND'))
+		return 'A non-S3 point-in-time recovery repository needs YOAL_FEATURE_PITR_REWIND, which is off; use an S3-compatible repository.';
 	const flagged = objectStoreKindIssue(kind, {
 		OBJECT_STORE_AZURE: featureEnabled(ctx.config, 'OBJECT_STORE_AZURE'),
 		OBJECT_STORE_GCS: featureEnabled(ctx.config, 'OBJECT_STORE_GCS'),

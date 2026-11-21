@@ -1,8 +1,11 @@
 import {
 	DATABASE_REPLICATION_SAMPLE_SECONDS,
+	databaseReplicaRewindActivationSchema,
 	databaseReplicationActivationSchema,
 	type DatabaseReplicaPromotionResult,
 	type DatabaseReplicaPromotionTask,
+	type DatabaseReplicaRewindResult,
+	type DatabaseReplicaRewindTask,
 	type DatabaseReplicationReport,
 	type DatabaseReplicationSlotStatus,
 	type DesiredState,
@@ -26,7 +29,7 @@ import type { HelperApi } from './helper-client.ts';
 export interface DatabaseReplicationRunnerOptions {
 	controlUrl: string;
 	nodeToken: string;
-	helper: Pick<HelperApi, 'replicationConfigure' | 'replicationStatus' | 'replicaPromote'>;
+	helper: Pick<HelperApi, 'replicationConfigure' | 'replicationStatus' | 'replicaPromote' | 'rewindReplica'>;
 	/** The workload runtime: a promoted replica must not be re-applied by the reconcile loop. */
 	runtime: { hold(id: string): void; release(id: string): void };
 	log?: (level: 'info' | 'warn' | 'error', message: string) => void;
@@ -59,6 +62,7 @@ export class DatabaseReplicationRunner {
 	private readonly databases = new Map<string, DatabaseState>();
 	private lastSampleAt = Number.NEGATIVE_INFINITY;
 	private readonly results = new Map<string, DatabaseReplicaPromotionResult>();
+	private readonly rewindResults = new Map<string, DatabaseReplicaRewindResult>();
 	private readonly completed = new Set<string>();
 	private readonly inFlight = new Set<string>();
 	/** Replica workloads held for a promotion, released once they leave desired state. */
@@ -91,6 +95,14 @@ export class DatabaseReplicationRunner {
 		return [...this.results.values()].slice(0, 20);
 	}
 
+	pendingRewindResults(): DatabaseReplicaRewindResult[] {
+		return [...this.rewindResults.values()].slice(0, 20);
+	}
+
+	acknowledgeRewinds(replicaIds: readonly string[]): void {
+		for (const id of replicaIds) this.rewindResults.delete(id);
+	}
+
 	acknowledgePromotions(failoverIds: readonly string[]): void {
 		for (const id of failoverIds) {
 			this.results.delete(id);
@@ -119,6 +131,7 @@ export class DatabaseReplicationRunner {
 			}
 		}
 		await this.promote(state, signal);
+		await this.rewind(state, signal);
 	}
 
 	private async configure(
@@ -184,8 +197,71 @@ export class DatabaseReplicationRunner {
 		}
 	}
 
-	private async execute(task: DatabaseReplicaPromotionTask): Promise<void> {
-		this.inFlight.add(task.failoverId);
+	/**
+	 * Rewind old primaries onto the new primary (HA-PLAN W10). The workload is not in desired state
+	 * until this finishes (the control plane holds it back), so nothing races the adopted data dir.
+	 * The credential is fetched per task and never stored; the result rides a heartbeat.
+	 */
+	private async rewind(state: DesiredState, signal: AbortSignal): Promise<void> {
+		const tasks = state.databaseReplicaRewinds ?? [];
+		for (const task of tasks) {
+			if (signal.aborted) return;
+			if (this.completed.has(`rewind:${task.replicaId}`) || this.inFlight.has(`rewind:${task.replicaId}`))
+				continue;
+			if (this.rewindResults.has(task.replicaId)) continue;
+			await this.executeRewind(task, signal);
+		}
+	}
+
+	private async executeRewind(task: DatabaseReplicaRewindTask, signal: AbortSignal): Promise<void> {
+		this.inFlight.add(`rewind:${task.replicaId}`);
+		try {
+			const response = await this.fetcher(
+				`${this.controlUrl}/api/agent/database-rewind/${encodeURIComponent(task.replicaId)}`,
+				{
+					headers: { authorization: `Bearer ${this.nodeToken}`, accept: 'application/json' },
+					signal,
+				},
+			);
+			if (!response.ok) {
+				const text = await response.text().catch(() => '');
+				throw new Error(`rewind activation -> ${response.status}${text ? `: ${text.slice(0, 300)}` : ''}`);
+			}
+			const activation = databaseReplicaRewindActivationSchema.parse(await response.json());
+			if (activation.replicaId !== task.replicaId || activation.databaseId !== task.databaseId)
+				throw new Error('The rewind activation does not match the desired task');
+			const result = await this.helper.rewindReplica(task.replicaWorkloadId, {
+				databaseId: task.databaseId,
+				walLogHints: task.walLogHints,
+				user: activation.user,
+				password: activation.password,
+			});
+			this.rewindResults.set(task.replicaId, {
+				replicaId: task.replicaId,
+				status: result.rewound ? 'ok' : result.fallback ? 'fallback' : 'failed',
+				rewound: result.rewound,
+				...(result.reason ? { reason: result.reason } : {}),
+			});
+			this.log(
+				'info',
+				result.rewound
+					? `Rewound ${task.databaseId} onto ${task.replicaWorkloadId}`
+					: `Rebuilding ${task.replicaWorkloadId} instead of rewinding${result.reason ? `: ${result.reason}` : ''}`,
+			);
+		} catch (error) {
+			this.rewindResults.set(task.replicaId, {
+				replicaId: task.replicaId,
+				status: 'failed',
+				rewound: false,
+				error: errorText(error).slice(0, 2_000),
+			});
+			this.log('error', `Could not rewind ${task.databaseId} onto ${task.replicaWorkloadId}: ${errorText(error)}`);
+		} finally {
+			this.inFlight.delete(`rewind:${task.replicaId}`);
+		}
+	}
+
+	private async execute(task: DatabaseReplicaPromotionTask): Promise<void> {		this.inFlight.add(task.failoverId);
 		this.runtime.hold(task.replicaWorkloadId);
 		this.held.set(task.failoverId, task.replicaWorkloadId);
 		try {

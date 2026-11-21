@@ -144,6 +144,9 @@ class FakeHelper implements HelperApi {
 	async replicaPromote(): Promise<never> {
 		throw new Error('replicaPromote not used in this test');
 	}
+	async rewindReplica(): Promise<never> {
+		throw new Error('rewindReplica not used in this test');
+	}
 	async pitrConfigure(): Promise<never> {
 		throw new Error('pitrConfigure not used in this test');
 	}
@@ -798,6 +801,30 @@ describe('managed databases', () => {
 		f.activations.set('app', activationFor('app'));
 		await f.runtime.converge(state([workload('app')]));
 		expect(f.runtime.databaseTargets()).toEqual([]);
+	});
+
+	test('readyWorkloadIds includes a replica workload that has no monitor credentials', async () => {
+		const f = fixture();
+		const replicaId = 'db_dbr_0123456789abcdef0123456789abcdef';
+		const replica = databaseWorkload({
+			id: replicaId,
+			projectId: replicaId,
+			deploymentId: replicaId,
+			port: 15433,
+			upstream: '127.0.0.1:15433',
+			database: { engine: 'postgres', version: '17', replica: { slot: 'yoal_dbr_test' } },
+		});
+		f.activations.set(replicaId, {
+			workloadId: replicaId,
+			activationVersion: ACTIVATION,
+			env: { POSTGRES_PASSWORD: OWNER_PASSWORD },
+			files: {},
+		});
+		await f.runtime.converge(state([replica], 1, []));
+		// A read replica has no monitor, so the stats sampler skips it...
+		expect(f.runtime.databaseTargets()).toEqual([]);
+		// ...but PITR readiness must still see the workload id that exists on this node.
+		expect(f.runtime.readyWorkloadIds().has(replicaId)).toBe(true);
 	});
 
 	test('credentials never reach the diff cache, and a restart re-fetches them without re-applying', async () => {

@@ -2,7 +2,10 @@
 
 Status: **implemented end to end behind `YOAL_FEATURE_PITR`, on by default, not yet proven on
 Linux.** It does nothing until the pgBackRest repository is configured; the restore drill below has
-not yet passed on a Debian 13 node with Podman.
+not yet passed on a Debian 13 node with Podman. Replicas of a PITR database, `pg_rewind`
+re-attachment and Azure/GCS repositories are behind the opt-in `PITR_REWIND` flag (HA-PLAN W10);
+with it off PITR is exactly the S3-only, single-member path it shipped as. Backing up *from* a
+replica is deferred (see below).
 Logical dumps and restore-to-new remain the supported path ([DATABASES.md](./DATABASES.md) §8);
 PITR does not replace them.
 
@@ -18,9 +21,48 @@ See [What still needs a live check](#what-still-needs-a-live-check).
 - **PostgreSQL 18 on the standard image only.** 16/17 run the alpine image and the D126 variants
   (`postgis`, `pg_cron`) have no pgBackRest build; enabling PITR on them is refused with the reason
   (`pitrUnsupportedReason`). Upgrade first.
-- **One S3-compatible repository per install**, from the control plane's environment.
+- **One repository per install**, from the control plane's environment: S3-compatible today; Azure
+  Blob and Google Cloud Storage with `PITR_REWIND` and their own `OBJECT_STORE_*` flags.
 - **Restores always create a new database on the source's node.** In-place restore and cross-node
   restore are out of scope.
+
+## Replicas, promotion and rewind (`PITR_REWIND`, opt-in)
+
+With `YOAL_FEATURE_PITR_REWIND=on`:
+
+- A replica of a PITR database runs the same `yoal-postgres-pitr` image and mounts its own
+  `/run/yoal-workloads/<replica id>/pgbackrest`, with the **same stanza**. WAL received on the
+  standby is archived by the primary; once promoted, the same container archives its own WAL, so the
+  stanza follows the primary across a promotion without a rewrite.
+- **Base backups run on the primary only.** pgBackRest's `backup-standby` needs both a primary and a
+  standby host configured (`pg1-*` plus a `pg2-*` standby and `backup-standby=y`); this single-host
+  layout has only the container pgBackRest runs in, so routing a base backup to a replica is
+  deferred until that two-host config exists. The fixed verbs still carry the **database's** stanza
+  (`configure` and `basebackup` take `stanza`); the helper never derives it from a container
+  workload id, which for a replica would name an empty, orphan stanza.
+- After a promotion, the old primary's node gets a replica that adopts the diverged data dir by
+  `pg_rewind` instead of a full `pg_basebackup`. The helper's fixed verb
+  `POST /v1/workloads/<replica id>/replica/rewind` takes
+  `{ databaseId, user, password, walLogHints }` (the owner from the node activation endpoint;
+  `walLogHints` says the control plane rendered `-c wal_log_hints=on`, which the helper cannot see
+  in the config files), stops the old unit, checks the target has data checksums or hint logging,
+  runs `pg_rewind -R` through the replica link socket and renames the directory to the replica's id.
+  A successful rewind writes `yoal-rewind.json` beside the adopted `pgdata`; only that marker (for
+  the same database and replica, never a bare `PG_VERSION`) makes a re-run report success. Transport
+  failures (connection/TLS/socket) are retried: three attempts in total (the first run plus two
+  retries). Anything else falls back to a rebuild: the diverged directory is removed and the
+  replica's normal bootstrap runs. Until the result arrives the replica is held out of desired
+  state, so a base backup never races the rewind. A failed rewind marks the row removing (dropping
+  its slot) so the old directory is purged and a fresh replica is rebuilt automatically.
+- New databases are initdb'd with `--data-checksums`; existing clusters render `wal_log_hints=on`.
+  Either satisfies `pg_rewind`.
+- The Azure/GCS repositories are written by pgBackRest's own clients (`repo1-type=azure|gcs`), not
+  through an S3 gateway. A node must declare `object-store-kinds`, and the repository kind needs its
+  `OBJECT_STORE_AZURE` / `OBJECT_STORE_GCS` flag; anything else fails closed before an activation.
+- Every involved node must advertise `pitr-rewind` (`nodeCapabilities`). Without it the control
+  plane refuses a replica of a PITR database and never sends `database.pgRewind`, so an older helper
+  is not handed a shape it would reject. `db-member` (the Wave 3 lane B capability) is accepted as
+  an equivalent while a mixed fleet has both names.
 
 ## How it works
 
@@ -101,10 +143,13 @@ Fixed verbs under `/v1/workloads/<db id>/pitr/…`; no argv or shell from the wi
 
 | Verb | What it runs |
 |---|---|
-| `configure` | Writes the two files into the config directory. Restarts nothing. |
-| `basebackup` | `podman exec … pgbackrest --stanza=<s> stanza-create`, then `--type=<full\|diff\|incr> backup`. |
+| `configure` | Takes `{ repo, stanza }` and writes the two files (and a GCS key, when used) into the config directory. `stanza` is the database's, even in a replica container. Restarts nothing. |
+| `basebackup` | Takes `{ type, stanza }`; requires the node's config to be for that stanza, then `podman exec … pgbackrest --stanza=<s> stanza-create`, then `--type=<full\|diff\|incr> backup`. Runs on the primary only; a replica route is deferred. |
 | `status` | `pgbackrest --output=json info` and `SELECT … FROM pg_stat_archiver` by `podman exec`, reduced to the window (`computePitrWindow`). |
 | `restore` | See below. |
+
+`pg_rewind` is a separate fixed verb, `POST /v1/workloads/<replica id>/replica/rewind`; it touches
+only the old primary's data dir and the replica's link socket (see above).
 
 `restore` into a new database (the target must already be applied: env file, data dir, unit):
 
@@ -182,9 +227,12 @@ Do these in order; do not skip the drill.
    `YOAL_PITR_REPO_ENDPOINT` (https only; AWS S3 when unset), `YOAL_PITR_REPO_REGION`
    (`us-east-1`), `YOAL_PITR_REPO_PREFIX` (`yoal/pitr`), `YOAL_PITR_REPO_FORCE_PATH_STYLE`
    (`true`; RustFS/MinIO/Garage need it). An incomplete set fails closed.
-3. **Turn the flag on** for a test install: `YOAL_FEATURE_PITR=on`, restart the control plane.
+3. **Turn the flag on** for a test install: `YOAL_FEATURE_PITR=on`, restart the control plane. For
+   replicas of PITR databases, `pg_rewind` and Azure/GCS repositories, also set
+   `YOAL_FEATURE_PITR_REWIND=on` (and the matching `OBJECT_STORE_*` flag for a non-S3 repo).
 4. **Run the drill** on a Debian 13 node (below) against a throwaway PostgreSQL 18 database. It must
-   print `PASS`.
+   print `PASS`. With `PITR_REWIND` on and a replica, run `scripts/pitr-rewind-drill.sh` with
+   `YOAL_REWIND_DRILL_PROMOTE=1`; it proves a restore to a point *after* a promotion.
 5. Only then enable PITR per database: `yoal db pitr <name> --enable` (or the dashboard). Watch
    `yoal db pitr <name>` until the first base backup and the recoverable window appear.
 
@@ -215,6 +263,12 @@ absent. It prints the RTO, moves the copy to the trash (`YOAL_PITR_DRILL_KEEP=1`
 exits non-zero on any failure. `YOAL_PITR_DRILL_TARGET_TIME` restores to a given time instead, with
 `YOAL_PITR_CANARY_SQL` as the only check. A scheduled monthly drill is not wired yet.
 
+`scripts/pitr-rewind-drill.sh` is the W10 successor for a database with replicas. It writes a
+pre-promotion marker, optionally promotes a replica (`YOAL_REWIND_DRILL_PROMOTE=1`), writes a
+post-promotion marker on the new primary, restores to a time after it, and requires **both** markers
+in the copy. That is the check that the stanza and WAL archiving followed the promotion. Without
+`YOAL_REWIND_DRILL_PROMOTE=1` it runs the same sequence as `pitr-drill.sh`.
+
 ## What still needs a live check
 
 On a Debian 13 node with the published image, Podman 5 and an S3 repository (the drill covers the
@@ -234,11 +288,24 @@ first six):
 7. amd64 (the local repro was arm64); the workflow's amd64 smoke test covers the image, not
    Podman.
 8. Disk headroom: the 1 GiB archive-push queue on the data volume when S3 is down.
+9. `PITR_REWIND`: the replica's PITR unit and `pg_rewind` re-attachment after a promotion (with
+   `--data-checksums` and with `wal_log_hints=on`). The helper argv, transport retry and fallback are
+   unit-tested; Podman, SELinux/AppArmor and a real link socket are not. Backing up from a replica is
+   not shipped (the two-host `pg1`/`pg2` config is deferred), so there is nothing to check there yet.
+10. An Azure or GCS repository end to end (Azurite/fake-gcs-server first): the rendered
+    `repo1-type=azure|gcs` config, the GCS 0400 key file, and a restore from each.
 
 ## Known gaps
 
 - **Only PostgreSQL 18 on the standard image.** 16/17 and the D126 variants need their own PITR
   builds.
+- **Rewind is automatic only as part of the existing promotion path.** A failed `pg_rewind` is
+  reported on the replica (`rewind.error`), the old directory is purged and a fresh replica is
+  rebuilt on that node. Transport failures are retried in the helper, but there is no control-plane
+  retry/backoff and no W11 member-driven healing yet.
+- **Base backups stay on the primary.** Backing up from a replica is deferred until pgBackRest is
+  configured with both hosts (`pg1` primary and `pg2` standby, `backup-standby=y`); routing a task
+  to a replica with the current single-host config would fail on a real fleet.
 - **Same-node only.** The target is created on the source's node; cross-node restore and a target
   that has not been applied yet are not supported.
 - **No alerting** for `archiveStatus: failing` or a missed base backup; the state and error are

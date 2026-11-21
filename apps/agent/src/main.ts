@@ -1489,14 +1489,14 @@ class AgentRuntime {
 			const state = this.desired;
 			if (!state || state.databasePitrTasks.length === 0) continue;
 			try {
-				// Ready = running on its current activation (the sampler's targets carry that check).
-				const ready = new Set(
-					this.workloads
-						.databaseTargets()
-						.filter((target) => target.status === 'running')
-						.map((target) => target.id),
+				// Ready = desired activation applied and the last report is running. A replica has no
+				// held monitor, so the stats sampler's `databaseTargets()` must not be the source.
+				const ready = this.workloads.readyWorkloadIds();
+				await this.databasePitr.runOnce(
+					state,
+					(id) => ready.has(id),
+					this.shutdownController.signal,
 				);
-				await this.databasePitr.runOnce(state, (id) => ready.has(id), this.shutdownController.signal);
 			} catch (error) {
 				log('warn', `Database PITR task failed: ${errorText(error)}`);
 			}
@@ -1679,6 +1679,7 @@ class AgentRuntime {
 		const poolerRestarted = this.databasePoolerRestarts.pending();
 		const databaseReplication = this.databaseReplication.reports();
 		const promotionResults = this.databaseReplication.pendingPromotionResults();
+		const rewindResults = this.databaseReplication.pendingRewindResults();
 		const nodeUpdateResult = this.nodeUpdate.pendingResult();
 		const databaseTls = databaseTlsHeartbeat(reports);
 		// Release commands this node ran or refused; re-sent until the control plane drops the task.
@@ -1730,6 +1731,7 @@ class AgentRuntime {
 			...(poolerRestarted.length > 0 ? { databasePoolerRestarted: poolerRestarted } : {}),
 			...(databaseReplication.length > 0 ? { databaseReplication } : {}),
 			...(promotionResults.length > 0 ? { databaseReplicaPromotionResults: promotionResults } : {}),
+			...(rewindResults.length > 0 ? { databaseReplicaRewindResults: rewindResults } : {}),
 			...(nodeUpdateResult ? { nodeUpdateResult } : {}),
 			...(releaseCommandResults.length > 0 ? { releaseCommandResults } : {}),
 			...(databaseTls.length > 0 ? { databaseTls } : {}),
@@ -1787,6 +1789,7 @@ class AgentRuntime {
 		this.studioPrincipals.acknowledge(studioPrincipalResults);
 		this.databasePoolerRestarts.acknowledge(poolerRestarted);
 		this.databaseReplication.acknowledgePromotions(promotionResults.map((result) => result.failoverId));
+		this.databaseReplication.acknowledgeRewinds(rewindResults.map((result) => result.replicaId));
 		await this.nodeUpdate.acknowledge(nodeUpdateResult);
 		// The control plane accepted a heartbeat from this binary: stand the rollback guard down.
 		await this.nodeUpdate.confirmHealthy(this.shutdownController.signal);

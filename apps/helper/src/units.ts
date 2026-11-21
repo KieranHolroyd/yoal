@@ -1117,8 +1117,10 @@ export function renderDatabaseUnit(options: DatabaseUnitOptions): string {
 	const replica = database.replica;
 	if (Boolean(replica) !== Boolean(options.replica))
 		throw new ValidationError('A replica database unit needs both workload.database.replica and its link paths');
-	if (replica && (options.pitr || workload.pooler))
-		throw new ValidationError('A replica database unit has no PITR archiving and no pooler');
+	if (replica && workload.pooler)
+		throw new ValidationError('A replica database unit has no pooler');
+	// A replica of a PITR database runs the same image and config: WAL it receives is archived by
+	// the primary, and it archives itself once promoted (HA-PLAN W10).
 	// A replica starts through the helper's standby script, which runs pg_basebackup on first
 	// start and then execs the same entrypoint with the slot name stripped (replication.ts).
 	lines.push(`Entrypoint=${replica ? REPLICA_START_SCRIPT : '/usr/local/bin/docker-entrypoint.sh'}`);
@@ -1151,6 +1153,9 @@ export function renderDatabaseUnit(options: DatabaseUnitOptions): string {
 			`archive_timeout=${options.pitr.archiveTimeoutSeconds}`,
 		);
 	}
+	// HA-PLAN W10: an older cluster has no data checksums, so pg_rewind needs hint logging. New
+	// databases also get `--data-checksums` from the control plane's env; either is enough.
+	if (database.pgRewind) execArgs.push('-c', 'wal_log_hints=on');
 	if (options.tlsDir) {
 		execArgs.push(
 			'-c',

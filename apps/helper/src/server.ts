@@ -124,10 +124,14 @@ export interface HelperRuntime {
 	stopIdentity?(): Promise<void>;
 	/** Restore a custom-format dump into a managed database. */
 	restoreDatabase(id: string, body: ReadableStream<Uint8Array> | null): Promise<void>;
-	/** Write the 0400 pgBackRest config for PITR (docs/PITR.md). */
-	pitrConfigure(id: string, repo: unknown): Promise<{ stanza: string; configPath: string }>;
-	/** Run a full or differential pgBackRest base backup. */
-	pitrBaseBackup(id: string, type: unknown): Promise<{ stanza: string; type: 'full' | 'diff' | 'incr' }>;
+	/** Write the 0400 pgBackRest config for PITR (docs/PITR.md). `stanza` is the database's. */
+	pitrConfigure(id: string, repo: unknown, stanza: unknown): Promise<{ stanza: string; configPath: string }>;
+	/** Run a full or differential pgBackRest base backup in the database's stanza. */
+	pitrBaseBackup(
+		id: string,
+		type: unknown,
+		stanza: unknown,
+	): Promise<{ stanza: string; type: 'full' | 'diff' | 'incr' }>;
 	/** Restore a stanza to a timestamp into a new database and verify it. */
 	pitrRestore(
 		id: string,
@@ -135,6 +139,16 @@ export interface HelperRuntime {
 	): Promise<{ targetDatabaseId: string; targetTime: number; verified: true }>;
 	/** Credential-free archive/repository status and the recoverable window. */
 	pitrStatus(id: string): Promise<HelperPitrStatus>;
+	/** Rewind an old primary onto the new primary and adopt it as `replicaId` (W10). */
+	rewindReplica?(
+		replicaId: string,
+		input: {
+			databaseId?: unknown;
+			walLogHints?: unknown;
+			user?: unknown;
+			password?: unknown;
+		},
+	): Promise<{ replicaId: string; rewound: boolean; fallback: 'rebuild' | null; reason: string | null }>;
 	/** Mounts and block devices, from which Settings → Storage lists disk candidates (D72). */
 	volumesInventory(): Promise<HelperInventory>;
 	/** Replace the disk registry from desired state (D76). */
@@ -815,6 +829,16 @@ export function createHandler(
 					if (key !== 'databaseId') throw new ValidationError(`request.${key} is not supported`);
 				return json({ ok: true, ...(await runtime.replicaPromote(id, body)) });
 			}
+			const rewindMatch = /^\/v1\/workloads\/([^/]+)\/replica\/rewind$/.exec(path);
+			if (rewindMatch && runtime.rewindReplica) {
+				if (method !== 'POST') return methodNotAllowed('POST');
+				const id = assertDatabaseId(decodeURIComponent(rewindMatch[1]!), 'replica id');
+				const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
+				for (const key of Object.keys(body))
+					if (key !== 'databaseId' && key !== 'walLogHints' && key !== 'user' && key !== 'password')
+						throw new ValidationError(`request.${key} is not supported`);
+				return json({ ok: true, ...(await runtime.rewindReplica(id, body)) });
+			}
 
 			const rotateMatch = /^\/v1\/workloads\/([^/]+)\/rotate$/.exec(path);
 			if (rotateMatch) {
@@ -840,11 +864,11 @@ export function createHandler(
 				if (method !== 'POST') return methodNotAllowed('POST');
 				if (verb === 'configure') {
 					const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
-					return json({ ok: true, ...(await runtime.pitrConfigure(id, body.repo)) });
+					return json({ ok: true, ...(await runtime.pitrConfigure(id, body.repo, body.stanza)) });
 				}
 				if (verb === 'basebackup') {
 					const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
-					return json({ ok: true, ...(await runtime.pitrBaseBackup(id, body.type)) });
+					return json({ ok: true, ...(await runtime.pitrBaseBackup(id, body.type, body.stanza)) });
 				}
 				const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
 				return json({

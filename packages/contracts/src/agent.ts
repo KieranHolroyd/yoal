@@ -41,11 +41,13 @@ import {
 	kubernetesStatusSampleSchema,
 } from './kubernetes.ts';
 import { databaseBackupResultSchema, databaseBackupTaskSchema } from './database-backup.ts';
-import { databasePitrResultSchema, databasePitrTaskSchema } from './database-pitr.ts';
+import { PITR_REWIND_CAPABILITY, databasePitrResultSchema, databasePitrTaskSchema } from './database-pitr.ts';
 import {
 	databaseReplicaLinkSchema,
 	databaseReplicaPromotionResultSchema,
 	databaseReplicaPromotionTaskSchema,
+	databaseReplicaRewindResultSchema,
+	databaseReplicaRewindTaskSchema,
 	databaseReplicationReportSchema,
 	databaseReplicationTaskSchema,
 } from './database-replication.ts';
@@ -276,6 +278,8 @@ export const desiredStateSchema = z.object({
 	databaseReplicaLinks: z.array(databaseReplicaLinkSchema).default([]),
 	/** Replicas on this node to promote and hand over to their database id (§9.3). */
 	databaseReplicaPromotions: z.array(databaseReplicaPromotionTaskSchema).default([]),
+	/** Old primaries on this node to rewind onto the new primary and adopt as replicas (W10). */
+	databaseReplicaRewinds: z.array(databaseReplicaRewindTaskSchema).optional(),
 	/** Disks this node must know about, so disk-backed data dirs can be verified (D76, D169). */
 	volumes: z.array(nodeVolumeDesiredSchema).default([]),
 	/** Network shares this node keeps mounted under `/mnt/yoal-shares` (docs/STORAGE.md §3, D143). */
@@ -473,6 +477,8 @@ export const nodeCapabilities = [
 	'app-volumes',
 	'jobs',
 	'database-replicas',
+	// HA-PLAN W10: replica PITR/backup-from-replica and the pg_rewind verb.
+	PITR_REWIND_CAPABILITY,
 	'share-mounts',
 	'volume-profiles',
 	'disk-mounts',
@@ -634,6 +640,8 @@ export const heartbeatSchema = z.object({
 	databaseReplication: z.array(databaseReplicationReportSchema).max(100).optional(),
 	/** Outcomes of `databaseReplicaPromotions` since the last heartbeat. */
 	databaseReplicaPromotionResults: z.array(databaseReplicaPromotionResultSchema).max(20).optional(),
+	/** Outcomes of `databaseReplicaRewinds` since the last heartbeat. */
+	databaseReplicaRewindResults: z.array(databaseReplicaRewindResultSchema).max(20).optional(),
 	/**
 	 * Retired with the D60 studio console (D96). 0.7.x agents may still send console results;
 	 * they are accepted and ignored. Remove once no 0.7.x agents remain.

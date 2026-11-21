@@ -15,8 +15,11 @@ type DatabaseFields =
 
 /** Databases: purges, backups, PITR, rotations, credentials, pooler restarts and replication (C7). */
 export class DatabaseState extends DesiredStatePart {
-	async tasks(): Promise<Pick<DesiredState, DatabaseFields>> {
+	async tasks(): Promise<
+		Pick<DesiredState, DatabaseFields> & Pick<Partial<DesiredState>, 'databaseReplicaRewinds'>
+	> {
 		const { node } = this.state;
+		const rewinds = this.ctx.databaseReplicas.rewindsForNode(node.id);
 		return {
 			// Trashed databases plus the old copy a finished (or rolled-back) move left here.
 			databasePurges: [
@@ -36,6 +39,9 @@ export class DatabaseState extends DesiredStatePart {
 			databaseReplication: this.ctx.databaseReplicas.replicationTasksForNode(node.id),
 			databaseReplicaLinks: this.ctx.databaseReplicas.linksForNode(node.id),
 			databaseReplicaPromotions: this.ctx.databaseReplicas.promotionsForNode(node.id),
+			// Omitted while empty, so the flag-off desired state (and the golden fixtures) are
+			// byte-identical to before this wave.
+			...(rewinds.length > 0 ? { databaseReplicaRewinds: rewinds } : {}),
 		};
 	}
 }

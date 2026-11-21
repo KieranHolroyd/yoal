@@ -572,6 +572,8 @@ export class NodeService {
 			this.ctx.databaseReplicas.applyReplicationReports(node.id, input.databaseReplication);
 		if (input.databaseReplicaPromotionResults?.length)
 			this.ctx.databaseReplicas.applyPromotionResults(node.id, input.databaseReplicaPromotionResults);
+		if (input.databaseReplicaRewindResults?.length)
+			this.ctx.databaseReplicas.applyRewindResults(node.id, input.databaseReplicaRewindResults);
 		if (input.databaseBackupResults?.length)
 			this.ctx.databases.applyBackupResults(node.id, input.databaseBackupResults);
 		if (input.databasePitrResults?.length)

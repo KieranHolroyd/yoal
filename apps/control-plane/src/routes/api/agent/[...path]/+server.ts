@@ -258,6 +258,14 @@ const handler: RequestHandler = async (event) => {
 			return core.databases.pitrActivation(node.id, pitrTask[1]!);
 		}
 
+		// The `yoal_repl` password and slot for one pg_rewind (W10); never in desired state.
+		const rewind = /^database-rewind\/([^/]+)$/.exec(action);
+		if (rewind) {
+			if (method !== 'GET') return json({ error: 'method_not_allowed' }, 405);
+			const node = core.nodes.authenticate(token);
+			return core.databaseReplicas.rewindActivation(node.id, rewind[1]!);
+		}
+
 		// SMB credentials for one share mount (docs/STORAGE.md §3, D143); never in desired state.
 		const shareCredential = /^share-mounts\/([^/]+)\/credentials$/.exec(action);
 		if (shareCredential) {

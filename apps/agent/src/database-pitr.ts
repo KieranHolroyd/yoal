@@ -1,6 +1,9 @@
 import {
-	databasePitrActivationSchema,
+	databasePitrAnyActivationSchema,
+	pitrStanzaFor,
+	type DatabasePitrActivation,
 	type DatabasePitrResult,
+	type DatabasePitrStoreActivation,
 	type DatabasePitrTask,
 	type DesiredState,
 } from '@yoal/contracts';
@@ -93,7 +96,10 @@ export class DatabasePitrRunner {
 	}
 
 	private databasesOf(task: DatabasePitrTask): string[] {
-		return task.action === 'restore' && task.targetDatabaseId ? [task.databaseId, task.targetDatabaseId] : [task.databaseId];
+		if (task.action === 'restore' && task.targetDatabaseId) return [task.databaseId, task.targetDatabaseId];
+		// A task may name another workload (reserved for a future standby backup path); only that id
+		// exists as a workload on this node, so gating on the database id would hold it forever.
+		return [task.workloadId ?? task.databaseId];
 	}
 
 	private async execute(task: DatabasePitrTask, signal: AbortSignal): Promise<void> {
@@ -110,13 +116,23 @@ export class DatabasePitrRunner {
 				const text = await response.text().catch(() => '');
 				throw new Error(`PITR activation -> ${response.status}${text ? `: ${text.slice(0, 300)}` : ''}`);
 			}
-			const activation = databasePitrActivationSchema.parse(await response.json());
+			const activation = databasePitrAnyActivationSchema.parse(await response.json());
 			if (activation.taskId !== task.id || activation.databaseId !== task.databaseId)
 				throw new Error('PITR activation does not match the desired task');
+			const workloadId = task.workloadId ?? task.databaseId;
+			// The stanza is the DATABASE's, even when the container is a replica's (its workload id
+			// differs). Validate before configuring: a stanza derived from the replica id would
+			// create an orphan stanza and every restore against the primary's stanza would miss it.
+			const stanza = task.stanza;
+			if (stanza !== pitrStanzaFor(task.databaseId))
+				throw new Error(`PITR task stanza "${stanza}" is not the stanza of ${task.databaseId}.`);
+			if (activation.stanza !== stanza)
+				throw new Error('PITR activation stanza does not match the desired task.');
+			const repo = pitrRepoForActivation(activation);
 
 			if (task.action === 'basebackup') {
-				await this.helper.pitrConfigure(task.databaseId, activation.repo);
-				const backup = await this.helper.pitrBaseBackup(task.databaseId, task.baseBackupType ?? 'full');
+				await this.helper.pitrConfigure(workloadId, repo, stanza);
+				const backup = await this.helper.pitrBaseBackup(workloadId, task.baseBackupType ?? 'full', stanza);
 				this.queued.set(task.id, {
 					taskId: task.id,
 					action: 'basebackup',
@@ -129,8 +145,8 @@ export class DatabasePitrRunner {
 			} else if (task.action === 'restore') {
 				if (!task.targetDatabaseId || task.targetTime === null)
 					throw new Error('PITR restore task is missing its target database or timestamp');
-				await this.helper.pitrConfigure(task.databaseId, activation.repo);
-				const restored = await this.helper.pitrRestore(task.databaseId, {
+				await this.helper.pitrConfigure(workloadId, repo, stanza);
+				const restored = await this.helper.pitrRestore(workloadId, {
 					targetDatabaseId: task.targetDatabaseId,
 					targetTime: task.targetTime,
 				});
@@ -147,8 +163,8 @@ export class DatabasePitrRunner {
 			} else {
 				// `/run` is a tmpfs: rewriting the config here is what brings archiving back after a
 				// reboot, before the check reads the repository.
-				await this.helper.pitrConfigure(task.databaseId, activation.repo);
-				const status = await this.helper.pitrStatus(task.databaseId);
+				await this.helper.pitrConfigure(workloadId, repo, stanza);
+				const status = await this.helper.pitrStatus(workloadId);
 				this.queued.set(task.id, {
 					taskId: task.id,
 					action: 'status',
@@ -182,4 +198,11 @@ export class DatabasePitrRunner {
 			this.inFlight.delete(task.id);
 		}
 	}
+}
+
+/** The helper's repo shape: S3 fields as before, or the store + credentials for Azure/GCS (W3). */
+function pitrRepoForActivation(activation: DatabasePitrActivation | DatabasePitrStoreActivation): unknown {
+	return 'repo' in activation
+		? activation.repo
+		: { store: activation.store, storeCredentials: activation.storeCredentials };
 }
