@@ -84,18 +84,34 @@ interface Calls {
 	promoted: number;
 	fenced: Array<'stop' | 'readonly'>;
 	cleared: number;
+	promoteArgs?: Array<[string, string]>;
+	promoteFailures?: number;
+	/** Default true; false simulates a helper that accepted the verb but did not take effect. */
+	fenceConfirms?: boolean;
 }
 
 function ops(status: { inRecovery: boolean; streaming: boolean; readOnly: boolean; lsn?: string | null }, calls: Calls): MemberOperations {
+	let fenced = false;
 	return {
 		async status() {
-			return { inRecovery: status.inRecovery, streaming: status.streaming, readOnly: status.readOnly, lsn: status.lsn ?? '0/200' };
+			return {
+				inRecovery: status.inRecovery,
+				streaming: status.streaming,
+				readOnly: status.readOnly || fenced,
+				lsn: status.lsn ?? '0/200',
+			};
 		},
 		async fence(_id, mode) {
 			calls.fenced.push(mode);
+			if (calls.fenceConfirms !== false) fenced = true;
 		},
-		async promote() {
+		async promote(workloadId, databaseId) {
 			calls.promoted += 1;
+			(calls.promoteArgs ??= []).push([workloadId, databaseId]);
+			if ((calls.promoteFailures ?? 0) > 0) {
+				calls.promoteFailures = (calls.promoteFailures ?? 0) - 1;
+				return { promoted: false, lsn: null, error: 'pg_ctl promote failed' };
+			}
 			return { promoted: true, lsn: '0/300' };
 		},
 		async clearSync() {
@@ -170,6 +186,8 @@ describe('candidate acquisition', () => {
 		await machine.runOnce(state([desired()]), AbortSignal.timeout(1_000));
 		expect(calls.promoted).toBe(1);
 		expect(calls.cleared).toBe(1);
+		expect(calls.promoteArgs).toEqual([['db_dbr_a', DB]]);
+		expect(arbiter.renewals).toBe(1);
 		expect(arbiter.record?.lease).toMatchObject({ generation: 2, holderNodeId: A, sync: [], syncState: 'changing' });
 		expect(events.map((event) => event.kind)).toEqual(expect.arrayContaining(['candidate', 'promoted']));
 		expect(machine.pendingPromotionReports()).toEqual([{ databaseId: DB, generation: 2, lsn: '0/300' }]);
@@ -191,12 +209,24 @@ describe('candidate acquisition', () => {
 		const peers = new FakePeers();
 		peers.lastAnswer = T0 - 1_000;
 		const calls: Calls = { promoted: 0, fenced: [], cleared: 0 };
-		const machine = runner({ nodeId: A, arbiter, peers, ops: ops({ inRecovery: true, streaming: false, readOnly: false }, calls), streamDownMs: 0 });
+		// Default timings: the stream is observed down in this very pass, so only the notice can
+		// allow a promotion (review blocker 17: the waiver test must not disable the debounce).
+		const machine = runner({ nodeId: A, arbiter, peers, ops: ops({ inRecovery: true, streaming: false, readOnly: false }, calls) });
 		machine.receiveFenceNotice(DB, { generation: 1, epoch: 1, from: P, at: iso(T0 - 100) });
-		// The stream was observed down only just now: without the notice the 5 s debounce would hold.
-		const fast = { ...desired(), leaseExpiresAt: iso(T0 - 1) };
-		await machine.runOnce(state([fast]), AbortSignal.timeout(1_000));
+		await machine.runOnce(state([desired()]), AbortSignal.timeout(1_000));
 		expect(calls.promoted).toBe(1);
+	});
+
+	test('a stale notice does not waive the debounce with default timings', async () => {
+		const arbiter = new FakeArbiter();
+		const peers = new FakePeers();
+		peers.lastAnswer = T0 - 20_000;
+		const calls: Calls = { promoted: 0, fenced: [], cleared: 0 };
+		const machine = runner({ nodeId: A, arbiter, peers, ops: ops({ inRecovery: true, streaming: false, readOnly: false }, calls) });
+		machine.receiveFenceNotice(DB, { generation: 0, epoch: 0, from: P, at: iso(T0 - 100) });
+		await machine.runOnce(state([desired()]), AbortSignal.timeout(1_000));
+		expect(calls.promoted).toBe(0);
+		expect(arbiter.renewals).toBe(0);
 	});
 
 	test('a stale or bad-epoch notice waives nothing', async () => {
@@ -266,6 +296,80 @@ describe('candidate acquisition', () => {
 	});
 });
 
+
+	test('a notice is keyed by generation, not by database', async () => {
+		const arbiter = new FakeArbiter();
+		const peers = new FakePeers();
+		peers.lastAnswer = T0 - 1_000;
+		const calls: Calls = { promoted: 0, fenced: [], cleared: 0 };
+		const machine = runner({ nodeId: A, arbiter, peers, ops: ops({ inRecovery: true, streaming: false, readOnly: false }, calls) });
+		// A generation-2 notice must not authorise an acquisition from the generation-1 lease.
+		machine.receiveFenceNotice(DB, { generation: 2, epoch: 2, from: P, at: iso(T0 - 100) });
+		await machine.runOnce(state([desired()]), AbortSignal.timeout(1_000));
+		expect(calls.promoted).toBe(0);
+		// The matching generation is the promise that authorises the waiver.
+		machine.receiveFenceNotice(DB, { generation: 1, epoch: 1, from: P, at: iso(T0 - 100) });
+		await machine.runOnce(state([desired()]), AbortSignal.timeout(1_000));
+		expect(calls.promoted).toBe(1);
+	});
+
+	test('does not report primary when the lease moved during pg_ctl promote; it fences', async () => {
+		const arbiter = new FakeArbiter();
+		const peers = new FakePeers();
+		peers.lastAnswer = T0 - 20_000;
+		const calls: Calls = { promoted: 0, fenced: [], cleared: 0 };
+		const events: MemberEvent[] = [];
+		const machine = runner({
+			nodeId: A,
+			arbiter,
+			peers,
+			ops: {
+				...ops({ inRecovery: true, streaming: false, readOnly: false }, calls),
+				async promote(workloadId, databaseId) {
+					calls.promoted += 1;
+					(calls.promoteArgs ??= []).push([workloadId, databaseId]);
+					// Another member takes the next generation between the CAS and pg_ctl promote.
+					arbiter.record = { lease: lease({ generation: 3, holderNodeId: B }), etag: 'etag-x' };
+					return { promoted: true, lsn: '0/300' };
+				},
+			},
+			events,
+			streamDownMs: 0,
+		});
+		await machine.runOnce(state([desired()]), AbortSignal.timeout(1_000));
+		expect(events.map((event) => event.kind)).not.toContain('promoted');
+		expect(calls.fenced).toEqual(['readonly']);
+	});
+
+	test('a failed pg_ctl promote retries as the changing-lease holder', async () => {
+		const arbiter = new FakeArbiter();
+		const peers = new FakePeers();
+		peers.lastAnswer = T0 - 20_000;
+		const calls: Calls = { promoted: 0, fenced: [], cleared: 0, promoteFailures: 1 };
+		const events: MemberEvent[] = [];
+		let clock = T0;
+		const machine = runner({
+			nodeId: A,
+			arbiter,
+			peers,
+			ops: ops({ inRecovery: true, streaming: false, readOnly: false }, calls),
+			events,
+			now: () => clock,
+			streamDownMs: 0,
+		});
+		await machine.runOnce(state([desired()]), AbortSignal.timeout(1_000));
+		expect(calls.promoted).toBe(1);
+		expect(calls.cleared).toBe(0);
+		expect(arbiter.record?.lease).toMatchObject({ generation: 2, holderNodeId: A, syncState: 'changing' });
+		expect(events.map((event) => event.kind)).toContain('promotion-retry');
+		// The won changing lease is renewed while we wait, then the promotion is retried.
+		clock += 2_100;
+		await machine.runOnce(state([desired()]), AbortSignal.timeout(1_000));
+		expect(calls.promoted).toBe(2);
+		expect(calls.cleared).toBe(1);
+		expect(machine.pendingPromotionReports()).toEqual([{ databaseId: DB, generation: 2, lsn: '0/300' }]);
+	});
+
 describe('the fencing primary', () => {
 	test('sends the notice to every reachable member, then fences Postgres', async () => {
 		const arbiter = new FakeArbiter(lease({ generation: 2, holderNodeId: A }));
@@ -292,6 +396,25 @@ describe('the fencing primary', () => {
 		expect(events.map((event) => event.kind)).toContain('fence-notice-missed');
 	});
 
+	test('does not send a notice or report fenced until the helper confirms read-only', async () => {
+		const arbiter = new FakeArbiter(lease({ generation: 2, holderNodeId: A }));
+		const peers = new FakePeers();
+		const calls: Calls = { promoted: 0, fenced: [], cleared: 0, fenceConfirms: false };
+		const events: MemberEvent[] = [];
+		const machine = runner({ nodeId: P, arbiter, peers, ops: ops({ inRecovery: false, streaming: true, readOnly: false }, calls), events });
+		await machine.runOnce(state([desired({ holderNodeId: A, leaseGeneration: 2 })]), AbortSignal.timeout(1_000));
+		expect(calls.fenced).toEqual(['readonly']);
+		expect(peers.sent).toEqual([]);
+		expect(events.map((event) => event.kind)).toContain('fence-failed');
+		expect(events.map((event) => event.kind)).not.toContain('fenced');
+		expect(machine.reports()[0]).toMatchObject({ role: 'fencing' });
+		// The next pass retries; once the fence is confirmed the notice goes out and fenced is reported.
+		calls.fenceConfirms = true;
+		await machine.runOnce(state([desired({ holderNodeId: A, leaseGeneration: 2 })]), AbortSignal.timeout(1_000));
+		expect(peers.sent.length).toBeGreaterThan(0);
+		expect(events.map((event) => event.kind)).toContain('fenced');
+	});
+
 	test('does not fence a healthy primary that can still prove the lease', async () => {
 		const arbiter = new FakeArbiter(lease({ holderNodeId: P, expiresAt: iso(T0 + 10_000) }));
 		const peers = new FakePeers();
@@ -299,16 +422,36 @@ describe('the fencing primary', () => {
 		const machine = runner({ nodeId: P, arbiter, peers, ops: ops({ inRecovery: false, streaming: true, readOnly: false }, calls) });
 		await machine.runOnce(state([desired({ holderNodeId: P })]), AbortSignal.timeout(1_000));
 		expect(calls.fenced).toEqual([]);
-		expect(arbiter.renewals).toBeGreaterThanOrEqual(0);
+		expect(arbiter.renewals).toBeGreaterThanOrEqual(1);
 	});
 
 	test('an arbiter outage alone neither fences nor stops a primary when every member answers', async () => {
-		const arbiter = new FakeArbiter(lease({ holderNodeId: P }));
 		const peers = new FakePeers();
 		peers.everyPeerAnswered = true;
 		const calls: Calls = { promoted: 0, fenced: [], cleared: 0 };
-		const machine = runner({ nodeId: P, arbiter: { read: async () => { throw new Error('down'); }, compareAndSwap: async () => { throw new Error('down'); } }, peers, ops: ops({ inRecovery: false, streaming: true, readOnly: false }, calls) });
-		// First pass establishes the proof window, then the arbiter goes away.
+		let down = false;
+		let reads = 0;
+		const live = new FakeArbiter(lease({ holderNodeId: P, expiresAt: iso(T0 + 60_000) }));
+		const machine = runner({
+			nodeId: P,
+			arbiter: {
+				read: async () => {
+					reads += 1;
+					if (down) throw new Error('down');
+					return live.read();
+				},
+				compareAndSwap: async (id, etag, next) => {
+					if (down) throw new Error('down');
+					return live.compareAndSwap(id, etag, next);
+				},
+			},
+			peers,
+			ops: ops({ inRecovery: false, streaming: true, readOnly: false }, calls),
+		});
+		// A successful read establishes the proof window *before* the outage (review blocker 17).
+		await machine.runOnce(state([desired({ holderNodeId: P })]), AbortSignal.timeout(1_000));
+		expect(reads).toBeGreaterThan(0);
+		down = true;
 		await machine.runOnce(state([desired({ holderNodeId: P })]), AbortSignal.timeout(1_000));
 		expect(calls.fenced).toEqual([]);
 	});

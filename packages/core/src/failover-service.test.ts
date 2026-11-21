@@ -7,6 +7,8 @@ import { DEFAULT_FEATURES, type FailoverPlan } from '@yoal/contracts';
 import { buildPrincipal } from './orgs.ts';
 import { createCore, type Core } from './index.ts';
 import { LocalObjectStore } from './object-store.ts';
+import { MemoryConditionalStore } from './ha-lease.ts';
+import { ObjectStoreDatabaseLeaseStore } from './database-sync.ts';
 import {
 	FAILOVER_LEASE_KEY,
 	FailoverService,
@@ -495,6 +497,7 @@ describe('database primaries', () => {
 			.insert(databaseReplicas)
 			.values({ id: 'dbr_1', databaseId: 'db_1', nodeId: h.node.w2!, status: replicaStatus, replayLsn: '0/16B3740', lagBytes: 0, lagSeconds: 0.2, primaryGeneration: 3 })
 			.run();
+		(h.core.ctx.config.features as Record<string, boolean>).DB_AUTO_PROMOTE = true;
 	}
 
 	test('without a handler a lost primary is a manual event and a critical alert, once', async () => {
@@ -540,6 +543,8 @@ describe('database primaries', () => {
 	test('a registered handler runs fence, promote, repoint and heal under the lease', async () => {
 		const h = harness(['w1', 'w2'], { enabled: true });
 		database(h);
+		// The lease gate is tested separately; this test owns the stage machine.
+		(h.core.ctx.databaseMembers as unknown as { automaticPromotionRefusal: () => Promise<null> }).automaticPromotionRefusal = async () => null;
 		const calls: Array<{ stage: FailoverHandlerStage; plan: FailoverPlan; epoch: number }> = [];
 		let waitOnce = true;
 		const unregister = h.core.failover.registerDatabaseHandler({
@@ -569,9 +574,42 @@ describe('database primaries', () => {
 		expect(h.core.failover.status(principal).databaseHandler).toBe(false);
 	});
 
+	test('automatic promotion waits for a steady lease that names the candidate and has expired', async () => {
+		const h = harness(['w1', 'w2'], { enabled: true });
+		database(h);
+		h.core.failover.registerDatabaseHandler({ run: () => ({ status: 'done' }) });
+		const store = new MemoryConditionalStore();
+		(h.core.ctx as unknown as { arbiter: MemoryConditionalStore }).arbiter = store;
+		const leases = new ObjectStoreDatabaseLeaseStore(store);
+		await leases.compareAndSwap('db_1', null, {
+			generation: 0,
+			holderNodeId: h.node.w1!,
+			expiresAt: new Date(h.clock.now + 300_000).toISOString(),
+			sync: [],
+			syncState: 'steady',
+			durability: 'async',
+			durabilityEffective: 'async',
+			syncSetAt: null,
+		});
+		h.advance(120_000);
+		h.heartbeat('w1');
+		const first = await h.core.failover.tick();
+		expect(first.databases.started).toBe(0);
+		expect(h.events('database')).toMatchObject([{ status: 'blocked' }]);
+		expect(h.events('database')[0]!.reason).toContain('not expired');
+		const record = (await leases.read('db_1'))!;
+		await leases.compareAndSwap('db_1', record.etag, {
+			...record.lease,
+			expiresAt: new Date(h.clock.now - 1).toISOString(),
+		});
+		const second = await h.core.failover.tick();
+		expect(second.databases.started).toBe(1);
+	});
+
 	test('a handler that loses the lease cannot advance the stage', async () => {
 		const h = harness(['w1', 'w2'], { enabled: true });
 		database(h);
+		(h.core.ctx.databaseMembers as unknown as { automaticPromotionRefusal: () => Promise<null> }).automaticPromotionRefusal = async () => null;
 		h.core.failover.registerDatabaseHandler({
 			run(): FailoverStageOutcome {
 				h.sqlite.run('UPDATE settings SET value = ? WHERE key = ?', [

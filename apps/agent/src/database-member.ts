@@ -80,19 +80,22 @@ export type MemberEventKind =
 	| 'promoted'
 	| 'cas-lost'
 	| 'fenced'
+	| 'fence-failed'
 	| 'fence-notice-sent'
 	| 'fence-notice-missed'
 	| 'fence-notice-received'
-	| 'fence-notice-ignored'
 	| 'lease-renewed'
 	| 'failsafe-held'
+	| 'promotion-retry'
+	| 'promotion-failed'
 	| 'refused';
 
 export interface MemberEvent {
 	kind: MemberEventKind;
 	databaseId: string;
 	nodeId: string;
-	at: number;
+	/** Wall-clock time for humans; never a safety decision. */
+	at: string;
 	generation: number;
 	detail?: string;
 	notice?: FenceNotice;
@@ -104,8 +107,12 @@ interface DatabaseMemberState {
 	streaming: boolean;
 	streamDownSince: number | null;
 	lsn: string | null;
-	/** The last notice this member holds, keyed by its generation, newest wins. */
-	notice: FenceNotice | null;
+	/** Fence notices keyed by the generation the sender held (cross-generation is observable). */
+	notices: Map<number, FenceNotice>;
+	/** A CAS this member won but could not promote yet; retried as the changing-lease holder. */
+	pendingPromotion: { generation: number; attempts: number; lastAttemptAt: number } | null;
+	/** Consecutive fence attempts that did not confirm; reported until one succeeds. */
+	fenceFailures: number;
 	/** Monotonic time of the last successful lease read or write (the proof window). */
 	lastProofAt: number | null;
 	lastRenewAt: number | null;
@@ -122,7 +129,10 @@ export interface DatabaseMemberRunnerOptions {
 	/** Null means this deployment has no node-side arbiter: the machine stays report-only. */
 	arbiter: MemberLeaseArbiter | null;
 	peer: MemberPeerTransport;
+	/** Monotonic clock for debounce/keep-alive/proof ages (never `Date.now`). */
 	now?: () => number;
+	/** Wall clock only for report/event timestamps. */
+	wallNow?: () => number;
 	log?: (level: 'info' | 'warn' | 'error', message: string) => void;
 	onEvent?: (event: MemberEvent) => void;
 	/** Overridable for tests; §9's values are the defaults. */
@@ -145,6 +155,7 @@ export class DatabaseMemberRunner {
 	private readonly arbiter: MemberLeaseArbiter | null;
 	private readonly peer: MemberPeerTransport;
 	private readonly now: () => number;
+	private readonly wallNow: () => number;
 	private readonly log: NonNullable<DatabaseMemberRunnerOptions['log']>;
 	private readonly onEvent: (event: MemberEvent) => void;
 	private readonly leaseTtlMs: number;
@@ -154,14 +165,16 @@ export class DatabaseMemberRunner {
 	private readonly states = new Map<string, DatabaseMemberState>();
 	private readonly lastReports = new Map<string, DatabaseMemberReport>();
 	/** A notice delivered before the first desired-state pass (state is created on observe). */
-	private readonly pendingNotices = new Map<string, FenceNotice>();
+	private readonly pendingNotices = new Map<string, Map<number, FenceNotice>>();
+	private readonly events: MemberEvent[] = [];
 
 	constructor(options: DatabaseMemberRunnerOptions) {
 		this.nodeId = options.nodeId;
 		this.helper = options.helper;
 		this.arbiter = options.arbiter;
 		this.peer = options.peer;
-		this.now = options.now ?? Date.now;
+		this.now = options.now ?? (() => performance.now());
+		this.wallNow = options.wallNow ?? Date.now;
 		this.log = options.log ?? (() => undefined);
 		this.onEvent = options.onEvent ?? (() => undefined);
 		this.leaseTtlMs = options.leaseTtlMs ?? 15_000;
@@ -200,17 +213,17 @@ export class DatabaseMemberRunner {
 		const state = this.states.get(databaseId);
 		if (!state) {
 			// The lease may have expired before the next desired-state pass created the member state;
-			// keep the notice so the candidate check can use it, but never treat it as authorisation
-			// on its own (the check validates generation, sender and epoch).
-			this.pendingNotices.set(databaseId, notice);
+			// keep the notice keyed by generation so the candidate check can use it, but never treat
+			// it as authorisation on its own.
+			const pending = this.pendingNotices.get(databaseId) ?? new Map<number, FenceNotice>();
+			pending.set(notice.generation, notice);
+			this.pendingNotices.set(databaseId, pending);
 			this.#event('fence-notice-received', databaseId, 0, `notice for generation ${notice.generation} (awaiting state)`, notice);
 			return;
 		}
-		// Store a cross-generation notice (so a stale delivery is observable) but only the candidate
-		// check authorises it. A duplicate is idempotent.
-		if (state.notice && notice.at && state.notice.at && notice.at < state.notice.at && notice.generation === state.notice.generation)
-			return;
-		state.notice = notice;
+		const existing = state.notices.get(notice.generation);
+		// A duplicate is idempotent; a later delivery of the same generation is still the same promise.
+		if (!existing) state.notices.set(notice.generation, notice);
 		this.#event('fence-notice-received', databaseId, state.generation, `notice for generation ${notice.generation}`, notice);
 	}
 
@@ -224,6 +237,15 @@ export class DatabaseMemberRunner {
 		return [...this.states.entries()]
 			.filter(([, state]) => state.promoted !== null)
 			.map(([databaseId, state]) => ({ databaseId, generation: state.promoted!.generation, lsn: state.promoted!.lsn }));
+	}
+
+	/** Member events since the last acknowledged heartbeat (fence failures, notices, promotions). */
+	pendingEvents(): MemberEvent[] {
+		return this.events.slice(0, 50);
+	}
+
+	acknowledgeEvents(count: number): void {
+		this.events.splice(0, Math.max(0, Math.min(count, this.events.length)));
 	}
 
 	acknowledgePromotion(databaseId: string): void {
@@ -258,7 +280,7 @@ export class DatabaseMemberRunner {
 		if (role === 'primary') {
 			await this.#keepPrimary(desired, state, wasPrimary);
 		} else if (desiredRole === 'replica') {
-			await this.#tryCandidate(desired, state, state.notice);
+			await this.#tryCandidate(desired, state, workloadId, state.notices);
 		}
 		// A fenced old primary is never resurrected here: desired state's rewind task re-attaches it
 		// as a replica. This machine only stops it serving.
@@ -346,13 +368,13 @@ export class DatabaseMemberRunner {
 	}
 
 	/** §4: evaluate candidate conditions and, only if all hold, CAS `generation + 1`. */
-	async #tryCandidate(desired: DatabaseMembersDesired, state: DatabaseMemberState, notice: FenceNotice | null): Promise<void> {
+	async #tryCandidate(
+		desired: DatabaseMembersDesired,
+		state: DatabaseMemberState,
+		workloadId: string,
+		notices: ReadonlyMap<number, FenceNotice>,
+	): Promise<void> {
 		if (state.busy) return;
-		const failover = desired.failover;
-		if (!failover || failover.mode !== 'auto') return;
-		const acceptDataLoss = failover.acceptDataLoss;
-		// W11-MODEL assumption 9: a downgraded sync database without acceptDataLoss is async now.
-		if (desired.durabilityEffective === 'async' && !acceptDataLoss && desired.durability === 'sync') return;
 		if (!this.arbiter) return;
 		let record: MemberLeaseRecord | null;
 		try {
@@ -364,6 +386,40 @@ export class DatabaseMemberRunner {
 		state.arbiterReachable = true;
 		state.leaseExpiresAt = record?.lease.expiresAt ?? state.leaseExpiresAt;
 		const arbiterNow = record?.arbiterNow ?? this.now();
+
+		// Review blocker 7: after a CAS win, keep promoting as the holder of the changing lease. Never
+		// abandon a won generation: renew it while retrying, and report every failed attempt.
+		if (state.pendingPromotion) {
+			const pending = state.pendingPromotion;
+			if (!record) return;
+			if (record.lease.generation === pending.generation && record.lease.holderNodeId === this.nodeId) {
+				// Keep the won lease alive while `pg_ctl promote` is retried; it stays non-promotable.
+				await this.#renewChangingLease(desired, record, arbiterNow).catch(() => undefined);
+				if (this.now() - pending.lastAttemptAt >= 2_000) {
+					state.busy = true;
+					try {
+						await this.#runPromotion(desired, state, workloadId);
+					} finally {
+						state.busy = false;
+					}
+				}
+				return;
+			}
+			this.#event(
+				'promotion-failed',
+				desired.databaseId,
+				pending.generation,
+				`generation ${pending.generation} is no longer held by this member; the promotion is abandoned`,
+			);
+			state.pendingPromotion = null;
+		}
+
+		const failover = desired.failover;
+		if (!failover || failover.mode !== 'auto') return;
+		const acceptDataLoss = failover.acceptDataLoss;
+		// W11-MODEL assumption 9: a downgraded sync database without acceptDataLoss is async now.
+		if (desired.durabilityEffective === 'async' && !acceptDataLoss && desired.durability === 'sync') return;
+		const notice = notices.get(record?.lease.generation ?? -1) ?? null;
 		const decision = this.#candidate(desired, state, record, arbiterNow, notice);
 		if (!decision.eligible) {
 			this.log('info', `database member ${desired.databaseId} is not a candidate: ${decision.refusals.map((refusal) => refusal.code).join(', ')}`);
@@ -386,29 +442,77 @@ export class DatabaseMemberRunner {
 				won = latest?.lease.generation === next.generation && latest.lease.holderNodeId === this.nodeId;
 				if (!won) {
 					this.#event('cas-lost', desired.databaseId, state.generation, `generation ${next.generation} was taken by another member`);
-					state.notice = null;
 					return;
 				}
 				state.leaseExpiresAt = latest!.lease.expiresAt;
 			}
-			const outcome = await this.helper.promote(desired.databaseId, desired.databaseId);
-			if (!outcome.promoted) {
-				this.#event('refused', desired.databaseId, next.generation, outcome.error ?? 'pg_ctl promote did not complete');
-				return;
-			}
-			// §5.3: clear the inherited sync setting and become the new primary.
-			await this.helper.clearSync(desired.databaseId).catch((error: unknown) =>
-				this.log('warn', `could not clear the sync setting for ${desired.databaseId}: ${errorText(error)}`),
-			);
-			state.generation = next.generation;
-			state.role = 'primary';
-			state.promoted = { generation: next.generation, lsn: outcome.lsn };
-			state.notice = null;
-			this.#event('promoted', desired.databaseId, next.generation, outcome.lsn ?? undefined);
+			state.pendingPromotion = { generation: next.generation, attempts: 0, lastAttemptAt: 0 };
+			await this.#runPromotion(desired, state, workloadId);
 		} catch (error) {
 			this.#event('refused', desired.databaseId, state.generation, errorText(error));
 		} finally {
 			state.busy = false;
+		}
+	}
+
+	/** `pg_ctl promote` on the replica workload, retried while this member holds the changing lease. */
+	async #runPromotion(desired: DatabaseMembersDesired, state: DatabaseMemberState, workloadId: string): Promise<void> {
+		const pending = state.pendingPromotion;
+		if (!pending) return;
+		pending.attempts += 1;
+		pending.lastAttemptAt = this.now();
+		let outcome: { promoted: boolean; lsn: string | null; error?: string };
+		try {
+			outcome = await this.helper.promote(workloadId, desired.databaseId);
+		} catch (error) {
+			outcome = { promoted: false, lsn: null, error: errorText(error) };
+		}
+		if (!outcome.promoted) {
+			this.#event(
+				pending.attempts > 1 ? 'promotion-failed' : 'promotion-retry',
+				desired.databaseId,
+				pending.generation,
+				`pg_ctl promote attempt ${pending.attempts} did not complete: ${outcome.error ?? 'unknown error'}; the changing lease is kept and retried`,
+			);
+			return;
+		}
+		// §5: the winner must prove the generation before serving writes. If the lease moved while
+		// `pg_ctl promote` ran, this member must not report a primary; it fences immediately.
+		const proof = await this.arbiter?.read(desired.databaseId).catch(() => null);
+		if (!proof || proof.lease.generation !== pending.generation || proof.lease.holderNodeId !== this.nodeId) {
+			state.pendingPromotion = null;
+			this.#event('promotion-failed', desired.databaseId, pending.generation, 'pg_ctl promote completed but the lease is no longer held; fencing');
+			await this.#fence(desired, state, 'the lease moved while pg_ctl promote ran');
+			return;
+		}
+		// §5.3: clear the inherited sync setting and become the new primary.
+		await this.helper.clearSync(desired.databaseId).catch((error: unknown) =>
+			this.log('warn', `could not clear the sync setting for ${desired.databaseId}: ${errorText(error)}`),
+		);
+		state.generation = pending.generation;
+		state.role = 'primary';
+		state.promoted = { generation: pending.generation, lsn: outcome.lsn };
+		state.pendingPromotion = null;
+		// Only the generation being acquired matters; older notices are diagnostics.
+		for (const generation of state.notices.keys()) if (generation < pending.generation) state.notices.delete(generation);
+		this.#event('promoted', desired.databaseId, pending.generation, outcome.lsn ?? undefined);
+	}
+
+	/** Keep the won `changing` lease alive while `pg_ctl promote` retries (same generation, holder). */
+	async #renewChangingLease(desired: DatabaseMembersDesired, record: MemberLeaseRecord, arbiterNow: number): Promise<void> {
+		if (!this.arbiter) return;
+		const expiry = Date.parse(record.lease.expiresAt);
+		const base = Number.isFinite(expiry) ? Math.max(arbiterNow, expiry) : arbiterNow;
+		const next: DatabaseLease = { ...record.lease, expiresAt: new Date(base + this.leaseTtlMs).toISOString() };
+		const result = await this.arbiter.compareAndSwap(desired.databaseId, record.etag, next);
+		if (result.ok) {
+			const state = this.states.get(desired.databaseId);
+			if (state) {
+				state.leaseExpiresAt = next.expiresAt;
+				state.lastRenewAt = this.now();
+			}
+		} else {
+			this.#event('promotion-failed', desired.databaseId, record.lease.generation, 'the changing lease could not be renewed while retrying promotion');
 		}
 	}
 
@@ -438,21 +542,45 @@ export class DatabaseMemberRunner {
 	}
 
 	/**
-	 * §5.0/§1.8: stop serving first, send the notice to every reachable member within 2 s, then
-	 * fence Postgres. Delivery is best effort; the lease and keep-alive rules remain the authority.
+	 * Stop writes/read-only and **confirm** (review blocker 4), then send the fence notice to every
+	 * reachable member within 2 s, then report `fenced`. A fence that cannot be confirmed is retried
+	 * and reported (`fence-failed`); the notice is only sent after the primary has stopped serving.
 	 */
 	async #fence(desired: DatabaseMembersDesired, state: DatabaseMemberState, reason: string): Promise<void> {
-		if (state.role === 'fenced' || state.role === 'fencing') return;
+		if (state.role === 'fenced') return;
 		state.role = 'fencing';
 		const decidedAt = this.now();
+		// 1. Stop serving writes and confirm it took effect before promising anything to a peer.
+		let confirmed = false;
+		try {
+			await this.helper.fence(desired.databaseId, 'readonly');
+			const status = await this.helper.status(desired.databaseId);
+			// `readOnly` is the authoritative drain flag; a stopped/moved member is in recovery.
+			confirmed = status.readOnly || status.inRecovery;
+		} catch (error) {
+			this.log('error', `could not fence ${desired.databaseId}: ${errorText(error)}`);
+		}
+		if (!confirmed) {
+			state.fenceFailures += 1;
+			this.#event(
+				'fence-failed',
+				desired.databaseId,
+				state.generation,
+				`the fence was not confirmed (attempt ${state.fenceFailures}); retrying before any notice; ${reason}`,
+			);
+			return;
+		}
+		state.fenceFailures = 0;
 		const notice: FenceNotice = {
 			generation: state.generation,
 			// W9's database lease has a generation, not a separate epoch; the notice names both.
 			epoch: state.generation,
 			from: this.nodeId,
-			at: new Date(decidedAt).toISOString(),
+			at: new Date(this.wallNow()).toISOString(),
 		};
-		const peers = await this.peer.peers(desired.databaseId).catch(() => []);
+		// 2. Best-effort fan-out, bounded by §5.0's 2 s from the decision (including peers()).
+		const budget = () => Math.max(0, 2_000 - (this.now() - decidedAt));
+		const peers = (await Promise.race([this.peer.peers(desired.databaseId).catch(() => []), deadline(budget())])) ?? [];
 		let delivered = 0;
 		const sends = peers
 			.filter((peer) => peer.reachable && peer.nodeId !== this.nodeId)
@@ -464,8 +592,7 @@ export class DatabaseMemberRunner {
 					})
 					.catch(() => undefined),
 			);
-		// §5.0: the notice attempt is best effort and must not delay stopping Postgres past 2 s.
-		await Promise.race([Promise.all(sends), deadline(2_000)]);
+		await Promise.race([Promise.all(sends), deadline(budget())]);
 		const sentAt = this.now();
 		this.#event(
 			delivered > 0 ? 'fence-notice-sent' : 'fence-notice-missed',
@@ -474,11 +601,7 @@ export class DatabaseMemberRunner {
 			`${reason}; notice reached ${delivered}/${peers.length} peer(s)${fenceNoticeWithinBudget(decidedAt, sentAt) ? '' : ' (over the 2 s budget)'}`,
 			notice,
 		);
-		try {
-			await this.helper.fence(desired.databaseId, 'readonly');
-		} catch (error) {
-			this.log('error', `could not fence ${desired.databaseId}: ${errorText(error)}`);
-		}
+		// 3. Only now is the old primary `fenced`.
 		state.role = 'fenced';
 		this.#event('fenced', desired.databaseId, state.generation, reason);
 	}
@@ -492,7 +615,9 @@ export class DatabaseMemberRunner {
 			streaming: desiredRole === 'replica',
 			streamDownSince: null,
 			lsn: null,
-			notice: this.pendingNotices.get(databaseId) ?? null,
+			notices: this.pendingNotices.get(databaseId) ?? new Map<number, FenceNotice>(),
+			pendingPromotion: null,
+			fenceFailures: 0,
 			lastProofAt: null,
 			lastRenewAt: null,
 			arbiterReachable: false,
@@ -529,15 +654,19 @@ export class DatabaseMemberRunner {
 			primaryKeepAliveAt:
 				state.role === 'primary'
 					? null
-					: this.peer.lastAnsweredToPrimary(desired.databaseId) === null
-						? null
-						: new Date(this.peer.lastAnsweredToPrimary(desired.databaseId)!).toISOString(),
-			observedAt: new Date(this.now()).toISOString(),
+					: (() => {
+							const answered = this.peer.lastAnsweredToPrimary(desired.databaseId);
+							return answered === null ? null : new Date(this.wallNow() - (this.now() - answered)).toISOString();
+						})(),
+			observedAt: new Date(this.wallNow()).toISOString(),
 		});
 	}
 
 	#event(kind: MemberEventKind, databaseId: string, generation: number, detail?: string, notice?: FenceNotice): void {
-		this.onEvent({ kind, databaseId, nodeId: this.nodeId, at: this.now(), generation, detail, notice });
+		const event = { kind, databaseId, nodeId: this.nodeId, at: new Date(this.wallNow()).toISOString(), generation, detail, notice };
+		this.events.push(event);
+		if (this.events.length > 200) this.events.splice(0, this.events.length - 200);
+		this.onEvent(event);
 	}
 }
 

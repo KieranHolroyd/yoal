@@ -18,7 +18,8 @@ export const failoverUsage = `Usage:
       --accept-data-loss                      Async only: accept that a promotion may lose commits
       --drill-id <id>                         Arm on this passed drill (default: the latest)
   yoal db failover <name> --disarm            Turn automatic failover off now (no confirmation)
-  yoal db failover <name> --drill             Start a failover drill on the same promotion path
+  yoal db failover <name> --drill --target <disposable>
+                                                Run a measured drill on a disposable database
       --note <text>                           Record a note with the drill
       --json                                  JSON output
   -h, --help                                  Show this help
@@ -35,6 +36,7 @@ const flags: FlagSpec = {
 	drill: { type: 'boolean' },
 	'accept-data-loss': { type: 'boolean' },
 	'drill-id': { type: 'string' },
+	target: { type: 'string' },
 	note: { type: 'string' },
 	yes: { type: 'boolean' },
 	help: { type: 'boolean', short: 'h' },
@@ -58,8 +60,10 @@ export async function failoverCommand(argv: string[]): Promise<void> {
 		return;
 	}
 	if (args.boolean('drill')) {
+		const target = args.string('target');
+		if (!target) throw new UsageError('A drill needs a disposable target: pass --target <database> (never the production database).');
 		const note = args.string('note');
-		const { drill } = await client.drillDatabaseFailover(name, note);
+		const { drill } = await client.drillDatabaseFailover(name, target, note);
 		if (args.boolean('json')) return printJson(drill);
 		console.log(`Drill ${drill.id} started: generation ${drill.generation}, ${drill.fromNodeId ?? '?'} → ${drill.toNodeId ?? '?'}.`);
 		console.log('It records the measured time to writable when the promotion completes; check `yoal db failover` for the result.');

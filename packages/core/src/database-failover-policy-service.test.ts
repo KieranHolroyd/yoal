@@ -6,6 +6,8 @@ import { createDb } from '@yoal/db';
 import { DEFAULT_FEATURES } from '@yoal/contracts';
 import { createCore, type Core } from './index.ts';
 import { LocalObjectStore } from './object-store.ts';
+import { MemoryConditionalStore } from './ha-lease.ts';
+import { ObjectStoreDatabaseLeaseStore } from './database-sync.ts';
 import { buildPrincipal } from './orgs.ts';
 
 /**
@@ -35,8 +37,9 @@ const core: Core = createCore({
 });
 const principal = buildPrincipal({ kind: 'user', userId: 'user_1', orgId: 'org_1', role: 'owner', platformAdmin: true });
 const node = core.nodes.join({ token: core.nodes.createJoinToken(principal, 'data').token, name: 'data' });
-opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member"]', 'online', 'a', node.nodeId]);
+opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member","db-member-self-fencing"]', 'online', 'a', node.nodeId]);
 const database = core.databases.create(principal, { name: 'main', placement: node.nodeId });
+const drillTarget = core.databases.create(principal, { name: 'drill-copy', placement: node.nodeId });
 const extraNodes: string[] = [];
 let sequence = 0;
 
@@ -51,14 +54,16 @@ function reset(): void {
 	opened.sqlite.run('DELETE FROM audit_log');
 	for (const id of extraNodes) opened.sqlite.run('DELETE FROM nodes WHERE id = ?', [id]);
 	extraNodes.length = 0;
-	opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member"]', 'online', 'a', node.nodeId]);
-	opened.sqlite.run(
-		`UPDATE databases SET engine_name = 'postgres', durability = 'async', durability_effective = 'async',
-		 accept_data_loss = 0, failover_mode = 'manual', sync_state = 'steady', last_failover_drill_at = NULL,
-		 failover_evidence_json = '{}', auto_armed_at = NULL, sync_lease_etag = NULL, sync_lease_expires_at = NULL
-		 WHERE id = ?`,
-		[database.id],
-	);
+	opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member","db-member-self-fencing"]', 'online', 'a', node.nodeId]);
+	for (const id of [database.id, drillTarget.id])
+		opened.sqlite.run(
+			`UPDATE databases SET engine_name = 'postgres', durability = 'async', durability_effective = 'async',
+			 accept_data_loss = 0, failover_mode = 'manual', sync_state = 'steady', last_failover_drill_at = NULL,
+			 failover_evidence_json = '{}', auto_armed_at = NULL, sync_lease_etag = NULL, sync_lease_expires_at = NULL
+			 WHERE id = ?`,
+			[id],
+		);
+	(core.ctx as { arbiter: unknown }).arbiter = null;
 	feature('DB_AUTO_PROMOTE', false);
 	feature('SYNC_REPLICA', false);
 	clock = Date.parse('2026-11-21T10:00:00Z');
@@ -69,7 +74,7 @@ function addDataNode(zone = 'a'): string {
 	opened.sqlite.run('UPDATE nodes SET zone = ?, status = ?, capabilities_json = ? WHERE id = ?', [
 		zone,
 		'online',
-		'["db-member","database-replicas"]',
+		'["db-member","database-replicas","db-member-self-fencing"]',
 		joined.nodeId,
 	]);
 	extraNodes.push(joined.nodeId);
@@ -185,6 +190,18 @@ describe('arming', () => {
 		});
 	});
 
+	test('arming refuses a no-self-fencing-path fleet', async () => {
+		eligibleAsync();
+		opened.sqlite.run('UPDATE nodes SET capabilities_json = ? WHERE id = ?', ['["db-member"]', extraNodes[0]!]);
+		expect(core.failoverPolicies.refusals(principal, 'main').map((refusal) => refusal.code)).toContain(
+			'no-self-fencing-path',
+		);
+		await expect(core.failoverPolicies.arm(principal, 'main', { confirm: true, acceptDataLoss: true })).rejects.toMatchObject({
+			code: 'conflict',
+			message: expect.stringContaining('self-fencing'),
+		});
+	});
+
 	test('arming can name an earlier passed drill', async () => {
 		eligibleAsync();
 		const older = addDrill({ finishedAt: clock - 10_000 });
@@ -219,69 +236,122 @@ describe('disarming', () => {
 describe('drills', () => {
 	beforeEach(reset);
 
-	test('need the replica machine and a promotable replica', async () => {
-		await expect(core.failoverPolicies.drill(principal, 'main', { confirm: true })).rejects.toMatchObject({ code: 'unavailable' });
-		feature('SYNC_REPLICA', true);
-		await expect(core.failoverPolicies.drill(principal, 'main', { confirm: true })).rejects.toMatchObject({
-			code: 'conflict',
-			message: expect.stringContaining('No readable replica'),
-		});
-	});
-
-	test('start the same promotion path and record a running drill', async () => {
+	async function targetWithReplica(durability: 'async' | 'sync' = 'async'): Promise<string> {
 		feature('SYNC_REPLICA', true);
 		const replicaNode = addDataNode('b');
-		addReplica(replicaNode, 'streaming', '0/200');
-		opened.sqlite.run('UPDATE databases SET sync_lease_etag = ?, sync_lease_expires_at = ? WHERE id = ?', [
-			'etag-1',
-			clock,
-			database.id,
-		]);
-		const drill = await core.failoverPolicies.drill(principal, 'main', { confirm: true, note: 'lab' });
-		expect(drill.status).toBe('running');
-		expect(drill.generation).toBe(1);
-		expect(drill.toNodeId).toBe(replicaNode);
-		const failover = opened.sqlite.query<{ promotion_source: string; evidence_json: string }, []>('SELECT promotion_source, evidence_json FROM database_failovers').get();
+		opened.sqlite.run(
+			`INSERT INTO database_replicas (id, database_id, node_id, status, slot, primary_generation, host_port, replay_lsn, reported_at, created_at, updated_at)
+			 VALUES (?, ?, ?, 'streaming', ?, 0, 5500, '0/200', ?, 1, 1)`,
+			[`dbr_${++sequence}`, drillTarget.id, replicaNode, `slot_${sequence}`, clock],
+		);
+		opened.sqlite.run(
+			"UPDATE databases SET durability = ?, durability_effective = ?, sync_lease_etag = 'etag-target', sync_lease_expires_at = ? WHERE id = ?",
+			[durability, durability, clock, drillTarget.id],
+		);
+		opened.sqlite.run('UPDATE nodes SET last_heartbeat_at = ? WHERE id = ?', [clock, node.nodeId]);
+		// A real arbiter so the promotion's CAS is provable at completion.
+		const arbiter = new MemoryConditionalStore();
+		(core.ctx as { arbiter: unknown }).arbiter = arbiter;
+		await new ObjectStoreDatabaseLeaseStore(arbiter).compareAndSwap(drillTarget.id, null, {
+			generation: 0,
+			holderNodeId: node.nodeId,
+			expiresAt: new Date(clock + 30_000).toISOString(),
+			sync: durability === 'sync' ? [replicaNode] : [],
+			syncState: 'steady',
+			durability,
+			durabilityEffective: durability,
+			syncSetAt: new Date(clock).toISOString(),
+		});
+		return replicaNode;
+	}
+
+	test('need the replica machine, an arbiter and a disposable target', async () => {
+		await expect(core.failoverPolicies.drill(principal, 'main', { confirm: true })).rejects.toMatchObject({ code: 'unavailable' });
+		feature('SYNC_REPLICA', true);
+		// Even with the replica machine, a drill without a disposable target is refused.
+		await expect(core.failoverPolicies.drill(principal, 'main', { confirm: true })).rejects.toMatchObject({ code: 'validation' });
+		await expect(
+			core.failoverPolicies.drill(principal, 'main', { confirm: true, drillDatabaseId: 'drill-copy' }),
+		).rejects.toMatchObject({ code: 'unavailable' });
+		(core.ctx as { arbiter: unknown }).arbiter = new MemoryConditionalStore();
+		await expect(
+			core.failoverPolicies.drill(principal, 'main', { confirm: true, drillDatabaseId: 'drill-copy' }),
+		).rejects.toMatchObject({ code: 'conflict', message: expect.stringContaining('No readable replica') });
+		await expect(
+			core.failoverPolicies.drill(principal, 'main', { confirm: true, drillDatabaseId: 'main' }),
+		).rejects.toMatchObject({ code: 'validation' });
+	});
+
+	test('promotes the disposable target and records a real running drill', async () => {
+		const targetNode = await targetWithReplica();
+		const drill = await core.failoverPolicies.drill(principal, 'main', {
+			confirm: true,
+			drillDatabaseId: 'drill-copy',
+			note: 'lab',
+		});
+		expect(drill).toMatchObject({
+			status: 'running',
+			generation: 1,
+			toNodeId: targetNode,
+			drillDatabaseId: drillTarget.id,
+			// Start records no assumption; completion proves the CAS.
+			arbiterTested: false,
+			lostCommits: null,
+		});
+		const failover = opened.sqlite
+			.query<{ promotion_source: string; evidence_json: string }, []>('SELECT promotion_source, evidence_json FROM database_failovers')
+			.get();
 		expect(failover?.promotion_source).toBe('drill');
 		expect(JSON.parse(failover?.evidence_json ?? '{}')).toMatchObject({ drillId: drill.id });
 		expect(auditActions()).toEqual(expect.arrayContaining(['database.failover.drill.start', 'database.failover.promote']));
+		// The production database was not promoted.
+		const mainNode = opened.sqlite
+			.query<{ node_id: string }, [string]>('SELECT node_id FROM databases WHERE id = ?')
+			.get(database.id)!;
+		expect(mainNode.node_id).toBe(node.nodeId);
 	});
 
-	test('completion records the measurement and 0 lost commits for sync', async () => {
-		feature('SYNC_REPLICA', true);
-		const replicaNode = addDataNode('b');
-		addReplica(replicaNode, 'streaming', '0/200');
-		opened.sqlite.run(
-			"UPDATE databases SET durability = 'sync', durability_effective = 'sync', sync_lease_etag = ?, sync_lease_expires_at = ? WHERE id = ?",
-			['etag-1', clock, database.id],
-		);
-		// A drill simulates the primary's loss; keep its heartbeat fresh so the fence is confirmable.
-		opened.sqlite.run('UPDATE nodes SET last_heartbeat_at = ? WHERE id = ?', [clock, node.nodeId]);
-		const drill = await core.failoverPolicies.drill(principal, 'main', { confirm: true });
-		// The measurement starts at the last lease write (expiry - 15 s).
-		core.failoverPolicies.completeDrill(drill.id, { passed: true, writableAt: clock - 15_000 + 21_000 });
+	test('completion measures time to writable, proves the CAS and never hardcodes lost commits', async () => {
+		const targetNode = await targetWithReplica('sync');
+		const drill = await core.failoverPolicies.drill(principal, 'main', { confirm: true, drillDatabaseId: 'drill-copy' });
+		// The promotion took the lease at the drill's generation; write that CAS outcome for the prover.
+		const store = new ObjectStoreDatabaseLeaseStore((core.ctx as unknown as { arbiter: MemoryConditionalStore }).arbiter);
+		const current = (await store.read(drillTarget.id))!;
+		await store.compareAndSwap(drillTarget.id, current.etag, {
+			generation: drill.generation,
+			holderNodeId: targetNode,
+			expiresAt: new Date(clock + 15_000).toISOString(),
+			sync: [],
+			syncState: 'changing',
+			durability: 'sync',
+			durabilityEffective: 'sync',
+			syncSetAt: null,
+		});
+		await core.failoverPolicies.completeDrill(drill.id, { passed: true, writableAt: clock - 15_000 + 21_000 });
 		const completed = core.failoverPolicies.view(principal, 'main').lastDrill!;
 		expect(completed).toMatchObject({
 			id: drill.id,
 			status: 'passed',
 			timeToWritableMs: 21_000,
-			lostCommits: 0,
+			// Not measured by any promotion path yet: null, so a sync `auto` is refused.
+			lostCommits: null,
 			arbiterTested: true,
 		});
+		expect(completed.arbiterTestedAt).not.toBeNull();
 		expect(auditActions()).toContain('database.failover.drill.complete');
 	});
 
+	test('completion without a lease CAS does not claim the arbiter was tested', async () => {
+		await targetWithReplica('async');
+		const drill = await core.failoverPolicies.drill(principal, 'main', { confirm: true, drillDatabaseId: 'drill-copy' });
+		await core.failoverPolicies.completeDrill(drill.id, { passed: true, writableAt: clock - 15_000 + 21_000 });
+		expect(core.failoverPolicies.view(principal, 'main').lastDrill).toMatchObject({ arbiterTested: false });
+	});
+
 	test('a slow completion is a failed drill, not a pass', async () => {
-		feature('SYNC_REPLICA', true);
-		const replicaNode = addDataNode('b');
-		addReplica(replicaNode, 'streaming', '0/200');
-		opened.sqlite.run('UPDATE databases SET sync_lease_etag = ?, sync_lease_expires_at = ? WHERE id = ?', [
-			'etag-1',
-			clock,
-			database.id,
-		]);
-		const drill = await core.failoverPolicies.drill(principal, 'main', { confirm: true });
-		core.failoverPolicies.completeDrill(drill.id, { passed: true, writableAt: clock - 15_000 + 30_001 });
+		await targetWithReplica();
+		const drill = await core.failoverPolicies.drill(principal, 'main', { confirm: true, drillDatabaseId: 'drill-copy' });
+		await core.failoverPolicies.completeDrill(drill.id, { passed: true, writableAt: clock - 15_000 + 30_001 });
 		expect(core.failoverPolicies.view(principal, 'main').lastDrill).toMatchObject({
 			status: 'failed',
 			timeToWritableMs: 30_001,
@@ -289,11 +359,9 @@ describe('drills', () => {
 	});
 
 	test('an unmeasured completion cannot arm', async () => {
-		feature('SYNC_REPLICA', true);
-		const replicaNode = addDataNode('b');
-		addReplica(replicaNode, 'streaming', '0/200');
-		const drill = await core.failoverPolicies.drill(principal, 'main', { confirm: true });
-		core.failoverPolicies.completeDrill(drill.id, { passed: true, writableAt: null });
+		await targetWithReplica();
+		const drill = await core.failoverPolicies.drill(principal, 'main', { confirm: true, drillDatabaseId: 'drill-copy' });
+		await core.failoverPolicies.completeDrill(drill.id, { passed: true, writableAt: null });
 		expect(core.failoverPolicies.view(principal, 'main').lastDrill).toMatchObject({
 			status: 'failed',
 			timeToWritableMs: null,

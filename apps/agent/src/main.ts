@@ -26,6 +26,7 @@ import {
 	type WorkloadActivation,
 	INGRESS_SET_CAPABILITY,
 	HA_EPOCH_CAPABILITY,
+	DB_MEMBER_SELF_FENCING_CAPABILITY,
 } from '@yoal/contracts';
 import type { TlsOptions } from '@yoal/site-config';
 import { startAnalyticsSink, type AnalyticsSink } from './analytics-sink.ts';
@@ -1726,6 +1727,7 @@ class AgentRuntime {
 		const memberReports = [
 			...new Map([...durabilityReports, ...this.databaseMember.reports()].map((report) => [report.databaseId, report])).values(),
 		];
+		const memberEvents = this.databaseMember.pendingEvents();
 		const syncResults = this.databaseDurability.pendingSyncResults();
 		const switchoverResults = this.databaseDurability.pendingSwitchoverResults();
 		const rewindResults = this.databaseReplication.pendingRewindResults();
@@ -1755,7 +1757,7 @@ class AgentRuntime {
 			actualStateVersion: this.actualStateVersion,
 			status: requestedStatus === 'draining' ? 'draining' : this.caddyOk ? 'online' : 'offline',
 			caddyOk: this.caddyOk,
-			capabilities: advertisedCapabilities(undefined, undefined, this.nodeCa.available()),
+			capabilities: advertisedCapabilities(undefined, undefined, this.nodeCa.available(), this.databaseMember.selfFencing),
 			// The same value on every ingress when distribution is healthy (HA-PLAN H20, W7). Null
 			// with the flag off, where Caddy issues per node.
 			certificateFingerprint: this.certificateDelivery.fingerprint(),
@@ -1781,6 +1783,7 @@ class AgentRuntime {
 			...(databaseReplication.length > 0 ? { databaseReplication } : {}),
 			...(promotionResults.length > 0 ? { databaseReplicaPromotionResults: promotionResults } : {}),
 			...(memberReports.length > 0 ? { databaseMembers: memberReports } : {}),
+			...(memberEvents.length > 0 ? { databaseMemberEvents: memberEvents } : {}),
 			...(syncResults.length > 0 ? { databaseSyncResults: syncResults } : {}),
 			...(switchoverResults.length > 0 ? { databaseSwitchoverResults: switchoverResults } : {}),
 			...(rewindResults.length > 0 ? { databaseReplicaRewindResults: rewindResults } : {}),
@@ -1842,6 +1845,7 @@ class AgentRuntime {
 		this.databasePoolerRestarts.acknowledge(poolerRestarted);
 		this.databaseReplication.acknowledgePromotions(promotionResults);
 		this.databaseReplication.acknowledgeRewinds(rewindResults.map((result) => result.replicaId));
+		this.databaseMember.acknowledgeEvents(memberEvents.length);
 		await this.nodeUpdate.acknowledge(nodeUpdateResult);
 		// The control plane accepted a heartbeat from this binary: stand the rollback guard down.
 		await this.nodeUpdate.confirmHealthy(this.shutdownController.signal);
@@ -2353,6 +2357,7 @@ export function advertisedCapabilities(
 	pyodideDir: string = process.env.YOAL_PYODIDE_CACHE_DIR ?? `${WORKERD_INSTALL_DIR}/${WORKERD_PINNED_VERSION}/pyodide`,
 	nodeBinary: string = process.env.YOAL_NODE_PATH ?? '/usr/local/bin/node',
 	nodeCaAvailable: boolean = Bun.which('openssl') !== null,
+	selfFencing: boolean = false,
 ): string[] {
 	let python = false;
 	try {
@@ -2375,6 +2380,9 @@ export function advertisedCapabilities(
 	capabilities.push(INGRESS_SET_CAPABILITY);
 	// W9: holds the control address list in `control`, persists the epoch and refuses a lower one.
 	capabilities.push(HA_EPOCH_CAPABILITY);
+	// W11: advertise self-fencing only when this process really has an arbiter transport and a peer
+	// channel. Report-only builds must not claim it, or the control plane would arm `auto` (F1).
+	if (selfFencing) capabilities.push(DB_MEMBER_SELF_FENCING_CAPABILITY);
 	return capabilities;
 }
 

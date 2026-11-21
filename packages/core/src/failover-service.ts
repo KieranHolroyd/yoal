@@ -847,6 +847,34 @@ export class FailoverService {
 			}
 			const candidate = choice.replica;
 			const generation = Math.max(0, ...(byDatabase.get(database.id) ?? []).map((r) => r.primaryGeneration)) + 1;
+			if (automatic) {
+				// W11 review blocker 2: the controller must read the lease and refuse unless it is
+				// steady, expired and names this candidate. The node member machine is the W11 path.
+				const leaseRefusal = await this.ctx.databaseMembers.automaticPromotionRefusal(database, candidate.nodeId);
+				if (leaseRefusal) {
+					const reason = `${silent} Waiting to promote: ${leaseRefusal}.`;
+					if (event) this.#note(fence, event, 'blocked', now, reason);
+					else
+						this.#fenced(fence, () =>
+							this.#insertEvent({
+								kind: 'database',
+								status: 'blocked',
+								stage: 'decide',
+								subjectId: database.id,
+								subjectName: database.name,
+								orgId: database.orgId,
+								fromNodeId: database.nodeId,
+								toNodeId: candidate.nodeId,
+								reason,
+								epoch: fence.epoch,
+								generation,
+								detectedAt: now,
+							}),
+						);
+					alerts.push({ key: `failover:database:${database.id}`, title: `Database ${database.name} is waiting to promote`, detail: reason, severity: 'critical' });
+					continue;
+				}
+			}
 			if (!automatic) {
 				const reason =
 					`${silent} ${policyReason ?? ''} Promote the replica on ${this.#nodeName(facts, candidate.nodeId)} by hand ` +

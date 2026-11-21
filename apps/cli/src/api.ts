@@ -1580,9 +1580,13 @@ export class ApiClient {
 		return { failover: asRecord(raw)?.failover as unknown as DatabaseFailoverPolicyView, raw };
 	}
 
-	async drillDatabaseFailover(name: string, note?: string): Promise<{ drill: DatabaseFailoverDrill; raw: unknown }> {
+	async drillDatabaseFailover(
+		name: string,
+		target: string,
+		note?: string,
+	): Promise<{ drill: DatabaseFailoverDrill; raw: unknown }> {
 		const raw = await this.request('POST', `/api/v1/databases/${encodeURIComponent(name)}/failover`, {
-			body: { action: 'drill', drill: { confirm: true, ...(note ? { note } : {}) } },
+			body: { action: 'drill', drill: { confirm: true, drillDatabaseId: target, ...(note ? { note } : {}) } },
 		});
 		return { drill: asRecord(raw)?.drill as unknown as DatabaseFailoverDrill, raw };
 	}

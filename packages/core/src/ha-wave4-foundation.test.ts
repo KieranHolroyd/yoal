@@ -37,7 +37,7 @@ const core: Core = createCore({
 const principal = buildPrincipal({ kind: 'user', userId: 'user_1', orgId: 'org_1', role: 'owner', platformAdmin: true });
 
 const node = core.nodes.join({ token: core.nodes.createJoinToken(principal, 'data').token, name: 'data' });
-opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member"]', 'online', 'a', node.nodeId]);
+opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member","db-member-self-fencing"]', 'online', 'a', node.nodeId]);
 const database = core.databases.create(principal, { name: 'main', placement: node.nodeId });
 const project = await core.projects.create(principal, {
 	name: 'App',
@@ -61,7 +61,7 @@ function reset(): void {
 	opened.sqlite.run('DELETE FROM database_replicas');
 	for (const id of extraNodes) opened.sqlite.run('DELETE FROM nodes WHERE id = ?', [id]);
 	extraNodes.length = 0;
-	opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member"]', 'online', 'a', node.nodeId]);
+	opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member","db-member-self-fencing"]', 'online', 'a', node.nodeId]);
 	opened.sqlite.run(
 		`UPDATE databases SET engine_name = 'postgres', durability = 'async', durability_effective = 'async',
 		 accept_data_loss = 0, failover_mode = 'manual', sync_state = 'steady', last_failover_drill_at = NULL,
@@ -76,7 +76,7 @@ function addDataNode(zone: string, capable = true): string {
 	opened.sqlite.run('UPDATE nodes SET zone = ?, status = ?, capabilities_json = ? WHERE id = ?', [
 		zone,
 		'online',
-		capable ? '["db-member"]' : '[]',
+		capable ? '["db-member","db-member-self-fencing"]' : '[]',
 		joined.nodeId,
 	]);
 	extraNodes.push(joined.nodeId);

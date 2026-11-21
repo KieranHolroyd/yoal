@@ -580,6 +580,11 @@ export class NodeService {
 			this.ctx.databaseReplicas.applyRewindResults(node.id, input.databaseReplicaRewindResults);
 		// W10: member roles, sync steps and switchover drain/resume outcomes.
 		if (input.databaseMembers?.length) this.ctx.databaseMembers.applyMemberReports(node.id, input.databaseMembers);
+		// W11: fence-notice/failure/promotion events; audited and alerted.
+		if (input.databaseMemberEvents?.length)
+			void this.ctx.databaseMembers
+				.applyMemberEvents(node.id, input.databaseMemberEvents)
+				.catch((error: unknown) => console.error(`[database-members] member event: ${(error as Error).message}`));
 		if (input.databaseSyncResults?.length)
 			void this.ctx.databaseMembers
 				.applySyncResults(node.id, input.databaseSyncResults)

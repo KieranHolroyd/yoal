@@ -29,6 +29,11 @@ export const databaseFailoverEvidenceSchema = z.object({
 	dataZones: z.array(z.string().max(64)).max(64).default([]),
 	/** Every involved member (primary and replicas) declares `db-member`. */
 	membersCapable: z.boolean().default(false),
+	/**
+	 * Every data node advertises `db-member-self-fencing`: a real arbiter transport and peer
+	 * channel, so a primary can fence itself. Arming `auto` without it re-opens F1.
+	 */
+	selfFencing: z.boolean().default(false),
 	/** The passed drill this evidence refers to. */
 	drillId: z.string().max(100).nullable().default(null),
 	drillPassedAt: z.string().datetime().nullable().default(null),
@@ -68,6 +73,11 @@ export const failoverArmRefusalCodes = [
 	'single-zone',
 	/** The primary or a replica's agent is too old to run the member machine. */
 	'member-capability-missing',
+	/**
+	 * No data node advertises `db-member-self-fencing`, so a primary cannot fence itself and an
+	 * automatic promotion could produce two primaries (HA-PLAN F1).
+	 */
+	'no-self-fencing-path',
 	/** No replica is on another online node. */
 	'no-cross-node-replica',
 	/** A planned switchover is in progress. */
@@ -183,6 +193,11 @@ export type DatabaseFailoverArmRequest = z.infer<typeof databaseFailoverArmReque
 /** What `yoal ha db drill <database>` sends (W11-SPEC §12: the same path, disposable database). */
 export const databaseFailoverDrillRequestSchema = z.object({
 	confirm: z.literal(true),
+	/**
+	 * The disposable database to promote. A drill never promotes the production database; when this
+	 * is absent or names the policy database itself, the drill is refused (review blocker 11).
+	 */
+	drillDatabaseId: z.string().min(1).max(100).optional(),
 	/** Optional note recorded with the drill, e.g. the lab scenario name. */
 	note: z.string().max(500).optional(),
 });
@@ -210,8 +225,10 @@ export const databaseFailoverPolicyViewSchema = z.object({
 	evidence: databaseFailoverEvidenceSchema,
 	/** The evidence persisted when the policy was last armed; null for a manual database. */
 	armedEvidence: databaseFailoverEvidenceSchema.nullable(),
-	/** `failoverMode === 'auto'` with no current refusals. */
+	/** `failoverMode === 'auto'` and the live predicate the controller uses (flag, steady, durability). */
 	active: z.boolean(),
+	/** Every arming gate that currently fails; `active` is the controller's live predicate, so a
+	 * lapsed gate such as a stale drill is visible here without silently disabling a live `auto`. */
 	refusals: z.array(failoverArmRefusalSchema),
 });
 export type DatabaseFailoverPolicyView = z.infer<typeof databaseFailoverPolicyViewSchema>;

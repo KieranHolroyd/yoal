@@ -8,6 +8,7 @@ import {
 } from '@yoal/db';
 import {
 	DB_MEMBER_CAPABILITY,
+	DB_MEMBER_SELF_FENCING_CAPABILITY,
 	autoEnabledFor,
 	databaseFailoverEvidenceSchema,
 	databaseReplicaReadable,
@@ -28,6 +29,7 @@ import type { CoreContext } from './context.ts';
 import type { DatabaseRow } from './databases.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import type { NodeView } from './nodes.ts';
+import { ObjectStoreDatabaseLeaseStore } from './database-sync.ts';
 import { newId, parseJson } from './util.ts';
 
 /** W9-SPEC §3 `DB_TTL`: a lease's last write is its expiry minus this. */
@@ -62,13 +64,17 @@ export class DatabaseFailoverPolicyService {
 	}
 
 	/**
-	 * The live half of the policy (W11-MODEL assumption 9): once armed, only a change that stops the
-	 * §1.3 durability condition disables auto without an operator action. The fleet evidence is a
-	 * snapshot taken at arming; re-checking every refusal each tick would turn a stale drill into a
-	 * silent manual promotion, which is not what §3 says.
+	 * The live half of the policy (W11-MODEL assumption 9 + review blockers 2/10). The controller and
+	 * `view.active` use this one predicate: the flag, the per-database mode, a steady sync state, and
+	 * the §1.3 durability condition. Arming separately enforces every §3 refusal.
 	 */
-	autoActiveForRow(database: Pick<DatabaseRow, 'failoverMode' | 'durabilityEffective' | 'acceptDataLoss'>): boolean {
-		return database.failoverMode === 'auto' && autoEnabledFor(true, database.durabilityEffective, database.acceptDataLoss);
+	autoActiveForRow(
+		database: Pick<DatabaseRow, 'failoverMode' | 'durabilityEffective' | 'acceptDataLoss' | 'syncState'>,
+	): boolean {
+		if (!featureEnabled(this.ctx.config, 'DB_AUTO_PROMOTE')) return false;
+		if (database.failoverMode !== 'auto') return false;
+		if (database.syncState !== 'steady') return false;
+		return autoEnabledFor(true, database.durabilityEffective, database.acceptDataLoss);
 	}
 
 	/**
@@ -188,45 +194,62 @@ export class DatabaseFailoverPolicyService {
 			);
 		if (this.#activeFailover(database.id))
 			throw new ConflictError(`"${database.name}" is already failing over; wait for it to finish.`);
+		// Review blocker 11: a drill never promotes the production database. It must name a disposable
+		// target explicitly; the default (no target) is refused rather than guessing.
+		if (!request.drillDatabaseId)
+			throw new ValidationError(
+				'A failover drill needs a disposable database: pass drillDatabaseId (or `--target <database>`) naming a database with a cross-node replica.',
+			);
+		const target = this.ctx.databases.requireRow(principal, request.drillDatabaseId);
+		if (target.id === database.id)
+			throw new ValidationError('A drill must not promote the database whose policy it proves; name a disposable copy instead.');
+		if (target.engine !== 'postgres') throw new ValidationError('Failover drills are available for Postgres only.');
+		if (target.deletedAt) throw new NotFoundError('Database');
+		if (this.#activeFailover(target.id))
+			throw new ConflictError(`"${target.name}" is already failing over; wait for it to finish.`);
+		if (target.syncState !== 'steady')
+			throw new ConflictError(`"${target.name}" has an open sync-set change; it is non-promotable.`);
+		if (!this.ctx.arbiter)
+			throw new CoreError('unavailable', 'A failover drill must prove an arbiter compare-and-swap, and no arbiter is configured.', 409);
 		const replicas = this.ctx.db
 			.select()
 			.from(databaseReplicas)
-			.where(and(eq(databaseReplicas.databaseId, database.id), isNull(databaseReplicas.removingAt)))
+			.where(and(eq(databaseReplicas.databaseId, target.id), isNull(databaseReplicas.removingAt)))
 			.all();
 		const nodeById = new Map(this.#allNodes().map((node) => [node.id, node]));
 		const candidate = replicas
 			.filter(
 				(replica) =>
-					replica.nodeId !== database.nodeId &&
-					replica.primaryGeneration === database.primaryGeneration &&
+					replica.nodeId !== target.nodeId &&
+					replica.primaryGeneration === target.primaryGeneration &&
 					databaseReplicaReadable(replica.status) &&
 					nodeById.get(replica.nodeId)?.status === 'online',
 			)
 			.sort((a, b) => a.nodeId.localeCompare(b.nodeId))[0];
 		if (!candidate)
 			throw new ConflictError(
-				'No readable replica on another online node follows this primary, so a drill has nothing to promote.',
+				`No readable replica on another online node follows "${target.name}", so a drill has nothing to promote.`,
 			);
 		const now = this.ctx.now();
 		const id = newId('drl_');
 		// The lease's last write before the loss is its expiry minus one TTL; that is the §9 clock.
-		const lastLeaseWriteAt = database.syncLeaseExpiresAt === null ? null : database.syncLeaseExpiresAt - DB_LEASE_TTL_MS;
-		const arbiterTested = database.syncLeaseEtag !== null;
+		const lastLeaseWriteAt = target.syncLeaseExpiresAt === null ? null : target.syncLeaseExpiresAt - DB_LEASE_TTL_MS;
 		this.ctx.db
 			.insert(databaseFailoverDrills)
 			.values({
 				id,
 				databaseId: database.id,
-				drillDatabaseId: database.id,
+				drillDatabaseId: target.id,
 				status: 'running',
-				durability: database.durability,
+				durability: target.durability,
 				startedAt: now,
-				generation: database.primaryGeneration + 1,
-				fromNodeId: database.nodeId,
+				generation: target.primaryGeneration + 1,
+				fromNodeId: target.nodeId,
 				toNodeId: candidate.nodeId,
-				arbiterTested,
-				arbiterTestedAt: arbiterTested ? now : null,
-				evidenceJson: JSON.stringify({ lastLeaseWriteAt, replicaId: candidate.id, note: request.note ?? null }),
+				// Set from the actual lease CAS at completion, never assumed at start.
+				arbiterTested: false,
+				arbiterTestedAt: null,
+				evidenceJson: JSON.stringify({ lastLeaseWriteAt, replicaId: candidate.id, targetName: target.name, note: request.note ?? null }),
 				createdBy: principal.userId ?? principal.kind ?? 'system',
 				createdAt: now,
 			})
@@ -236,16 +259,23 @@ export class DatabaseFailoverPolicyService {
 			action: 'database.failover.drill.start',
 			resource: 'database',
 			resourceId: database.id,
-			args: { name: database.name, drillId: id, from: database.nodeId, to: candidate.nodeId, durability: database.durability },
+			args: {
+				name: database.name,
+				drillId: id,
+				target: target.name,
+				from: target.nodeId,
+				to: candidate.nodeId,
+				durability: target.durability,
+			},
 			result: 'ok',
 		});
 		try {
 			const failover = await this.ctx.databaseReplicas.promote(
 				principal,
-				database.name,
+				target.name,
 				candidate.id,
 				// A sync drill must prove RPO 0; an async one is explicitly acknowledged by the drill.
-				{ confirm: true, acceptDataLoss: database.durability === 'async' },
+				{ confirm: true, acceptDataLoss: target.durability === 'async' },
 				{ source: 'drill', drillId: id },
 			);
 			this.ctx.db
@@ -254,6 +284,7 @@ export class DatabaseFailoverPolicyService {
 					evidenceJson: JSON.stringify({
 						lastLeaseWriteAt,
 						replicaId: candidate.id,
+						targetName: target.name,
 						failoverId: failover.id,
 						note: request.note ?? null,
 					}),
@@ -280,13 +311,16 @@ export class DatabaseFailoverPolicyService {
 
 	/**
 	 * Called by the promotion path when a `promotion_source = 'drill'` failover reaches a terminal
-	 * state. The measurement is from the primary's last successful lease write; an async drill
-	 * records no lost-commit count, while a sync drill must record 0 to pass (I13).
+	 * state. Two pieces of evidence are measured, not assumed (review blocker 5):
+	 * - `arbiterTested` only if this drill's generation is actually held at its target node in the
+	 *   arbiter (a real CAS), read back here;
+	 * - `lostCommits` stays `null` unless a promotion path measured it. A sync drill with `null`
+	 *   lost commits therefore **refuses** `auto` (drill-lost-commits); it is never hardcoded to 0.
 	 */
-	completeDrill(
+	async completeDrill(
 		drillId: string,
 		outcome: { passed: boolean; writableAt: number | null; message?: string | null; failoverMessage?: string | null },
-	): void {
+	): Promise<void> {
 		const row = this.ctx.db.select().from(databaseFailoverDrills).where(eq(databaseFailoverDrills.id, drillId)).get();
 		if (!row || row.status !== 'running') return;
 		const evidence = parseJson<Record<string, unknown>>(row.evidenceJson, {});
@@ -294,7 +328,24 @@ export class DatabaseFailoverPolicyService {
 			typeof evidence.lastLeaseWriteAt === 'number' ? evidence.lastLeaseWriteAt : null;
 		const measured = timeToWritableMs(lastLeaseWriteAt, outcome.writableAt);
 		const passed = outcome.passed && withinTimeToWritable(measured);
-		const lostCommits = passed && row.durability === 'sync' ? 0 : null;
+		// A real CAS: the drill's acquired generation is at its target node in the arbiter.
+		let arbiterTested = false;
+		let arbiterTestedAt: number | null = null;
+		const store = this.#leaseStore();
+		if (store && row.toNodeId !== null) {
+			try {
+				const record = await store.read(row.drillDatabaseId ?? row.databaseId);
+				if (record && record.lease.generation === row.generation && record.lease.holderNodeId === row.toNodeId) {
+					arbiterTested = true;
+					arbiterTestedAt = this.ctx.now();
+				}
+			} catch {
+				// An unreadable arbiter is not evidence of a CAS.
+			}
+		}
+		// No promotion path measures acknowledged-commit loss for an unplanned drill yet. Record
+		// `null` and let the refusal (`drill-lost-commits`) block sync auto rather than claiming RPO 0.
+		const lostCommits = null;
 		const message = outcome.passed
 			? measured === null
 				? 'The promotion completed but there was no lease write to measure the time to writable; the drill is unmeasured.'
@@ -306,6 +357,8 @@ export class DatabaseFailoverPolicyService {
 			passed,
 			timeToWritableMs: measured,
 			lostCommits,
+			arbiterTested,
+			arbiterTestedAt,
 			message,
 			evidence: { ...evidence, failoverMessage: outcome.failoverMessage ?? null, measuredAt: this.ctx.now() },
 		});
@@ -321,7 +374,7 @@ export class DatabaseFailoverPolicyService {
 			action: 'database.failover.drill.complete',
 			resource: 'database',
 			resourceId: row.databaseId,
-			args: { name: database?.name ?? null, drillId, passed, timeToWritableMs: measured, lostCommits },
+			args: { name: database?.name ?? null, drillId, passed, timeToWritableMs: measured, lostCommits, arbiterTested },
 			result: passed ? 'ok' : 'error',
 			...(passed ? {} : { error: message }),
 		});
@@ -334,6 +387,8 @@ export class DatabaseFailoverPolicyService {
 			passed: boolean;
 			timeToWritableMs?: number | null;
 			lostCommits?: number | null;
+			arbiterTested?: boolean;
+			arbiterTestedAt?: number | null;
 			message?: string;
 			evidence?: Record<string, unknown>;
 		},
@@ -346,11 +401,17 @@ export class DatabaseFailoverPolicyService {
 				finishedAt: now,
 				timeToWritableMs: result.timeToWritableMs ?? null,
 				lostCommits: result.lostCommits ?? null,
+				arbiterTested: result.arbiterTested ?? false,
+				arbiterTestedAt: result.arbiterTestedAt ?? null,
 				message: result.message?.slice(0, 2_000) ?? null,
 				...(result.evidence ? { evidenceJson: JSON.stringify(result.evidence) } : {}),
 			})
 			.where(eq(databaseFailoverDrills.id, id))
 			.run();
+	}
+
+	#leaseStore() {
+		return this.ctx.arbiter ? new ObjectStoreDatabaseLeaseStore(this.ctx.arbiter) : null;
 	}
 
 	// ---------------------------------------------------------------- reads
@@ -373,7 +434,9 @@ export class DatabaseFailoverPolicyService {
 			lastDrill: latestAttempt ? this.#drillView(latestAttempt) : null,
 			evidence,
 			armedEvidence: armed?.success ? armed.data : null,
-			active: database.failoverMode === 'auto' && refusals.length === 0,
+			// The same predicate the controller uses (review blocker 10): a surface never claims an
+			// `auto` the controller would not act on.
+			active: this.autoActiveForRow(database),
 			refusals,
 		};
 	}
@@ -409,6 +472,12 @@ export class DatabaseFailoverPolicyService {
 		const latestAttempt = this.#latestDrill(database.id);
 		// An explicit drill must be a passed one; it replaces the latest passed drill for arming.
 		const latestPassed = drillId ? this.#passedDrill(database.id, drillId) : this.#latestPassedDrill(database.id);
+		// F1 (review blocker 1): every data node and every involved member must advertise the real
+		// self-fencing capability. Without it the control-plane controller must not promote.
+		const selfFencing =
+			dataNodes.length > 0 &&
+			dataNodes.every((node) => node.capabilities.includes(DB_MEMBER_SELF_FENCING_CAPABILITY)) &&
+			involved.every((node) => node.capabilities.includes(DB_MEMBER_SELF_FENCING_CAPABILITY));
 
 		const drillAge =
 			latestPassed?.finishedAt === null || latestPassed?.finishedAt === undefined
@@ -420,6 +489,7 @@ export class DatabaseFailoverPolicyService {
 			dataNodeCount: dataNodes.length,
 			dataZones: zones,
 			membersCapable: memberNodeIds.length > 0 && missingCapability.length === 0,
+			selfFencing,
 			drillId: latestPassed?.id ?? null,
 			drillPassedAt: latestPassed?.finishedAt === null || latestPassed?.finishedAt === undefined ? null : iso(latestPassed.finishedAt),
 			drillTimeToWritableMs: latestPassed?.timeToWritableMs ?? null,
@@ -480,6 +550,12 @@ export class DatabaseFailoverPolicyService {
 				'member-capability-missing',
 				'Every involved member must run an agent that declares db-member; update the listed nodes first.',
 				{ nodeIds: missingCapability },
+			);
+		if (!selfFencing)
+			refuse(
+				'no-self-fencing-path',
+				'Every data node must advertise db-member-self-fencing (a real arbiter transport and peer channel); without it an automatic promotion could leave two primaries (HA-PLAN F1).',
+				{ dataNodeCount: dataNodes.length },
 			);
 		if (!crossNodeReplica)
 			refuse(

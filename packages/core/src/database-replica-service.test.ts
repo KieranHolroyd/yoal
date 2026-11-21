@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createDb } from '@yoal/db';
 import {
 	DATABASE_REPLICAS_CAPABILITY,
+	DB_MEMBER_SELF_FENCING_CAPABILITY,
 	DEFAULT_FEATURES,
 	nodeCapabilities,
 	type FeatureFlags,
@@ -345,6 +346,13 @@ describe('promotion', () => {
 		const fence = { epoch: 1, holderId: 'test', holds: () => true };
 		const plan = { databaseId: db.id, candidateNodeId: second.nodeId, generation: 1, stage: 'fence' as const, reason: 'lost' };
 		expect(handler.run('fence', plan, fence)).toMatchObject({ status: 'done' });
+		expect(
+			opened.sqlite
+				.query<{ promotion_source: string; evidence_json: string }, [string]>(
+					'SELECT promotion_source, evidence_json FROM database_failovers WHERE database_id = ?',
+				)
+				.get(db.id),
+		).toMatchObject({ promotion_source: 'auto' });
 		expect(handler.run('promote', { ...plan, stage: 'promote' }, fence)).toMatchObject({ status: 'waiting' });
 		const task = (await core.databaseReplicas.promotionsForNode(second.nodeId)).find((item) => item.databaseId === db.id)!;
 		beat(second, { databaseReplicaPromotionResults: [{ failoverId: task.failoverId, attempt: 0, status: 'ok', promoted: true, lsn: null }] });
@@ -412,6 +420,11 @@ describe('automatic promotion guard (HA-PLAN F1)', () => {
 		const previous = config.dbMemberSelfFencing;
 		try {
 			core.ctx.arbiter = {} as never;
+			for (const node of [edge, primary, second, third])
+				opened.sqlite.run('UPDATE nodes SET capabilities_json = ? WHERE id = ?', [
+					JSON.stringify([...nodeCapabilities, DB_MEMBER_SELF_FENCING_CAPABILITY]),
+					node.nodeId,
+				]);
 			config.dbMemberSelfFencing = false;
 			expect(withAutoPromote(true, () => core.databaseReplicas.selfFencing())).toMatchObject({ active: false });
 			config.dbMemberSelfFencing = true;

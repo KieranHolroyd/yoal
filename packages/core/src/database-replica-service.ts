@@ -16,6 +16,7 @@ import {
 	DATABASE_REPLICA_REPORT_STALE_SECONDS,
 	DATABASE_REPLICAS_CAPABILITY,
 	DATABASE_REPLICATION_MAX_SLOTS,
+	DB_MEMBER_SELF_FENCING_CAPABILITY,
 	PITR_REWIND_CAPABILITY,
 	databaseAlias,
 	databaseCapabilities,
@@ -364,7 +365,20 @@ export class DatabaseReplicaService {
 			return {
 				active: false,
 				reason:
-					'No data node has reported a W11 self-fencing member machine (direct arbiter transport and peer channel); set YOAL_DB_MEMBER_SELF_FENCING only after the lab proves it.',
+					'The deployment has not asserted YOAL_DB_MEMBER_SELF_FENCING=1 after the lab proved node-side fencing.',
+			};
+		const missing = this.ctx.db
+			.select({ id: nodes.id, rolesJson: nodes.rolesJson, capabilitiesJson: nodes.capabilitiesJson })
+			.from(nodes)
+			.all()
+			.filter((node) => parseJson<string[]>(node.rolesJson, []).includes('data'))
+			.filter((node) => !parseJson<string[]>(node.capabilitiesJson, []).includes(DB_MEMBER_SELF_FENCING_CAPABILITY))
+			.map((node) => node.id)
+			.sort();
+		if (missing.length > 0)
+			return {
+				active: false,
+				reason: `These data nodes do not advertise ${DB_MEMBER_SELF_FENCING_CAPABILITY}, so a primary cannot fence itself: ${missing.join(', ')}.`,
 			};
 		return { active: true, reason: '' };
 	}
@@ -414,7 +428,11 @@ export class DatabaseReplicaService {
 			if (!replica) return { status: 'failed', message: 'No live replica on the candidate node.' };
 			if (!fence.holds()) return { status: 'failed', message: 'The controller lost its lease before fencing.' };
 			try {
-				const started = this.begin(database, replica, { reason: plan.reason || 'Automatic failover.', automatic: true });
+				const started = this.begin(database, replica, {
+					reason: plan.reason || 'Automatic failover.',
+					automatic: true,
+					source: 'auto',
+				});
 				return started.status === 'pending'
 					? { status: 'waiting', message: 'Fence issued; waiting for the old primary to stop.' }
 					: { status: 'done', message: 'The old primary is unreachable; its node will stop it when it returns.' };
@@ -993,7 +1011,7 @@ export class DatabaseReplicaService {
 				.run();
 			const drillId = this.drillId(failover);
 			if (drillId)
-				this.ctx.failoverPolicies.completeDrill(drillId, {
+				void this.ctx.failoverPolicies.completeDrill(drillId, {
 					passed: true,
 					writableAt: failover.promotedAt ?? now,
 					message: null,
@@ -1592,7 +1610,7 @@ export class DatabaseReplicaService {
 			.run();
 		const drillId = this.drillId(failover);
 		if (drillId)
-			this.ctx.failoverPolicies.completeDrill(drillId, {
+			void this.ctx.failoverPolicies.completeDrill(drillId, {
 				passed: false,
 				writableAt: null,
 				message,

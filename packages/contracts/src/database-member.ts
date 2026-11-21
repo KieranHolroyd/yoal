@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { databaseFailoverModes } from './database-failover-policy.ts';
+import { fenceNoticeSchema } from './database-failover-machine.ts';
 
 /**
  * Database members, durability and the synchronous set (HA-PLAN H21–H23, Wave 3 opening). The
@@ -9,6 +10,14 @@ import { databaseFailoverModes } from './database-failover-policy.ts';
 
 /** An agent that runs the database member machine (role discovery, keep-alive, fencing). */
 export const DB_MEMBER_CAPABILITY = 'db-member';
+
+/**
+ * The W11 self-fencing capability. An agent advertises it **only** when it has a real per-node
+ * arbiter transport (a conditional store it can read and CAS) and a peer channel (mTLS member
+ * RPCs). The control plane refuses `auto`, and installs no automatic path, unless every data node
+ * advertises it (W11-SPEC §3; review blocker 1).
+ */
+export const DB_MEMBER_SELF_FENCING_CAPABILITY = 'db-member-self-fencing';
 
 export const databaseDurabilities = ['async', 'sync'] as const;
 export type DatabaseDurability = (typeof databaseDurabilities)[number];
@@ -236,9 +245,40 @@ export const databaseMemberReportSchema = z.object({
 
 export type DatabaseMemberReport = z.infer<typeof databaseMemberReportSchema>;
 
-/** What a member probe answers (helper `GET …/member`, consumed over mTLS). */
-export const databaseMemberProbeSchema = z.object({
+/** A member-machine event worth alerting or auditing (W11 review blocker 14). */
+export const databaseMemberEventKinds = [
+	'candidate',
+	'promoted',
+	'cas-lost',
+	'fenced',
+	'fence-failed',
+	'fence-notice-sent',
+	'fence-notice-missed',
+	'fence-notice-received',
+	'lease-renewed',
+	'failsafe-held',
+	'promotion-retry',
+	'promotion-failed',
+	'refused',
+] as const;
+export type DatabaseMemberEventKind = (typeof databaseMemberEventKinds)[number];
+
+export const databaseMemberEventSchema = z.object({
 	databaseId: z.string().min(1).max(64),
+	nodeId: z.string().min(1).max(64),
+	kind: z.enum(databaseMemberEventKinds),
+	/** The generation the member held/acquired when the event happened. */
+	generation: z.number().int().nonnegative(),
+	/** Wall-clock time for humans; never a safety decision. */
+	at: z.string().datetime(),
+	detail: z.string().max(1_000).optional(),
+	/** The notice, when the event is about one. */
+	notice: fenceNoticeSchema.optional(),
+});
+export type DatabaseMemberEvent = z.infer<typeof databaseMemberEventSchema>;
+
+/** What a member probe answers (helper `GET …/member`, consumed over mTLS). */
+export const databaseMemberProbeSchema = z.object({	databaseId: z.string().min(1).max(64),
 	nodeId: z.string().min(1).max(64),
 	role: z.enum(databaseMemberRoles),
 	generation: z.number().int().nonnegative(),

@@ -10,6 +10,7 @@ import {
 import {
 	DATABASE_REPLICA_REPORT_STALE_SECONDS,
 	DB_MEMBER_CAPABILITY,
+	DB_MEMBER_SELF_FENCING_CAPABILITY,
 	databaseReplicaReadable,
 	effectiveDurability,
 	reconcilePromotionReport,
@@ -19,6 +20,7 @@ import {
 	type DatabaseDurabilityStatus,
 	type DatabaseLease,
 	type DatabaseMember,
+	type DatabaseMemberEvent,
 	type DatabaseMemberReport,
 	type DatabaseMembersDesired,
 	type DatabaseSwitchoverRequest,
@@ -73,6 +75,8 @@ type FailoverRow = typeof databaseFailovers.$inferSelect;
 type ReplicaRow = typeof databaseReplicas.$inferSelect;
 
 export class DatabaseMemberService {
+	private readonly twoPrimaryAudited = new Set<string>();
+
 	constructor(private readonly ctx: CoreContext) {}
 
 	// ---------------------------------------------------------------- surfaces
@@ -433,9 +437,24 @@ export class DatabaseMemberService {
 				generation: report.generation,
 				reachable: this.#node(report.nodeId)?.status === 'online',
 			}));
-		return selectConsumerTarget(answers);
+		const selection = selectConsumerTarget(answers);
+		if (selection.twoPrimaries) {
+			const key = `${databaseId}:${selection.generation}`;
+			if (!this.twoPrimaryAudited.has(key)) {
+				this.twoPrimaryAudited.add(key);
+				this.ctx.audit.record({
+					orgId: database.orgId,
+					action: 'database.failover.two_primaries',
+					resource: 'database',
+					resourceId: database.id,
+					args: { name: database.name, generation: selection.generation, source: 'consumer-discovery' },
+					result: 'error',
+					error: `Two reachable primaries at generation ${selection.generation}; consumers fail closed.`,
+				});
+			}
+		}
+		return selection;
 	}
-
 	/**
 	 * W11-SPEC §7: the control-plane reader. It never decides or writes a lease; it reconciles a
 	 * promotion a node performed while the control plane was down, moves the row/endpoints/PITR
@@ -469,6 +488,15 @@ export class DatabaseMemberService {
 					'Two primaries at one generation (I3)',
 					`${atTop.map((report) => `${report.node_id}@${report.generation}`).join(' and ')} both report primary. Consumers must fail closed; fence both and page.`,
 				);
+				this.ctx.audit.record({
+					orgId: database.orgId,
+					action: 'database.failover.two_primaries',
+					resource: 'database',
+					resourceId: database.id,
+					args: { name: database.name, generation: top, nodes: atTop.map((report) => report.node_id) },
+					result: 'error',
+					error: `Two primaries at generation ${top}.`,
+				});
 				continue;
 			}
 			const report = atTop[0]!;
@@ -497,13 +525,21 @@ export class DatabaseMemberService {
 			);
 			if (decision.action !== 'apply') {
 				for (const alert of decision.alerts) await this.#deliverReaderAlert(database, alert);
-				if (decision.action === 'refuse')
+				if (decision.action === 'refuse' || decision.alerts.some((alert) => alert.severity === 'critical'))
 					this.ctx.audit.record({
 						orgId: database.orgId,
-						action: 'database.failover.invalid',
+						action:
+							decision.alerts.some((alert) => alert.code === 'two-primaries')
+								? 'database.failover.two_primaries'
+								: 'database.failover.invalid',
 						resource: 'database',
 						resourceId: database.id,
-						args: { name: database.name, nodeId: report.node_id, generation: report.generation, fence: decision.fence },
+						args: {
+							name: database.name,
+							nodeId: report.node_id,
+							generation: report.generation,
+							fence: decision.action === 'refuse' ? decision.fence : false,
+						},
 						result: 'error',
 						error: decision.alerts[0]?.message ?? 'invalid promotion',
 					});
@@ -685,6 +721,40 @@ export class DatabaseMemberService {
 		if (!refusal) return null;
 		if (acceptDataLoss && !refusal.startsWith('a sync-set change is open')) return null;
 		return refusal;
+	}
+
+	/**
+	 * The W11 controller gate (review blocker 2): the control-plane promotion path may only start
+	 * when the arbiter's lease is steady, at the database's generation, expired by the arbiter clock,
+	 * and names the candidate for `sync` (or the database accepted async data loss). It is not the
+	 * W11 promotion path; the node member machine is, and this refuses when that path is unavailable.
+	 */
+	async automaticPromotionRefusal(
+		database: Pick<DatabaseRow, 'id' | 'primaryGeneration' | 'acceptDataLoss'>,
+		candidateNodeId: string,
+	): Promise<string | null> {
+		const store = this.#store();
+		if (!store) return 'no arbiter with conditional writes is configured';
+		let record;
+		try {
+			record = await store.read(database.id);
+		} catch (error) {
+			return `the database lease could not be read: ${errorText(error)}`;
+		}
+		if (!record) return 'there is no database lease';
+		const lease = record.lease;
+		if (lease.generation !== database.primaryGeneration)
+			return `the lease is at generation ${lease.generation}, not ${database.primaryGeneration}`;
+		if (lease.syncState !== 'steady') return 'a sync-set change is open, so the database is non-promotable';
+		if (lease.holderNodeId === candidateNodeId) return 'the candidate already holds the lease';
+		if (effectiveDurability(lease) === 'sync' && !lease.sync.includes(candidateNodeId))
+			return 'the candidate is not named in the lease’s synchronous set (I12)';
+		if (effectiveDurability(lease) === 'async' && !database.acceptDataLoss)
+			return 'the database is async and has not accepted data loss';
+		const expiresAt = Date.parse(lease.expiresAt);
+		if (Number.isFinite(expiresAt) && expiresAt > this.ctx.now())
+			return 'the lease has not expired by the arbiter clock, so the primary may still be serving';
+		return null;
 	}
 
 	/**
@@ -991,14 +1061,57 @@ export class DatabaseMemberService {
 		});
 	}
 
+	/** Member-machine events: audit every one, alert the fence/promotion failures (review blocker 14). */
+	async applyMemberEvents(nodeId: string, events: readonly DatabaseMemberEvent[]): Promise<void> {
+		for (const event of events.slice(0, 50)) {
+			const database = this.ctx.db.select().from(databases).where(eq(databases.id, event.databaseId)).get();
+			if (!database) continue;
+			this.ctx.audit.record({
+				orgId: database.orgId,
+				action: 'database.member.event',
+				resource: 'database',
+				resourceId: database.id,
+				args: {
+					name: database.name,
+					nodeId,
+					memberNodeId: event.nodeId,
+					kind: event.kind,
+					generation: event.generation,
+					at: event.at,
+					detail: event.detail ?? null,
+					notice: event.notice ?? null,
+				},
+				result: event.kind === 'fence-failed' || event.kind === 'promotion-failed' ? 'error' : 'ok',
+				...(event.detail ? { error: event.detail.slice(0, 500) } : {}),
+			});
+			if (event.kind === 'fence-failed' || event.kind === 'fence-notice-missed' || event.kind === 'promotion-failed') {
+				await this.#notify(
+					database,
+					`member:${event.kind}:${event.nodeId}:${event.generation}`,
+					event.kind === 'fence-notice-missed' ? 'warning' : 'critical',
+					event.kind === 'fence-failed'
+						? 'A database primary could not confirm its fence'
+						: event.kind === 'fence-notice-missed'
+							? 'A fence notice was not delivered'
+							: 'A database promotion did not complete',
+					`${event.nodeId} at generation ${event.generation}: ${event.detail ?? event.kind}.`,
+				);
+			}
+		}
+	}
+
 	// ---------------------------------------------------------------- heartbeat
 
 	/** Member reports (role, generation, replay position) from every node. */
 	applyMemberReports(nodeId: string, reports: readonly DatabaseMemberReport[]): void {
-		const now = this.ctx.now();
 		let changed = false;
 		for (const report of reports.slice(0, 50)) {
-			if (this.#lastMemberReport(report.databaseId, nodeId)?.observedAt === report.observedAt) continue;
+			const observedAt = Date.parse(report.observedAt);
+			if (!Number.isFinite(observedAt)) continue;
+			const previous = this.#lastMemberReport(report.databaseId, nodeId);
+			// Persist the member's own observation time and never let a reordered/older report
+			// overwrite a newer one (review blocker 8).
+			if (previous && Date.parse(previous.observedAt) >= observedAt) continue;
 			this.ctx.sqlite.run(
 				`INSERT INTO database_member_status (database_id, node_id, role, generation, epoch, streaming, in_recovery, lsn, durability_effective, sync_state, read_only, fenced, lease_generation, lease_epoch, observed_at)
 				 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -1022,7 +1135,7 @@ export class DatabaseMemberService {
 					report.fenced ? 1 : 0,
 					report.leaseGeneration,
 					report.leaseEpoch,
-					now,
+					observedAt,
 				],
 			);
 			changed = true;
@@ -1591,19 +1704,41 @@ export class DatabaseMemberService {
 		}
 	}
 
+	/** True when every involved node really renews from the arbiter, so this process must not. */
+	#nodeRenewalAvailable(database: DatabaseRow): boolean {
+		const replicaIds = this.ctx.db
+			.select({ nodeId: databaseReplicas.nodeId })
+			.from(databaseReplicas)
+			.where(and(eq(databaseReplicas.databaseId, database.id), isNull(databaseReplicas.removingAt)))
+			.all()
+			.map((row) => row.nodeId);
+		const ids = [...new Set([database.nodeId, ...replicaIds])];
+		if (ids.length === 0) return false;
+		return ids.every((id: string) => {
+			const node = this.#node(id);
+			return Boolean(node && parseJson<string[]>(node.capabilitiesJson, []).includes(DB_MEMBER_SELF_FENCING_CAPABILITY));
+		});
+	}
+
 	#store(): DatabaseLeaseStore | null {
 		return this.ctx.arbiter ? new ObjectStoreDatabaseLeaseStore(this.ctx.arbiter) : null;
 	}
 
 	/** Renew a lease the primary holds when it is inside half a TTL of expiry; CAS at its ETag. */
 	async #renewLeaseIfDue(database: DatabaseRow, now: number): Promise<boolean> {
+		// Review blocker 9: once every data node advertises the real member machine, the primary's
+		// node renews its own lease; the control plane must not race it.
+		if (this.#nodeRenewalAvailable(database)) return false;
 		const store = this.#store();
 		if (!store) return false;
 		try {
 			const current = await store.read(database.id);
 			if (!current || current.lease.holderNodeId !== database.nodeId) return false;
 			const expiresAt = Date.parse(current.lease.expiresAt);
-			if (Number.isFinite(expiresAt) && expiresAt - now >= DB_LEASE_TTL_MS / 2) return false;
+			// Never resurrect an expired lease: the holder could not prove it before the TTL, so a
+			// control-plane write would make a fenced primary live again (review blocker 9).
+			if (!Number.isFinite(expiresAt) || expiresAt <= now) return false;
+			if (expiresAt - now >= DB_LEASE_TTL_MS / 2) return false;
 			const renewed = renewedLease(current.lease, now);
 			if (!(await store.compareAndSwap(database.id, current.etag, renewed))) return false;
 			const written = await store.read(database.id);

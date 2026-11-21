@@ -53,6 +53,7 @@ import {
 } from './database-replication.ts';
 import {
 	DB_MEMBER_CAPABILITY,
+	databaseMemberEventSchema,
 	databaseMemberReportSchema,
 	databaseMembersDesiredSchema,
 	databaseSwitchoverResultSchema,
@@ -664,6 +665,8 @@ export const heartbeatSchema = z.object({
 	databaseReplicaRewindResults: z.array(databaseReplicaRewindResultSchema).max(20).optional(),
 	/** Role, generation and replay position of each member on this node (W9-SPEC §5.6). */
 	databaseMembers: z.array(databaseMemberReportSchema).max(50).optional(),
+	/** W11 membership events since the last heartbeat: fence notice/failure, promotions, retries. */
+	databaseMemberEvents: z.array(databaseMemberEventSchema).max(50).optional(),
 	/** Outcomes of `databaseSyncTasks` since the last heartbeat. */
 	databaseSyncResults: z.array(databaseSyncResultSchema).max(20).optional(),
 	/** Outcomes of `databaseSwitchovers` since the last heartbeat. */
