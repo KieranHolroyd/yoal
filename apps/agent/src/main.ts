@@ -1895,6 +1895,8 @@ class AgentRuntime {
 			headers: {
 				authorization: `Bearer ${this.config.nodeToken}`,
 				'content-type': 'application/json',
+				// This host's clock at send time, for the control plane's `clocks` check (HA Wave 5).
+				'x-yoal-agent-time': String(Date.now()),
 			},
 			body: JSON.stringify(parsed.data),
 		});

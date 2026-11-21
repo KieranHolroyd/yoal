@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { BUILD_VERSION } from './build-version.ts';
-import { nodeJoinSchema, wireguardPublicKeySchema, wireguardStateSchema, type NodeJoin, type WireguardState } from '@yoal/contracts';
+import { nodeJoinSchema, nodeRoleSchema, nodeZoneSchema, wireguardPublicKeySchema, wireguardStateSchema, type NodeJoin, type NodeRole, type WireguardState } from '@yoal/contracts';
 import { atomicWriteFile } from './state.ts';
 
 /**
@@ -8,7 +8,7 @@ import { atomicWriteFile } from './state.ts';
  * identity, writes `${dataDir}/node.json` and prints the systemd EnvironmentFile lines.
  */
 
-export const JOIN_USAGE = `Usage: yoal-agent join <controlUrl> --token <joinToken> --name <name> [--data-dir <dir>] [--public-address <address>] [--network-mode yoal|external] [--wireguard-public-key <key>]`;
+export const JOIN_USAGE = `Usage: yoal-agent join <controlUrl> --token <joinToken> --name <name> [--data-dir <dir>] [--public-address <address>] [--network-mode yoal|external] [--wireguard-public-key <key>] [--zone <zone>] [--roles <role,...>]\n(--token may come from YOAL_JOIN_TOKEN instead, so it is not on the command line)`;
 
 export class JoinError extends Error {
 	constructor(message: string) {
@@ -26,6 +26,9 @@ export interface JoinOptions {
 	publicAddress?: string;
 	networkMode?: 'yoal' | 'external';
 	wireguardPublicKey?: string;
+	/** HA Wave 5: sent with the join, as Nodes → Edit node would set them. */
+	zone?: string;
+	roles?: NodeRole[];
 }
 
 export interface JoinedNode {
@@ -71,6 +74,8 @@ export function parseJoinArgs(args: string[], env: Env = process.env): JoinOptio
 	let publicAddress: string | undefined;
 	let networkMode: 'yoal' | 'external' = 'external';
 	let wireguardPublicKey: string | undefined;
+	let zone: string | undefined;
+	let roles: string[] | undefined;
 	let dataDir = env.YOAL_DATA_DIR?.trim() || '/var/lib/yoal-agent';
 
 	for (let index = 0; index < args.length; index++) {
@@ -84,7 +89,9 @@ export function parseJoinArgs(args: string[], env: Env = process.env): JoinOptio
 			flag === '--data-dir' ||
 			flag === '--public-address' ||
 			flag === '--network-mode' ||
-			flag === '--wireguard-public-key'
+			flag === '--wireguard-public-key' ||
+			flag === '--zone' ||
+			flag === '--roles'
 		) {
 			const value = equals > 0 ? arg.slice(equals + 1) : takeValue(args, index, flag);
 			if (equals < 0) index += 1;
@@ -96,6 +103,8 @@ export function parseJoinArgs(args: string[], env: Env = process.env): JoinOptio
 				if (value !== 'yoal' && value !== 'external') throw new JoinError('--network-mode must be yoal or external');
 				networkMode = value;
 			} else if (flag === '--wireguard-public-key') wireguardPublicKey = value;
+			else if (flag === '--zone') zone = value;
+			else if (flag === '--roles') roles = value.split(',').map((role) => role.trim()).filter(Boolean);
 			else publicAddress = value;
 			continue;
 		}
@@ -106,6 +115,7 @@ export function parseJoinArgs(args: string[], env: Env = process.env): JoinOptio
 	}
 
 	if (positionals.length !== 1) throw new JoinError(`Expected one control URL\n${JOIN_USAGE}`);
+	token ??= env.YOAL_JOIN_TOKEN?.trim() || undefined;
 	if (!token) throw new JoinError(`--token is required\n${JOIN_USAGE}`);
 	if (!name) throw new JoinError(`--name is required\n${JOIN_USAGE}`);
 	if (token.length < 20) throw new JoinError('Join token must be at least 20 characters');
@@ -114,6 +124,10 @@ export function parseJoinArgs(args: string[], env: Env = process.env): JoinOptio
 		throw new JoinError('--public-address must be at most 253 characters');
 	if (wireguardPublicKey && !wireguardPublicKeySchema.safeParse(wireguardPublicKey).success)
 		throw new JoinError('--wireguard-public-key must be a base64 WireGuard public key');
+	if (zone !== undefined && !nodeZoneSchema.safeParse(zone).success)
+		throw new JoinError('--zone must be 1–32 lowercase letters, digits and single hyphens');
+	if (roles !== undefined && (roles.length === 0 || roles.some((role) => !nodeRoleSchema.safeParse(role).success)))
+		throw new JoinError(`--roles must be a comma-separated list of ${nodeRoleSchema.options.join(', ')}`);
 
 	return {
 		controlUrl: normalizeControlUrl(positionals[0]!),
@@ -123,6 +137,8 @@ export function parseJoinArgs(args: string[], env: Env = process.env): JoinOptio
 		version: env.YOAL_AGENT_VERSION?.trim() || BUILD_VERSION,
 		...(publicAddress ? { publicAddress } : {}),
 		...(networkMode === 'yoal' ? { networkMode, ...(wireguardPublicKey ? { wireguardPublicKey } : {}) } : {}),
+		...(zone ? { zone } : {}),
+		...(roles ? { roles: [...new Set(roles)] as NodeRole[] } : {}),
 	};
 }
 
@@ -137,6 +153,8 @@ export async function joinNode(options: JoinOptions, fetchImpl: FetchLike = fetc
 		...(options.networkMode === 'yoal' && options.wireguardPublicKey
 			? { wireguardPublicKey: options.wireguardPublicKey }
 			: {}),
+		...(options.zone ? { zone: options.zone } : {}),
+		...(options.roles ? { roles: options.roles } : {}),
 	};
 	const parsedBody = nodeJoinSchema.safeParse(body);
 	if (!parsedBody.success)

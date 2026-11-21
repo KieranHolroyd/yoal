@@ -169,15 +169,10 @@ describe('REGIONS on', () => {
 });
 
 describe('lane stubs', () => {
-	test('lane A and lane B services refuse honestly', async () => {
+	test('lane A services refuse honestly (lane B is built: ha-w5-commands.test.ts)', async () => {
 		const notBuilt = { code: 'not_built', status: 501 };
 		expect(() => core.regions.view(principal)).toThrow(expect.objectContaining(notBuilt));
 		await expect(core.regions.promote(principal, 'ukwest', {})).rejects.toMatchObject(notBuilt);
-		expect(() => core.haInit.plan(principal, { profile: 'ha' })).toThrow(expect.objectContaining(notBuilt));
-		await expect(core.haInit.apply(principal, { profile: 'ha', apply: true })).rejects.toMatchObject(notBuilt);
-		expect(() => core.haDoctor.doctor(principal)).toThrow(expect.objectContaining(notBuilt));
-		await expect(core.haDrills.run(principal, { scenario: 'zone-offline', resource: 'uksouth-1' })).rejects.toMatchObject(notBuilt);
-		await expect(core.haDrills.runAll(principal, {})).rejects.toMatchObject(notBuilt);
 		expect(core.haDrills.catalogue(principal).scenarios).toBe(HA_DRILL_CATALOGUE);
 	});
 

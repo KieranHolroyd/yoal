@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { s3StoreConfigured } from './s3-store.js';
 import {
 	existsSync,
 	mkdirSync,
@@ -182,9 +183,7 @@ export function currentSection(section: PlatformConfigSection): SectionView {
 	}
 	const configured =
 		section === 'backups'
-			? Boolean(
-					env.R2_ACCOUNT_ID && env.R2_BUCKET && env.R2_ACCESS_KEY_ID && env.R2_SECRET_ACCESS_KEY
-				)
+			? s3StoreConfigured(env)
 			: section === 'email'
 				? Boolean(env.YOAL_SMTP_HOST)
 				: section === 'sms'

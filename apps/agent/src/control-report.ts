@@ -22,6 +22,8 @@ interface ReadyzBody {
 	canPromote?: unknown;
 	lease?: { holder?: unknown; expiresAt?: unknown } | null;
 	replication?: { lagSeconds?: unknown } | null;
+	/** HA Wave 5: the flags this host's control plane runs with; only on the local `/readyz`. */
+	featureFlags?: unknown;
 }
 
 export async function readControlReport(
@@ -50,6 +52,9 @@ export async function readControlReport(
 			canPromote: body.canPromote,
 			replicationLagSeconds: body.replication?.lagSeconds ?? null,
 		};
+		// Flags are extra evidence: a malformed set is dropped, never the whole report.
+		const flags = controlReportSchema.shape.featureFlags.safeParse(body.featureFlags);
+		if (flags.success && flags.data) Object.assign(candidate, { featureFlags: flags.data });
 		const parsed = controlReportSchema.safeParse(candidate);
 		return parsed.success ? parsed.data : null;
 	} catch {

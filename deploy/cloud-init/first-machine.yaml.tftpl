@@ -80,12 +80,12 @@ write_files:
       [ -z "$ADMIN_EMAIL" ] || set -- "$@" --admin-email "$ADMIN_EMAIL"
       [ "$SKIP_DNS_CHECK" != "true" ] || set -- "$@" --skip-dns-check
       [ "$CHANNEL" != "canary" ] || set -- "$@" --canary
-      # TODO(installer): --profile ha (HA-PLAN section 8). Not an installer flag; after setup, run
-      #   `yoal ha init --profile ha` (Wave 5 lane B) or set the flags below.
-      # TODO(installer): --zone <zone>. Not an installer flag; set the zone under Nodes > Edit node.
-      # TODO(installer): --roles <list>. Not an installer flag; set roles under Nodes > Edit node.
-      # TODO(installer): --object-store azure://<container> (also s3://, gcs://). The installer
-      #   takes local|r2 only; switch the platform store in /etc/yoal/yoal.env after install.
+      [ -z "$ZONE" ] || set -- "$@" --zone "$ZONE"
+      # The first machine holds every role, so it takes no --roles; change them under Nodes > Edit node.
+      # TODO(terraform): --profile ha (HA-PLAN section 8). The installer has it; the modules have no
+      #   variable for it yet, so `features` below sets flags, and `yoal ha init --profile ha` the rest.
+      # TODO(terraform): --object-store azure://<container> (also s3://, gcs://). The installer has it,
+      #   with credentials from the environment or --object-store-credentials-file; no module passes one yet.
       curl -fsSL "$INSTALL_URL" -o /root/yoal-install.sh
       YOAL_CHANNEL="$CHANNEL" sh /root/yoal-install.sh "$@"
 
@@ -103,7 +103,7 @@ write_files:
       fi
 
       log "done. Open https://$PLATFORM_HOST to finish setup (setup token: sudo cat /etc/yoal/setup-token)."
-      log "then set this node's zone ($ZONE) and roles ($ROLES) under Nodes > Edit node."
+      log "this node's zone is $ZONE (blank means default); set its roles ($ROLES) under Nodes > Edit node if they differ."
 
 runcmd:
   - [sh, -c, '/usr/local/sbin/yoal-provision-first 2>&1 | tee -a /var/log/yoal-provision.log']

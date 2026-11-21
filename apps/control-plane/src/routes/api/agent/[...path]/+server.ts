@@ -72,7 +72,9 @@ const handler: RequestHandler = async (event) => {
 		if (action === 'heartbeat') {
 			if (method !== 'POST') return json({ error: 'method_not_allowed' }, 405);
 			const input = await readJson(request, heartbeatSchema);
-			return core.nodes.heartbeat(token, input);
+			// The agent's send time, for the `clocks` HA check; an older agent omits it.
+			const agentTime = Number(request.headers.get('x-yoal-agent-time') ?? '');
+			return core.nodes.heartbeat(token, input, Number.isFinite(agentTime) && agentTime > 0 ? agentTime : undefined);
 		}
 
 		// A node in an offline drill asks only this while dark (D235). Not a heartbeat: answering it
