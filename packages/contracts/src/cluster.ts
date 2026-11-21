@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { replicaSpreads } from './replica.ts';
 
 /**
  * Cluster topology (docs/CLUSTERING.md §3, phase C0).
@@ -110,8 +111,8 @@ export const placementSpecSchema = z
 		labels: z.record(z.string().min(1).max(63), z.string().max(128)).optional(),
 		volumeClass: volumeClassSchema.optional(),
 		volumeId: z.string().trim().min(1).max(100).optional(),
-		/** Replica constraint: never two copies on one node, or in one zone. */
-		spread: z.enum(['node', 'zone']).optional(),
+		/** Replica constraint: never two copies on one node, zone or region (`region` needs `REGIONS`). */
+		spread: z.enum(replicaSpreads).optional(),
 		/** Prefer the node(s) running this database or storage instance. */
 		near: z.string().trim().min(1).max(100).optional(),
 	})
@@ -124,6 +125,8 @@ export const privateNetworkNameSchema = nodeZoneSchema;
 export const nodeClusterSettingsSchema = z
 	.object({
 		zone: nodeZoneSchema.optional(),
+		/** The region the node's zone belongs to (HA-PLAN H26); absent is `default`. Needs `REGIONS`. */
+		region: nodeZoneSchema.optional(),
 		roles: z.array(nodeRoleSchema).min(1).max(nodeRoles.length).optional(),
 		labels: nodeLabelsSchema.optional(),
 		/** LAN address used for direct peering inside one zone (C1). */
@@ -147,6 +150,8 @@ export interface TopologyNodeView {
 	id: string;
 	name: string;
 	zone: string;
+	/** The node's region (HA-PLAN H26). Optional until W13 lane A fills it; absent is `default`. */
+	region?: string;
 	roles: NodeRole[];
 	labels: Record<string, string>;
 	status: string;
@@ -175,6 +180,8 @@ export interface TopologyNodeView {
 
 export interface TopologyZoneView {
 	zone: string;
+	/** The zone's region (HA-PLAN H26). Optional until W13 lane A fills it; absent is `default`. */
+	region?: string;
 	nodes: string[];
 	/** What an outage of this zone would take down, before failover. */
 	workloads: number;

@@ -1,4 +1,4 @@
-import type { HaProfile } from '@yoal/contracts';
+import { haFindingStatus, type HaCheck, type HaCheckFixKind, type HaProfile } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 
 /**
@@ -138,4 +138,29 @@ export function haFindings(ctx: CoreContext, profile: HaProfile): HaFinding[] {
 
 export function haBlockers(ctx: CoreContext, profile: HaProfile): HaFinding[] {
 	return haFindings(ctx, profile).filter((finding) => finding.severity === 'blocker');
+}
+
+/** How each W12 finding's fix is applied, for the `HaCheck` shape (HA-PLAN W14). */
+const FINDING_FIX_KINDS: Readonly<Record<HaFinding['key'], HaCheckFixKind>> = {
+	'platform-store': 'env',
+	'registry-storage': 'setting',
+	identity: 'setting',
+	mail: 'setting',
+	'telemetry-spool': 'manual',
+};
+
+/**
+ * The W12 findings as `HaCheck`s (Wave 5 foundation). Every finding keeps its key as the check id,
+ * its title, its detail as evidence and its fix; `blocker` is `fail`, `warning` is `warn`, `info`
+ * is `pass`. Nothing is dropped: the preflight, doctor and `ha init` all start from these.
+ */
+export function haFindingChecks(findings: readonly HaFinding[]): HaCheck[] {
+	return findings.map((finding) => ({
+		id: finding.key,
+		title: finding.title,
+		status: haFindingStatus(finding.severity),
+		evidence: [finding.detail],
+		fix: finding.fix && finding.severity !== 'info' ? { kind: FINDING_FIX_KINDS[finding.key], value: finding.fix } : null,
+		subject: null,
+	}));
 }

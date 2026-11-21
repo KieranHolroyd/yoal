@@ -37,6 +37,8 @@ export const nodes = sqliteTable(
 		canBuild: integer('can_build', { mode: 'boolean' }).notNull().default(false),
 		/** Failure domain: nodes in one zone share power, uplink and provider fate (CLUSTERING §3.2). */
 		zone: text('zone').notNull().default('default'),
+		/** The region the zone belongs to (HA-PLAN H26, 0132); `default` is the implicit one. */
+		region: text('region').notNull().default('default'),
 		/** Operator-set roles; NULL keeps the derivation from mode/can_build for older rows. */
 		rolesJson: text('roles_json'),
 		/** Operator labels for placement constraints (`owner=media`); never `yoal.io/*`. */
@@ -1318,6 +1320,8 @@ export const databases = sqliteTable(
 		lastFailoverDrillAt: integer('last_failover_drill_at'),
 		/** Eligibility evidence captured at arming, as JSON (0129). */
 		failoverEvidenceJson: text('failover_evidence_json').notNull().default('{}'),
+		/** The region holding an async standby replica that never auto-promotes (HA-PLAN H26, 0132). */
+		standbyRegion: text('standby_region'),
 		/** Set while a pooler-only restart is waiting for the node to acknowledge it. */
 		poolerRestartRequestedAt: integer('pooler_restart_requested_at'),
 		status: text('status', { enum: ['pending', 'starting', 'running', 'failed', 'stopped'] })
@@ -3441,4 +3445,36 @@ export const sloObjects = sqliteTable(
 		uniqueIndex('slo_objects_project_name_idx').on(t.projectId, t.name),
 		index('slo_objects_org_idx').on(t.orgId),
 	],
+);
+
+/** `yoal ha region promote` (HA-PLAN H26, W13; 0132). The lease generation is the fence. */
+export const regionPromotions = sqliteTable(
+	'region_promotions',
+	{
+		id: text('id').primaryKey(),
+		toRegion: text('to_region').notNull(),
+		fromRegion: text('from_region').notNull(),
+		stage: text('stage', {
+			enum: ['awaiting-confirmation', 'fencing', 'control-plane', 'databases', 'steering', 'completed', 'failed', 'cancelled'],
+		})
+			.notNull()
+			.default('awaiting-confirmation'),
+		/** The generation the plan was made at; the promotion is refused if it moved. */
+		expectedGeneration: integer('expected_generation').notNull(),
+		/** The generation the fence wrote; strictly greater than `expectedGeneration`. */
+		fencedGeneration: integer('fenced_generation'),
+		/** `RegionPromotionItem[]` as JSON. */
+		itemsJson: text('items_json').notNull().default('[]'),
+		acceptDataLoss: integer('accept_data_loss', { mode: 'boolean' }).notNull().default(false),
+		reason: text('reason'),
+		requestedBy: text('requested_by').notNull(),
+		requestedAt: integer('requested_at').notNull(),
+		confirmedBy: text('confirmed_by'),
+		confirmedAt: integer('confirmed_at'),
+		startedAt: integer('started_at'),
+		/** Set by every terminal stage; at most one row has it null (the open promotion). */
+		finishedAt: integer('finished_at'),
+		error: text('error'),
+	},
+	(t) => [index('region_promotions_requested_idx').on(t.requestedAt)],
 );

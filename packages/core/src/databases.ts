@@ -115,6 +115,7 @@ import { pitrActivationFor, pitrStoreProblem } from './pitr-store-gate.ts';
 import type { CoreContext } from './context.ts';
 import { nextCronTime } from './cron.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
+import { assertRegionWrites } from './region-gate.ts';
 import { resolvePlacement } from './placement.ts';
 import type { ProjectRow } from './projects.ts';
 import type { DiskRow } from './disks.ts';
@@ -286,6 +287,7 @@ export class DatabaseService {
 		// A database exists as an org resource before any project attachment, so creation is org-scoped.
 		this.ctx.iam.require(principal, 'database:create', { type: 'org' });
 		const input = databaseCreateSchema.parse(raw);
+		assertRegionWrites(this.ctx.config, [{ field: 'database.standbyRegion', value: input.standbyRegion }]);
 		const info = databaseEngineRegistry[input.engine];
 		const version = input.version ?? info.defaultVersion;
 		const memoryMb = input.memoryMb ?? info.defaultMemoryMb;
@@ -426,6 +428,9 @@ export class DatabaseService {
 		const row = this.requireRow(principal, name);
 		this.requireDatabasePermission(principal, 'database:update', row);
 		const patch = databaseUpdateSchema.parse(raw);
+		assertRegionWrites(this.ctx.config, [{ field: 'database.standbyRegion', value: patch.standbyRegion, current: row.standbyRegion }]);
+		if (patch.standbyRegion !== undefined && patch.standbyRegion !== null && row.engine !== 'postgres')
+			throw new ValidationError('A standby region is only available for PostgreSQL.');
 		this.ctx.moves.assertNotMoving(row);
 		const info = databaseEngineRegistry[row.engine];
 		const projectId = this.attachmentsOf(row.id)[0]?.projectId;
@@ -3866,6 +3871,7 @@ export class DatabaseService {
 			nodeName: node?.name ?? null,
 			primaryGeneration: row.primaryGeneration,
 			replicaCount: this.ctx.databaseReplicas.rowsFor(row.id).filter((replica) => !replica.removingAt).length,
+			standbyRegion: row.standbyRegion ?? null,
 			durability: {
 				configured: row.durability,
 				effective: row.durabilityEffective,

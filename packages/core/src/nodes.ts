@@ -53,9 +53,12 @@ import {
 	OFFLINE_DRILL_CAPABILITY,
 	WG_SUBNETS_CAPABILITY,
 	machineSubnetFor,
+	regionOf,
+	zoneRegionIssue,
 } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, UnauthorizedError, ValidationError } from './errors.ts';
+import { assertRegionWrites } from './region-gate.ts';
 import { allocateOverlayAddress, buildWireguardState, type OverlayNode } from './overlay.ts';
 import { newId, randomToken, sha256Hex, parseJson } from './util.ts';
 import { assertJoinKeyFree, assertJoinTokenUnused } from './node-join.ts';
@@ -865,6 +868,16 @@ export class NodeService {
 			changes.sliceCpuWeight = patch.sliceCpuWeight;
 		if (patch.canBuild !== undefined && patch.canBuild !== node.canBuild) changes.canBuild = patch.canBuild;
 		if (patch.zone !== undefined && patch.zone !== node.zone) changes.zone = patch.zone;
+		// HA-PLAN H26: a region needs REGIONS, and a zone belongs to exactly one region.
+		assertRegionWrites(this.ctx.config, [{ field: 'node.region', value: patch.region, current: node.region }]);
+		if (patch.region !== undefined && regionOf({ region: patch.region }) !== regionOf(node)) changes.region = regionOf({ region: patch.region });
+		if (changes.zone !== undefined || changes.region !== undefined) {
+			const issue = zoneRegionIssue(
+				this.ctx.db.select({ id: nodes.id, name: nodes.name, zone: nodes.zone, region: nodes.region }).from(nodes).all(),
+				{ nodeId: node.id, zone: changes.zone, region: changes.region },
+			);
+			if (issue) throw new ValidationError(issue);
+		}
 		if (patch.roles !== undefined) {
 			const next = [...new Set(patch.roles)] as NodeRole[];
 			const removed = rolesFor(node).filter((role) => !next.includes(role));

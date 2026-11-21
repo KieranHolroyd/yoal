@@ -1,5 +1,6 @@
 import * as z from 'zod';
 import { SLUG_PATTERN } from './slugs.ts';
+import { nodeZoneSchema } from './cluster.ts';
 import type { DatabaseBackupSummary } from './database-backup.ts';
 import { storageTargetSchema, type DiskSummary } from './disk.ts';
 import type { DatabaseDurability, SyncLossPolicy, SyncState } from './database-member.ts';
@@ -767,9 +768,16 @@ export const databaseCreateSchema = z
 		 * other engines ignore the default.
 		 */
 		pooler: z.boolean().default(true),
+		/**
+		 * A region that holds an async replica which never auto-promotes (HA-PLAN H26). Postgres
+		 * only; refused while `REGIONS` is off. W13 lane A places the replica.
+		 */
+		standbyRegion: nodeZoneSchema.optional(),
 	})
 	.superRefine((input, ctx) => {
 		const info = databaseEngineRegistry[input.engine];
+		if (input.standbyRegion !== undefined && input.engine !== 'postgres')
+			ctx.addIssue({ code: 'custom', path: ['standbyRegion'], message: 'A standby region is only available for PostgreSQL.' });
 		if (input.version && !info.versions.includes(input.version))
 			ctx.addIssue({
 				code: 'custom',
@@ -828,6 +836,8 @@ export const databaseUpdateSchema = z
 		extensions: z.array(databaseExtensionSchema).max(databaseExtensionAllowlist.length).optional(),
 		/** Enable or disable the PgBouncer sidecar. */
 		pooler: z.boolean().optional(),
+		/** Set or clear (`null`) the standby region (HA-PLAN H26). Setting one needs `REGIONS`. */
+		standbyRegion: nodeZoneSchema.nullable().optional(),
 	})
 	.superRefine((input, ctx) => {
 		// The version is checked against the database's own engine by the service; here it only
@@ -1062,6 +1072,8 @@ export interface DatabaseView {
 	primaryGeneration: number;
 	/** Read replicas not being removed (docs/CLUSTERING.md §9.2). */
 	replicaCount: number;
+	/** The standby region (HA-PLAN H26), or null. Its replica is async and never auto-promotes. */
+	standbyRegion: string | null;
 	/** Requested durability and what the lease says is in force (HA-PLAN H23, W10). */
 	durability: {
 		configured: DatabaseDurability;

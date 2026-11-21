@@ -45,6 +45,10 @@ import { ReleaseCommandScheduler } from './release-commands.ts';
 import { RelocationService } from './relocation-service.ts';
 import { ClusterConfigService } from './cluster-config-service.ts';
 import { HaService } from './ha-service.ts';
+import { RegionService } from './region-service.ts';
+import { HaInitService } from './ha-init-service.ts';
+import { HaDoctorService } from './ha-doctor.ts';
+import { HaDrillRunner } from './ha-drill-runner.ts';
 import { TelemetrySpoolGapService } from './telemetry-spool-gaps.ts';
 import { CertificateService, IngressSetService, SteeringService } from './ingress-service.ts';
 import { ControlPlaneService } from './control-plane-service.ts';
@@ -358,6 +362,10 @@ export interface Core {
 	cluster: ClusterConfigService;
 	/** The HA profile and movable platform dependencies (HA-PLAN H27/H28, W12). */
 	ha: HaService;
+	regions: RegionService;
+	haInit: HaInitService;
+	haDoctor: HaDoctorService;
+	haDrills: HaDrillRunner;
 	/** Telemetry spool gaps agents report (HA-PLAN H28, W12). */
 	telemetrySpool: TelemetrySpoolGapService;
 	ingressSet: IngressSetService;
@@ -533,6 +541,10 @@ export function createCore(options: CoreOptions): Core {
 	ctx.cluster = new ClusterConfigService(ctx);
 	ctx.telemetrySpool = new TelemetrySpoolGapService(ctx);
 	ctx.ha = new HaService(ctx);
+	ctx.regions = new RegionService(ctx);
+	ctx.haInit = new HaInitService(ctx);
+	ctx.haDoctor = new HaDoctorService(ctx);
+	ctx.haDrills = new HaDrillRunner(ctx);
 	ctx.ingressSet = new IngressSetService(ctx);
 	// Lane E's driver needs the core context (provider, probes, persisted streaks), so it is
 	// registered here rather than in the context-free registry.
@@ -636,6 +648,10 @@ export function createCore(options: CoreOptions): Core {
 		relocations: ctx.relocations,
 		cluster: ctx.cluster,
 		ha: ctx.ha,
+		regions: ctx.regions,
+		haInit: ctx.haInit,
+		haDoctor: ctx.haDoctor,
+		haDrills: ctx.haDrills,
 		telemetrySpool: ctx.telemetrySpool,
 		ingressSet: ctx.ingressSet,
 		steering: ctx.steering,

@@ -50,6 +50,7 @@ import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
 import type { DatabaseRow } from './databases.ts';
 import { ConflictError, CoreError, ForbiddenError, NotFoundError, ValidationError } from './errors.ts';
+import { assertBlueprintHaKeysSupported } from './blueprints-ha.ts';
 import type { ActionDefinition, ItemResult, OperationParams, RunContext, StoredItem } from './operations/types.ts';
 import type { ProjectRow } from './projects.ts';
 import { effectiveRuntime } from './runtime-tier.ts';
@@ -452,6 +453,7 @@ export class BlueprintService {
 
 	/** Every step the document needs against live state, plus problems and warnings. Read-only. */
 	diff(principal: Principal, doc: Blueprint, prune: boolean): Diff {
+		assertBlueprintHaKeysSupported(doc);
 		const steps: BlueprintStep[] = [];
 		const problems: Problem[] = [];
 		const warnings: string[] = [];
@@ -616,7 +618,8 @@ export class BlueprintService {
 			change(changes, path, live, value);
 		};
 		set('name', 'name', row.name, project.name);
-		set('placement', 'placement', row.placement, project.placement);
+		// An object `placement` is an HA key (a spread), refused in `diff` until lane C builds it.
+		set('placement', 'placement', row.placement, typeof project.placement === 'string' ? project.placement : undefined);
 		set('productionAccess', 'access.production', row.productionAccess, project.access?.production);
 		set('previewAccess', 'access.previews', row.previewAccess, project.access?.previews);
 		return { row, action: changes.length ? ('update' as const) : ('noop' as const), changes, problems, patch };
@@ -1171,7 +1174,8 @@ export class BlueprintService {
 						: this.maybe(() => this.ctx.brokers.requireRow(principal, other.name));
 			if (row) return row.nodeId;
 		}
-		return project?.placement ?? doc.projects[first.project]?.placement;
+		const declared = doc.projects[first.project]?.placement;
+		return project?.placement ?? (typeof declared === 'string' ? declared : undefined);
 	}
 
 	// --- stack record -------------------------------------------------------------------

@@ -16,6 +16,7 @@ import { featureEnabled } from './config.ts';
 import { effectiveAccessMode } from './access.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, NotFoundError, ValidationError } from './errors.ts';
+import { assertRegionWrites } from './region-gate.ts';
 import { effectiveRuntime, storedRuntime, type TierRuntime } from './runtime-tier.ts';
 import { hashPassword } from './util.ts';
 
@@ -165,6 +166,7 @@ export class ProjectService {
 		// YOAL_FEATURE_FUNCTIONS=0; refuse a project it could never run.
 		if (input.runtime === 'function' && !featureEnabled(this.ctx.config, 'FUNCTIONS'))
 			throw new ValidationError('Functions are not enabled on this platform (YOAL_FEATURE_FUNCTIONS).');
+		assertRegionWrites(this.ctx.config, [{ field: 'project.placementSpec.spread', value: input.placementSpec?.spread }]);
 		if (input.runtime === 'compose' && !featureEnabled(this.ctx.config, 'COMPOSE'))
 			throw new ValidationError('Compose stacks are not enabled on this platform (YOAL_FEATURE_COMPOSE).');
 		const name = input.name?.trim() || input.slug || 'Untitled project';
@@ -283,6 +285,14 @@ export class ProjectService {
 		const patch: Partial<ProjectRow> = { updatedAt: now };
 		if (input.name !== undefined) patch.name = input.name.trim();
 		if (input.placement !== undefined) patch.placement = input.placement;
+		if (input.placementSpec !== undefined)
+			assertRegionWrites(this.ctx.config, [
+				{
+					field: 'project.placementSpec.spread',
+					value: input.placementSpec?.spread,
+					current: parsePlacementSpec(row.placementJson)?.spread,
+				},
+			]);
 		if (input.placementSpec !== undefined)
 			patch.placementJson = input.placementSpec ? JSON.stringify(input.placementSpec) : null;
 		if (input.productionAccess !== undefined) {

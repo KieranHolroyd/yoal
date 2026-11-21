@@ -10,6 +10,7 @@ import {
 } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { CoreError, ValidationError } from './errors.ts';
+import { assertRegionWrites } from './region-gate.ts';
 import { haBlockers } from './ha-preflight.ts';
 
 /**
@@ -80,6 +81,9 @@ export class ClusterConfigService {
 				ClusterConfig[K]
 			>;
 		};
+		assertRegionWrites(this.ctx.config, [
+			{ field: 'cluster.replicas.spread', value: sent('replicas').spread, current: current.replicas.spread },
+		]);
 		const merged = clusterConfigSchema.safeParse({
 			...current,
 			overlay: { ...current.overlay, ...sent('overlay') },
