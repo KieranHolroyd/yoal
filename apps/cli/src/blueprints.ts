@@ -81,12 +81,33 @@ export function findBlueprintFile(given: string | undefined, cwd: string, exists
 
 const SIGN: Record<BlueprintPlanAction, string> = { create: '+', update: '~', delete: '-', noop: '=' };
 
-/** One line per resource and one indented line per changed field; up-to-date ones only with `all`. */
+/**
+ * One line per resource and one indented line per changed field; up-to-date ones only with `all`.
+ * HA steps (kind `ha`) are left out here: `haLines` renders them as their own section.
+ */
 export function planLines(plan: Pick<BlueprintPlanView, 'resources'>, options: { all?: boolean } = {}): string[] {
 	const lines: string[] = [];
 	for (const resource of plan.resources) {
+		if (resource.kind === 'ha') continue;
 		if (resource.action === 'noop' && !options.all) continue;
 		const reason = resource.reason && resource.action !== 'noop' ? `  (${resource.reason})` : '';
+		lines.push(`${SIGN[resource.action]} ${resource.action.padEnd(6)} ${resource.key}${reason}`);
+		for (const change of resource.changes)
+			lines.push(`      ${change.path}: ${truncate(change.from ?? '-', 60)} → ${truncate(change.to ?? '-', 60)}`);
+	}
+	return lines;
+}
+
+/**
+ * The plan's HA section (HA-PLAN §8): every HA step, up to date ones included, because a
+ * `cluster.requires` check is always up to date and its reason is what the fleet has. Empty for a
+ * file with no HA keys.
+ */
+export function haLines(plan: Pick<BlueprintPlanView, 'resources'>): string[] {
+	const lines: string[] = [];
+	for (const resource of plan.resources) {
+		if (resource.kind !== 'ha') continue;
+		const reason = resource.reason ? `  (${resource.reason})` : '';
 		lines.push(`${SIGN[resource.action]} ${resource.action.padEnd(6)} ${resource.key}${reason}`);
 		for (const change of resource.changes)
 			lines.push(`      ${change.path}: ${truncate(change.from ?? '-', 60)} → ${truncate(change.to ?? '-', 60)}`);

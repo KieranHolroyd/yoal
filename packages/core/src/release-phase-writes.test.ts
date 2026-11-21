@@ -135,13 +135,19 @@ describe('RELEASE_PHASE on: the fields are stored', () => {
 });
 
 describe('blueprints and release-phase fields (HA-PLAN §8, Wave 5)', () => {
-	test('the §8 keys validate, plan refuses them until lane C, and the rest stay unknown', async () => {
+	test('the §8 keys validate, plan refuses them while RELEASE_PHASE is off, and the rest stay unknown', async () => {
 		const { core, close } = makeCore({ BLUEPRINTS: true });
 		const doc = (line: string) => `apiVersion: yoal/v1\nname: stack-a\nprojects:\n  api:\n    runtime: process\n    command: [bun, run, start]\n    ${line}\n`;
 		expect(() => core.blueprints.validate(principal, `apiVersion: yoal/v1\nname: stack-a\nprojects:\n  api:\n    runtime: process\n    command: [bun, run, start]\n`)).not.toThrow();
 		for (const line of ['release: { command: [bin/migrate] }', 'drainSeconds: 10', 'readinessPath: /ready', 'rollout: { canary: 0 }']) {
 			expect(() => core.blueprints.validate(principal, doc(line))).not.toThrow();
-			await expect(core.blueprints.plan(principal, { document: doc(line) })).rejects.toMatchObject({ code: 'not_built' });
+			// The plan lists every problem; the release-phase refusal is one of them, under projects.api.<field>.
+			await expect(core.blueprints.plan(principal, { document: doc(line) })).rejects.toMatchObject({
+				code: 'validation',
+				issues: expect.arrayContaining([
+					{ path: [`projects.api.${line.split(':')[0]}`], message: expect.stringContaining('YOAL_FEATURE_RELEASE_PHASE') },
+				]),
+			});
 		}
 		// §8 does not add stopTimeoutSeconds to blueprints.
 		expect(() => core.blueprints.validate(principal, doc('stopTimeoutSeconds: 30'))).toThrow(/Unrecognized key|unrecognized/i);

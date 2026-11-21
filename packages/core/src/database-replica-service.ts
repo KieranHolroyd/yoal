@@ -1663,6 +1663,11 @@ export class DatabaseReplicaService {
 		return typeof evidence.drillId === 'string' ? evidence.drillId : null;
 	}
 
+	/** Whether a failover or switchover is running for this database (`add` refuses then). */
+	isFailingOver(databaseId: string): boolean {
+		return this.activeFailover(databaseId) !== undefined;
+	}
+
 	private activeFailover(databaseId: string): FailoverRow | undefined {
 		return this.ctx.db
 			.select()

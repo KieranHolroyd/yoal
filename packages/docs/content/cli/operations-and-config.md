@@ -244,6 +244,8 @@ Compares the file with what exists and shows what applying would do, changing no
 
 The plan checks every step against your permissions, the secrets it names and the fields that can't change, and fails with a list of problems rather than producing a plan that would fail halfway.
 
+A file that uses [high availability keys](/compute/apps-and-containers#high-availability-keys) also gets an **HA** section, printed after the other resources with up-to-date steps included: the `cluster.requires` fleet check with what the fleet has, `cluster.steering`, and one step per project and database (`projects.<slug>.ha`, `databases.<name>.ha`). In `--json` output these are the resources whose `kind` is `ha`. A key that a feature flag or another check refuses fails the plan, with each refusal on its own line.
+
 | Flag | Description |
 | --- | --- |
 | `--prune` | Also plan to delete resources this stack manages that the file no longer lists. |
