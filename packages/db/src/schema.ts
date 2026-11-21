@@ -516,6 +516,8 @@ export const databaseFailovers = sqliteTable(
 		promotedAt: integer('promoted_at'),
 		/** When the database lease was last taken at the promoted generation (0128 review). */
 		leaseTakenAt: integer('lease_taken_at'),
+		/** `pg_ctl promote` succeeded, even if the hand-over/re-point has not finished (0128 review). */
+		promotionSucceededAt: integer('promotion_succeeded_at'),
 		/** The old primary's data dir was deleted on its node. */
 		oldPurgedAt: integer('old_purged_at'),
 		/** The promoted replica's leftover directory was deleted. */

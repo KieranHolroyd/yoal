@@ -196,10 +196,13 @@ class ReplicationRunner implements CommandRunner {
 	recovery = 't';
 	status = '[]';
 	failStop = false;
+	throwRecoveryAfterPromote = false;
 	async run(argv: string[], options?: CommandRunOptions): Promise<RunResult> {
 		this.calls.push({ argv, ...(options ? { options } : {}) });
 		const sql = argv[argv.indexOf('-c') + 1] ?? '';
 		if (this.failStop && argv[1] === 'stop') return { code: 1, stdout: '', stderr: 'stop failed' };
+		if (this.throwRecoveryAfterPromote && this.recovery === 'f' && sql === 'SELECT pg_is_in_recovery()')
+			throw new Error('probe RPC lost');
 		if (argv.includes('psql') && sql === 'SELECT pg_is_in_recovery()') return { code: 0, stdout: `${this.recovery}\n`, stderr: '' };
 		if (argv.includes('psql') && sql.startsWith('SELECT pg_current_wal_lsn')) return { code: 0, stdout: '0/5000060\n', stderr: '' };
 		if (argv.includes('psql') && sql === REPLICATION_STATUS_SQL) return { code: 0, stdout: this.status, stderr: '' };
@@ -310,6 +313,17 @@ describe('SystemdDriver replication verbs', () => {
 		const result = await f.driver.replicaPromote(REPLICA, { databaseId: PRIMARY });
 		expect(result).toMatchObject({ promoted: true, error: expect.stringContaining('systemctl stop failed') });
 		// The data dir is still under the replica id: the hand-over can be retried idempotently.
+		expect((await fs.stat(join(f.stateDir, REPLICA, 'pgdata'))).isDirectory()).toBe(true);
+	});
+
+	test('a thrown probe after pg_ctl promote is latched as promoted, never thrown', async () => {
+		const f = await driverFixture();
+		await f.envFor(REPLICA);
+		await fs.mkdir(join(f.stateDir, REPLICA, 'pgdata'), { recursive: true });
+		await fs.writeFile(join(f.stateDir, REPLICA, 'pgdata', 'PG_VERSION'), '17\n');
+		f.runner.throwRecoveryAfterPromote = true;
+		const result = await f.driver.replicaPromote(REPLICA, { databaseId: PRIMARY });
+		expect(result).toMatchObject({ promoted: true, error: expect.stringContaining('probe RPC lost') });
 		expect((await fs.stat(join(f.stateDir, REPLICA, 'pgdata'))).isDirectory()).toBe(true);
 	});
 

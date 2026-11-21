@@ -1775,7 +1775,7 @@ class AgentRuntime {
 		this.databaseCredentials.acknowledge(credentialResults.map((result) => result.taskId));
 		this.studioPrincipals.acknowledge(studioPrincipalResults);
 		this.databasePoolerRestarts.acknowledge(poolerRestarted);
-		this.databaseReplication.acknowledgePromotions(promotionResults.map((result) => result.failoverId));
+		this.databaseReplication.acknowledgePromotions(promotionResults);
 		await this.nodeUpdate.acknowledge(nodeUpdateResult);
 		// The control plane accepted a heartbeat from this binary: stand the rollback guard down.
 		await this.nodeUpdate.confirmHealthy(this.shutdownController.signal);

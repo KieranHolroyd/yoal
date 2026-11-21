@@ -214,8 +214,10 @@ export class DatabaseReplicaService {
 		if (!row) throw new NotFoundError('Database replica');
 		const failover = this.activeFailover(database.id);
 		if (failover && failover.replicaId === row.id) {
-			if (failover.promotedAt)
-				throw new ConflictError('This replica is already the new primary; wait for the failover to finish.');
+			if (failover.promotedAt || failover.promotionSucceededAt)
+				throw new ConflictError(
+					'This replica is already the new primary (the promotion succeeded); removing it would strand the database. Finish the hand-over/re-point instead.',
+				);
 			this.failFailover(failover, 'Cancelled: the replica was removed.');
 		}
 		if (!row.removingAt) {
@@ -766,7 +768,12 @@ export class DatabaseReplicaService {
 					.set({ promotionIssuedAt: this.ctx.now() })
 					.where(eq(databaseFailovers.id, row.id))
 					.run();
-			tasks.push({ failoverId: row.id, databaseId: row.databaseId, replicaWorkloadId: databaseReplicaWorkloadId(row.replicaId) });
+			tasks.push({
+				failoverId: row.id,
+				databaseId: row.databaseId,
+				replicaWorkloadId: databaseReplicaWorkloadId(row.replicaId),
+				attempt: row.switchoverAttempt,
+			});
 		}
 		return tasks;
 	}
@@ -842,6 +849,9 @@ export class DatabaseReplicaService {
 			.where(and(eq(databaseFailovers.status, 'promoting'), eq(databaseFailovers.toNodeId, nodeId)))
 			.all()) {
 			if (!failover.promotedAt) continue;
+			// The lease take is part of the promotion: do not complete the failover until it landed,
+			// or `#retryPromotionLeases` would stop seeing a promoting row (W10 review).
+			if (failover.leaseTakenAt === null) continue;
 			const report = reports.find((item) => item.id === failover.databaseId);
 			if (report?.status !== 'running') continue;
 			this.ctx.db
@@ -935,7 +945,13 @@ export class DatabaseReplicaService {
 			const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
 			if (result.status === 'failed' && result.promoted) {
 				// `pg_ctl promote` succeeded; only the data-dir hand-over failed. The new primary is
-				// live, so this is never a resume. Keep the task for an idempotent retry and alert.
+				// live, so this is never a resume. Record success independently of the re-point, keep
+				// the task for an idempotent retry, and alert.
+				this.ctx.db
+					.update(databaseFailovers)
+					.set({ promotionSucceededAt: this.ctx.now() })
+					.where(eq(databaseFailovers.id, failover.id))
+					.run();
 				await this.ctx.databaseMembers.onHandoverFailed(
 					failover,
 					`The promotion succeeded but the hand-over failed: ${result.error ?? 'unknown error'}`,
@@ -964,7 +980,7 @@ export class DatabaseReplicaService {
 					'The promotion succeeded, but a sync-set change is open, so the database is non-promotable and was not re-pointed. The new primary is live; do not resume the old one.';
 				this.ctx.db
 					.update(databaseFailovers)
-					.set({ promotedAt: now, message: message.slice(0, 2_000) })
+					.set({ promotedAt: now, promotionSucceededAt: now, message: message.slice(0, 2_000) })
 					.where(eq(databaseFailovers.id, failover.id))
 					.run();
 				try {
@@ -1316,7 +1332,7 @@ export class DatabaseReplicaService {
 				.run();
 			this.ctx.db
 				.update(databaseFailovers)
-				.set({ promotedAt: now, message: lsn ? `Promoted at ${lsn}.` : null })
+				.set({ promotedAt: now, promotionSucceededAt: now, message: lsn ? `Promoted at ${lsn}.` : null })
 				.where(eq(databaseFailovers.id, failover.id))
 				.run();
 		})();
@@ -1368,9 +1384,19 @@ export class DatabaseReplicaService {
 
 	private failFailover(failover: FailoverRow, message: string): void {
 		const now = this.ctx.now();
+		// A promotion that already happened must never put the old primary back: the replica is a
+		// primary, so un-fencing the old one would be two primaries. Keep it fenced and say so.
+		const promoted = failover.promotedAt !== null || failover.promotionSucceededAt !== null;
 		this.ctx.db
 			.update(databaseFailovers)
-			.set({ status: 'failed', message: message.slice(0, 2_000), finishedAt: now })
+			.set({
+				status: 'failed',
+				message: (promoted
+					? `${message} The promotion already succeeded; the old primary stays fenced. Repair the hand-over/re-point by hand.`
+					: message
+				).slice(0, 2_000),
+				finishedAt: now,
+			})
 			.where(eq(databaseFailovers.id, failover.id))
 			.run();
 		const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
@@ -1379,12 +1405,12 @@ export class DatabaseReplicaService {
 			action: 'database.failover.fail',
 			resource: 'database',
 			resourceId: failover.databaseId,
-			args: { name: database?.name ?? null, from: failover.fromNodeId, to: failover.toNodeId, message },
+			args: { name: database?.name ?? null, from: failover.fromNodeId, to: failover.toNodeId, message, promoted },
 			result: 'error',
 			error: message.slice(0, 500),
 		});
-		// Un-fenced: the old primary is back in its node's desired state.
-		this.ctx.projects.bump();
+		// Un-fenced only when nothing was promoted; a promoted old primary must stay stopped/read-only.
+		if (!promoted) this.ctx.projects.bump();
 	}
 
 	private activeFailover(databaseId: string): FailoverRow | undefined {

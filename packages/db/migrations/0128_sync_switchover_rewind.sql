@@ -29,6 +29,8 @@ ALTER TABLE database_failovers ADD COLUMN rewind_status TEXT;
 -- The new primary's lease generation is taken after the data hand-over; this records success so a
 -- failed take can be retried on a later tick instead of being swallowed (W10 review).
 ALTER TABLE database_failovers ADD COLUMN lease_taken_at INTEGER;
+-- `pg_ctl promote` succeeded, even while the data-dir hand-over or re-point is still pending.
+ALTER TABLE database_failovers ADD COLUMN promotion_succeeded_at INTEGER;
 -- The replica row created on the old primary's node to hold the rewound copy.
 ALTER TABLE database_failovers ADD COLUMN rewind_replica_id TEXT;
 -- When the current change was opened; a stuck change older than SYNC_CHANGE_TIMEOUT falls back.

@@ -57,7 +57,7 @@ revision fixes the independent review in `REVIEW-FINDINGS.md`. No merge to `main
 
 | # | Fixed | Evidence |
 | --- | --- | --- |
-| 1 | `repoint` passes `failover.id` to `onPromotion`, so `lease_taken_at` is set. `#retryPromotionLeases` now requires `status='promoting'`, the database row on the failover's `toNodeId`, and the row at the failover's generation. `onPromotion` refuses to lower the lease generation. Migration 0128 backfills `lease_taken_at = promoted_at`. | `repoint`, `#retryPromotionLeases`, `onPromotion`, 0128; “a historical completed failover is not re-processed and cannot lower the lease”. |
+| 1 | `repoint` passes `failover.id` to `onPromotion`, so `lease_taken_at` is set. `#retryPromotionLeases` selects the newest `promoted_at != null, lease_taken_at == null` per database and relies on `onPromotion` refusing to lower the generation; this includes the blocked path. Migration 0128 backfills `lease_taken_at = promoted_at`. | `repoint`, `#retryPromotionLeases`, `onPromotion`, 0128; “a historical completed failover is not re-processed and cannot lower the lease”. |
 | 2 | The tick visits every leased row (`durability='sync'` **or** a cached lease ETag), renews it, and only then applies sync-set decisions to `sync` rows. An async promotion's lease is renewed too. | `tick`, `#renewLeaseIfDue`; “an async lease is renewed by the tick too”. |
 | 3 | The helper latches promotion the instant `pg_ctl promote` succeeds; any later hand-over failure returns `{promoted: true, error}`. The agent keeps the workload held and reports `promoted: true`; the control plane alerts and keeps the promotion task for an idempotent hand-over retry, never `failFailover`/resume. | `SystemdDriver.replicaPromote`, agent `database-replication`, `applyPromotionResults`, `onHandoverFailed`; helper “a failure after pg_ctl promote is latched”, agent “a hand-over failure after promotion…”, core “a promotion that succeeded but failed its hand-over is retried, never resumed”. |
 | 4 | A switchover parked at `step='promote'` with `promotion_issued_at IS NULL` for longer than `SYNC_CHANGE_TIMEOUT` is alerted and queued for resume; a promotion that was handed out is left alone. | `#switchoverStalls`, `promotion_issued_at`; “a switchover parked at promote with no promotion resumes after the timeout”. |
@@ -65,6 +65,17 @@ revision fixes the independent review in `REVIEW-FINDINGS.md`. No merge to `main
 | 6 | Schema comments now say 0128, not 0127. | `packages/db/src/schema.ts`. |
 | 7 | The generated stream is exactly `0126_replica_durability.sql`, `0127_replica_rewind.sql` (verbatim from `origin/main`), `0128_sync_switchover_rewind.sql`; `migrations.test.ts` matches. `0127` was not edited. | `bun scripts/generate-migrations.ts` (128), `migrations.test.ts`. |
 | 8 | Hand-off notes the separate lane A `mayAcquire` path (expired + steady + eligible at generation + 1); `acquireRefusal` is unchanged. | W9-SPEC note below. |
+
+## Last verification response
+
+| # | Fixed | Evidence |
+| --- | --- | --- |
+| 1 | Promotion tasks carry `attempt`; `completed` is keyed by `failoverId:attempt`. A failed+promoted result is acknowledged but not terminal: the agent keeps a per-failover retry time and re-runs the hand-over after `promotionRetryMs` (10 s). | `database-replication.ts`, contract `attempt`; “a promoted-but-not-handed-over result is acknowledged and re-runs after a backoff”. |
+| 2 | Added `promotion_succeeded_at`, set on a failed+promoted result and on every successful re-point. `remove()` refuses a replica whose promotion succeeded, and `failFailover` keeps the old primary fenced (no `projects.bump`) when `promotionSucceededAt`/`promotedAt` is set. | `applyPromotionResults`, `repoint`, `remove`, `failFailover`; “removing the replica after a promoted hand-over failure is refused”. |
+| 3 | Every post-promote helper step (including the recovery probe) is inside the latched try; a thrown probe returns `{promoted: true, error}`. On an ambiguous agent/helper error, the agent probes `memberStatus`; out-of-recovery means promoted, and a failed probe is ambiguous → promoted, never resumed. | `SystemdDriver.replicaPromote`, agent `execute`; helper “a thrown probe after pg_ctl promote…”, agent “an ambiguous helper error…” and “a probe that also fails…”. |
+| 4 | `#retryPromotionLeases` selects the newest `promoted_at != null, lease_taken_at == null` per database and relies on `onPromotion`’s generation guard; the blocked (promoted-while-changing) path is included. Completion (`applyWorkloadReports`) is skipped until `leaseTakenAt` is set. | `#retryPromotionLeases`, `applyWorkloadReports`. |
+| 5 | `#switchoverStalls` runs before the `SYNC_REPLICA` gate; a `resume` switchover task is emitted even with the flag off or the capability gone, and desired state includes a non-empty resume task while keeping the flag-off golden byte-identical. | `tick`, `switchoverTasksForNode`, `desired-state/databases.ts`; parked test with the flag off and the desired-state assertion. |
+| 6 | Helper promote polls for 60 s (was 30) matching the client comment; tests added for flag-off lease retry, ack-then-re-run and the thrown post-promote probe. | `systemd.ts`; the three named tests. |
 
 ## What is implemented
 
@@ -84,19 +95,20 @@ revision fixes the independent review in `REVIEW-FINDINGS.md`. No merge to `main
   fenced), `database_member_status`, `GET /databases/:name/members`, and `database_replica` alerts
   for down/lag/lost slot, refused switchover, sync fallback/downgrade/block and failed resume.
 - **Migration 0128** (additive) adds the display cache, switchover/rewind fields, member status, the
-  `sync_attempt`/`sync_phase`/`sync_barrier_lsn`/lease-token columns, `switchover_attempt` and
-  `lease_taken_at`. `0127_replica_rewind.sql` is lane C's file copied verbatim from `origin/main` so
-  the local stream is sequential without a gap; it is not this lane's change and should be dropped
-  by the integrator if the branch is rebased. No VERSION bump.
+  `sync_attempt`/`sync_phase`/`sync_barrier_lsn`/lease-token columns, `switchover_attempt`,
+  `promotion_issued_at`, `lease_taken_at`, `promotion_succeeded_at` and the lease backfill.
+  `0127_replica_rewind.sql` is lane C's file copied verbatim from `origin/main` so the local stream
+  is sequential without a gap; it is not this lane's change and should be dropped by the integrator
+  if the branch is rebased. No VERSION bump.
 
 ## Verified
 
 - `bun run check` — all packages, 0 errors (one pre-existing Svelte warning in
   `settings/registry/+page.svelte`). `iam lint: no new role/kind checks`.
-- `bun test` — 6,522 pass, 74 skip, 0 fail across 592 files.
+- `bun test` — 6,528 pass, 74 skip, 0 fail across 592 files.
 - `YOAL_MIGRATION_BASE_REF=origin/main bun scripts/check-migrations.ts` — ok, 128 embedded
   migrations, no unreviewed destructive statement.
-- Focused: 120 tests across `database-sync.test.ts`, `database-switchover.test.ts`,
+- Focused: 126 tests across `database-sync.test.ts`, `database-switchover.test.ts`,
   `database-member-service.test.ts`, `database-replica-service.test.ts`,
   `apps/helper/src/replication.test.ts`, `apps/agent/src/database-durability.test.ts`,
   `apps/agent/src/database-replication.test.ts`,

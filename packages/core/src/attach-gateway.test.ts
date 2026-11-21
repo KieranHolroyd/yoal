@@ -297,7 +297,7 @@ describe('promotion changes no app environment and restarts none', () => {
 		const started = await core.databaseReplicas.promote(owner, 'promotion-db', replica.id, { confirm: true }, { ifMatch: 0 });
 		beat(data, { workloads: [] });
 		beat(workerB, {
-			databaseReplicaPromotionResults: [{ failoverId: started.id, status: 'ok', promoted: true, lsn: '0/4000000' }],
+			databaseReplicaPromotionResults: [{ failoverId: started.id, attempt: 0, status: 'ok', promoted: true, lsn: '0/4000000' }],
 		});
 		expect(core.databases.get(owner, 'promotion-db').nodeId).toBe(workerB.nodeId);
 

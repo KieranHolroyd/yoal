@@ -114,11 +114,15 @@ export const databaseReplicaPromotionTaskSchema = z.object({
 	failoverId: z.string().min(1).max(100),
 	databaseId: z.string().min(1).max(100),
 	replicaWorkloadId: z.string().min(1).max(100),
+	/** The failover attempt; a completed task is keyed by it so a retry can run. */
+	attempt: z.number().int().nonnegative().default(0),
 });
 export type DatabaseReplicaPromotionTask = z.infer<typeof databaseReplicaPromotionTaskSchema>;
 
 export const databaseReplicaPromotionResultSchema = z.object({
 	failoverId: z.string().min(1).max(100),
+	/** Echo of the task attempt; a completion is keyed by it. */
+	attempt: z.number().int().nonnegative().default(0),
 	status: z.enum(['ok', 'failed']),
 	/**
 	 * `pg_ctl promote` succeeded even if the later hand-over failed. A failed result with this set

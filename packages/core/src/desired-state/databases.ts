@@ -43,14 +43,21 @@ export class DatabaseState extends DesiredStatePart {
 		};
 		// W10 (SYNC_REPLICA): the keys are absent, not empty, with the flag off. That keeps every
 		// existing desired state byte-identical (the golden test) and an older agent unaffected.
-		// The cast is deliberate: the type carries the keys, the flag-off runtime value does not.
-		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA')) return base as Pick<DesiredState, DatabaseFields | DurabilityFields>;
+		// The exception is a resume task: it is a recovery path and must reach the node even after
+		// the flag is turned off, so it is included only when one exists.
+		const switchovers = this.ctx.databaseMembers.switchoverTasksForNode(node.id);
+		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA')) {
+			return (switchovers.length > 0 ? { ...base, databaseSwitchovers: switchovers } : base) as Pick<
+				DesiredState,
+				DatabaseFields | DurabilityFields
+			>;
+		}
 		return {
 			...base,
 			databaseMembers: this.ctx.databaseMembers.membersDesiredAll(),
 			databaseSyncTasks: this.ctx.databaseMembers.syncTasksForNode(node.id),
 			databaseRewindTasks: this.ctx.databaseMembers.rewindTasksForNode(node.id),
-			databaseSwitchovers: this.ctx.databaseMembers.switchoverTasksForNode(node.id),
+			databaseSwitchovers: switchovers,
 		};
 	}
 }

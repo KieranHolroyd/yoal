@@ -1410,20 +1410,27 @@ export class SystemdDriver {
 			if (result.code !== 0)
 				throw new Error(`pg_ctl promote failed (${result.code}): ${result.stderr.trim().slice(0, 500) || 'no detail'}`);
 			promoted = true;
-			for (let attempt = 0; attempt < 30 && recovering !== 'f'; attempt += 1) {
-				recovering = await query('SELECT pg_is_in_recovery()');
-				if (recovering !== 'f') await new Promise((resolve) => setTimeout(resolve, this.restorePollMs));
-			}
-			if (recovering !== 'f') {
-				const error = `Replica ${id} was still in recovery 30 s after pg_ctl promote.`;
-				return { databaseId, lsn: null, promoted: true, error };
-			}
 		} else {
 			// It was already out of recovery: a previous run promoted it. The hand-over may still be
 			// pending, and it is safe to finish it (idempotent retry).
 			promoted = true;
 		}
+		// Every post-promote step is inside this try, including the recovery probe: a thrown RPC must
+		// be reported as promoted (with an error), never as "nothing promoted" (verification).
 		try {
+			if (promoted && recovering !== 'f') {
+				for (let attempt = 0; attempt < 60 && recovering !== 'f'; attempt += 1) {
+					recovering = await query('SELECT pg_is_in_recovery()');
+					if (recovering !== 'f') await new Promise((resolve) => setTimeout(resolve, this.restorePollMs));
+				}
+				if (recovering !== 'f')
+					return {
+						databaseId,
+						lsn: null,
+						promoted: true,
+						error: `Replica ${id} was still in recovery 60 s after pg_ctl promote.`,
+					};
+			}
 			const lsn = await query('SELECT pg_current_wal_lsn()::text');
 			await query('CHECKPOINT');
 			await this.systemctl(['stop', serviceUnitName(id)]);

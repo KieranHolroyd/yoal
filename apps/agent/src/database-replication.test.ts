@@ -96,6 +96,12 @@ class FakeHelper {
 	async replicationStatus(): Promise<DatabaseReplicationSlotStatus[]> {
 		return this.slots;
 	}
+	recovery = true;
+	memberFails = false;
+	async memberStatus(): Promise<{ inRecovery: boolean; lsn: string | null; streaming: boolean; readOnly: boolean }> {
+		if (this.memberFails) throw new Error('member probe failed');
+		return { inRecovery: this.recovery, lsn: null, streaming: !this.recovery, readOnly: false };
+	}
 	async replicaPromote(replicaId: string): Promise<{ lsn: string | null; promoted: boolean; error?: string }> {
 		if (this.failPromote) throw new Error('target exists');
 		this.promoted.push(replicaId);
@@ -173,7 +179,7 @@ describe('DatabaseReplicationRunner', () => {
 
 	test('promotion holds the replica, reports once and releases it when it leaves desired state', async () => {
 		const r = runnerWith();
-		const promotion = { failoverId: 'dfo_1', databaseId: PRIMARY, replicaWorkloadId: REPLICA };
+		const promotion = { failoverId: 'dfo_1', databaseId: PRIMARY, replicaWorkloadId: REPLICA, attempt: 0 };
 		const withReplica = state({
 			databaseReplicaPromotions: [promotion],
 			workloads: [
@@ -203,8 +209,10 @@ describe('DatabaseReplicationRunner', () => {
 		await r.runner.runOnce(withReplica, signal);
 		expect(r.helper.promoted).toEqual([REPLICA]);
 		expect(r.held).toEqual([REPLICA]);
-		expect(r.runner.pendingPromotionResults()).toEqual([{ failoverId: 'dfo_1', status: 'ok', promoted: true, lsn: '0/5000060' }]);
-		r.runner.acknowledgePromotions(['dfo_1']);
+		expect(r.runner.pendingPromotionResults()).toEqual([{ failoverId: 'dfo_1', attempt: 0, status: 'ok', promoted: true, lsn: '0/5000060' }]);
+		r.runner.acknowledgePromotions([
+			{ failoverId: 'dfo_1', attempt: 0, status: 'ok', promoted: true, lsn: '0/5000060' },
+		]);
 		expect(r.runner.pendingPromotionResults()).toEqual([]);
 		await r.runner.runOnce(withReplica, signal);
 		expect(r.helper.promoted).toHaveLength(1);
@@ -217,25 +225,69 @@ describe('DatabaseReplicationRunner', () => {
 		const r = runnerWith();
 		r.helper.failPromote = true;
 		await r.runner.runOnce(
-			state({ databaseReplicaPromotions: [{ failoverId: 'dfo_2', databaseId: PRIMARY, replicaWorkloadId: REPLICA }] }),
+			state({ databaseReplicaPromotions: [{ failoverId: 'dfo_2', databaseId: PRIMARY, replicaWorkloadId: REPLICA, attempt: 0 }] }),
 			signal,
 		);
 		expect(r.held).toEqual([]);
-		expect(r.runner.pendingPromotionResults()).toEqual([{ failoverId: 'dfo_2', status: 'failed', promoted: false, error: 'target exists' }]);
+		expect(r.runner.pendingPromotionResults()).toEqual([{ failoverId: 'dfo_2', attempt: 0, status: 'failed', promoted: false, error: 'target exists' }]);
 	});
 
 	test('a hand-over failure after promotion is reported promoted, and the replica stays held', async () => {
 		const r = runnerWith();
 		r.helper.failHandover = true;
 		await r.runner.runOnce(
-			state({ databaseReplicaPromotions: [{ failoverId: 'dfo_3', databaseId: PRIMARY, replicaWorkloadId: REPLICA }] }),
+			state({ databaseReplicaPromotions: [{ failoverId: 'dfo_3', databaseId: PRIMARY, replicaWorkloadId: REPLICA, attempt: 0 }] }),
 			signal,
 		);
 		// It is a primary now: releasing it would restart it as a standby.
 		expect(r.held).toEqual([REPLICA]);
 		expect(r.runner.pendingPromotionResults()).toEqual([
-			{ failoverId: 'dfo_3', status: 'failed', promoted: true, lsn: null, error: 'data dir rename failed' },
+			{ failoverId: 'dfo_3', attempt: 0, status: 'failed', promoted: true, lsn: null, error: 'data dir rename failed' },
 		]);
+	});
+
+	test('an ambiguous helper error after promotion probes out of recovery and never resumes', async () => {
+		const r = runnerWith();
+		r.helper.failPromote = true;
+		r.helper.recovery = false;
+		await r.runner.runOnce(
+			state({ databaseReplicaPromotions: [{ failoverId: 'dfo_4', databaseId: PRIMARY, replicaWorkloadId: REPLICA, attempt: 0 }] }),
+			signal,
+		);
+		expect(r.held).toEqual([REPLICA]);
+		expect(r.runner.pendingPromotionResults()).toEqual([
+			{ failoverId: 'dfo_4', attempt: 0, status: 'failed', promoted: true, error: 'target exists' },
+		]);
+	});
+
+	test('a probe that also fails is ambiguous and treated as promoted, never resumed', async () => {
+		const r = runnerWith();
+		r.helper.failPromote = true;
+		r.helper.memberFails = true;
+		await r.runner.runOnce(
+			state({ databaseReplicaPromotions: [{ failoverId: 'dfo_5', databaseId: PRIMARY, replicaWorkloadId: REPLICA, attempt: 0 }] }),
+			signal,
+		);
+		expect(r.held).toEqual([REPLICA]);
+		expect(r.runner.pendingPromotionResults()[0]).toMatchObject({ status: 'failed', promoted: true });
+	});
+
+	test('a promoted-but-not-handed-over result is acknowledged and re-runs after a backoff', async () => {
+		const r = runnerWith();
+		r.helper.failHandover = true;
+		const promotion = state({
+			databaseReplicaPromotions: [{ failoverId: 'dfo_6', databaseId: PRIMARY, replicaWorkloadId: REPLICA, attempt: 0 }],
+		});
+		await r.runner.runOnce(promotion, signal);
+		const first = r.runner.pendingPromotionResults()[0]!;
+		expect(first).toMatchObject({ status: 'failed', promoted: true });
+		r.runner.acknowledgePromotions([first]);
+		// Acknowledged, but not terminal: no immediate re-run, then the hand-over is retried.
+		await r.runner.runOnce(promotion, signal);
+		expect(r.helper.promoted).toHaveLength(1);
+		r.advance(10_000);
+		await r.runner.runOnce(promotion, signal);
+		expect(r.helper.promoted).toHaveLength(2);
 	});
 
 	test('the replica slot reaches the helper request', () => {

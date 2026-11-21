@@ -26,13 +26,15 @@ import type { HelperApi } from './helper-client.ts';
 export interface DatabaseReplicationRunnerOptions {
 	controlUrl: string;
 	nodeToken: string;
-	helper: Pick<HelperApi, 'replicationConfigure' | 'replicationStatus' | 'replicaPromote'>;
+	helper: Pick<HelperApi, 'replicationConfigure' | 'replicationStatus' | 'replicaPromote' | 'memberStatus'>;
 	/** The workload runtime: a promoted replica must not be re-applied by the reconcile loop. */
 	runtime: { hold(id: string): void; release(id: string): void };
 	log?: (level: 'info' | 'warn' | 'error', message: string) => void;
 	now?: () => number;
 	/** Retry a failed configure of the same version after this long. */
 	retryMs?: number;
+	/** Retry a promoted-but-not-handed-over promotion after this long. */
+	promotionRetryMs?: number;
 	sampleIntervalMs?: number;
 	fetch?: typeof fetch;
 }
@@ -54,6 +56,7 @@ export class DatabaseReplicationRunner {
 	private readonly log: NonNullable<DatabaseReplicationRunnerOptions['log']>;
 	private readonly now: () => number;
 	private readonly retryMs: number;
+	private readonly promotionRetryMs: number;
 	private readonly sampleIntervalMs: number;
 	private readonly fetcher: typeof fetch;
 	private readonly databases = new Map<string, DatabaseState>();
@@ -61,6 +64,8 @@ export class DatabaseReplicationRunner {
 	private readonly results = new Map<string, DatabaseReplicaPromotionResult>();
 	private readonly completed = new Set<string>();
 	private readonly inFlight = new Set<string>();
+	/** Earliest retry after a promoted-but-not-handed-over result, per failover. */
+	private readonly retryAt = new Map<string, number>();
 	/** Replica workloads held for a promotion, released once they leave desired state. */
 	private readonly held = new Map<string, string>();
 
@@ -72,6 +77,7 @@ export class DatabaseReplicationRunner {
 		this.log = options.log ?? (() => undefined);
 		this.now = options.now ?? Date.now;
 		this.retryMs = options.retryMs ?? 30_000;
+		this.promotionRetryMs = options.promotionRetryMs ?? 10_000;
 		this.sampleIntervalMs = options.sampleIntervalMs ?? DATABASE_REPLICATION_SAMPLE_SECONDS * 1000;
 		this.fetcher = options.fetch ?? fetch;
 	}
@@ -91,10 +97,17 @@ export class DatabaseReplicationRunner {
 		return [...this.results.values()].slice(0, 20);
 	}
 
-	acknowledgePromotions(failoverIds: readonly string[]): void {
-		for (const id of failoverIds) {
-			this.results.delete(id);
-			this.completed.add(id);
+	acknowledgePromotions(results: readonly DatabaseReplicaPromotionResult[]): void {
+		for (const result of results) {
+			this.results.delete(result.failoverId);
+			const key = `${result.failoverId}:${result.attempt}`;
+			// A promoted-but-not-handed-over failure is not terminal: retry it after a backoff. Any
+			// other outcome stops re-running the same attempt; a new attempt has a new key.
+			if (result.status === 'failed' && result.promoted) {
+				this.retryAt.set(result.failoverId, this.now() + this.promotionRetryMs);
+				continue;
+			}
+			this.completed.add(key);
 		}
 	}
 
@@ -174,12 +187,17 @@ export class DatabaseReplicationRunner {
 			this.held.delete(failoverId);
 		}
 		const tasks = state.databaseReplicaPromotions ?? [];
-		const present = new Set(tasks.map((task) => task.failoverId));
-		for (const id of [...this.completed]) if (!present.has(id)) this.completed.delete(id);
+		const present = new Set(tasks.map((task) => `${task.failoverId}:${task.attempt}`));
+		for (const key of [...this.completed]) if (!present.has(key)) this.completed.delete(key);
+		const now = this.now();
 		for (const task of tasks) {
 			if (signal.aborted) return;
-			if (this.completed.has(task.failoverId) || this.inFlight.has(task.failoverId) || this.results.has(task.failoverId))
+			const key = `${task.failoverId}:${task.attempt}`;
+			if (this.completed.has(key) || this.inFlight.has(task.failoverId) || this.results.has(task.failoverId))
 				continue;
+			const retryAt = this.retryAt.get(task.failoverId);
+			if (retryAt !== undefined && now < retryAt) continue;
+			this.retryAt.delete(task.failoverId);
 			await this.execute(task);
 		}
 	}
@@ -195,6 +213,7 @@ export class DatabaseReplicationRunner {
 				// primary now) and report `promoted` so the control plane retries, never resumes.
 				this.results.set(task.failoverId, {
 					failoverId: task.failoverId,
+					attempt: task.attempt,
 					status: 'failed',
 					promoted: true,
 					lsn: outcome.lsn,
@@ -202,17 +221,33 @@ export class DatabaseReplicationRunner {
 				});
 				this.log('error', `Promoted ${task.replicaWorkloadId} but the hand-over failed: ${outcome.error}`);
 			} else {
-				this.results.set(task.failoverId, { failoverId: task.failoverId, status: 'ok', promoted: outcome.promoted, lsn: outcome.lsn });
+				this.results.set(task.failoverId, {
+					failoverId: task.failoverId,
+					attempt: task.attempt,
+					status: 'ok',
+					promoted: outcome.promoted,
+					lsn: outcome.lsn,
+				});
 				this.log('info', `Promoted ${task.replicaWorkloadId} to primary of ${task.databaseId}${outcome.lsn ? ` at ${outcome.lsn}` : ''}`);
 			}
 		} catch (error) {
-			// Not handed over: the replica goes back to normal reconcile; the control plane decides.
-			this.runtime.release(task.replicaWorkloadId);
-			this.held.delete(task.failoverId);
+			// A helper RPC error/timeout after `pg_ctl promote` is ambiguous. Probe the member: out of
+			// recovery is a promoted primary. A probe that also fails is ambiguous, and an ambiguous
+			// result never resumes the old primary.
+			let promoted = true;
+			try {
+				const status = await this.helper.memberStatus(task.replicaWorkloadId);
+				promoted = !status.inRecovery;
+			} catch {
+				promoted = true;
+			}
+			if (!promoted) this.runtime.release(task.replicaWorkloadId);
+			if (!promoted) this.held.delete(task.failoverId);
 			this.results.set(task.failoverId, {
 				failoverId: task.failoverId,
+				attempt: task.attempt,
 				status: 'failed',
-				promoted: false,
+				promoted,
 				error: errorText(error).slice(0, 2_000),
 			});
 			this.log('error', `Could not promote ${task.replicaWorkloadId}: ${errorText(error)}`);

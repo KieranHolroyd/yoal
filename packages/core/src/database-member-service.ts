@@ -700,7 +700,7 @@ export class DatabaseMemberService {
 
 	/** Drain/resume steps for a planned switchover on the old primary's node. */
 	switchoverTasksForNode(nodeId: string): DatabaseSwitchoverTask[] {
-		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA') || !this.#nodeHasDbMember(nodeId)) return [];
+		const enabled = featureEnabled(this.ctx.config, 'SYNC_REPLICA') && this.#nodeHasDbMember(nodeId);
 		const rows = this.ctx.db
 			.select()
 			.from(databaseFailovers)
@@ -715,6 +715,9 @@ export class DatabaseMemberService {
 		return rows.flatMap((row) => {
 			const step = row.switchoverStep;
 			if (step !== 'drain' && step !== 'resume') return [];
+			// A resume is a recovery path: emit it even if the flag was turned off or the node stopped
+			// advertising db-member mid-flight, or writes stay stopped forever (W10 review).
+			if (step === 'drain' && !enabled) return [];
 			const replica = row.replicaId
 				? this.ctx.db.select({ slot: databaseReplicas.slot }).from(databaseReplicas).where(eq(databaseReplicas.id, row.replicaId)).get()
 				: undefined;
@@ -1243,12 +1246,12 @@ export class DatabaseMemberService {
 	 *   previous member when it is healthy, else applies `on_sync_loss`.
 	 */
 	async tick(now = this.ctx.now()): Promise<number> {
-		// A promotion's lease retry is not a SYNC_REPLICA feature: an async database promoted under
-		// the flag still needs its lease taken after the flag is turned off.
+		// Lease retries and switchover stalls are recovery paths, not SYNC_REPLICA features: a
+		// promotion or a stopped-writes switchover must still finish after the flag is turned off.
 		let changed = await this.#retryPromotionLeases();
+		changed += await this.#switchoverStalls(now);
 		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA')) return changed;
 		await this.#replicaAlerts(now);
-		changed += await this.#switchoverStalls(now);
 		const rows = this.ctx.db
 			.select()
 			.from(databases)
@@ -1462,20 +1465,15 @@ export class DatabaseMemberService {
 			.select({ failover: databaseFailovers, database: databases })
 			.from(databaseFailovers)
 			.innerJoin(databases, eq(databases.id, databaseFailovers.databaseId))
-			.where(
-				and(
-					isNotNull(databaseFailovers.promotedAt),
-					isNull(databaseFailovers.leaseTakenAt),
-					eq(databaseFailovers.status, 'promoting'),
-					// Only the promotion that is still current: the row must be on the target node at
-					// the generation this failover promoted. A historical row can never lower the lease.
-					eq(databases.nodeId, databaseFailovers.toNodeId),
-					eq(databases.primaryGeneration, databaseFailovers.generation),
-				),
-			)
+			.where(and(isNotNull(databaseFailovers.promotedAt), isNull(databaseFailovers.leaseTakenAt)))
+			.orderBy(desc(databaseFailovers.startedAt))
 			.all();
+		// Newest first: `onPromotion` refuses to lower a generation, so an older blocked row can
+		// never move the lease backwards. Process at most one (the newest) per database.
+		const seen = new Set<string>();
 		for (const { failover, database } of rows) {
-			if (database.deletedAt) continue;
+			if (seen.has(database.id) || database.deletedAt) continue;
+			seen.add(database.id);
 			try {
 				await this.onPromotion(database.id, failover.toNodeId, failover.generation, failover.id);
 				changed += 1;

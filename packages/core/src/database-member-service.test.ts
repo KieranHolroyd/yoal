@@ -363,7 +363,7 @@ describe('sync-set safety (W10 review blockers)', () => {
 			{ switchoverId: drain.switchoverId, version: drain.version, step: 'drain', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148' },
 		]);
 		const promotion = (await core.databaseReplicas.promotionsForNode(target.nodeId)).find((item) => item.databaseId === db.id)!;
-		await core.databaseReplicas.applyPromotionResults(target.nodeId, [{ failoverId: promotion.failoverId, status: 'ok', promoted: true, lsn: '0/3000148' }]);
+		await core.databaseReplicas.applyPromotionResults(target.nodeId, [{ failoverId: promotion.failoverId, attempt: 0, status: 'ok', promoted: true, lsn: '0/3000148' }]);
 		const stored = (await lease(db.id))!;
 		expect(stored).toMatchObject({ generation: 1, holderNodeId: target.nodeId, sync: [], syncState: 'changing' });
 		const status = await core.databaseMembers.status(owner, 'promotelase');
@@ -440,7 +440,7 @@ describe('sync-set safety (W10 review blockers)', () => {
 		// The promotion task was handed out before the change opened; the result races the change.
 		const promotion = (await core.databaseReplicas.promotionsForNode(target.nodeId)).find((item) => item.databaseId === db.id)!;
 		opened.sqlite.run("UPDATE databases SET sync_state = 'changing' WHERE id = ?", [db.id]);
-		await core.databaseReplicas.applyPromotionResults(target.nodeId, [{ failoverId: promotion.failoverId, status: 'ok', promoted: true, lsn: '0/3000148' }]);
+		await core.databaseReplicas.applyPromotionResults(target.nodeId, [{ failoverId: promotion.failoverId, attempt: 0, status: 'ok', promoted: true, lsn: '0/3000148' }]);
 		const resumed = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id);
 		expect(resumed).toBeUndefined();
 		const view = core.databaseMembers.switchovers(owner, 'racedpromote')[0]!;
@@ -459,10 +459,33 @@ describe('sync-set safety (W10 review blockers)', () => {
 		]);
 		const promotion = (await core.databaseReplicas.promotionsForNode(target.nodeId)).find((item) => item.databaseId === db.id)!;
 		arbiter.failNext = { status: 500, count: 1 };
-		await core.databaseReplicas.applyPromotionResults(target.nodeId, [{ failoverId: promotion.failoverId, status: 'ok', promoted: true, lsn: '0/3000148' }]);
+		await core.databaseReplicas.applyPromotionResults(target.nodeId, [{ failoverId: promotion.failoverId, attempt: 0, status: 'ok', promoted: true, lsn: '0/3000148' }]);
 		expect(core.databaseMembers.switchovers(owner, 'leaseretry')[0]!.message).toContain('no lease yet');
 		await core.databaseMembers.tick();
 		expect(core.databaseMembers.switchovers(owner, 'leaseretry')[0]!.message).toContain('lease taken');
+	});
+
+	test('a promotion lease retry runs with SYNC_REPLICA off', async () => {
+		const db = database('leaseretryoff');
+		reportSlots(db.id, db.replicas);
+		const target = db.replicas[0]!;
+		await core.databaseMembers.switchover(owner, 'leaseretryoff', { replicaId: target.id, confirm: true });
+		const drain = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id)!;
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+			{ switchoverId: drain.switchoverId, version: drain.version, step: 'drain', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148' },
+		]);
+		const promotion = (await core.databaseReplicas.promotionsForNode(target.nodeId)).find((item) => item.databaseId === db.id)!;
+		arbiter.failNext = { status: 500, count: 1 };
+		await core.databaseReplicas.applyPromotionResults(target.nodeId, [{ failoverId: promotion.failoverId, attempt: 0, status: 'ok', promoted: true, lsn: '0/3000148' }]);
+		const features = (core.ctx.config as { features: Record<string, boolean> }).features;
+		const previous = features.SYNC_REPLICA ?? true;
+		features.SYNC_REPLICA = false;
+		try {
+			await core.databaseMembers.tick();
+		} finally {
+			features.SYNC_REPLICA = previous;
+		}
+		expect(core.databaseMembers.switchovers(owner, 'leaseretryoff')[0]!.message).toContain('lease taken');
 	});
 
 	test('a historical completed failover is not re-processed and cannot lower the lease', async () => {
@@ -508,7 +531,7 @@ describe('sync-set safety (W10 review blockers)', () => {
 		]);
 		const promotion = (await core.databaseReplicas.promotionsForNode(target.nodeId)).find((item) => item.databaseId === db.id)!;
 		await core.databaseReplicas.applyPromotionResults(target.nodeId, [
-			{ failoverId: promotion.failoverId, status: 'failed', promoted: true, error: 'data dir rename failed' },
+			{ failoverId: promotion.failoverId, attempt: 0, status: 'failed', promoted: true, error: 'data dir rename failed' },
 		]);
 		// Never a resume, never a failed failover: the task stays for an idempotent hand-over retry.
 		expect(core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id)).toBeUndefined();
@@ -516,6 +539,24 @@ describe('sync-set safety (W10 review blockers)', () => {
 		expect((await core.databaseReplicas.promotionsForNode(target.nodeId)).some((item) => item.databaseId === db.id)).toBe(true);
 	});
 
+	test('removing the replica after a promoted hand-over failure is refused', async () => {
+		const db = database('handoverremove');
+		reportSlots(db.id, db.replicas);
+		const target = db.replicas[0]!;
+		await core.databaseMembers.switchover(owner, 'handoverremove', { replicaId: target.id, confirm: true });
+		const drain = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id)!;
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+			{ switchoverId: drain.switchoverId, version: drain.version, step: 'drain', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148' },
+		]);
+		const promotion = (await core.databaseReplicas.promotionsForNode(target.nodeId)).find((item) => item.databaseId === db.id)!;
+		await core.databaseReplicas.applyPromotionResults(target.nodeId, [
+			{ failoverId: promotion.failoverId, attempt: 0, status: 'failed', promoted: true, error: 'data dir rename failed' },
+		]);
+		expect(() => core.databaseReplicas.remove(owner, 'handoverremove', target.id)).toThrow(/promotion succeeded/);
+		// The old primary is still fenced out of its node's desired state.
+		const desired = await core.nodes.desiredState(primary.token);
+		expect(desired.workloads.some((item) => item.id === db.id)).toBe(false);
+	});
 	test('a switchover parked at promote with no promotion resumes after the timeout', async () => {
 		const db = database('parked');
 		reportSlots(db.id, db.replicas);
@@ -527,9 +568,18 @@ describe('sync-set safety (W10 review blockers)', () => {
 		]);
 		// No promotionsForNode call: the promotion was never handed out.
 		opened.sqlite.run('UPDATE database_failovers SET switchover_started_at = ? WHERE id = ?', [clock - 60_000, drain.switchoverId]);
-		await core.databaseMembers.tick();
-		const resume = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id)!;
-		expect(resume.step).toBe('resume');
+		const features = (core.ctx.config as { features: Record<string, boolean> }).features;
+		const previous = features.SYNC_REPLICA ?? true;
+		features.SYNC_REPLICA = false;
+		try {
+			await core.databaseMembers.tick();
+			const resume = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id)!;
+			expect(resume.step).toBe('resume');
+			const desired = (await core.nodes.desiredState(primary.token)) as { databaseSwitchovers?: Array<{ databaseId: string; step: string }> };
+			expect(desired.databaseSwitchovers?.find((item) => item.databaseId === db.id)?.step).toBe('resume');
+		} finally {
+			features.SYNC_REPLICA = previous;
+		}
 		expect(core.databaseMembers.switchovers(owner, 'parked')[0]!.message).toContain('no promotion was issued');
 	});
 });
@@ -559,7 +609,7 @@ describe('planned switchover (W10)', () => {
 
 		// The replica's node promotes through the existing C7 task, then the re-point runs.
 		const promotion = (await core.databaseReplicas.promotionsForNode(second.nodeId)).find((task) => task.databaseId === db.id)!;
-		await core.databaseReplicas.applyPromotionResults(second.nodeId, [{ failoverId: promotion.failoverId, status: 'ok', promoted: true, lsn: '0/3000148' }]);
+		await core.databaseReplicas.applyPromotionResults(second.nodeId, [{ failoverId: promotion.failoverId, attempt: 0, status: 'ok', promoted: true, lsn: '0/3000148' }]);
 		// The promoted database reports running on its new node, which completes the switchover.
 		core.databaseReplicas.applyWorkloadReports(second.nodeId, [{ id: db.id, status: 'running', restarts: 0 }]);
 		const moved = core.databases.get(owner, 'billing');
