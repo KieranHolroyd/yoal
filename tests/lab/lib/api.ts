@@ -45,6 +45,22 @@ export async function api<T = any>(method: string, path: string, body?: unknown,
 	return { status: response.status, body: parsed as T };
 }
 
+/**
+ * The platform's resolved feature flags (`GET /api/setup/status` → `features`: booleans only, no
+ * auth). What the running control plane actually uses, not what a file says. Null when it does not
+ * answer.
+ */
+export async function platformFeatures(): Promise<Record<string, boolean> | null> {
+	try {
+		const response = await fetch(`${PUBLIC_BASE}/api/setup/status`, { headers: { host: PLATFORM_HOST }, signal: AbortSignal.timeout(10_000) });
+		if (!response.ok) return null;
+		const body = (await response.json()) as { features?: Record<string, boolean> };
+		return body.features && typeof body.features === 'object' ? body.features : null;
+	} catch {
+		return null;
+	}
+}
+
 export interface FleetNode {
 	id: string;
 	name: string;

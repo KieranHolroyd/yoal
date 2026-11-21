@@ -7,6 +7,7 @@ live fleet.
 ```sh
 bun tests/lab/lab.ts up                     # four nodes + s3lab (timings: "Speed" below)
 bun tests/lab/lab.ts up --only lab-a        # one node, plain install: the single-node gate's lab
+bun tests/lab/lab.ts up --feature ENDPOINTS_GATEWAY=1 --feature RELEASE_PHASE=1   # opt-in flags on (see Feature flags)
 bun tests/lab/verify-faults.ts              # every fault verb applied, checked and auto-reverted
 bun tests/ha/scenarios/kill-node.ts --node lab-b --target direct   # M1 node loss (see Scenarios)
 bun tests/lab/lab.ts down                   # clears faults, removes every yoal-w0-* object, checks loop devices
@@ -66,7 +67,7 @@ node's `:80` is published on `127.0.0.1:47080`–`47083`, and the lab's scripts 
 ## Commands
 
 ```sh
-bun tests/lab/lab.ts up [--only lab-a[,lab-b…]] [--upgrade] [--no-faults]
+bun tests/lab/lab.ts up [--only lab-a[,lab-b…]] [--upgrade] [--no-faults] [--feature NAME=0|1 …]
 bun tests/lab/lab.ts status [--json]
 bun tests/lab/lab.ts fault <node|all> <verb> [flags] [--observe obs.jsonl]
 bun tests/lab/lab.ts fault <node|all> list | revert <id> | clear-all
@@ -90,6 +91,21 @@ adoption, no cluster settings (failover stays off). A later `lab up` without `--
 workers and turns the cluster settings on, as an operator adding machines would; that is the order
 `ha-integration` runs in (single-node gate first). Every `up` writes its phase timings to
 `.out/up-timings.json`.
+
+## Feature flags
+
+`--feature NAME=VALUE` (repeatable; `NAME` from `packages/contracts/src/features.ts`, `VALUE` 0, 1,
+true or false) sets `YOAL_FEATURE_<NAME>` on every node through the files the installer wrote:
+`/etc/yoal/yoal.env` on lab-a (the control plane reads it) and `/etc/yoal/agent.env` on every node.
+An existing line is replaced and a missing one appended; the installer keeps both across re-runs and
+`--upgrade`. A unit whose file changed is restarted (`yoal-control-plane`, `yoal-agent`), and `up`
+then waits until `GET /api/setup/status` reports every flag as asked, or fails.
+
+The flags are kept in `.state/lab.json`, so a later `up` (growing a one-node lab, say) renders them
+onto new nodes without repeating them; `--feature NAME=0` turns one back off. `status` shows what
+was asked and whether the platform agrees. Scenarios never trust the file: they read the platform's
+resolved flags. The single-node gate runs with every opt-in flag off, so bring its lab up without
+`--feature`. The VM form (`vm/lab-vm.ts`) takes no `--feature` yet.
 
 ## Fault verbs
 
