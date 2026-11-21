@@ -411,6 +411,11 @@ export const haDrillRunRequestSchema = z
 		durationSeconds: z.number().int().min(60).max(1_800).optional(),
 		/** `database-failover`: the disposable copy to promote (never the production database). */
 		drillDatabase: z.string().trim().min(1).max(128).optional(),
+		/**
+		 * `node-offline`/`ingress-offline` on the node that hosts the control plane: an explicit opt-in,
+		 * as the D235 drill's. Without it that node is refused, whatever the typed name.
+		 */
+		includeControlNode: z.boolean().default(false),
 	})
 	.strict();
 export type HaDrillRunRequest = z.input<typeof haDrillRunRequestSchema>;
