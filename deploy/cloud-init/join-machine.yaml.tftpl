@@ -38,7 +38,7 @@ write_files:
 
       if [ -z "$JOIN_TOKEN" ]; then
         log "no join token. Create one under Nodes > Enroll node, then run:"
-        log "  curl -fsSL $CONTROL_ORIGIN/install/node.sh | sudo sh -s -- --token <token> --name $NODE_NAME --endpoint $ENDPOINT"
+        log "  curl -fsSL $CONTROL_ORIGIN/install/node.sh -o node.sh && sudo sh node.sh --token-file <file> --name $NODE_NAME --endpoint $ENDPOINT"
         exit 0
       fi
 
@@ -65,12 +65,13 @@ write_files:
         sleep 20
       done
 
-      # TODO(installer): --zone <zone>. node.sh has no zone flag; set it under Nodes > Edit node.
-      # TODO(installer): --roles <list>. node.sh has no roles flag; set them under Nodes > Edit node.
-      set -- --token "$JOIN_TOKEN" --name "$NODE_NAME"
+      set -- --token-file - --name "$NODE_NAME"
       [ -z "$ENDPOINT" ] || set -- "$@" --endpoint "$ENDPOINT"
+      [ -z "$ZONE" ] || set -- "$@" --zone "$ZONE"
+      [ -z "$ROLES" ] || set -- "$@" --roles "$ROLES"
       status=0
-      sh /root/yoal-node.sh "$@" || status=$?
+      # The token goes in on stdin, so it is never in the process list.
+      printf '%s\n' "$JOIN_TOKEN" | sh /root/yoal-node.sh "$@" || status=$?
 
       # The token is single-use: drop this copy whether or not the join worked.
       grep -v '^JOIN_TOKEN=' /etc/yoal-provision/provision.env > /etc/yoal-provision/provision.env.tmp || true
@@ -79,7 +80,7 @@ write_files:
       rm -f /etc/yoal-provision/provision.env.tmp
       [ "$status" -eq 0 ] || { log "node.sh failed ($status); create a new token and rerun it by hand"; exit "$status"; }
 
-      log "joined as $NODE_NAME. Set its zone ($ZONE) and roles ($ROLES) under Nodes > Edit node."
+      log "joined as $NODE_NAME (zone: $ZONE, roles: $ROLES; blank means the default)."
 
 runcmd:
   - [sh, -c, '/usr/local/sbin/yoal-provision-join 2>&1 | tee -a /var/log/yoal-provision.log']

@@ -39,6 +39,7 @@ import {
 	type OperationStatus,
 	type LogLevel,
 	type LogSource,
+	type NodeRole,
 } from '@yoal/contracts';
 import { core } from '#lib/server/core.js';
 import { json, readJson, route } from '#lib/server/api.js';
@@ -444,8 +445,11 @@ const api: RequestHandler = async (event) => {
 		if (segments[0] === 'nodes') {
 			if (segments.length === 1 && method === 'GET') return { nodes: core.nodes.list(principal) };
 			if (segments.length === 2 && segments[1] === 'join-token' && method === 'POST') {
-				const body = (await request.json().catch(() => ({}))) as { name?: string };
-				return json(core.nodes.createJoinToken(principal, body.name), 201);
+				// `roles`: the roles a join with this token may request (HA Wave 5); none by default.
+				const body = (await request.json().catch(() => ({}))) as { name?: string; roles?: unknown };
+				if (body.roles !== undefined && !(Array.isArray(body.roles) && body.roles.every((role) => typeof role === 'string')))
+					return json({ error: 'validation', message: 'roles must be an array of role names.' }, 422);
+				return json(core.nodes.createJoinToken(principal, body.name, { roles: body.roles as NodeRole[] | undefined }), 201);
 			}
 			// Fleet updates in waves (CLUSTERING §3.11, D217). `rollouts` is not a node id: ids are `nod_…`.
 			if (segments[1] === 'rollouts') {

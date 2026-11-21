@@ -177,7 +177,8 @@ if (!building && objectStoreKind === 'gcs' && !features.OBJECT_STORE_GCS)
 export const r2 =
 	objectStoreKind === 'r2'
 		? {
-				accountId: required('R2_ACCOUNT_ID'),
+				// Only derives an R2 endpoint: any other S3 store sets R2_ENDPOINT and needs no account id.
+				accountId: env.R2_ENDPOINT ? (env.R2_ACCOUNT_ID ?? '') : required('R2_ACCOUNT_ID'),
 				bucket: required('R2_BUCKET'),
 				accessKeyId: required('R2_ACCESS_KEY_ID'),
 				secretAccessKey: required('R2_SECRET_ACCESS_KEY'),

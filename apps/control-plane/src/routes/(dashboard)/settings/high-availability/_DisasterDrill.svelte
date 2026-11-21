@@ -81,7 +81,10 @@
 			// A destructive drill needs the target typed back (HA-PLAN §10); a random pick types "random".
 			typeToConfirm: node ? node.nodeName : 'random',
 			action: '?/startDrill',
+			// The server checks it too: the node's name, or "random" for a random pick.
+			typeToConfirm: node ? node.nodeName : 'random',
 			fields: {
+				confirm: node ? node.nodeName : 'random',
 				node: target,
 				durationSeconds: String(Number(minutes) * 60),
 				includeControlNode: includeControl ? 'true' : ''

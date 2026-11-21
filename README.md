@@ -150,25 +150,32 @@ elicitation, and clients that don't support elicitation get a dashboard hand-off
 | Area | Tools |
 |---|---|
 | Identity & docs | `whoami` · `search_docs` · `read_docs` |
-| Projects | `list_projects` · `get_project` · `create_project` · `update_project` · `delete_project` · `delete_projects` · `restore_projects` · `get_operation` |
+| Projects | `list_projects` · `get_project` · `create_project` · `update_project` · `delete_project` · `delete_projects` · `restore_projects` · `get_operation` · `get_task` · `cancel_task` |
 | Deploy | `deploy_site` · `deploy_files` · `create_upload` · `finalize_upload` |
-| Releases | `list_deployments` · `get_deployment` · `promote_deployment` · `rollback` |
-| Environments | `list_environments` · `create_environment` · `deploy_to_environment` |
+| Releases | `list_deployments` · `get_deployment` · `promote_deployment` · `rollback` · `list_builds` · `get_build` · `cancel_build` |
+| Git & pipelines | `list_github_repositories` · `deploy_from_github` · `list_git_repositories` · `deploy_from_git` · `list_pipeline_runs` · `get_pipeline_run` · `dispatch_workflow` · `rerun_pipeline_run` · `cancel_pipeline_run` |
+| Environments | `list_environments` · `create_environment` · `update_environment` · `delete_environment` · `deploy_to_environment` |
+| Custom domains | `list_domains` · `add_domain` · `check_domain` · `remove_domain` |
 | Workloads & functions | `get_workload` · `get_function` · `invoke_function` · `run_function_cron` · `set_workload` · `get_scaling` · `scale_project` · `set_autoscaling` · `get_node_capacity` |
 | Volumes | `list_volumes` · `create_volume` · `attach_volume` · `detach_volume` · `list_volume_snapshots` · `snapshot_volume` · `restore_volume` |
 | Jobs (while the feature is on) | `list_jobs` · `create_job` · `update_job` · `pause_job` · `run_job` · `run_command` · `get_job_runs` · `get_job_run` · `cancel_job_run` · `delete_job` |
 | Containers (while the feature is on) | `inspect_container` · `list_container_files` · `read_container_file` · `restart_container` |
-| Databases & backups | `list_databases` · `get_database` · `get_database_logs` · `create_database` · `list_database_backups` · `list_backup_targets` · `create_backup_target` · `test_backup_target` · `backup_database` · `restore_database` · `set_database_backup_policy` · `get_database_pitr` · `set_database_pitr` · `backup_database_pitr` · `restore_database_to_time` · `backup_all_databases` · `update_database` · `restart_database` · `list_database_replicas` · `create_database_replica` · `delete_database_replica` · `rotate_database_credentials` · `list_database_credentials` · `create_database_credential` · `rotate_database_credential` · `revoke_database_credential` · `attach_database` · `detach_database` · `delete_database` |
+| Registry | `list_images` · `image_tags` |
+| Databases & backups | `list_databases` · `get_database` · `get_database_logs` · `create_database` · `list_database_backups` · `list_backup_targets` · `create_backup_target` · `test_backup_target` · `backup_database` · `restore_database` · `set_database_backup_policy` · `get_database_pitr` · `set_database_pitr` · `backup_database_pitr` · `restore_database_to_time` · `backup_all_databases` · `update_database` · `restart_database` · `list_database_replicas` · `get_database_failover` · `plan_database_upgrade` · `create_database_replica` · `delete_database_replica` · `rotate_database_credentials` · `list_database_credentials` · `create_database_credential` · `rotate_database_credential` · `revoke_database_credential` · `attach_database` · `detach_database` · `delete_database` |
 | Brokers & queues | `list_brokers` · `get_broker` · `get_broker_logs` · `get_broker_metrics` · `get_broker_queues` · `create_queue` · `send_queue_message` · `peek_queue_messages` · `redrive_queue` · `get_node_task` · `create_broker` · `update_broker` · `restart_broker` · `attach_broker` · `detach_broker` |
 | Event rules | `list_event_rules` · `get_event_rule` · `create_event_rule` · `update_event_rule` · `test_event_rule` · `list_event_deliveries` · `delete_event_rule` |
-| Storage | `list_storage` · `get_storage` · `list_objects` · `presign_object` · `create_object_folder` · `create_storage` · `create_bucket` · `get_bucket_config` · `update_bucket_config` · `attach_storage` · `detach_storage` · `delete_storage` · `get_storage_logs` · `restart_storage` · `list_storage_keys` · `create_storage_key` · `revoke_storage_key` |
+| Storage | `list_storage` · `get_storage` · `list_objects` · `presign_object` · `create_object_folder` · `create_storage` · `create_bucket` · `get_bucket_config` · `update_bucket_config` · `attach_storage` · `detach_storage` · `delete_storage` · `get_storage_logs` · `list_storage_replicas` · `restart_storage` · `list_storage_keys` · `create_storage_key` · `revoke_storage_key` |
+| Kubernetes (while the feature is on) | `list_k8s_clusters` · `get_k8s_cluster` · `create_k8s_cluster` · `update_k8s_cluster` · `add_k8s_route` · `attach_to_k8s_cluster` · `generate_k8s_config` · `apply_k8s_config` · `k8s_pod_logs` · `backup_k8s_cluster` · `list_k8s_backups` · `restore_k8s_backup` · `delete_k8s_cluster` |
 | Access | `set_access` · `create_share_link` · `list_share_links` · `revoke_share_link` · `list_site_sessions` · `revoke_site_session` · `sign_out_all_visitors` |
+| Identity & IAM | `list_roles` · `explain_access` · `who_can` · `simulate_access` · `bind_role` · `unbind_role` · `request_access` · `list_service_accounts` · `create_service_account` · `list_federation_trusts` |
 | Observe | `get_status` · `get_metrics` · `get_logs` · `get_audit_log` · `list_log_drains` · `create_log_drain` · `test_log_drain` · `delete_log_drain` |
 | Dashboards | `describe_telemetry` · `query_telemetry` · `list_dashboards` · `get_dashboard` · `create_dashboard` · `add_dashboard_panels` · `update_dashboard_panel` · `remove_dashboard_panels` · `update_dashboard` · `delete_dashboard` |
-| Alerts | `list_alerts` · `get_alert_rule` · `create_alert_rule` · `update_alert_rule` · `silence_alerts` · `acknowledge_alert` · `get_alert_history` · `delete_alert_rule` |
+| Alerts | `list_alerts` · `get_alert_rule` · `create_alert_rule` · `update_alert_rule` · `silence_alerts` · `list_alert_silences` · `remove_alert_silence` · `acknowledge_alert` · `get_alert_history` · `delete_alert_rule` |
+| SLOs (while the feature is on) | `list_slos` · `evaluate_slos` · `set_slo` · `delete_slo` |
+| App errors | `list_app_errors` · `get_app_error` · `update_app_errors` |
 | Email (while the feature is on) | `get_email_status` · `list_email_domains` · `get_email_domain` · `create_email_domain` · `check_email_domain` · `send_email` · `list_email_messages` · `get_email_message` · `list_email_suppressions` · `remove_email_suppression` · `list_email_addresses` · `add_email_address` · `remove_email_address` |
-| Blueprints (while the feature is on) | `plan_stack` · `apply_stack` · `get_task` |
-| Platform | `restart_services` · `list_nodes` · `get_ha_status` · `get_fleet` · `get_node_links` · `get_usage` · `get_quotas` |
+| Blueprints (while the feature is on) | `plan_stack` · `apply_stack` |
+| Platform | `restart_services` · `list_nodes` · `get_ha_status` · `get_ha_init_plan` · `get_ha_checks` · `list_ha_drills` · `get_attachment_endpoints` · `get_fleet` · `get_node_links` · `get_usage` · `get_quotas` |
 
 A token's effective permissions are always **its scopes ∩ the user's current role**. Demote someone
 and every token they've issued narrows straight away. Every tool call is recorded in the audit log

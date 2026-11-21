@@ -61,6 +61,10 @@ import {
 	deploySiteSchema,
 	effectivePermissions,
 	environmentCreateSchema,
+	environmentUpdateSchema,
+	domainCreateSchema,
+	type BuildView,
+	type DomainView,
 	inlineFileSchema,
 	isPermission,
 	isTerminalOperation,
@@ -136,8 +140,16 @@ import {
 	logDrainLevels,
 	logDrainSources,
 	type LogDrainView,
+	haCertificateSources,
+	haInitSteeringDrivers,
+	haProfiles,
+	sloBurnAlertSchema,
+	sloObjectInputSchema,
 } from '@yoal/contracts';
-import { MAX_DURATION_SECONDS, featureEnabled, parseAuditTime, parseManifestYaml } from '@yoal/core';
+
+/** The steering drivers `ha init` offers (never `direct`). */
+type HaInitSteering = (typeof haInitSteeringDrivers)[number];
+import { MAX_DURATION_SECONDS, NotFoundError, featureEnabled, parseAuditTime, parseManifestYaml } from '@yoal/core';
 import { authSecret } from './config';
 import { core } from './core';
 import { principalFromMcp } from './principal';
@@ -197,7 +209,12 @@ export const TOOL_PERMISSIONS: Record<string, Permission> = {
 	deploy_to_environment: 'deployment:create',
 	promote_deployment: 'deployment:promote',
 	rollback: 'deployment:rollback',
+	cancel_build: 'build:cancel',
 	create_environment: 'project:update',
+	update_environment: 'project:update',
+	delete_environment: 'project:update',
+	add_domain: 'domain:create',
+	remove_domain: 'domain:delete',
 	set_workload: 'project:update',
 	scale_project: 'project:update',
 	set_autoscaling: 'project:update',
@@ -268,7 +285,11 @@ export const TOOL_PERMISSIONS: Record<string, Permission> = {
 	update_alert_rule: 'metrics:read',
 	delete_alert_rule: 'metrics:read',
 	silence_alerts: 'metrics:read',
+	remove_alert_silence: 'metrics:read',
 	acknowledge_alert: 'metrics:read',
+	// SLOs (HA-PLAN W15) are project config; their burn alerts page like alert rules.
+	set_slo: 'project:update',
+	delete_slo: 'project:update',
 	// Log drains (DESIGN §8): the service further limits writes to owners and admins.
 	create_log_drain: 'logs:read',
 	test_log_drain: 'logs:read',
@@ -1982,6 +2003,73 @@ function buildServer(
 			run(() => core.deployments.rollback(principal, core.projects.requireRow(principal, project), environment)),
 	);
 
+	// --- builds (git-connected projects; a log tail only, never the whole log) ---
+	/** Lines `get_build` returns from the end of a build log, and a hard cap on their size. */
+	const BUILD_LOG_LINES = 200;
+	const BUILD_LOG_CHARS = 32_000;
+	const buildLogTail = (log: string | null) => {
+		if (!log) return { logTail: null, logTruncated: false };
+		const lines = log.replace(/\n$/, '').split('\n');
+		let tail = lines.slice(-BUILD_LOG_LINES).join('\n');
+		if (tail.length > BUILD_LOG_CHARS) tail = tail.slice(-BUILD_LOG_CHARS);
+		return { logTail: tail, logTruncated: tail.length < log.replace(/\n$/, '').length };
+	};
+	const buildSummary = (view: BuildView): Omit<BuildView, 'logTail'> => {
+		const { logTail, ...build } = view;
+		void logTail;
+		return build;
+	};
+
+	tool(
+		'list_builds',
+		{
+			title: 'List builds',
+			description:
+				'List a git-connected project\'s builds, newest first: status, ref, commit, error, the deployment it produced and timings. ' +
+				'No logs here; read one build\'s log tail with get_build.',
+			inputSchema: z.object({ project: z.string(), limit: z.number().int().min(1).max(200).default(20) }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('build:read'),
+		},
+		async ({ project, limit }) =>
+			run(() => ({
+				builds: core.builds.list(principal, core.projects.requireRow(principal, project), { limit }).map(buildSummary),
+			})),
+	);
+
+	tool(
+		'get_build',
+		{
+			title: 'Get build',
+			description:
+				`Get one build with the last ${BUILD_LOG_LINES} lines of its log (\`logTruncated\` says whether earlier output was left out; ` +
+				'the dashboard and `yoal` show the whole log). Use it to see why a build failed.',
+			inputSchema: z.object({ project: z.string(), build: z.string().describe('Build id (bld_…) from list_builds') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('build:read'),
+		},
+		async ({ project, build }) =>
+			run(() => {
+				const view = core.builds.get(principal, core.projects.requireRow(principal, project), build);
+				return { ...buildSummary(view), ...buildLogTail(view.logTail) };
+			}),
+	);
+
+	tool(
+		'cancel_build',
+		{
+			title: 'Cancel build',
+			description:
+				'Cancel a queued or running build. Nothing is deployed from it; a build that already finished is refused. Push again or ' +
+				'use the dashboard to start a new one.',
+			inputSchema: z.object({ project: z.string(), build: z.string().describe('Build id (bld_…) from list_builds') }),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('build:cancel'),
+		},
+		async ({ project, build }) =>
+			run(() => buildSummary(core.builds.cancel(principal, core.projects.requireRow(principal, project), build))),
+	);
+
 	// --- environments -------------------------------------------------------
 	tool(
 		'list_environments',
@@ -2011,6 +2099,91 @@ function buildServer(
 		},
 		async ({ project, ...input }) =>
 			run(() => core.environments.create(principal, core.projects.requireRow(principal, project), input)),
+	);
+
+	tool(
+		'update_environment',
+		{
+			title: 'Update environment',
+			description:
+				'Rename a named environment or change its access mode (public, password, platform, or a Yoal Access policy with `access` and ' +
+				'`policyId`). `password` sets that environment\'s own password and is never returned. Production is refused: use update_project ' +
+				'or set_access for it. Making an environment public serves it to anyone with its URL.',
+			inputSchema: environmentUpdateSchema.extend({
+				project: z.string(),
+				environment: z.string().describe('Environment slug from list_environments'),
+			}),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:update'),
+		},
+		async ({ project, environment, ...input }) =>
+			run(() => core.environments.update(principal, core.projects.requireRow(principal, project), environment, input)),
+	);
+
+	tool(
+		'delete_environment',
+		{
+			title: 'Delete environment',
+			description:
+				'Delete a named environment and its host. Refused for production and while the environment still has deployments ' +
+				'(delete those in the dashboard first). Requires confirmation.',
+			inputSchema: z.object({
+				project: z.string(),
+				environment: z.string().describe('Environment slug from list_environments'),
+			}),
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+			scopeChallenge: requires('project:update'),
+		},
+		async ({ project, environment }, ctx) => {
+			const target = `${project}/${environment}`;
+			const remove = () =>
+				run(() => {
+					core.environments.remove(principal, core.projects.requireRow(principal, project), environment);
+					return { ok: true, project, environment };
+				});
+			if (era === 'assistant') return remove();
+			if (era === 'legacy')
+				return {
+					isError: true,
+					...text(
+						`Deleting environment "${environment}" needs your confirmation, which this MCP client can't show. ` +
+							`Delete it from the Yoal dashboard: ${core.ctx.config.platformOrigin}/projects/${project}`,
+					),
+				};
+			const key = `confirm_delete_environment:${target}`;
+			const schema = z.object({ confirm: z.boolean() });
+			const prompted = verifyConfirmation(ctx.mcpReq.requestState(), principal, 'delete_environment', target);
+			const answer = prompted ? acceptedContent(ctx.mcpReq.inputResponses, key, schema) : undefined;
+			const responded = prompted && ctx.mcpReq.inputResponses?.[key] !== undefined;
+			if (responded && answer?.confirm !== true) {
+				const cancelled = text(`Cancelled: environment "${environment}" was not deleted (the user did not confirm).`);
+				declined.add(cancelled);
+				return cancelled;
+			}
+			if (answer?.confirm !== true) {
+				let host: string | undefined;
+				try {
+					const row = core.projects.requireRow(principal, project);
+					host = core.environments.list(principal, row).find((entry) => entry.slug === environment)?.host;
+				} catch (error) {
+					return run(() => {
+						throw error;
+					});
+				}
+				if (!host)
+					return { isError: true, ...text(`Environment "${environment}" was not found in ${project}; see list_environments.`) };
+				return inputRequired({
+					inputRequests: {
+						[key]: inputRequired.elicit({
+							message: `Delete environment "${environment}" of ${project} (${host})? Its host stops serving; this cannot be undone.`,
+							requestedSchema: schema,
+						}),
+					},
+					requestState: mintConfirmation(principal, 'delete_environment', target),
+				});
+			}
+			return remove();
+		},
 	);
 
 	tool(
@@ -3071,6 +3244,50 @@ function buildServer(
 				replicas: core.databaseReplicas.list(principal, database),
 				failovers: core.databaseReplicas.failovers(principal, database),
 			})),
+	);
+
+	// Failover, switchover and moves are read-only here: MCP never changes a database's role or
+	// placement (docs/CLUSTERING.md §12.4). Arming, drills, switchover and move are dashboard/CLI/REST.
+	tool(
+		'get_database_failover',
+		{
+			title: 'Get database failover',
+			description:
+				'Read a database\'s failover state (read-only): the automatic-failover policy (mode, whether it is active, the persisted ' +
+				'evidence such as the last passed drill, and every reason `auto` would be refused now), its 20 most recent planned ' +
+				'switchovers with their outcome, and its newest move to another node. Arming failover, drills, switchover, promotion and ' +
+				'moves are not available over MCP: a person does them from the dashboard or `yoal db`.',
+			inputSchema: z.object({ database: z.string().describe('Database name') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('database:read'),
+		},
+		async ({ database }) =>
+			run(() => ({
+				database,
+				failover: core.failoverPolicies.view(principal, database),
+				switchovers: core.databaseMembers.switchovers(principal, database),
+				latestMove: core.moves.latestForDatabase(principal, database),
+			})),
+	);
+
+	tool(
+		'plan_database_upgrade',
+		{
+			title: 'Plan database major upgrade',
+			description:
+				'Plan a PostgreSQL major upgrade (e.g. 17 → 18) without changing anything: the blockers that refuse it now (read replicas, ' +
+				'an in-flight backup or restore, status, variant support), warnings (attached projects, extensions), and the dump/restore ' +
+				'runbook steps. Yoal never switches a major automatically. To start, a person runs `yoal db upgrade <name> --to <version> ' +
+				'--apply`, which queues the pinned pre-upgrade backup. Needs database:update, because planning is an upgrade request.',
+			inputSchema: z.object({
+				database: z.string().describe('Database name'),
+				targetVersion: z.string().min(1).max(16).describe('The PostgreSQL major to move to, e.g. "18"'),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('database:update'),
+		},
+		async ({ database, targetVersion }) =>
+			run(() => ({ plan: core.databases.upgradeDatabase(principal, database, { targetVersion, apply: false }) })),
 	);
 
 	tool(
@@ -4400,6 +4617,20 @@ function buildServer(
 	);
 
 	tool(
+		'list_storage_replicas',
+		{
+			title: 'List storage replicas',
+			description:
+				'List the bucket replication links an object storage instance takes part in, as source or target (read-only): the other ' +
+				'instance, buckets, status and lag. Adding or removing a replica changes placement, so it is dashboard, REST and CLI only.',
+			inputSchema: z.object({ storage: z.string().describe('Storage instance name') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('storage:read'),
+		},
+		async ({ storage }) => run(() => ({ storage, replicas: core.storageReplication.list(principal, storage) })),
+	);
+
+	tool(
 		'list_objects',
 		{
 			title: 'List bucket objects',
@@ -4834,6 +5065,134 @@ function buildServer(
 				},
 				requestState: mintConfirmation(principal, 'revoke_storage_key', target),
 			});
+		},
+	);
+
+	// --- custom domains (DESIGN §5, D31): a TXT record proves a hostname before TLS is issued ---
+	const domainNextSteps = (domain: DomainView): string[] => {
+		if (domain.status === 'active' || domain.status === 'verified')
+			return [`https://${domain.hostname} serves ${domain.projectSlug}'s production deployment.`];
+		const steps: string[] = [];
+		if (domain.verification)
+			steps.push(
+				`Create a TXT record ${domain.verification.recordName} with value "${domain.verification.recordValue}" at the DNS provider.`,
+			);
+		steps.push(`Point ${domain.hostname} at the platform as check_domain describes, then call check_domain({ domain: "${domain.id}" }).`);
+		if (domain.status === 'failed') steps.unshift(`Verification failed${domain.lastError ? `: ${domain.lastError}` : ''}.`);
+		return steps;
+	};
+
+	tool(
+		'list_domains',
+		{
+			title: 'List custom domains',
+			description:
+				'List custom domains, for one project or every project you can read: hostname, status (pending, verified, active or failed), ' +
+				'the TXT record that proves it, the www redirect and the last check.',
+			inputSchema: z.object({ project: z.string().optional().describe('Project slug; omit for every project') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('domain:read'),
+		},
+		async ({ project }) =>
+			run(() => ({
+				domains: core.domains.list(principal, project ? core.projects.requireRow(principal, project) : undefined),
+			})),
+	);
+
+	tool(
+		'add_domain',
+		{
+			title: 'Add custom domain',
+			description:
+				'Attach a hostname you own to a project\'s production deployment. It stays pending until DNS proves it: the result gives the ' +
+				'TXT record to create and next steps; then call check_domain. `redirectWww` adds the www sibling and redirects one to the other. ' +
+				'Once verified, TLS is issued on demand and the hostname serves the project\'s production deployment.',
+			inputSchema: domainCreateSchema,
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: true },
+			scopeChallenge: requires('domain:create'),
+		},
+		async (input) =>
+			run(async () => {
+				const domain = await core.domains.create(principal, input);
+				return { domain, nextSteps: domainNextSteps(domain) };
+			}),
+	);
+
+	tool(
+		'check_domain',
+		{
+			title: 'Check custom domain',
+			description:
+				'Re-read a domain\'s TXT and CNAME/A records now. Returns its status, what is still missing (`detail`) and the exact records to create.',
+			inputSchema: z.object({ domain: z.string().describe('Domain id (dom_…) from list_domains') }),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+			scopeChallenge: requires('domain:read'),
+		},
+		async ({ domain }) =>
+			run(async () => {
+				const result = await core.domains.check(principal, domain);
+				return { ...result, nextSteps: domainNextSteps(result.domain) };
+			}),
+	);
+
+	tool(
+		'remove_domain',
+		{
+			title: 'Remove custom domain',
+			description:
+				'Detach a custom domain from its project: the hostname is no longer routed to it and its verification is dropped, so adding it ' +
+				'again needs a new TXT record. DNS records at your provider are untouched (records Yoal made through Cloudflare are removed). ' +
+				'Requires confirmation.',
+			inputSchema: z.object({ domain: z.string().describe('Domain id (dom_…) from list_domains') }),
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+			scopeChallenge: requires('domain:delete'),
+		},
+		async ({ domain: id }, ctx) => {
+			const remove = () =>
+				run(async () => {
+					await core.domains.remove(principal, id);
+					return { ok: true, id };
+				});
+			if (era === 'assistant') return remove();
+			let domain: DomainView;
+			try {
+				domain = core.domains.get(principal, id);
+			} catch (error) {
+				return run(() => {
+					throw error;
+				});
+			}
+			if (era === 'legacy')
+				return {
+					isError: true,
+					...text(
+						`Removing ${domain.hostname} needs your confirmation, which this MCP client can't show. ` +
+							`Remove it from the Yoal dashboard: ${core.ctx.config.platformOrigin}/projects/${domain.projectSlug}`,
+					),
+				};
+			const key = `confirm_remove_domain:${id}`;
+			const schema = z.object({ confirm: z.boolean() });
+			const prompted = verifyConfirmation(ctx.mcpReq.requestState(), principal, 'remove_domain', id);
+			const answer = prompted ? acceptedContent(ctx.mcpReq.inputResponses, key, schema) : undefined;
+			const responded = prompted && ctx.mcpReq.inputResponses?.[key] !== undefined;
+			if (responded && answer?.confirm !== true) {
+				const cancelled = text(`Cancelled: ${domain.hostname} was not removed (the user did not confirm).`);
+				declined.add(cancelled);
+				return cancelled;
+			}
+			if (answer?.confirm !== true)
+				return inputRequired({
+					inputRequests: {
+						[key]: inputRequired.elicit({
+							message:
+								`Remove ${domain.hostname}${domain.wwwHostname ? ` and ${domain.wwwHostname}` : ''} from ${domain.projectSlug}? ` +
+								'It is no longer routed to the project, and adding it back needs DNS verification again.',
+							requestedSchema: schema,
+						}),
+					},
+					requestState: mintConfirmation(principal, 'remove_domain', id),
+				});
+			return remove();
 		},
 	);
 
@@ -5528,6 +5887,38 @@ function buildServer(
 	);
 
 	tool(
+		'list_alert_silences',
+		{
+			title: 'List alert silences',
+			description:
+				'List the org\'s active and upcoming silences: id, the rule or label matchers they mute, start, end, comment and who created ' +
+				'them. includeExpired adds silences that ended in the last 30 days.',
+			inputSchema: z.object({ includeExpired: z.boolean().default(false) }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('metrics:read'),
+		},
+		async ({ includeExpired }) => run(() => ({ silences: core.alerts.listSilences(principal, { includeExpired }) })),
+	);
+
+	tool(
+		'remove_alert_silence',
+		{
+			title: 'Remove alert silence',
+			description:
+				'End a silence now (id from list_alert_silences), so its alerts notify again. It stays in the list as expired. ' +
+				'Owners, admins and deployers only.',
+			inputSchema: z.object({ id: z.string().min(1).describe('Silence id') }),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
+			scopeChallenge: requires('metrics:read'),
+		},
+		async ({ id }) =>
+			run(() => {
+				core.alerts.expireSilence(principal, id);
+				return { ok: true, id };
+			}),
+	);
+
+	tool(
 		'acknowledge_alert',
 		{
 			title: 'Acknowledge alert',
@@ -5607,6 +5998,132 @@ function buildServer(
 					},
 					requestState: mintConfirmation(principal, 'delete_alert_rule', rule),
 				});
+			return remove();
+		},
+	);
+
+	// --- SLOs (HA-PLAN §4 W15): offered only while SLO_OBJECTS is on ------------------------------
+	const sloProject = z.string().describe('Project slug');
+
+	tool(
+		'list_slos',
+		{
+			feature: 'SLO_OBJECTS',
+			title: 'List SLOs',
+			description:
+				'List a project\'s service level objectives: name, indicator (e.g. http_availability), target, window, burn alerts and ' +
+				'enabled. Without `project`, the platform-wide overview of every project\'s SLOs with their current error budget ' +
+				'(platform admins only).',
+			inputSchema: z.object({ project: sloProject.optional() }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async ({ project }) =>
+			run(async () => (project ? { project, slos: core.slos.list(principal, project) } : await core.slos.overview(principal))),
+	);
+
+	tool(
+		'evaluate_slos',
+		{
+			feature: 'SLO_OBJECTS',
+			title: 'Evaluate SLOs',
+			description:
+				'Evaluate one SLO (`id`) or every SLO in a project against telemetry over its window: the measured ratio, the error ' +
+				'budget left and which burn alerts would fire. A window with no data is reported as such, not as healthy. Read-only.',
+			inputSchema: z.object({ project: sloProject, id: z.string().min(1).optional().describe('SLO id (slo_…); omit for all') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async ({ project, id }) => run(async () => ({ project, evaluations: await core.slos.evaluate(principal, project, id) })),
+	);
+
+	tool(
+		'set_slo',
+		{
+			feature: 'SLO_OBJECTS',
+			title: 'Set SLO',
+			description:
+				'Create an SLO, or replace the one with the same name in the project. `target` is a ratio between 0 and 1 (0.999 = 99.9%), ' +
+				'`windowSeconds` the rolling window (1 hour to 90 days). Burn alerts page at their severity when the budget burns faster ' +
+				'than `burnRate` times the allowed rate over `windowSeconds` (and `shortWindowSeconds` when set).',
+			inputSchema: z.object({
+				project: sloProject,
+				name: z.string().min(1).max(100),
+				description: z.string().max(2_000).nullable().optional(),
+				indicator: z.string().min(1).max(100).describe('The signal, e.g. http_availability, database_writable or mail_delivery'),
+				target: z.number().gt(0).lt(1),
+				windowSeconds: z.number().int().min(3_600).max(90 * 24 * 60 * 60),
+				burnAlerts: z.array(sloBurnAlertSchema).max(8).optional(),
+				enabled: z.boolean().optional(),
+			}),
+			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:update'),
+		},
+		async ({ project, ...input }) =>
+			run(async () => {
+				const raw = Object.fromEntries(Object.entries(input).filter(([, value]) => value !== undefined));
+				return { project, slo: await core.slos.upsert(principal, project, sloObjectInputSchema.parse(raw)) };
+			}),
+	);
+
+	tool(
+		'delete_slo',
+		{
+			feature: 'SLO_OBJECTS',
+			title: 'Delete SLO',
+			description:
+				'Delete an SLO and its burn alerts. To pause it instead, set_slo with enabled:false. Requires confirmation.',
+			inputSchema: z.object({ project: sloProject, id: z.string().min(1).describe('SLO id (slo_…)') }),
+			annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true },
+			scopeChallenge: requires('project:update'),
+		},
+		async ({ project, id }, ctx) => {
+			const remove = () =>
+				run(() => {
+					core.slos.remove(principal, project, id);
+					return { ok: true, project, id };
+				});
+			if (era === 'assistant') return remove();
+			if (era === 'legacy')
+				return {
+					isError: true,
+					...text(
+						`Deleting SLO ${id} needs your confirmation, which this MCP client can't show. ` +
+							`Ask the user to delete it from the Yoal dashboard: ${core.ctx.config.platformOrigin}/settings/slo`,
+					),
+				};
+			const target = `${project}/${id}`;
+			const key = `confirm_delete_slo:${target}`;
+			const schema = z.object({ confirm: z.boolean() });
+			const prompted = verifyConfirmation(ctx.mcpReq.requestState(), principal, 'delete_slo', target);
+			const answer = prompted ? acceptedContent(ctx.mcpReq.inputResponses, key, schema) : undefined;
+			const responded = prompted && ctx.mcpReq.inputResponses?.[key] !== undefined;
+			if (responded && answer?.confirm !== true) {
+				const cancelled = text(`Cancelled: SLO ${id} was not deleted (the user did not confirm).`);
+				declined.add(cancelled);
+				return cancelled;
+			}
+			if (answer?.confirm !== true) {
+				let name: string;
+				try {
+					const slo = core.slos.list(principal, project).find((entry) => entry.id === id);
+					if (!slo) throw new NotFoundError('SLO');
+					name = slo.name;
+				} catch (error) {
+					return run(() => {
+						throw error;
+					});
+				}
+				return inputRequired({
+					inputRequests: {
+						[key]: inputRequired.elicit({
+							message: `Delete SLO "${name}" from ${project}? Its burn alerts stop; this cannot be undone.`,
+							requestedSchema: schema,
+						}),
+					},
+					requestState: mintConfirmation(principal, 'delete_slo', target),
+				});
+			}
 			return remove();
 		},
 	);
@@ -5965,6 +6482,74 @@ function buildServer(
 			scopeChallenge: requires('project:read'),
 		},
 		async () => run(() => ({ ...core.failover.status(principal), haTargets: core.slos.targets(principal) })),
+	);
+
+	tool(
+		'get_ha_init_plan',
+		{
+			title: 'Get HA init plan',
+			description:
+				'Read what `yoal ha init --profile <single|ha|ha-dr>` would do (read-only): the YOAL_FEATURE_* lines to put in yoal.env on every ' +
+				'control-plane host, the cluster settings it sets and their current values, the questions (steering, certificate source, ' +
+				'standby region) with defaults, the preflight, and every reason applying it would be refused now. ' +
+				'Requires a platform operator or admin role. MCP never applies a profile; a platform admin applies it from the dashboard or CLI.',
+			inputSchema: z.object({
+				profile: z.enum(haProfiles).default('ha').describe('The profile to plan'),
+				steering: z.enum(haInitSteeringDrivers as [HaInitSteering, ...HaInitSteering[]]).optional().describe('Steering driver answer'),
+				certificates: z.enum(haCertificateSources).optional().describe('Certificate source answer'),
+				standbyRegion: z.string().max(64).optional().describe('ha-dr only: the standby region'),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async ({ profile, steering, certificates, standbyRegion }) =>
+			run(() =>
+				core.haInit.plan(principal, {
+					profile,
+					answers: {
+						...(steering ? { steering } : {}),
+						...(certificates ? { certificates } : {}),
+						...(standbyRegion ? { standbyRegion } : {}),
+					},
+				}),
+			),
+	);
+
+	tool(
+		'get_ha_checks',
+		{
+			title: 'Get HA checks',
+			description:
+				'Run the HA preflight (`yoal ha preflight`) or the doctor (`yoal doctor`), read-only: every check with pass, warn, fail or skip, ' +
+				'what was observed, and the exact fix (a command, a setting, a yoal.env line or a manual step). The preflight checks a profile ' +
+				'before `ha init`; the doctor checks the running install and each node (heartbeat, Caddy, drift, agent version, disk). ' +
+				'The arbiter probe result is the last one the API ran (at most a minute old); a never-probed arbiter is a skip. ' +
+				'Requires a platform operator or admin role.',
+			inputSchema: z.object({
+				mode: z.enum(['preflight', 'doctor']).default('preflight'),
+				profile: z.enum(haProfiles).optional().describe('Preflight only; default the install’s own profile'),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async ({ mode, profile }) => run(() => (mode === 'doctor' ? core.haDoctor.doctor(principal) : core.haDoctor.preflight(principal, profile))),
+	);
+
+	tool(
+		'list_ha_drills',
+		{
+			title: 'List HA drills',
+			description:
+				'Read the drill catalogue and recent results (read-only): every scenario (`yoal ha drill <scenario>`), whether it runs on a fleet ' +
+				'or only in the lab and why, its confirmation, flags, minimum HA level and bound; then recent runs, newest first, with the measured ' +
+				'RTO, lost commits, failed requests or refusal. Requires a platform operator or admin role. MCP never starts a drill.',
+			inputSchema: z.object({
+				limit: z.number().int().min(1).max(200).default(20).describe('Recent runs to list'),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async ({ limit }) => run(() => ({ scenarios: core.haDrills.catalogue(principal).scenarios, runs: core.haDrills.list(principal, limit) })),
 	);
 
 	tool(

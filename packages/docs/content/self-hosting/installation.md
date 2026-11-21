@@ -167,6 +167,14 @@ These flags are passed to the installer. Each one is also available as an enviro
 | `--smtp-password <password>` | SMTP password. | `YOAL_SMTP_PASSWORD` |
 | `--smtp-from <address>` | From address. Default `Yoal <noreply@content domain>`. | `YOAL_SMTP_FROM` |
 | `--object-store local\|r2` | Where release artifacts are stored. Default `local`. | `YOAL_OBJECT_STORE` |
+| `--object-store azure://<container>` | An Azure Blob Storage container. Also writes `YOAL_FEATURE_OBJECT_STORE_AZURE=1`. Needs `YOAL_AZURE_ACCOUNT` and `YOAL_AZURE_ACCOUNT_KEY` or `YOAL_AZURE_SAS_TOKEN`. | `YOAL_AZURE_*` |
+| `--object-store gcs://<bucket>` | A Google Cloud Storage bucket. Also writes `YOAL_FEATURE_OBJECT_STORE_GCS=1`. Needs a service-account key (an absolute path in `YOAL_GCS_CREDENTIALS_FILE`, or the key itself as the credentials file); the installer copies it to `/etc/yoal/gcs-credentials.json`, readable by Yoal only. | `YOAL_GCS_*` |
+| `--object-store s3://<bucket>` | A bucket on any S3 endpoint, through the platform's S3 store (`YOAL_OBJECT_STORE=r2`). Needs an `https://` endpoint, a region, `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`. No R2 account ID. | `R2_*` |
+| `--object-store-endpoint <url>` | The S3 endpoint for `s3://`. | `R2_ENDPOINT` |
+| `--object-store-region <region>` | The S3 region for `s3://`. Required for `s3://`. | `R2_REGION` |
+| `--object-store-credentials-file <path>` | The store's keys, one `KEY=value` per line. For `gcs://` it can be the service-account key itself. The installer never takes these keys on the command line. | `YOAL_OBJECT_STORE_CREDENTIALS_FILE` |
+| `--profile single\|ha\|ha-dr` | Write the profile's `YOAL_FEATURE_*` lines into `/etc/yoal/yoal.env`: the same lines `yoal ha init --profile` prints. Run that command once the other nodes have joined. `--profile single` removes the lines an earlier `--profile` added (a line you set yourself first stays). Without the flag no flag line changes. | none |
+| `--zone <zone>` | This machine's zone, set when it enrols: lowercase letters, digits and single hyphens. Change it later under **Nodes → Edit node**. | none |
 | `--r2-account-id <id>` | R2 account ID. Required with `--object-store r2`. | `R2_ACCOUNT_ID` |
 | `--r2-bucket <bucket>` | R2 bucket. Required with `--object-store r2`. | `R2_BUCKET` |
 | `--r2-access-key-id <id>` | R2 access key ID. Required with `--object-store r2`. | `R2_ACCESS_KEY_ID` |

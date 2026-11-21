@@ -119,7 +119,7 @@ describe('REGIONS off: every region write is refused', () => {
 		expect(() => core.workloads.setSpec(principal, project, { runtime: 'process', placement: { spread: 'region' } })).toThrow(expect.objectContaining(refusedWithFlag));
 	});
 
-	test('blueprint HA keys validate but plan refuses them loudly until lane C', async () => {
+	test('blueprint region keys validate, and plan refuses each one by name while REGIONS is off', async () => {
 		const document = {
 			apiVersion: 'yoal/v1',
 			name: 'w5-stack',
@@ -127,8 +127,11 @@ describe('REGIONS off: every region write is refused', () => {
 		};
 		expect(core.blueprints.validate(principal, document).document.databases.main?.standbyRegion).toBe('ukwest');
 		await expect(core.blueprints.plan(principal, { document })).rejects.toMatchObject({
-			code: 'not_built',
-			message: expect.stringContaining('databases.main.spread, databases.main.standbyRegion'),
+			code: 'validation',
+			issues: [
+				{ path: ['databases.main.standbyRegion'], message: expect.stringContaining('YOAL_FEATURE_REGIONS') },
+				{ path: ['databases.main.spread'], message: expect.stringContaining('YOAL_FEATURE_REGIONS') },
+			],
 		});
 	});
 });
@@ -166,15 +169,10 @@ describe('REGIONS on', () => {
 });
 
 describe('lane stubs', () => {
-	test('lane A and lane B services refuse honestly', async () => {
+	test('lane A services refuse honestly (lane B is built: ha-w5-commands.test.ts)', async () => {
 		const notBuilt = { code: 'not_built', status: 501 };
 		expect(() => core.regions.view(principal)).toThrow(expect.objectContaining(notBuilt));
 		await expect(core.regions.promote(principal, 'ukwest', {})).rejects.toMatchObject(notBuilt);
-		expect(() => core.haInit.plan(principal, { profile: 'ha' })).toThrow(expect.objectContaining(notBuilt));
-		await expect(core.haInit.apply(principal, { profile: 'ha', apply: true })).rejects.toMatchObject(notBuilt);
-		expect(() => core.haDoctor.doctor(principal)).toThrow(expect.objectContaining(notBuilt));
-		await expect(core.haDrills.run(principal, { scenario: 'zone-offline', resource: 'uksouth-1' })).rejects.toMatchObject(notBuilt);
-		await expect(core.haDrills.runAll(principal, {})).rejects.toMatchObject(notBuilt);
 		expect(core.haDrills.catalogue(principal).scenarios).toBe(HA_DRILL_CATALOGUE);
 	});
 

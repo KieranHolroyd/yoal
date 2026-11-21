@@ -17,7 +17,8 @@ export const failoverUsage = `Usage:
   yoal db failover <name> --arm               Arm automatic failover (asks; --yes to skip)
       --accept-data-loss                      Async only: accept that a promotion may lose commits
       --drill-id <id>                         Arm on this passed drill (default: the latest)
-  yoal db failover <name> --disarm            Turn automatic failover off now (no confirmation)
+  yoal db failover <name> --disarm            Turn automatic failover off now (no confirmation); it
+                                              also clears --accept-data-loss, so arm with it again
   yoal db failover <name> --drill --target <disposable>
                                                 Run a measured drill on a disposable database
       --note <text>                           Record a note with the drill

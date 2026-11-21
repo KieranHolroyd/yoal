@@ -12,6 +12,10 @@ import type * as z from 'zod';
  */
 export const CONFIRM_TOOLS: ReadonlySet<string> = new Set([
 	'set_access',
+	// Changes an environment's access mode or password, like set_access does for production.
+	'update_environment',
+	// Serves the project on a new hostname once DNS proves it.
+	'add_domain',
 	'create_share_link',
 	'presign_object',
 	'promote_deployment',

@@ -62,10 +62,12 @@ export const actions: Actions = {
 		const data = await request.formData();
 		const node = formString(data, 'node');
 		try {
-			const drill = core.nodeDrills.start(principal, {
+			// The typed confirmation is checked on the server, not only in the dialog (HA-PLAN §10).
+			const drill = core.haDrills.startNodeDrill(principal, {
 				...(node ? { node } : {}),
 				durationSeconds: Number(formString(data, 'durationSeconds')),
-				includeControlNode: formString(data, 'includeControlNode') === 'true'
+				includeControlNode: formString(data, 'includeControlNode') === 'true',
+				confirm: formString(data, 'confirm')
 			});
 			return {
 				success: `Drill started: ${drill.nodeName} is going offline for ${Math.round(drill.durationSeconds / 60)} min${drill.random ? ' (picked at random)' : ''}.`

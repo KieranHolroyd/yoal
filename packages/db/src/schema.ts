@@ -637,6 +637,8 @@ export const nodeJoinTokens = sqliteTable(
 		usedAt: integer('used_at'),
 		usedByNodeId: text('used_by_node_id'),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
+		/** JSON array of the roles a join with this token may request (0135); null allows none. */
+		rolesJson: text('roles_json'),
 	},
 	(t) => [uniqueIndex('node_join_tokens_hash_idx').on(t.tokenHash)],
 );

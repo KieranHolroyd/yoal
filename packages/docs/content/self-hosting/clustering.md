@@ -178,13 +178,38 @@ curl https://control.example.com/api/v1/ha/status -H "Authorization: Bearer yoal
 
 The MCP tool is `get_ha_status`. All three need a platform admin. None of them can change placement or trigger a failover.
 
+### High availability setup
+
+High availability is one profile rather than a list of settings. From four empty machines:
+
+```sh
+# 1. The first machine: control plane, ingress, compute and data
+curl -fsSL https://raw.githubusercontent.com/KieranHolroyd/yoal/main/install.sh | sudo sh -s -- \
+  --profile ha --platform-host control.example.com --content-domain apps.example.com \
+  --zone uksouth-1 --object-store azure://my-platform
+
+# 2. Every other machine, with a token from Nodes → Enroll node
+sudo sh node.sh --token-file /root/join-token --name node-b --zone uksouth-2 --roles ingress,compute,data,control
+
+# 3. Turn it on. It refuses with every reason while something is missing.
+yoal ha init --profile ha --steering external-lb
+
+# 4. Prove it
+yoal ha drill --all --database main:main-copy --project shop --yes
+```
+
+- `--profile ha` writes the feature flag lines the profile needs; `--object-store` keeps release artifacts, backups and the arbiter off any one machine. Its keys come from the environment or `--object-store-credentials-file`. See [installer flags](/self-hosting/installation#installer-flags).
+- [`yoal ha init`](/cli/platform#ha-init) shows the plan, asks at most three questions (steering, certificate source and, for `ha-dr`, the standby region), runs the preflight and then sets the profile's cluster settings in one change. `yoal ha init --profile single` puts back exactly what it changed.
+- [`yoal ha preflight`](/cli/platform#ha-preflight) runs the same checks at any time and changes nothing; [`yoal doctor`](/cli/platform#doctor) checks the running install and every node.
+- [`yoal ha drill`](/cli/platform#ha-drill) runs one fault scenario on a resource you name; `--all` runs every scenario that is safe on a fleet.
+
 ### Disaster drills
 
 A disaster drill takes one node off the control plane for a few minutes, so you can see the failover setup above work before a real outage. Start one from **Settings → High availability → Disaster drill**, or from the CLI:
 
 ```sh
-yoal ha drill node-offline --wait               # a random eligible node, 5 minutes, then the report
-yoal ha drill node-offline --node worker-2 --minutes 10
+yoal ha drill node-offline --confirm random --wait          # a random eligible node, 5 minutes, then the report
+yoal ha drill node-offline --node worker-2 --confirm worker-2 --minutes 10
 yoal ha drill list                              # which nodes can be drilled, and recent results
 yoal ha drill cancel drl_…                      # end it early
 ```
@@ -200,7 +225,9 @@ Rules:
 - The last online node is never drilled.
 - A drill fails if the node heartbeats in the middle of it (for example, its agent restarted) or does not come back within 3 minutes of the end.
 
-Drills need a platform admin. The REST endpoints are `GET` and `POST /api/v1/ha/drills`, `GET /api/v1/ha/drills/{id}` and `POST /api/v1/ha/drills/{id}/cancel`.
+Starting a drill needs a platform admin signed in to the dashboard, and the node's name typed back (or `random` for a random pick): the dashboard asks for it, the CLI takes `--confirm` or asks, and the API refuses a start without it (`confirm` in the request body). The REST endpoints are `GET` and `POST /api/v1/ha/drills`, `GET /api/v1/ha/drills/{id}` and `POST /api/v1/ha/drills/{id}/cancel`.
+
+The same drill is also the `node-offline` scenario of [`yoal ha drill`](/cli/platform#ha-drill), which always names the node and needs its name typed back.
 
 ### Database and storage replicas
 

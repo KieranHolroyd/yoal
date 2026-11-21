@@ -42,7 +42,7 @@ admin_cidrs    = ["203.0.113.7/32"]
 platform_host  = "control.example.org"
 content_domain = "apps.example.org"
 acme_email     = "ops@example.org"
-features       = ["INGRESS_SET", "STEERING"]   # until `yoal ha init --profile ha` exists
+features       = ["INGRESS_SET", "STEERING"]   # or install.sh --profile ha; then yoal ha init --profile ha
 EOF
 terraform apply                       # 1. network, balancer, bucket, Key Vault, the first VM
 ```
@@ -74,20 +74,25 @@ terraform apply                       # 1. network, balancer, bucket, Key Vault,
      -d '{"endpoint":"10.40.1.10"}'   # node-a's private_ip
    ```
    This needs a platform admin key, which exists only after setup, so cloud-init cannot do it.
-7. **Join tokens**, one per node, within the hour before the next step:
+7. **Join tokens**, one per node, within the hour before the next step. A token carries the roles
+   its join may take: the join template passes each node's `roles`, and a join that asks for a role
+   its token does not allow is refused (so a leaked token cannot make a machine an ingress). Creating
+   a token needs a platform admin's dashboard session (by default an API key gets 403), or use
+   **Nodes → Add node** and tick the roles:
    ```sh
-   for n in node-b node-c node-d; do
-     curl -sS -X POST "https://control.example.org/api/v1/nodes/join-token" \
-       -H "Authorization: Bearer $YOAL_KEY" -H 'Content-Type: application/json' -d "{\"name\":\"$n\"}"
-   done
+   yoal nodes enrol --name node-b --roles ingress,compute,data,control --json
+   yoal nodes enrol --name node-c --roles ingress,compute,data --json
+   # or: curl -sS -X POST "https://control.example.org/api/v1/nodes/join-token" \
+   #   -H "Authorization: Bearer $YOAL_KEY" -H 'Content-Type: application/json' \
+   #   -d '{"name":"node-b","roles":["ingress","compute","data","control"]}'
    ```
    Put them in `join_tokens = { node-b = "…", … }` in a git-ignored `tokens.auto.tfvars`, then
    `terraform apply -var create_join_nodes=true`. A node without a token boots and prints the
    `node.sh` line to run by hand. Each joining machine pins the platform host to node-a's
    private address in `/etc/hosts` for the join only, and removes the pin afterwards.
-8. **Zones and roles.** Set each node's zone and roles under **Nodes → Edit node**, or with
-   `PATCH /api/v1/nodes/<id>` and `{"zone":"uksouth-2","roles":["ingress","compute","data"]}`
-   (the outputs and `/var/log/yoal-provision.log` name the intended ones). Then `yoal ha status`.
+8. **Zones and roles** are set at the join from each node's `zone` and `roles` (first machine: its
+   `zone`; it holds every role). Change them later under **Nodes → Edit node**, or with
+   `PATCH /api/v1/nodes/<id>`. Then `yoal ha status`.
 9. **Platform store (optional).** `terraform output platform_store_env` gives the non-secret lines
    for `/etc/yoal/yoal.env`; add `YOAL_AZURE_SAS_TOKEN` (or `YOAL_AZURE_ACCOUNT_KEY`) yourself and
    restart `yoal-control-plane`. AWS: the same with the `R2_*` keys and an IAM user's key.
@@ -96,21 +101,22 @@ terraform apply                       # 1. network, balancer, bucket, Key Vault,
 Re-running `terraform apply` never replaces a running node: `custom_data`/`user_data` changes are
 ignored, so removing spent tokens later is safe.
 
-## Installer flags HA-PLAN §8 assumes that do not exist (TODO for lanes A/B or the installer owner)
+## Installer flags HA-PLAN §8 uses
 
-Each is a `TODO(installer):` comment in the templates, and `cloud-init.test.ts` fails once the
-installer gains it, so the template gets wired.
+The installer gained these in Wave 5 lane B. `cloud-init.test.ts` checks that each exists and that
+the templates pass the ones they have variables for.
 
-| §8 flag | Where §8 uses it | Today |
+| §8 flag | Where | Status |
 |---|---|---|
-| `--profile ha` | `install.sh` | No flag. `features` appends `YOAL_FEATURE_INGRESS_SET/STEERING`; later `yoal ha init --profile ha` (lane B) |
-| `--zone <zone>` | `install.sh` and `node.sh` | No flag on either. Set under **Nodes → Edit node** |
-| `--roles <list>` | `node.sh` | No flag. Set under **Nodes → Edit node** |
-| `--object-store azure://<container>` (and `s3://`, `gcs://`) | `install.sh` | `--object-store local\|r2` only. Azure/GCS are env-only (`YOAL_OBJECT_STORE`, `YOAL_AZURE_*`, `YOAL_GCS_*`, behind `OBJECT_STORE_*` flags) |
+| `--profile single\|ha\|ha-dr` | `install.sh` | Built. Writes the profile's `YOAL_FEATURE_*` lines into `yoal.env`, the same lines `yoal ha init --profile` prints. The templates still use `features` (no module variable yet: `TODO(terraform)`) |
+| `--zone <zone>` | `install.sh` and `node.sh` | Built and passed by both templates. Sent with the join |
+| `--roles <list>` | `node.sh` (and `install.sh --join`) | Built and passed by the join template. Sent with the join. The first machine holds every role |
+| `--object-store azure://<container>` (and `s3://`, `gcs://`) | `install.sh` | Built. Credentials come from the environment or `--object-store-credentials-file`, never the command line. Azure and GCS also write their `OBJECT_STORE_*` flag. No module passes one yet (`TODO(terraform)`) |
 | `--domain` | `install.sh` | The real flag is `--platform-host` (the templates use it) |
 
-Also missing for a hands-off run: a `node.sh` way to pass the token other than `--token` on the
-command line, and an installer or join option that puts the first machine on the overlay (step 6).
+`node.sh` also takes `--token-file <path>` or `--token-file -` (stdin), so the join token is not
+in the process list or the shell history; the join template pipes it in. Still missing for a
+hands-off run: an installer or join option that puts the first machine on the overlay (step 6).
 
 **HA-PLAN §10 "Arbiter credentials" is not reached today.** The modules create an arbiter identity
 scoped to blob reads, writes and deletes under `yoal/ha/` (Azure: a custom role with only those

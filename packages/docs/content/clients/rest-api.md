@@ -483,7 +483,7 @@ These need the `BLUEPRINTS` feature flag. See [blueprints](/compute/apps-and-con
 | Method | Path | Purpose |
 |---|---|---|
 | POST | `/blueprints/validate` | Check `{ document }` (YAML or JSON text, or a parsed object) without reading live state. Returns `{ validation }`. |
-| POST | `/blueprints/plan` | Diff `{ document, prune? }` against live state. Changes nothing. Returns `{ plan }` with every resource step, a `planHash` and the planned operation's id. Any problem is a `422` listing every issue with its resource path. |
+| POST | `/blueprints/plan` | Diff `{ document, prune? }` against live state. Changes nothing. Returns `{ plan }` with every resource step, a `planHash` and the planned operation's id. Steps whose `kind` is `ha` are the plan's HA section (see [high availability keys](/compute/apps-and-containers#high-availability-keys)). Any problem is a `422` listing every issue with its resource path. |
 | POST | `/blueprints/apply` | Apply `{ planHash, confirm? }`: your own plan, within one hour. `confirm` is the stack name, required when the plan deletes resources. Returns `202` with `{ run }`; `?wait=<seconds>` (up to 25) holds the response until the run settles. A plan whose live state moved is a `409`. |
 | GET | `/blueprints/apply/{operationId}` | One run: its status and the result of every step. |
 | GET | `/blueprints` | The stacks your organisation has applied, with the resources each manages. |

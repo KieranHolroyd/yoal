@@ -64,6 +64,17 @@ export class DatabaseFailoverPolicyService {
 	}
 
 	/**
+	 * Every refusal `arm` would meet for this request, evaluated exactly as `arm` evaluates it (the
+	 * request's `acceptDataLoss` applied first), without writing. Blueprint plans (HA-PLAN W14) show
+	 * this list for `failover: auto`. `auto-promote-off` comes first while the flag is off, which is
+	 * where `arm` itself stops.
+	 */
+	armRefusals(principal: Principal, databaseName: string, request: Pick<DatabaseFailoverArmRequest, 'acceptDataLoss'>): FailoverArmRefusal[] {
+		const database = this.#require(principal, databaseName, 'database:read');
+		return this.#evaluate({ ...database, acceptDataLoss: request.acceptDataLoss || database.acceptDataLoss }).refusals;
+	}
+
+	/**
 	 * The live half of the policy (W11-MODEL assumption 9 + review blockers 2/10). The controller and
 	 * `view.active` use this one predicate: the flag, the per-database mode, a steady sync state, and
 	 * the §1.3 durability condition. Arming separately enforces every §3 refusal.
@@ -174,7 +185,9 @@ export class DatabaseFailoverPolicyService {
 
 	/**
 	 * Disarm immediately (W11-SPEC §12). It never fences a healthy primary: turning `auto` off only
-	 * removes the automatic acquisition path, so a live primary keeps serving and its lease.
+	 * removes the automatic acquisition path, so a live primary keeps serving and its lease. It also
+	 * clears `acceptDataLoss`: the acknowledgement belongs to one arming, so arming again must assert
+	 * it again (and `arm` never clears it, so this is the only way back to `false`).
 	 */
 	async disarm(principal: Principal, databaseName: string): Promise<DatabaseFailoverPolicyView> {
 		const database = this.#require(principal, databaseName, 'database:update');
@@ -183,6 +196,7 @@ export class DatabaseFailoverPolicyService {
 			.update(databases)
 			.set({
 				failoverMode: 'manual',
+				acceptDataLoss: false,
 				autoArmedAt: null,
 				// The evidence explained the armed policy; it is stale once the policy is manual.
 				failoverEvidenceJson: '{}',
@@ -195,7 +209,7 @@ export class DatabaseFailoverPolicyService {
 			action: 'database.failover.disarm',
 			resource: 'database',
 			resourceId: database.id,
-			args: { name: database.name, previousMode: database.failoverMode },
+			args: { name: database.name, previousMode: database.failoverMode, previousAcceptDataLoss: database.acceptDataLoss },
 			result: 'ok',
 		});
 		this.ctx.projects.bump(database.orgId);

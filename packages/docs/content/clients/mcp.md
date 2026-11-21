@@ -83,7 +83,7 @@ These are the permissions the MCP tools use. The tables in the catalogue below n
 
 | Permission | Lets an agent |
 |---|---|
-| `project:read` | List and read projects, environments, volumes, usage, quotas, nodes, status and the audit log |
+| `project:read` | List and read projects, environments, volumes, usage, quotas, nodes, status, app errors and the audit log |
 | `project:create` | Create projects (`deploy_site` also creates a missing project) |
 | `project:update` | Rename or re-place projects, set access, create environments and volumes, and attach or detach resources |
 | `project:delete` | Soft-delete projects |
@@ -91,6 +91,8 @@ These are the permissions the MCP tools use. The tables in the catalogue below n
 | `deployment:create` | Deploy sites and files, run uploads, invoke functions and run their cron handlers |
 | `deployment:promote` | Point production or an environment at an existing deployment |
 | `deployment:rollback` | Move an environment back to its previous deployment |
+| `domain:read`, `domain:create`, `domain:delete` | List and re-check custom domains, add them and remove them |
+| `build:read`, `build:cancel` | Read builds and their log tails, and cancel a queued or running build |
 | `database:read`, `database:create`, `database:update`, `database:delete` | Read, create, change and delete managed databases |
 | `storage:read`, `storage:create`, `storage:update`, `storage:delete` | The same for object storage |
 | `broker:read`, `broker:create`, `broker:update`, `broker:delete` | The same for queue brokers and event rules |
@@ -99,6 +101,10 @@ These are the permissions the MCP tools use. The tables in the catalogue below n
 | `container:inspect`, `container:files` | Inspect container projects; list and read their files (`container:files` is never pre-ticked) |
 | `logs:read`, `metrics:read` | Read logs and log drains (owners and admins also manage drains); read metrics, dashboards and alerts |
 | `database:credentials`, `storage:credentials`, `broker:credentials`, `database:console` | Rotate database credentials. No MCP tool reveals credentials. |
+| `kubernetes:read`, `kubernetes:create`, `kubernetes:update`, `kubernetes:delete` | Read, create, change and soft-delete managed Kubernetes clusters, their routes, attachments and backups |
+| `kubernetes:view`, `kubernetes:edit` | Read a cluster's shipped pod logs; apply YAML to a cluster as you (the cluster's own RBAC still decides per object) |
+| `iam:read`, `iam:manage-bindings` | List roles and explain, simulate or list who has access; grant and remove role bindings |
+| `serviceAccount:read`, `serviceAccount:create`, `federation:read` | List and create service accounts; list workload-identity federation trusts |
 
 Some tools need a second permission depending on what the call does. For example, `create_database` with a `project` also needs `project:update`, because it attaches the database to that project in the same call.
 
@@ -108,7 +114,7 @@ Call `whoami` first to see the client, your role and the permissions that apply 
 
 Every tool carries the MCP hints `readOnlyHint`, `destructiveHint` and `idempotentHint`, so a client can approve reads automatically and ask before destructive calls. Twenty-one tools are marked destructive: the nine deletes, the four detaches, `revoke_share_link`, `revoke_site_session`, `sign_out_all_visitors`, `revoke_database_credential`, `revoke_storage_key`, `remove_email_suppression`, `remove_email_address` and `apply_stack`.
 
-Seventeen tools ask a person to confirm before they act: the nine deletes (`delete_project`, `delete_projects`, `delete_database`, `delete_database_replica`, `delete_storage`, `delete_event_rule`, `delete_dashboard`, `delete_alert_rule`, `delete_log_drain`), plus `sign_out_all_visitors`, `revoke_database_credential`, `revoke_storage_key`, `remove_email_suppression`, `add_email_address`, `remove_email_address`, `send_email` and `apply_stack`. Each prompt names the exact target. The `apply_stack` prompt names the stack, counts what it creates and updates, and lists the first steps; the answer is bound to that exact plan. The `send_email` prompt shows the sender, recipients, subject and the start of the body, and warns that a sent message cannot be recalled.
+Twenty-four tools ask a person to confirm before they act: the thirteen deletes (`delete_project`, `delete_projects`, `delete_environment`, `delete_job`, `delete_database`, `delete_database_replica`, `delete_storage`, `delete_k8s_cluster`, `delete_event_rule`, `delete_dashboard`, `delete_alert_rule`, `delete_slo`, `delete_log_drain`), plus `remove_domain`, `unbind_role`, `sign_out_all_visitors`, `revoke_database_credential`, `revoke_storage_key`, `remove_email_suppression`, `add_email_address`, `remove_email_address`, `send_email`, `apply_stack` and `apply_k8s_config` (a real apply, not a dry run). Each prompt names the exact target. The `apply_stack` prompt names the stack, counts what it creates and updates, and lists the first steps; the answer is bound to that exact plan. The `send_email` prompt shows the sender, recipients, subject and the start of the body, and warns that a sent message cannot be recalled.
 
 How the prompt reaches you depends on the client:
 
@@ -173,7 +179,7 @@ You don't need to name tools. Ask in plain language and the agent picks them. Th
 
 ## Tool catalogue
 
-There are 171 tools. The permission column lists every scope a call checks, and a note in parentheses says when a second one applies. Tools that ask you to confirm are marked as such. Some tools appear only while their feature is on: Email (on by default), and Jobs, point-in-time recovery, Blueprints and the container console (off by default; see [configuration](/self-hosting/configuration)).
+There are 236 tools. The permission column lists every scope a call checks, and a note in parentheses says when a second one applies. Tools that ask you to confirm are marked as such. Some tools appear only while their feature is on: Email, Jobs, point-in-time recovery, Blueprints, the container console and Kubernetes are on by default, and SLOs are off by default (see [configuration](/self-hosting/configuration)).
 
 ### Documentation
 
@@ -214,6 +220,9 @@ These two tools search and read this documentation, as it shipped with the platf
 | `get_deployment` | Get one deployment by id or short id | `deployment:read` |
 | `promote_deployment` | Point production, or an environment, at an existing deployment. Instant, with no rebuild | `deployment:promote` |
 | `rollback` | Point an environment back at its previous deployment, including its configuration | `deployment:rollback` |
+| `list_builds` | List a project's builds from its connected repository, newest first, with status, ref, commit, error and the deployment each produced. No logs | `build:read` |
+| `get_build` | Show one build with the last 200 lines of its log, and whether earlier output was left out | `build:read` |
+| `cancel_build` | Cancel a queued or running build. A finished build is refused | `build:cancel` |
 
 ### Pipelines
 
@@ -237,6 +246,8 @@ See [Pipelines](/deploying/pipelines). There are no tools for secrets, variables
 |---|---|---|
 | `list_environments` | List named environments with their host, access mode and current deployment | `project:read` |
 | `create_environment` | Create a named environment, served at `<project>--<env>` | `project:update` |
+| `update_environment` | Rename a named environment or change its access mode or password. Production is refused; use `set_access` for it | `project:update` |
+| `delete_environment` | Delete a named environment and its host. Refused for production and while it still has deployments. Asks to confirm | `project:update` |
 | `deploy_to_environment` | Deploy files or an upload into one environment, leaving production alone | `deployment:create`, `project:read` |
 | `get_workload` | Show the runtime spec and status of a process or container project | `deployment:read` |
 | `set_workload` | Set the runtime spec of a process or container project. Secrets are references only | `project:update` |
@@ -301,6 +312,8 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 | `update_database` | Resize a database, turn its pooler on or off, set its extensions, or move MySQL, MariaDB, Valkey, Redis or ClickHouse forward to a newer listed version | `database:update` |
 | `restart_database` | Restart the database container, or only its pooler | `database:update` |
 | `list_database_replicas` | List a PostgreSQL database's read replicas with status, replay position and lag, and its promotion history | `database:read` |
+| `get_database_failover` | Read a database's automatic-failover policy and every reason `auto` would be refused now, its recent switchovers and its newest move. Read-only: arming failover, drills, switchover, promotion and moves are dashboard and CLI only | `database:read` |
+| `plan_database_upgrade` | Plan a PostgreSQL major upgrade: blockers, warnings and the dump/restore steps. Changes nothing; a person starts it with `yoal db upgrade --apply` | `database:update` |
 | `create_database_replica` | Add an async streaming read replica on a node. Attached apps restart once it streams, to receive `<PREFIX>_READ_URL` | `database:update` |
 | `delete_database_replica` | Remove a read replica and delete its copy. The primary is untouched. Asks to confirm | `database:read`, `database:update` |
 | `rotate_database_credentials` | Rotate the owner or monitor password. Attached apps receive the new value | `database:credentials`, `database:update` |
@@ -361,6 +374,7 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 | `list_storage` | List object storage instances with status, node, usage, buckets and attachments | `storage:read` |
 | `get_storage` | Show one instance: endpoints, buckets, attachments and last-hour usage | `storage:read` |
 | `get_storage_logs` | Show recent storage container log lines. Pass a cursor to poll | `storage:read`, `logs:read` |
+| `list_storage_replicas` | List the replication links an instance is source or target of, with status and lag. Read-only: adding and removing replicas is dashboard and CLI only | `storage:read` |
 | `list_objects` | List objects and folders in a bucket | `storage:read` |
 | `presign_object` | Create a short-lived GET or PUT URL for one object | `storage:read` |
 | `create_object_folder` | Create a folder marker in a bucket | `storage:update` |
@@ -376,6 +390,37 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 | `create_storage_key` | Create a named access key scoped to some buckets. The secret is not returned | `storage:update` |
 | `revoke_storage_key` | Revoke a named access key. Asks to confirm | `storage:update` |
 
+### Managed Kubernetes
+
+A cluster is a k3s control plane with up to 8 agent machines, on a node that has the optional Kubernetes component. These tools are offered only while the platform has Kubernetes turned on. No tool returns a token or kubeconfig: people get one with `yoal k8s kubeconfig <name>`, and their access inside the cluster follows their Yoal role (`kubernetes:view`, `kubernetes:edit` or `kubernetes:admin`).
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_k8s_clusters` | List the organisation's clusters with version, status, node, size and API endpoint | `kubernetes:read` |
+| `get_k8s_cluster` | Show one cluster: status, version and the minor it may upgrade to, end of support, API URL, tier, machines, nodes ready, routes and attachments | `kubernetes:read` |
+| `create_k8s_cluster` | Create a cluster: version, placement, machine size, agents, 3 servers for HA, purpose and tier | `kubernetes:create` |
+| `update_k8s_cluster` | Upgrade one minor at a time, scale agents, resize machines, change API access, the maintenance window, backups or the log shipper, or move a single server to 3 servers | `kubernetes:update` |
+| `add_k8s_route` | Claim `<name>.<content domain>` for a cluster and route it to the cluster's bundled Traefik ingress | `kubernetes:update` |
+| `attach_to_k8s_cluster` | Write a database's or broker's connection values into the cluster as a Secret. The database or broker must run on the cluster's node | `kubernetes:update`, plus `database:read` or `broker:read` |
+| `generate_k8s_config` | Write Kubernetes YAML from a plain-language request, using the cluster's real facts, then lint and repair it. Applies nothing. Needs a model provider in **Settings → Assistant** | `kubernetes:read` |
+| `apply_k8s_config` | Server-side apply YAML as you. `dryRun: true` validates without changing anything; a real apply asks to confirm | `kubernetes:edit` |
+| `k8s_pod_logs` | Read pod log lines the cluster's log shipper sent to Yoal, filtered by namespace, pod or text | `kubernetes:view` |
+| `backup_k8s_cluster` | Take a datastore snapshot now | `kubernetes:update` |
+| `list_k8s_backups` | List a cluster's scheduled, manual and pre-upgrade snapshots with status, size, version and expiry | `kubernetes:read` |
+| `restore_k8s_backup` | Restore a snapshot into a new cluster. Never overwrites a live cluster | `kubernetes:create` |
+| `delete_k8s_cluster` | Soft-delete a cluster; it can be restored for the trash period. Asks to confirm. Permanent deletion is dashboard and CLI only | `kubernetes:read`, `kubernetes:delete` |
+
+### Custom domains
+
+A custom domain serves a project's production deployment on a hostname you own. It stays pending until a DNS TXT record proves you control it; then Yoal issues its certificate.
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_domains` | List custom domains for one project, or every project you can read, with status, the TXT record that proves each one and the last check | `domain:read` |
+| `add_domain` | Attach a hostname to a project, optionally with its `www` sibling. Returns the TXT record to create and next steps | `domain:create` |
+| `check_domain` | Re-read a domain's DNS records now, and say what is still missing | `domain:read` |
+| `remove_domain` | Detach a domain from its project. Adding it back needs DNS verification again. Asks to confirm | `domain:delete` |
+
 ### Access and share links
 
 | Tool | What it does | Permission |
@@ -387,6 +432,23 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 | `list_site_sessions` | List a project's live share-link visitor sessions | `shareLink:read` |
 | `revoke_site_session` | End one share-link visitor session. The link keeps working | `shareLink:revoke` |
 | `sign_out_all_visitors` | Sign out every visitor of a project on every scope. Asks to confirm | `project:update` |
+
+### Identity and access
+
+These tools read and change who may do what in the organisation (see [identity and access](/cli/identity-and-access) for the same actions in the CLI). Nothing here creates or returns a key, token or secret. Approving, denying and extending access requests, platform bindings and federation trust changes are dashboard, REST and CLI only.
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_roles` | List the built-in and custom roles with the permissions each grants | `iam:read` |
+| `explain_access` | Explain the decision for one permission on a resource: the reason, the binding or guardrail that decided it, and every grant considered | `iam:read` |
+| `who_can` | List everyone who can do something, each with the binding that allows them. Group bindings are expanded to their members | `iam:read` |
+| `simulate_access` | Dry-run a binding or custom-role change and see which permissions it would give or take from one principal. Saves nothing | `iam:read` |
+| `bind_role` | Grant a role to a user, group or service account at a scope, optionally expiring and with a reason | `iam:manage-bindings` |
+| `unbind_role` | Remove a binding by id; its access stops at once. Asks to confirm | `iam:manage-bindings` |
+| `request_access` | Ask for a time-boxed role at a scope, with a reason. Creates a pending request that a different person approves | none |
+| `list_service_accounts` | List service accounts with their description, owner group and disabled state | `serviceAccount:read` |
+| `create_service_account` | Create a service account (`sa_…`). No key or token is issued | `serviceAccount:create` |
+| `list_federation_trusts` | List workload-identity federation trusts: the OIDC issuer, audiences, the service account each exchanges into, and its restriction | `federation:read` |
 
 ### Observability
 
@@ -415,9 +477,32 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 | `create_alert_rule` | Create a metric alert rule. The result previews the series that would breach | `metrics:read` |
 | `update_alert_rule` | Change a rule. Pause or resume it with `enabled` | `metrics:read` |
 | `silence_alerts` | Mute notifications for a window, for one rule or by label | `metrics:read` |
+| `list_alert_silences` | List active and upcoming silences; `includeExpired` adds those that ended in the last 30 days | `metrics:read` |
+| `remove_alert_silence` | End a silence now so its alerts notify again. Owners, admins and deployers | `metrics:read` |
 | `acknowledge_alert` | Stop repeat notifications for a firing series until it resolves | `metrics:read` |
 | `get_alert_history` | Show recent alert events, notifications, silences and acknowledgements | `metrics:read` |
 | `delete_alert_rule` | Delete a rule with its series and silences. History is kept. Asks to confirm | `metrics:read` |
+
+### SLOs
+
+Service level objectives with error budgets and burn alerts. These tools are offered only while the platform has `SLO_OBJECTS` turned on.
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_slos` | List a project's SLOs, or without `project` every project's SLOs with their error budget (platform admins) | `project:read` |
+| `evaluate_slos` | Evaluate one SLO or all of a project's against telemetry: error budget left and burn-alert state. A window with no data says so | `project:read` |
+| `set_slo` | Create an SLO, or replace the one with the same name: indicator, target ratio, window and burn alerts | `project:update` |
+| `delete_slo` | Delete an SLO and its burn alerts. Asks to confirm | `project:update` |
+
+### App errors
+
+Exceptions your apps report through a Sentry SDK, grouped into issues (see [app errors](/observe/app-errors)).
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_app_errors` | List one project's issues, newest first. Filter by status (unresolved, resolved or ignored), environment, release, time range or text | `project:read` |
+| `get_app_error` | Show one issue with its newest events and stack traces, and its 24-hour and 14-day counts | `project:read` |
+| `update_app_errors` | Resolve, ignore or reopen one or more issues | `project:update` |
 
 ### Email
 
@@ -443,6 +528,9 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 |---|---|---|
 | `list_nodes` | List fleet nodes. Requires a platform admin role | `project:read` |
 | `get_ha_status` | Read the failover controller: whether automatic failover is on, the lease, how long each node has been silent, the ingress record set, databases whose primary is lost and the replica a promotion would use, and recent failover events. Requires a platform admin role; never changes anything | `project:read` |
+| `get_ha_init_plan` | Read what `yoal ha init --profile <single, ha or ha-dr>` would do: the `YOAL_FEATURE_*` lines for `yoal.env`, the cluster settings and their current values, the questions with defaults, the preflight, and every reason applying would be refused now. Requires a platform operator or admin role; never applies anything | `project:read` |
+| `get_ha_checks` | Run the HA preflight or the doctor: every check with pass, warn, fail or skip, what was found and the exact fix. Requires a platform operator or admin role; never changes anything | `project:read` |
+| `list_ha_drills` | Read the drill catalogue (where each scenario runs, its confirmation, minimum HA level and bound) and recent drill results with what they measured. Requires a platform operator or admin role; never starts a drill | `project:read` |
 | `get_attachment_endpoints` | Read how every app reaches each database attached to it: per node holding a copy, the mode (`gateway`, `endpoint`, `direct` or `none`), the host and port, the pooled and read ports, and the node the connection lands on. No credentials. Requires a platform operator or admin role; never changes anything | `project:read` |
 | `get_fleet` | Read fleet capacity: per node what is reserved and in use, what may move and why the rest is pinned, and the moves a rebalance would make. Requires a platform admin role; never changes anything | `project:read` |
 | `get_node_links` | Read the links between nodes: path, latency, loss, the last hour, and the last throughput test. Requires a platform admin role; never changes anything | `project:read` |

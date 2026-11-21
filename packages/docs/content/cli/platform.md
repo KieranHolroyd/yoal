@@ -1,6 +1,6 @@
 ---
 title: Platform administration
-description: Reference for yoal ha, fleet, nodes and upgrade: failover status, capacity and rebalancing, node updates in waves, and platform upgrades.
+description: Reference for yoal ha, doctor, fleet, nodes and upgrade: HA setup and drills, failover status, capacity, node updates in waves, and upgrades.
 ---
 
 These commands run the platform itself rather than an organisation's projects: the failover controller, the fleet's capacity and links, worker node updates, and upgrades of the control plane. For global options, environment variables and the general exit codes, see [the CLI overview](/clients/cli). Scaling a single app's copies is on [compute](/cli/compute#scale).
@@ -11,10 +11,13 @@ Most of these commands need a **platform admin**, an install-wide role separate 
 
 | Commands | Who can run them |
 | --- | --- |
-| `ha status`, `ha attachments`, `ha migrate attachments` (without `--apply`), `ha ca`, `fleet status`, `fleet links`, `fleet rebalance` (preview), `nodes rollout plan`, `status` and `list`, `upgrade plan` | A platform admin, with any credential, including the API key the CLI uses. |
-| `ha migrate attachments --apply`, `ha ca rotate`, `fleet rebalance --apply`, `fleet link-test`, `nodes update`, `nodes rollout start`, `resume` and `cancel` | A platform admin signed in to the dashboard. By default an API key gets `403` for these, even a platform admin's; make the change from the dashboard instead. |
+| `ha status`, `ha preflight`, `ha init` (until it applies), `ha drill` for scenarios that take nothing down, `doctor`, `ha attachments`, `ha migrate attachments` (without `--apply`), `ha ca`, `fleet status`, `fleet links`, `fleet rebalance` (preview), `nodes rollout plan`, `status` and `list`, `upgrade plan` | A platform admin, with any credential, including the API key the CLI uses. |
+| `ha init` when it applies, `ha drill` for a scenario that takes something down (such as `node-offline`), `ha migrate attachments --apply`, `ha ca rotate`, `fleet rebalance --apply`, `fleet link-test`, `nodes enrol`, `nodes update`, `nodes rollout start`, `resume` and `cancel` | A platform admin signed in to the dashboard. By default an API key gets `403` for these, even a platform admin's; make the change from the dashboard instead. |
 | `fleet move` | Anyone with `project:update` on the project. `--status` needs read access to the project. |
 | `upgrade apply`, `upgrade rollback` | Root on the Yoal host. No API credential can do this. |
+
+> [!NOTE]
+> With the default bindings the CLI's API key gets `403` when `ha init` applies. Apply it from **Settings → High availability** instead, signed in as a platform admin. The plan and the preflight work with the API key.
 
 > [!NOTE]
 > With the default bindings, the CLI's API key gets `403` for `ha migrate attachments --apply` and `ha ca rotate`. Take them from **Settings → High availability** instead, signed in as a platform admin: **Move apps to their endpoints** and **Install CA**. Apps also move on their own next deploy.
@@ -22,13 +25,103 @@ Most of these commands need a **platform admin**, an install-wide role separate 
 ## ha
 
 ```sh
+yoal ha init --profile <ha|ha-dr|single> [--steering <driver>] [--certificates <shared|per-node>] [--standby-region <region>] [--yes] [--json]
+yoal ha preflight [--profile <ha|ha-dr|single>] [--steering <driver>] [--certificates <shared|per-node>] [--json]
+yoal ha drill <scenario> --resource <id|name> [--confirm <name>] [--yes] [--minutes <n>] [--drill-database <copy>] [--json]
+yoal ha drill --all [--node <name>]... [--ingress-node <name>]... [--database <db>[:<copy>]]... [--project <slug>]... [--target <kind>:<resource>]... [--yes] [--json]
+yoal ha drill catalogue|runs [--json]
 yoal ha status [--events <n>] [--json]
 yoal ha attachments [--json]
 yoal ha migrate attachments [--project <slug>]... [--apply] [--json]
 yoal ha ca [rotate] [--json]
 ```
 
-`ha status` shows the failover controller. It only reads. See [automatic failover](/self-hosting/clustering#automatic-failover). The other commands are for [attachment endpoints](/self-hosting/clustering#attachment-endpoints).
+`ha init`, `ha preflight` and `ha drill` set up and prove high availability; see [high availability setup](/self-hosting/clustering#high-availability-setup). `ha status` shows the failover controller. It only reads. See [automatic failover](/self-hosting/clustering#automatic-failover). The other commands are for [attachment endpoints](/self-hosting/clustering#attachment-endpoints).
+
+### ha init
+
+Turns high availability on as one profile, or off again with `--profile single`. It first shows the plan:
+
+- The answers it uses: how traffic reaches the ingress nodes (`--steering`, default `external-lb`), where certificates come from (`--certificates`, default `shared`), and for `ha-dr` the standby region (`--standby-region`, the default when exactly one other region has a data node). In a terminal it asks each question no flag answered; `--yes` takes the defaults.
+- The `YOAL_FEATURE_*` lines the profile needs in `/etc/yoal/yoal.env`. `ha init` never writes them: put them in `yoal.env` on every control-plane host and restart each control plane (`systemctl restart yoal-control-plane`). The lines you still need to change are marked.
+- The cluster settings it sets: the profile, the steering driver, automatic failover on, and app copies spread across zones.
+- The preflight, and every reason it would refuse to apply now.
+
+It changes nothing while a flag line differs, a question has no answer, or a check the profile requires fails. Otherwise it asks before applying (or applies with `--yes`) and sets everything in one change, recorded in the audit log. It also records each setting's earlier value, so `--profile single` puts back exactly those values and nothing else. `single` is refused while something still depends on an HA feature, such as a synchronous or armed database, an enrolled standby, or a node in a named region; each refusal says how to undo that one first. The `=0` flag lines appear only once nothing depends on an HA feature, because turning a flag off first would strand what still uses it. Steering goes back to `direct` in the same change, except after a driver that writes at a provider (`vip`, `dns-failover`, `webhook`, `cloud-lb`, `cloudflare-tunnel`): set steering to direct and remove the keepalived address, DNS records or other provider state by hand first. The `ha` profile includes `DB_AUTO_PROMOTE`, but no database fails over on its own until you arm it.
+
+| Flag | Description |
+| --- | --- |
+| `--profile <p>` | `ha`, `ha-dr` (adds a standby region) or `single`. Required. |
+| `--steering <driver>` | `external-lb`, `dns-failover`, `vip`, `cloud-lb`, `cloudflare-tunnel` or `webhook`. |
+| `--certificates <source>` | `shared` (one issuance on every ingress) or `per-node`. |
+| `--standby-region <region>` | `ha-dr` only. |
+| `--yes` | Take the defaults and apply without asking. |
+| `--json` | Print the plan; with `--yes`, the applied result. |
+
+```sh
+yoal ha init --profile ha --steering external-lb
+yoal ha init --profile single
+```
+
+### ha preflight
+
+Runs every HA check and prints each with `ok`, `WARN`, `FAIL` or `SKIP`, what it found and the exact fix: a command, a setting, a `yoal.env` line or a manual step. It changes nothing. Without `--profile` it checks the install's own profile, or `ha` on a single-node install, so you see what is missing. The exit status is 1 when the profile's required checks do not all pass.
+
+| Check | What it looks at |
+| --- | --- |
+| `nodes` | At least two online ingress, compute, data and control nodes. Two data nodes warn: a lost primary is not promoted automatically until there are three. |
+| `node-capabilities` | Each node's agent supports what the profile's flags need. The fix is `yoal nodes update <node>`. |
+| `zones` | Ingress, data and control nodes are not all in one zone. |
+| `clocks` | Each node's clock against the control plane's, from its heartbeats. More than 2.5 s warns; more than 5 s fails. |
+| `overlay-links` | Every link between ingress, data and control nodes answered in the last 5 minutes: WireGuard handshakes on the managed overlay, round-trip samples elsewhere. |
+| `arbiter-conditional-writes` | The platform object store wins and loses conditional writes correctly. The check writes and deletes one small object under `yoal/ha/`. |
+| `certificates` | Every ingress serves the same certificate (with shared certificates). |
+| `steering` | The steering driver's own checks pass. |
+| `backups` | Every database has an off-node backup from the last 48 hours, or point-in-time recovery. An unverified or mutable backup warns. |
+| `headroom` | The other nodes can take the memory of the largest node, and of the largest zone. |
+| `platform-store`, `registry-storage`, `identity`, `mail`, `telemetry-spool` | Nothing the platform needs lives only on one node. |
+| `flags-consistent` | Every control-plane host runs the same flags. |
+| `ha-dependents` | Nothing still depends on an HA feature; this is what `--profile single` requires. |
+| `regions` | Not checked yet: it is reported as `SKIP`. |
+
+A check that cannot be worked out, for example a node whose agent does not report its clock yet, is `SKIP` with the reason, never `ok`. A required check that is skipped keeps the profile from applying.
+
+```sh
+yoal ha preflight
+yoal ha preflight --profile ha-dr --json | jq '.checks[] | select(.status == "fail")'
+```
+
+### ha drill
+
+Injects one fault on one resource you name, measures how long recovery takes and how much data was lost, and records the result. `yoal ha drill catalogue` lists every scenario: what it is run against, whether it runs on a fleet or only in a test lab, how it is confirmed, the lowest HA level it accepts, and the bound it is judged by. `yoal ha drill runs` lists recent results, and `yoal ha drill show <id>` shows one.
+
+- A drill never picks a resource for you: name it with `--resource`.
+- A scenario that takes something down for real (such as `node-offline`) needs a platform admin signed in to the dashboard, and the resource's name typed back with `--confirm <name>` or at the prompt. The node that hosts the control plane also needs `--include-control`. The database failover drill asks for a yes and promotes a disposable copy you name with `--drill-database`, never the database itself.
+- A drill is refused on a resource whose declared HA level is below the scenario's minimum, and on a resource that is already below its own declared level.
+- Scenarios that need a fault only a test lab can inject (killing a process, a network partition, a skewed clock, a full disk) are refused with the reason. So are `zone-offline`, `control-plane-failover` and `region-failover`.
+- `release-readiness-fail` and `release-command-fail` are recorded as skipped: there is no way yet to run them on a live project.
+
+`--all` runs every scenario that is safe on a fleet (nothing taken down, nothing to type) against the resources you name, one at a time, and lists each scenario it skipped with the reason. `--yes` adds the ones that need a confirmation. A database is named as `main`, or `main:main-copy` to include its failover drill on the copy.
+
+| Flag | Description |
+| --- | --- |
+| `--resource <id\|name>` | The node, database or project to drill. |
+| `--confirm <name>` | The resource's name, for a scenario that takes it down. |
+| `--minutes <n>` | How long a node stays dark, from 1 to 30. The default is 5. |
+| `--drill-database <copy>` | The disposable copy a database failover drill promotes. |
+| `--include-control` | Allow the node that hosts the control plane. |
+| `--node`, `--ingress-node`, `--database`, `--project`, `--target <kind>:<resource>` | With `--all`: the resources to drill. Repeat each as needed. |
+| `--yes` | Confirm without a prompt. With `--all`, include the scenarios that need a confirmation. |
+| `--json` | Print the raw response. |
+
+```sh
+yoal ha drill catalogue
+yoal ha drill node-offline --resource worker-b --confirm worker-b
+yoal ha drill node-offline --resource edge --confirm edge --include-control
+yoal ha drill --all --database main:main-copy --project shop --yes
+```
+
+`yoal ha drill node-offline` without `--resource` is the older node offline drill, which can pick an eligible node at random; it needs `--confirm` with the node's name, or `random`. See [disaster drills](/self-hosting/clustering#disaster-drills). A database drill names a database in your own organisation.
 
 ### ha status
 
@@ -78,6 +171,14 @@ yoal ha migrate attachments --project shop --apply
 Shows the install's certificate authority: the one that signs, a previous one still trusted after a rotation, and the node certificates (how many nodes hold one, how many are due to renew, how many were revoked, and the next expiry). `yoal ha status` shows the same lines while attachment endpoints are on.
 
 `yoal ha ca rotate` creates a new authority. The old one stays trusted, so no node loses its connections; each node moves to the new one when it renews, within 60 days. A second rotation is refused while nodes still hold certificates the previous one signed. Needs a platform admin signed in to the dashboard.
+
+## doctor
+
+```sh
+yoal doctor [--json]
+```
+
+Checks the running install against its own profile, then each node: whether it is sending heartbeats, whether Caddy applied its configuration, whether it is behind the desired state, whether its agent matches the control plane's version, and how full its data disk is (85% warns, 95% fails). It prints the same lines as `ha preflight`, each problem with its fix, and changes nothing. On a single-node install the checks only an HA fleet needs are skipped. The exit status is 1 when anything fails.
 
 ## fleet
 
@@ -178,14 +279,26 @@ yoal fleet link-test --from edge --to edge-b --seconds 10
 ## nodes
 
 ```sh
-yoal nodes <update|rollout> [options]
+yoal nodes <enrol|update|rollout> [options]
 ```
 
-Updates worker nodes to the control plane's own version, one at a time or across the fleet in waves. A node never downgrades. The control-plane host itself is upgraded with [`upgrade`](#upgrade). See [worker nodes](/self-hosting/upgrades#worker-nodes).
+`nodes enrol` creates a join token for a new machine. The other actions update worker nodes to the control plane's own version, one at a time or across the fleet in waves. A node never downgrades. The control-plane host itself is upgraded with [`upgrade`](#upgrade). See [worker nodes](/self-hosting/upgrades#worker-nodes).
 
 Aliases: `node`. `rollouts` is accepted for `rollout`.
 
 Wherever a node is named, you can use its id or its name; a name shared by several nodes is an error that lists their ids.
+
+### nodes enrol
+
+```sh
+yoal nodes enrol [--name <name>] [--roles <role,...>] [--json]
+```
+
+Creates a single-use join token that expires after an hour, and prints the `node.sh` line to run on the new machine. `--roles` lists the roles a join with this token may take: `ingress`, `control`, `compute`, `data`, `build`. The join can ask for some or all of them, never more; a join that asks for more is refused and the token stays unused. A token without `--roles` allows none, and the node joins as `compute` and `data`. An ingress receives the shared certificate and session secrets, so a token that allows `ingress` deserves the same care as those secrets.
+
+```sh
+yoal nodes enrol --name node-b --roles ingress,compute,data,control
+```
 
 ### nodes update
 

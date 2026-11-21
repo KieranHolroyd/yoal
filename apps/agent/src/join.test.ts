@@ -68,6 +68,25 @@ describe('parseJoinArgs', () => {
 	});
 });
 
+describe('parseJoinArgs: zone, roles and the token from the environment (HA Wave 5)', () => {
+	test('sends --zone and --roles with the join, and reads YOAL_JOIN_TOKEN when --token is absent', async () => {
+		const options = parseJoinArgs(['https://cloud.example.com', '--name', 'b', '--zone', 'uksouth-2', '--roles', 'ingress, compute,ingress'], {
+			YOAL_JOIN_TOKEN: TOKEN,
+		});
+		expect(options).toMatchObject({ token: TOKEN, zone: 'uksouth-2', roles: ['ingress', 'compute'] });
+		let body: Record<string, unknown> = {};
+		const dir = await tempDir();
+		const fakeFetch: FetchLike = async (_input, init) => {
+			body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+			return new Response(JSON.stringify({ nodeId: 'nod_1', token: 'node-token', controlUrl: 'https://cloud.example.com', mode: 'worker' }), { status: 201 });
+		};
+		await joinNode({ ...options, dataDir: dir }, fakeFetch);
+		expect(body).toMatchObject({ zone: 'uksouth-2', roles: ['ingress', 'compute'] });
+		expect(() => parseJoinArgs(['https://cloud.example.com', '--token', TOKEN, '--name', 'b', '--zone', 'a b'], {})).toThrow(/--zone/);
+		expect(() => parseJoinArgs(['https://cloud.example.com', '--token', TOKEN, '--name', 'b', '--roles', 'router'], {})).toThrow(/--roles/);
+	});
+});
+
 describe('joinNode', () => {
 	test('posts the join request, writes node.json atomically with mode 0600', async () => {
 		const dir = await tempDir();

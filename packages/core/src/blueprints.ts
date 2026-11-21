@@ -14,6 +14,7 @@ import {
 	BLUEPRINT_MAX_BYTES,
 	attachmentTarget,
 	blueprintApplyRequestSchema,
+	blueprintHaKeys,
 	blueprintPlanRequestSchema,
 	blueprintSchema,
 	brokerCreateSchema,
@@ -50,7 +51,7 @@ import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
 import type { DatabaseRow } from './databases.ts';
 import { ConflictError, CoreError, ForbiddenError, NotFoundError, ValidationError } from './errors.ts';
-import { assertBlueprintHaKeysSupported } from './blueprints-ha.ts';
+import { applyBlueprintHa, parseBlueprintHaKey, planBlueprintHa, type BlueprintHaTarget } from './blueprints-ha.ts';
 import type { ActionDefinition, ItemResult, OperationParams, RunContext, StoredItem } from './operations/types.ts';
 import type { ProjectRow } from './projects.ts';
 import { effectiveRuntime } from './runtime-tier.ts';
@@ -65,8 +66,9 @@ import { newId, parseJson, sha256Hex } from './util.ts';
  * clicks in the dashboard produce.
  *
  * A plan is a list of resource steps in dependency order (projects → environments → databases →
- * storage → buckets → brokers → workload settings → domains → attachments, then deletes in reverse
- * when pruning). Every step converges one resource: at apply time it re-reads live state and
+ * storage → buckets → brokers → workload settings → the HA section → domains → attachments, then
+ * deletes in reverse when pruning). The HA section (`blueprints-ha.ts`) exists only for a file that
+ * sets HA keys (HA-PLAN §8). Every step converges one resource: at apply time it re-reads live state and
  * changes only what still differs, so a second apply of the same file is a no-op. The first
  * failure stops the run; later steps are skipped and nothing is rolled back.
  */
@@ -237,10 +239,14 @@ interface ParsedKey {
 	name?: string;
 	child?: string;
 	type?: 'database' | 'storage' | 'broker';
+	/** For `ha` steps: which HA target (`cluster.requires`, `projects.<slug>.ha`, …). */
+	ha?: BlueprintHaTarget;
 }
 
 /** Resource keys are dot-separated names; only hostnames contain dots, and they come last. */
 export function parseResourceKey(key: string): ParsedKey | null {
+	const ha = parseBlueprintHaKey(key);
+	if (ha) return { kind: 'ha', ha };
 	const parts = key.split('.');
 	const [section, a, b, ...rest] = parts;
 	if (section === 'projects' && a && parts.length === 2) return { kind: 'project', project: a };
@@ -272,6 +278,10 @@ const keys = {
 };
 
 const WORKLOAD_FIELDS = ['command', 'image', 'port', 'healthPath', 'memoryMb', 'cpus', 'replicas'] as const;
+
+/** Whether the file manages this project's workload settings (a `service` step). */
+const declaresWorkload = (project: Blueprint['projects'][string]): boolean =>
+	WORKLOAD_FIELDS.some((field) => project[field] !== undefined) || Boolean(project.env) || Boolean(project.secrets);
 
 // ---------------------------------------------------------------- service
 
@@ -453,7 +463,6 @@ export class BlueprintService {
 
 	/** Every step the document needs against live state, plus problems and warnings. Read-only. */
 	diff(principal: Principal, doc: Blueprint, prune: boolean): Diff {
-		assertBlueprintHaKeysSupported(doc);
 		const steps: BlueprintStep[] = [];
 		const problems: Problem[] = [];
 		const warnings: string[] = [];
@@ -530,12 +539,36 @@ export class BlueprintService {
 			]);
 		}
 
+		const serviceSpecs = new Map<string, WorkloadSpec | null>();
 		for (const [slug, project] of Object.entries(doc.projects)) {
-			if (!WORKLOAD_FIELDS.some((field) => project[field] !== undefined) && !project.env && !project.secrets) continue;
+			if (!declaresWorkload(project)) continue;
 			const key = keys.service(slug);
 			const result = this.serviceDiff(principal, slug, project);
+			serviceSpecs.set(slug, result.spec);
 			for (const message of result.problems) fail(key, message);
 			push({ key, kind: 'service', action: result.action, changes: result.changes }, ['project:update']);
+		}
+
+		// The HA section (HA-PLAN §8, W14): only for a file that sets HA keys, so older files plan as before.
+		if (blueprintHaKeys(doc).length > 0) {
+			const ha = planBlueprintHa(this.ctx, principal, doc, {
+				baseSpec: (slug) => {
+					if (serviceSpecs.has(slug)) return serviceSpecs.get(slug) ?? null;
+					const row = this.projectRow(principal.orgId, slug);
+					if (!row || row.deletedAt) return null;
+					try {
+						return this.ctx.workloads.projectSpec(row);
+					} catch {
+						return null;
+					}
+				},
+				declaresWorkload: (slug) => serviceSpecs.has(slug),
+				projectRow: (slug) => this.projectRow(principal.orgId, slug),
+			});
+			for (const step of ha.steps)
+				push({ key: step.key, kind: 'ha', action: step.action, changes: step.changes, reason: step.reason }, step.permissions);
+			problems.push(...ha.problems);
+			warnings.push(...ha.warnings);
 		}
 
 		for (const [slug, project] of Object.entries(doc.projects))
@@ -562,7 +595,8 @@ export class BlueprintService {
 		const orphans = [...managed]
 			.filter((key) => !wanted.has(key))
 			.map((key) => ({ key, parsed: parseResourceKey(key) }))
-			.filter((entry): entry is { key: string; parsed: ParsedKey } => entry.parsed !== null && entry.parsed.kind !== 'service')
+			// Workload settings and HA keys are never pruned: a key left out keeps its value.
+			.filter((entry): entry is { key: string; parsed: ParsedKey } => entry.parsed !== null && entry.parsed.kind !== 'service' && entry.parsed.kind !== 'ha')
 			.filter((entry) => this.exists(principal, entry.parsed))
 			.sort(
 				(a, b) =>
@@ -604,7 +638,8 @@ export class BlueprintService {
 				problems.push('Functions are not enabled on this platform (YOAL_FEATURE_FUNCTIONS).');
 			changes.push({ path: 'runtime', from: null, to: project.runtime });
 			change(changes, 'name', null, project.name ?? slug);
-			change(changes, 'placement', null, project.placement ?? 'edge');
+			// An object `placement` is a spread (an HA key, on the workload); the project keeps the default.
+			change(changes, 'placement', null, typeof project.placement === 'string' ? project.placement : 'edge');
 			change(changes, 'access.production', null, project.access?.production ?? 'public');
 			change(changes, 'access.previews', null, project.access?.previews ?? 'platform');
 			return { row: null, action: 'create' as const, changes, problems, patch };
@@ -618,7 +653,7 @@ export class BlueprintService {
 			change(changes, path, live, value);
 		};
 		set('name', 'name', row.name, project.name);
-		// An object `placement` is an HA key (a spread), refused in `diff` until lane C builds it.
+		// An object `placement` is an HA key (the workload's spread), planned in the HA section.
 		set('placement', 'placement', row.placement, typeof project.placement === 'string' ? project.placement : undefined);
 		set('productionAccess', 'access.production', row.productionAccess, project.access?.production);
 		set('previewAccess', 'access.previews', row.previewAccess, project.access?.previews);
@@ -960,7 +995,7 @@ export class BlueprintService {
 								slug,
 								name: project.name ?? slug,
 								runtime: project.runtime,
-								...(project.placement ? { placement: project.placement } : {}),
+								...(typeof project.placement === 'string' ? { placement: project.placement } : {}),
 								...(project.access?.production ? { productionAccess: project.access.production } : {}),
 								...(project.access?.previews ? { previewAccess: project.access.previews } : {}),
 							}),
@@ -1064,6 +1099,8 @@ export class BlueprintService {
 					await this.ctx.domains.create(principal, { project: parsed.project!, hostname: parsed.child!, redirectWww: false });
 					return { status: 'succeeded' };
 				}
+				case 'ha':
+					return await applyBlueprintHa(this.ctx, principal, doc, item.targetId);
 				case 'attachment': {
 					const attachment = doc.attachments.find((entry) => keys.attachment(entry) === item.targetId);
 					if (!attachment) return { status: 'failed', error: 'The attachment is no longer in the plan.' };
@@ -1202,7 +1239,7 @@ export class BlueprintService {
 		for (const key of [...managed]) {
 			if (inDoc.has(key)) continue;
 			const parsed = parseResourceKey(key);
-			if (!parsed || parsed.kind === 'service' || !this.exists(run.principal, parsed)) managed.delete(key);
+			if (!parsed || parsed.kind === 'service' || parsed.kind === 'ha' || !this.exists(run.principal, parsed)) managed.delete(key);
 		}
 		const failed = items.some((item) => item.status === 'failed');
 		const succeeded = items.some((item) => item.status === 'succeeded');
@@ -1438,6 +1475,7 @@ export class BlueprintService {
 				return Boolean(row && this.attachmentRow(principal, row.id, { type: parsed.type!, name: parsed.name! }));
 			}
 			case 'service':
+			case 'ha':
 				return true;
 		}
 	}
@@ -1464,7 +1502,16 @@ function stepPermissions(parsed: ParsedKey, action: BlueprintPlanAction): Permis
 			return [action === 'create' ? 'broker:create' : 'broker:update'];
 		case 'attachment':
 			return [PERMISSION_LABEL[parsed.type!], 'project:update'];
+		case 'ha':
+			return haPermissions(parsed);
 	}
+}
+
+/** Org permissions an HA step needs; platform ones (cluster settings) are checked by the service. */
+function haPermissions(parsed: ParsedKey): Permission[] {
+	if (parsed.ha?.section === 'project') return ['project:update'];
+	if (parsed.ha?.section === 'database') return ['database:update'];
+	return [];
 }
 
 function deletePermissions(parsed: ParsedKey): Permission[] {
@@ -1486,6 +1533,8 @@ function deletePermissions(parsed: ParsedKey): Permission[] {
 			return ['broker:delete'];
 		case 'attachment':
 			return [PERMISSION_LABEL[parsed.type!], 'project:update'];
+		case 'ha':
+			return haPermissions(parsed);
 	}
 }
 

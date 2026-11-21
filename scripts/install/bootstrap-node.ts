@@ -76,7 +76,9 @@ if (existing) {
 	mode = 'edge';
 	token = core.nodes.rotateToken(principal, nodeId).token;
 } else {
-	const join = core.nodes.join({ token: core.nodes.createJoinToken(principal, 'edge').token, name: 'edge' });
+	// `install.sh --zone` (HA Wave 5): the first node's zone; absent keeps `default`.
+	const zone = env.YOAL_NODE_ZONE?.trim() || undefined;
+	const join = core.nodes.join({ token: core.nodes.createJoinToken(principal, 'edge').token, name: 'edge', ...(zone ? { zone } : {}) });
 	nodeId = join.nodeId;
 	token = join.token;
 	mode = join.mode;
