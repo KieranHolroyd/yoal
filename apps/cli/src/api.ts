@@ -87,7 +87,15 @@ import type { BlueprintPlanView, BlueprintRunView, BlueprintValidation } from '.
 import type { ConfigExportDocument } from './config-export.ts';
 import type { ImportView } from './config-import.ts';
 import type { OperationItemView, OperationView } from './operations.ts';
-import type { AttachmentMigrationView, AttachmentsView, HaStatusView, NodeCaStatusView } from './ha.ts';
+import type {
+	AttachmentMigrationView,
+	AttachmentsView,
+	HaStatusView,
+	NodeCaStatusView,
+	RegionPromotionPlanView,
+	RegionPromotionView,
+	RegionsView,
+} from './ha.ts';
 import type { DrillListView, DrillView } from './drills.ts';
 import type { FleetLinksView, FleetRebalanceResult, FleetStatusView, RelocationStatusView } from './fleet.ts';
 import type { NodeSummary, RolloutCreateInput, RolloutOptions, RolloutPlanView, RolloutView } from './node-rollouts.ts';
@@ -557,6 +565,24 @@ export class ApiClient {
 		return { status: raw as HaStatusView, raw };
 	}
 
+	/** Regions, their zones and nodes, and region promotions (HA-PLAN H26). */
+	async getRegions(): Promise<{ view: RegionsView; raw: unknown }> {
+		const raw = await this.request('GET', '/api/v1/ha/regions');
+		return { view: raw as RegionsView, raw };
+	}
+
+	/**
+	 * `yoal ha region promote`: without `confirm` the plan; with the region typed back, the plan
+	 * hash, `acceptDataLoss` and a reason, the promotion record.
+	 */
+	async promoteRegion(
+		region: string,
+		body: { confirm?: string; planHash?: string; acceptDataLoss?: boolean; reason?: string; breakGlass?: boolean },
+	): Promise<{ result: RegionPromotionPlanView | RegionPromotionView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/ha/regions/${encodeURIComponent(region)}/promote`, { body });
+		return { result: raw as RegionPromotionPlanView | RegionPromotionView, raw };
+	}
+
 	/** Every database attachment and how each copy reaches it (H24): endpoint, port and node. */
 	async getAttachments(): Promise<{ view: AttachmentsView; raw: unknown }> {
 		const raw = await this.request('GET', '/api/v1/ha/attachments');
@@ -702,6 +728,12 @@ export class ApiClient {
 		const raw = await this.request('GET', '/api/v1/nodes');
 		const record = asRecord(unwrap(raw)) ?? {};
 		return { nodes: (asArray(record.nodes) ?? []) as NodeSummary[], raw };
+	}
+
+	/** Change a node's placement settings (zone, region, roles, labels), `PATCH /api/v1/nodes/:id`. */
+	async updateNodeSettings(nodeId: string, body: { zone?: string; region?: string }): Promise<{ node: NodeSummary; raw: unknown }> {
+		const raw = await this.request('PATCH', `/api/v1/nodes/${encodeURIComponent(nodeId)}`, { body });
+		return { node: unwrap(raw) as NodeSummary, raw };
 	}
 
 	/** Install the control plane's signed release on one node (D99). Needs a dashboard session. */

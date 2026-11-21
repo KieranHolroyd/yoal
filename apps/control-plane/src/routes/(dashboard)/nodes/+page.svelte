@@ -74,6 +74,7 @@
 	let editCpuWeight = $state(200);
 	let editCanBuild = $state(false);
 	let editZone = $state('default');
+	let editRegion = $state('default');
 	let editRoles = $state<NodeRole[]>([]);
 	let editLabels = $state('');
 	let editLan = $state('');
@@ -95,6 +96,7 @@
 		editCpuWeight = node.sliceCpuWeight;
 		editCanBuild = node.canBuild;
 		editZone = node.zone;
+		editRegion = node.region ?? 'default';
 		editRoles = [...node.roles];
 		editLabels = Object.entries(node.labels)
 			.map(([key, value]) => `${key}=${value}`)
@@ -343,6 +345,11 @@
 									{node.name}
 									<Badge variant="secondary" class="capitalize">{node.mode}</Badge>
 									<Badge variant="outline" class="font-mono text-[11px]">{node.zone}</Badge>
+									{#if node.region && node.region !== 'default'}
+										<Badge variant="outline" class="font-mono text-[11px]" title="Region"
+											>{node.region}</Badge
+										>
+									{/if}
 									{#if node.networkMode === 'yoal'}
 										<Badge variant="outline" class="font-mono text-[11px]">
 											{node.privateAddress ?? 'overlay'}
@@ -691,6 +698,21 @@
 						The failure domain: nodes in one zone share power, uplink and provider fate.
 					</Field.Description>
 				</Field.Field>
+				{#if data.regionsEnabled}
+					<Field.Field>
+						<Field.Label for="node-region">Region</Field.Label>
+						<Input
+							id="node-region"
+							name="region"
+							bind:value={editRegion}
+							placeholder="default"
+							maxlength={32}
+						/>
+						<Field.Description>
+							The region this zone belongs to. Every node in one zone names the same region.
+						</Field.Description>
+					</Field.Field>
+				{/if}
 				<Field.Field>
 					<Field.Label for="node-lan-endpoint">LAN endpoint</Field.Label>
 					<Input

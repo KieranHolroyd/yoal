@@ -67,6 +67,141 @@ export interface HaStatusView {
 	controlPlane?: HaControlNodeView[];
 	/** The install CA; present only while ENDPOINTS_GATEWAY is on. */
 	nodeCa?: NodeCaStatusView;
+	/** Regions (HA-PLAN H26); present only while REGIONS is on. */
+	regions?: RegionsView;
+}
+
+/** Mirrors `RegionPromotionStepView` in packages/contracts/src/region.ts. */
+export interface RegionPromotionStepView {
+	position: number;
+	step: 'control-plane' | 'databases' | 'steering';
+	kind: 'control-plane' | 'database' | 'steering';
+	resourceId: string;
+	name: string;
+	targetNodeId: string | null;
+	expectedGeneration: number;
+	fencedGeneration: number | null;
+	status: 'pending' | 'running' | 'done' | 'skipped' | 'failed';
+	lagBytes: number | null;
+	lagSeconds: number | null;
+	startedAt: string | null;
+	finishedAt: string | null;
+	message: string | null;
+}
+
+/** Mirrors `RegionPromotionPlan` (plus the blockers and live leases the service adds). */
+export interface RegionPromotionPlanView {
+	toRegion: string;
+	fromRegion: string;
+	steps: RegionPromotionStepView[];
+	planHash: string;
+	maxLagSeconds: number | null;
+	blockers?: string[];
+	liveLeases?: string[];
+}
+
+/** Mirrors `RegionPromotionView`. */
+export interface RegionPromotionView {
+	id: string;
+	toRegion: string;
+	fromRegion: string;
+	stage: string;
+	planHash: string;
+	steps: RegionPromotionStepView[];
+	runnerId: string | null;
+	leaseExpiresAt: string | null;
+	attempt: number;
+	reason: string;
+	confirmedBy: string;
+	confirmedAt: string;
+	startedAt: string;
+	finishedAt: string | null;
+	error: string | null;
+}
+
+/** Mirrors `RegionsView`. */
+export interface RegionsView {
+	enabled: boolean;
+	regions: Array<{
+		name: string;
+		zones: string[];
+		nodes: Array<{ id: string; name: string; zone: string; online: boolean; roles: string[] }>;
+		primary: boolean;
+		databases: { primaries: number; standbys: number };
+	}>;
+	conflicts: Array<{ zone: string; regions: string[]; nodes: string[] }>;
+	active: RegionPromotionView | null;
+	recent: RegionPromotionView[];
+	notes: string[];
+}
+
+/** `yoal ha region` and the regions section of `yoal ha status`. */
+export function formatRegions(view: RegionsView): string {
+	if (!view.enabled) return 'Regions are off (YOAL_FEATURE_REGIONS); every node is in the default region.';
+	const lines = [
+		renderTable(
+			['REGION', 'ZONES', 'NODES', 'ONLINE', 'DB PRIMARIES', 'DB STANDBYS', 'CONTROL PLANE'],
+			view.regions.map((region) => [
+				region.name,
+				region.zones.join(', '),
+				region.nodes.map((node) => node.name).join(', '),
+				`${region.nodes.filter((node) => node.online).length}/${region.nodes.length}`,
+				String(region.databases.primaries),
+				String(region.databases.standbys),
+				region.primary ? 'primary' : '',
+			]),
+		),
+	];
+	for (const conflict of view.conflicts)
+		lines.push(`Zone ${conflict.zone} names regions ${conflict.regions.join(', ')} (nodes ${conflict.nodes.join(', ')}); a zone belongs to one region.`);
+	if (view.active) lines.push('', 'Open promotion:', formatRegionPromotion(view.active));
+	const last = view.recent[0];
+	if (last) lines.push('', `Last promotion: ${last.fromRegion} → ${last.toRegion}, ${last.stage}${last.finishedAt ? ` at ${formatTime(last.finishedAt)}` : ''}${last.error ? ` (${last.error})` : ''}`);
+	for (const note of view.notes) lines.push('', `Note: ${note}`);
+	return lines.join('\n');
+}
+
+function stepRows(steps: RegionPromotionStepView[]): string {
+	return renderTable(
+		['#', 'STEP', 'RESOURCE', 'FENCE', 'LAG', 'STATUS', 'DETAIL'],
+		steps.map((step) => [
+			String(step.position + 1),
+			step.kind,
+			step.name,
+			step.fencedGeneration === null ? `at ${step.expectedGeneration}` : `${step.expectedGeneration} → ${step.fencedGeneration}`,
+			step.lagSeconds === null ? '-' : `${step.lagSeconds} s`,
+			step.status,
+			truncate(step.message ?? '', 70),
+		]),
+	);
+}
+
+/** The plan `yoal ha region promote <region>` prints before anything changes. */
+export function formatRegionPlan(plan: RegionPromotionPlanView): string {
+	const lines = [
+		`Promote region ${plan.toRegion} (traffic and writes move from ${plan.fromRegion}):`,
+		'',
+		stepRows(plan.steps),
+		'',
+		plan.maxLagSeconds === null
+			? 'Data loss: unknown (no replica reported its lag).'
+			: `Data loss: writes in the last ${plan.maxLagSeconds} s (the largest replica lag) are lost.`,
+		`Plan hash: ${plan.planHash}`,
+	];
+	for (const blocker of plan.blockers ?? []) lines.push(`Blocked: ${blocker}`);
+	for (const live of plan.liveLeases ?? []) lines.push(`Still held by ${plan.fromRegion}: ${live}`);
+	return lines.join('\n');
+}
+
+/** One stored promotion. */
+export function formatRegionPromotion(view: RegionPromotionView): string {
+	const lines = [
+		`${view.id}: ${view.fromRegion} → ${view.toRegion}, ${view.stage} (attempt ${view.attempt}, confirmed by ${view.confirmedBy} at ${formatTime(view.confirmedAt)})`,
+		`Reason: ${view.reason}`,
+		stepRows(view.steps),
+	];
+	if (view.error) lines.push(`Error: ${view.error}`);
+	return lines.join('\n');
 }
 
 /** Mirrors `NodeCaStatus` in packages/core/src/node-ca.ts. */
@@ -270,6 +405,7 @@ export function formatHaStatus(view: HaStatusView, options: { events?: number } 
 		);
 	}
 	if (view.nodeCa?.inUse) lines.push('', formatNodeCa(view.nodeCa));
+	if (view.regions) lines.push('', 'Regions:', formatRegions(view.regions));
 	if (options.events === 0) return lines.join('\n');
 	const events = view.recent.slice(0, options.events ?? 10);
 	lines.push('', events.length ? 'Recent events:' : 'No failover events yet.');

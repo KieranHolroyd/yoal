@@ -171,6 +171,8 @@ export interface DatabaseView {
 	tables: DatabaseTableStat[];
 	statsAt: string | null;
 	extensions?: string[];
+	/** The standby region (HA-PLAN H26), or null; absent from older control planes. */
+	standbyRegion?: string | null;
 	slowQueries?: Array<{
 		queryId: string;
 		query: string;
@@ -231,6 +233,8 @@ export interface DatabaseCreateInput {
 	envPrefix?: string;
 	extensions?: string[];
 	pooler?: boolean;
+	/** A region for an async standby replica that never auto-promotes (HA-PLAN H26). */
+	standbyRegion?: string;
 }
 
 /** `PATCH /api/v1/databases/:name`: any subset; the server checks it against the engine. */
@@ -241,6 +245,8 @@ export interface DatabaseUpdateInput {
 	version?: string;
 	extensions?: string[];
 	pooler?: boolean;
+	/** A region for an async standby replica, or null to clear it (HA-PLAN H26). */
+	standbyRegion?: string | null;
 }
 
 /** `--storage 10G`, `--memory 512M`, `--memory 512` (MB): a whole number of megabytes. */
@@ -328,6 +334,7 @@ export function databaseDetails(view: DatabaseView, options: { now?: number; tab
 			`${view.pooler.host.process} (process), ${view.pooler.host.container} (container)`,
 		);
 	if (view.extensions?.length) field('Extensions', view.extensions.join(', '));
+	if (view.standbyRegion) field('Standby', `region ${view.standbyRegion} (async replica, never promoted automatically)`);
 	field('Created', formatTime(view.createdAt));
 	if (view.deletedAt) {
 		field('Deleted', formatTime(view.deletedAt));

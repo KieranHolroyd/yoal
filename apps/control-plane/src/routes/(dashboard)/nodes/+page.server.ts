@@ -59,7 +59,9 @@ export const load: PageServerLoad = ({ locals }) => {
 		recentRollouts,
 		rolloutDefaults: core.cluster.get().updates,
 		/** Starting, resuming and cancelling need `platform:updates` from a dashboard session. */
-		canUpdateFleet: !denied && core.ctx.platformIam.allows(principal, 'platform:updates')
+		canUpdateFleet: !denied && core.ctx.platformIam.allows(principal, 'platform:updates'),
+		/** The node region field shows only while YOAL_FEATURE_REGIONS is on (HA-PLAN H26). */
+		regionsEnabled: core.regions.enabled()
 	};
 };
 
@@ -145,6 +147,8 @@ export const actions: Actions = {
 				sliceCpuWeight,
 				canBuild: formBoolean(data, 'canBuild'),
 				zone: formString(data, 'zone') || 'default',
+				// Only sent when the field is shown (REGIONS on); blank is the default region.
+				...(data.has('region') ? { region: formString(data, 'region') || 'default' } : {}),
 				roles,
 				labels,
 				lanEndpoint: formString(data, 'lanEndpoint') || null,

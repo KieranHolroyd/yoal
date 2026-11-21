@@ -180,6 +180,19 @@ export const init: ServerInit = async () => {
 					membersBusy = false;
 				});
 		}, 5_000).unref?.();
+		// Region promotion (HA-PLAN H26, W13): advance an open promotion as its database steps finish,
+		// and take over one whose runner died once its lease expires. Nothing runs with REGIONS off.
+		let regionsBusy = false;
+		setInterval(() => {
+			if (regionsBusy || !mayAct() || !core.regions.enabled()) return;
+			regionsBusy = true;
+			void core.regions
+				.tick()
+				.catch((error) => reportBackgroundError('regions', error))
+				.finally(() => {
+					regionsBusy = false;
+				});
+		}, 5_000).unref?.();
 		// Pick up mass operations whose runner died with the previous process (docs/OPERATIONS.md §2.2).
 		setTimeout(() => {
 			if (!mayAct()) return;
