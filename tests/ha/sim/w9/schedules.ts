@@ -250,6 +250,74 @@ function controlOutage(seed: number): Scenario {
 	});
 }
 
+/**
+ * Revision 2: the control plane is unavailable while the synchronous standby is lost. The primary
+ * applies the on_sync_loss setting locally at the last observed ETag so writes resume, reports it,
+ * and the control plane reconciles on return. A stale ETag is never recorded as sync; the healthy
+ * old member is re-opened with a fresh barrier, otherwise the policy outcome is recorded. Alerts.
+ */
+function controlSyncLoss(seed: number): Scenario {
+	const { rng, finish } = base(seed, 'control-sync-loss');
+	const faults: Fault[] = [];
+	let id = 0;
+	const t = rng.int(5_000, 12_000);
+	const outage = rng.int(38_000, 55_000);
+	faults.push(fault(id++, t, 'sync-control-outage', { durationMs: outage }));
+	faults.push(edge(id++, t + 1_000, 'p', 'b', outage - 1_000 + rng.int(5_000, 15_000)));
+	const killed = rng.chance(0.3);
+	if (killed) faults.push(fault(id++, t + 36_000, 'kill-primary', { durationMs: 0 }));
+	return finish({
+		faults,
+		durability: 'sync',
+		sync: ['b'],
+		durationMs: 100_000,
+		expect: {
+			requireAcks: { from: t + 33_000, to: t + outage, min: 1 },
+			...(killed ? { failover: { after: t + 36_000, withinMs: 35_000 } } : {}),
+		},
+	});
+}
+
+/**
+ * The loss heals after the primary applied the on_sync_loss setting locally. On return the report is
+ * stale; if the lease names a healthy member the control plane re-opens a fresh barrier, otherwise
+ * it records the policy outcome. Never `sync` from the stale report.
+ */
+function controlSyncStale(seed: number): Scenario {
+	const { rng, finish } = base(seed, 'control-sync-stale');
+	const faults: Fault[] = [];
+	let id = 0;
+	const t = rng.int(5_000, 12_000);
+	const outage = rng.int(40_000, 55_000);
+	const loss = rng.int(31_000, 45_000);
+	faults.push(fault(id++, t, 'sync-control-outage', { durationMs: outage }));
+	faults.push(edge(id++, t + 1_000, 'p', 'b', loss));
+	return finish({
+		faults,
+		durability: 'sync',
+		sync: ['b'],
+		durationMs: 100_000,
+		expect: { requireAcks: { from: t + 33_000, to: t + outage - 1_000, min: 1 } },
+	});
+}
+
+/** A transient control-plane outage with no sync loss: traffic must not notice it. */
+function controlTransient(seed: number): Scenario {
+	const { rng, finish } = base(seed, 'control-transient');
+	const faults: Fault[] = [];
+	let id = 0;
+	const t = rng.int(5_000, 12_000);
+	const outage = rng.int(8_000, 20_000);
+	faults.push(fault(id++, t, 'sync-control-outage', { durationMs: outage }));
+	return finish({
+		faults,
+		durability: 'sync',
+		sync: ['b'],
+		durationMs: 60_000,
+		expect: { requireAcks: { from: t, to: t + outage, min: 1 } },
+	});
+}
+
 /** `mixed`: 2–4 faults from the families above, always healed by 100 s. */
 function mixed(seed: number): Scenario {
 	const { rng, finish } = base(seed, 'mixed');
@@ -318,6 +386,9 @@ const GENERATORS: Record<Family, (seed: number) => Scenario> = {
 	'sync-change': syncChange,
 	'keepalive-acquire': keepAliveAcquire,
 	'control-outage': controlOutage,
+	'control-sync-loss': controlSyncLoss,
+	'control-sync-stale': controlSyncStale,
+	'control-transient': controlTransient,
 	mixed,
 };
 
@@ -449,6 +520,104 @@ export function syncChangeCloseRace(): Scenario {
 	};
 }
 
+/** Rev 2: outage + lost sync standby; local async, stale report, record async + alert. */
+export function syncControlLoss(): Scenario {
+	const faults: Fault[] = [
+		fault(0, 2_000, 'sync-control-outage', { durationMs: 43_000 }),
+		edge(1, 3_000, 'p', 'b', 57_000),
+	];
+	return {
+		name: 'sync-control-loss',
+		family: 'control-sync-loss',
+		durationMs: 60_000,
+		faults,
+		expect: { requireAcks: { from: 35_000, to: 44_000, min: 1 } },
+		durability: 'sync',
+		sync: ['b'],
+		syncLoss: 'downgrade',
+		writes: true,
+	};
+}
+
+/** Rev 2: the lost standby heals before the control plane returns; stale report, fresh barrier. */
+export function syncControlStaleReopen(): Scenario {
+	const faults: Fault[] = [
+		fault(0, 2_000, 'sync-control-outage', { durationMs: 53_000 }),
+		edge(1, 3_000, 'p', 'b', 33_000),
+	];
+	return {
+		name: 'sync-control-stale-reopen',
+		family: 'control-sync-stale',
+		durationMs: 65_000,
+		faults,
+		expect: { requireAcks: { from: 35_000, to: 54_000, min: 1 } },
+		durability: 'sync',
+		sync: ['b'],
+		syncLoss: 'downgrade',
+		writes: true,
+	};
+}
+
+/** Rev 2: the report beats the next renewal, so the ETag is the same and the change is recorded. */
+export function syncControlSameEtage(): Scenario {
+	const faults: Fault[] = [
+		fault(0, 2_000, 'sync-control-outage', { durationMs: 32_500 }),
+		edge(1, 3_000, 'p', 'b', 57_000),
+	];
+	return {
+		name: 'sync-control-same-etag',
+		family: 'control-sync-loss',
+		durationMs: 60_000,
+		faults,
+		expect: { requireAcks: { from: 35_000, to: 45_000, min: 1 } },
+		durability: 'sync',
+		sync: ['b'],
+		syncLoss: 'downgrade',
+		writes: true,
+	};
+}
+
+/** Rev 2: a transient control-plane outage with nothing else failing. */
+export function syncControlTransient(): Scenario {
+	const faults: Fault[] = [fault(0, 2_000, 'sync-control-outage', { durationMs: 15_000 })];
+	return {
+		name: 'sync-control-transient',
+		family: 'control-transient',
+		durationMs: 40_000,
+		faults,
+		expect: { requireAcks: { from: 3_000, to: 16_000, min: 1 } },
+		durability: 'sync',
+		sync: ['b'],
+		syncLoss: 'downgrade',
+		writes: true,
+	};
+}
+
+/**
+ * Rev 2's forbidden act: a node reports a new sync member from inside the outage, and the report is
+ * stale on return. The normal reconciler must refuse it; `record-sync-on-stale` records it and a
+ * lagging member promotes with missing acknowledged commits.
+ */
+export function syncControlStaleSync(): Scenario {
+	const faults: Fault[] = [
+		fault(0, 2_000, 'sync-control-outage', { durationMs: 53_000 }),
+		edge(1, 3_000, 'p', 'b', 57_000),
+		fault(2, 0, 'lag', { target: 'a', durationMs: 80_000 }),
+		fault(3, 56_000, 'kill-primary', { durationMs: 0 }),
+	];
+	return {
+		name: 'sync-control-stale-sync',
+		family: 'control-sync-loss',
+		durationMs: 90_000,
+		faults,
+		expect: {},
+		durability: 'sync',
+		sync: ['b'],
+		syncLoss: 'downgrade',
+		writes: true,
+	};
+}
+
 /** The control-plane outage with a database failover: I11's positive case. */
 export function minimalControlOutage(): Scenario {
 	const faults: Fault[] = [
@@ -502,6 +671,11 @@ export const FIXED_SCENARIOS: Record<string, () => Scenario> = {
 	'sync-change-fallback': syncChangeFallback,
 	'sync-change-downgrade': syncChangeDowngrade,
 	'sync-change-close-race': syncChangeCloseRace,
+	'sync-control-loss': syncControlLoss,
+	'sync-control-stale-reopen': syncControlStaleReopen,
+	'sync-control-same-etag': syncControlSameEtage,
+	'sync-control-transient': syncControlTransient,
+	'sync-control-stale-sync': syncControlStaleSync,
 	'control-outage-minimal': minimalControlOutage,
 	'wall-clock-fence': wallClockFenceScenario,
 };
