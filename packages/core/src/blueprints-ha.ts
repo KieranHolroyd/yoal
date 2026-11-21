@@ -57,17 +57,28 @@ import { assertRegionWrites } from './region-gate.ts';
  *   assertions: a database has no backup target of its own (resolution is org → platform), so the
  *   plan fails when its backups would not go to the named target or that target is not immutable.
  *
- * **Refusals.** Every service refusal is evaluated at plan time with the service's own checks
- * (`durabilityRefusal`, `armRefusals`, the release-phase and region gates) and fails the plan with
- * its path, one problem per refusal. A refusal from a stub that is not built yet (`spread: region`
- * and `standbyRegion` while lane A's region placement is missing) is shown as the stub's own
- * `not_built` message. Some keys cannot apply in the same run as the change they depend on, and the
- * plan says so instead of half-applying: `durability: sync` needs replicas that already stream, and
- * `failover: auto` needs a passed failover drill on the database and a settled durability.
+ * **Checked at plan time.** Each step runs, without writing, the checks its services run before
+ * they write, and every refusal fails the plan with its path, one problem per refusal:
+ * - projects: the release-phase and region gates and the spec schema (`setSpec`'s other checks, the
+ *   memory quota and port conflicts, run at apply, as they do for the `service` step);
+ * - steering: the platform-admin rule and the stacked-driver rules of `ClusterConfigService.update`;
+ * - databases: the region gates (a not-built stub shows its own `not_built` message), every check of
+ *   `setPitrPolicy` (a replica being removed counts), `DatabaseReplicaService.add`'s node, disk,
+ *   max-replica and memory-quota checks for all new replicas together, `setDurability`'s
+ *   preconditions (`durabilityRefusal`), `arm`'s policy (`armRefusals`), and whether the database is
+ *   moving or failing over;
+ * - AI agents (an OAuth/MCP principal) may not change `durability` or `failover`, as they may not prune.
  *
- * **No half-applied state.** A step re-reads live state and re-runs every check before its first
- * write; only a change between that check and a write (a node going offline mid-step) can stop a
- * step partway, as for every other blueprint step.
+ * Some keys cannot apply in the same run as the change they depend on, and the plan refuses them:
+ * `durability: sync` needs replicas that already stream; `failover: auto` needs a passed drill on the
+ * database, a settled durability and no replicas being added in the same plan.
+ *
+ * **Checked only at apply.** Apply re-runs every check above before the run (`checkBeforeApply`) and
+ * again in each step before its first write. What it cannot see in advance is a change between that
+ * check and a write: `setDurability` writes the arbiter lease and `arm` re-evaluates the policy when
+ * they run, and the plan warns about both. A database step makes several writes in order (standby
+ * region, PITR, replicas, durability, failover policy); if one of those is refused at that moment, the
+ * writes before it stay, and nothing is rolled back, as for every other blueprint step.
  *
  * **Idempotence.** Each step compares the file with live state and changes only what differs, so a
  * second apply is a no-op. A key removed from the file is no longer managed and keeps its value; an
@@ -509,7 +520,8 @@ function databaseStep(
 	};
 	const nodes = fleet(ctx);
 	const byId = new Map(nodes.map((node) => [node.id, node]));
-	const liveReplicas = row ? ctx.databaseReplicas.rowsFor(row.id).filter((replica) => !replica.removingAt) : [];
+	const allReplicas = row ? ctx.databaseReplicas.rowsFor(row.id) : [];
+	const liveReplicas = allReplicas.filter((replica) => !replica.removingAt);
 
 	// ---- standbyRegion (DatabaseService.update; the REGIONS gate, then lane A's rule once built)
 	if (database.standbyRegion !== undefined && database.standbyRegion !== (row?.standbyRegion ?? null)) {
@@ -562,24 +574,27 @@ function databaseStep(
 	if (database.pitr !== undefined && database.pitr !== pitrLive) {
 		changes.push({ path: 'pitr', from: String(pitrLive), to: String(database.pitr) });
 		writes.pitr = database.pitr;
+		// `setPitrPolicy`'s checks, in its order. It reads the repository in both directions, so
+		// turning PITR off without one is refused as well.
 		if (!featureEnabled(ctx.config, 'PITR')) refuse('pitr', 'PITR is disabled on this control plane (YOAL_FEATURE_PITR).');
+		else if (!ctx.config.pitrRepository)
+			refuse(
+				'pitr',
+				'PITR is enabled but no pgBackRest repository is configured; set YOAL_PITR_REPO_BUCKET, YOAL_PITR_ACCESS_KEY_ID and YOAL_PITR_SECRET_ACCESS_KEY.',
+			);
 		else if (database.pitr) {
 			const info = databaseEngineRegistry[database.engine];
+			refuse('pitr', pitrStoreProblem(ctx, ctx.config.pitrRepository, row?.nodeId ?? null));
 			refuse(
 				'pitr',
 				pitrUnsupportedReason(database.engine, row?.version ?? database.version ?? info.defaultVersion, row?.variant ?? database.variant ?? 'standard'),
 			);
-			if (!ctx.config.pitrRepository)
-				refuse(
-					'pitr',
-					'PITR is enabled but no pgBackRest repository is configured; set YOAL_PITR_REPO_BUCKET, YOAL_PITR_ACCESS_KEY_ID and YOAL_PITR_SECRET_ACCESS_KEY.',
-				);
-			else refuse('pitr', pitrStoreProblem(ctx, ctx.config.pitrRepository, row?.nodeId ?? null));
+			// A replica being removed still counts, and refuses, exactly as in `setPitrPolicy`.
 			if (row && liveReplicas.length > 0) {
 				const capable =
 					featureEnabled(ctx.config, 'PITR_REWIND') &&
 					ctx.databases.pitrRewindForNode(row.nodeId) &&
-					liveReplicas.every((replica) => ctx.databases.pitrRewindForNode(replica.nodeId));
+					allReplicas.every((replica) => !replica.removingAt && ctx.databases.pitrRewindForNode(replica.nodeId));
 				if (!capable)
 					refuse(
 						'pitr',
@@ -606,8 +621,15 @@ function databaseStep(
 			if (wantedReplicas > maxReplicas) refuse('replicas', `This install allows at most ${maxReplicas} replica(s) per database.`);
 			if (pitrAfter && !featureEnabled(ctx.config, 'PITR_REWIND'))
 				refuse('replicas', `"${name}" has point-in-time recovery on; replicas of a PITR database need YOAL_FEATURE_PITR_REWIND.`);
-			const picked = pickReplicaNodes(ctx, { row, nodes, liveReplicas: liveReplicas.map((replica) => replica.nodeId), count, spread, memoryMb: row?.memoryMb ?? database.memoryMb ?? databaseEngineRegistry[database.engine].defaultMemoryMb, pitr: pitrAfter });
+			const memoryMb = row?.memoryMb ?? database.memoryMb ?? databaseEngineRegistry[database.engine].defaultMemoryMb;
+			const picked = pickReplicaNodes(ctx, { row, nodes, liveReplicas: liveReplicas.map((replica) => replica.nodeId), removingOn: allReplicas.filter((replica) => replica.removingAt).map((replica) => replica.nodeId), count, spread, memoryMb, pitr: pitrAfter });
 			refuse('replicas', picked.problem);
+			// `add` admits each copy's memory one at a time; all of them together must fit. A database
+			// this plan creates reserves its own memory first.
+			refuse(
+				'replicas',
+				refusalOf(() => ctx.quota.assertCanAdmitMemory(principal.orgId, null, memoryMb * count + (creating ? memoryMb : 0))),
+			);
 			if (row && !picked.problem) {
 				writes.addReplicaNodes = picked.nodes.map((node) => node.id);
 				changes.push({ path: 'replicas.nodes', from: null, to: picked.nodes.map((node) => `${node.name} (${node.zone})`).join(', ') });
@@ -620,7 +642,9 @@ function databaseStep(
 	if (database.durability !== undefined && durabilityChanges) {
 		changes.push({ path: 'durability', from: row?.durability ?? 'async', to: database.durability });
 		writes.durability = database.durability;
-		if (!featureEnabled(ctx.config, 'SYNC_REPLICA'))
+		if (principal.credential === 'oauth')
+			refuse('durability', 'AI agents cannot change durability through a blueprint; it changes how the database commits. Apply it from the dashboard or CLI.');
+		else if (!featureEnabled(ctx.config, 'SYNC_REPLICA'))
 			refuse('durability', 'Synchronous replicas are off: enable SYNC_REPLICA first (HA-PLAN H23).');
 		else if (database.durability === 'sync' && (creating || addingReplicas))
 			refuse(
@@ -628,24 +652,40 @@ function databaseStep(
 				`durability: sync picks a replica that is already streaming, and this plan ${creating ? 'creates the database' : 'adds its replicas'}. Apply without durability first, wait for the replicas to stream (\`yoal db replica list ${name}\`), then set durability: sync and apply again.`,
 			);
 		else if (row) refuse('durability', ctx.databaseMembers.durabilityRefusal(principal, name, { durability: database.durability }));
+		warnings.push(
+			`databases.${name}.durability: the change writes the arbiter lease when it runs, so a lease that moves in the meantime (a concurrent sync-set change or switchover) can still refuse it then.`,
+		);
 	}
 
 	// ---- failover (DatabaseFailoverPolicyService.arm / disarm)
 	const liveMode = row?.failoverMode ?? 'manual';
+	const agentRefusal = 'AI agents cannot change failover through a blueprint; it arms or disarms automatic promotion. Apply it from the dashboard or CLI.';
 	if (database.failover === 'manual' && liveMode === 'auto') {
 		changes.push({ path: 'failover', from: 'auto', to: 'manual' });
 		writes.failover = { mode: 'manual' };
+		if (principal.credential === 'oauth') refuse('failover', agentRefusal);
 	} else if (database.failover === 'auto') {
 		const acceptDataLoss = database.acceptDataLoss ?? false;
 		const liveAccept = row?.acceptDataLoss ?? false;
 		const rearm = liveMode === 'auto' && database.acceptDataLoss === true && !liveAccept;
+		// `arm` never clears the acknowledgement; `disarm` does, so that is the way back.
 		if (liveMode === 'auto' && database.acceptDataLoss === false && liveAccept)
-			refuse('acceptDataLoss', 'Arming never clears acceptDataLoss. Set failover: manual and apply to disarm, then set failover: auto again.');
+			refuse(
+				'acceptDataLoss',
+				`"${name}" is armed with acceptDataLoss: true, and arming never clears it. Set failover: manual and apply, then set failover: auto with acceptDataLoss: false and apply again.`,
+			);
 		if (liveMode !== 'auto' || rearm) {
 			changes.push(rearm ? { path: 'acceptDataLoss', from: 'false', to: 'true' } : { path: 'failover', from: liveMode, to: 'auto' });
 			writes.failover = { mode: 'auto', acceptDataLoss };
 			const refusals: Pick<FailoverArmRefusal, 'code' | 'message'>[] = [];
-			if (!row) {
+			if (principal.credential === 'oauth') refuse('failover', agentRefusal);
+			// A database this plan creates gets W11's own codes below (`no-drill` names the staging).
+			else if (addingReplicas && row)
+				refuse(
+					'failover',
+					`failover: auto is refused: this plan also adds replicas, which must stream before automatic failover can count on them. Apply without failover: auto first, wait for the replicas to stream (\`yoal db replica list ${name}\`), then set failover: auto and apply again.`,
+				);
+			else if (!row) {
 				if (!featureEnabled(ctx.config, 'DB_AUTO_PROMOTE'))
 					refusals.push({ code: 'auto-promote-off', message: NEW_DATABASE_ARM_REFUSALS['auto-promote-off'] });
 				refusals.push({ code: 'no-drill', message: NEW_DATABASE_ARM_REFUSALS['no-drill'](name) });
@@ -662,6 +702,10 @@ function databaseStep(
 					});
 			}
 			for (const refusal of refusals) refuse('failover', `failover: auto is refused [${refusal.code}]: ${refusal.message}`);
+			if (row && !problems.some((problem) => problem.path[0] === path('failover')[0]))
+				warnings.push(
+					`databases.${name}.failover: arming re-checks the policy when it runs, so a change in the meantime (a member going offline, a drill expiring) can still refuse it then.`,
+				);
 		}
 	}
 
@@ -678,6 +722,15 @@ function databaseStep(
 				'backups.immutable',
 				`Backups of "${name}" go to "${resolved.target.name}", which is not immutable. Turn on object lock (S3) or an immutability policy (Azure, GCS) for that target in Settings → Backups.`,
 			);
+	}
+
+	// Every service this step calls refuses a database that is moving or failing over, so say that
+	// once, instead of the knock-on refusals.
+	if (row && changes.length) {
+		const blocked =
+			refusalOf(() => ctx.moves.assertNotMoving(row)) ??
+			(ctx.databaseReplicas.isFailingOver(row.id) ? `"${name}" is failing over; wait for the promotion to finish.` : null);
+		if (blocked) problems.splice(0, problems.length, { path: [`databases.${name}`], message: blocked });
 	}
 
 	const action: BlueprintPlanAction = changes.length ? (creating ? 'create' : 'update') : 'noop';
@@ -699,6 +752,8 @@ function pickReplicaNodes(
 		row: DatabaseRow | undefined;
 		nodes: NodeView[];
 		liveReplicas: string[];
+		/** Nodes whose previous replica is still being removed: `add` refuses them. */
+		removingOn: string[];
 		count: number;
 		spread: ReplicaSpread | undefined;
 		memoryMb: number;
@@ -738,19 +793,28 @@ function pickReplicaNodes(
 		return { nodes: [], problem: `The agent on "${primary?.name ?? input.row.nodeId}" is too old to run database replicas (it does not advertise "${DATABASE_REPLICAS_CAPABILITY}"). Update it first.` };
 	if (!primary.privateAddress)
 		return { nodes: [], problem: `The primary's node "${primary.name}" has no managed overlay address, so a replica on another node cannot reach it.` };
-	const taken = new Set([input.row.nodeId, ...input.liveReplicas]);
-	const used = new Set([...taken].map((id) => domain(byId.get(id) ?? { id, zone: id })));
+	const row = input.row;
+	const members = [row.nodeId, ...input.liveReplicas];
+	const taken = new Set([...members, ...input.removingOn]);
+	const used = new Set(members.map((id) => domain(byId.get(id) ?? { id, zone: id })));
 	const chosen: NodeView[] = [];
+	const unusable: string[] = [];
 	for (const node of eligible) {
 		if (chosen.length === input.count) break;
 		if (taken.has(node.id) || used.has(domain(node))) continue;
+		// The disk `add` would pick on that node: the primary's kind of disk, with room for a copy.
+		const disk = refusalOf(() => ctx.disks.pick(ctx.disks.plan('databases', ctx.disks.targetOf(row.diskId), node.id), node.id, row.storageMb));
+		if (disk) {
+			unusable.push(disk);
+			continue;
+		}
 		chosen.push(node);
 		used.add(domain(node));
 	}
 	if (chosen.length < input.count)
 		return {
 			nodes: [],
-			problem: `${need} need${input.count === 1 ? 's' : ''} ${input.count} ${spread === 'zone' ? 'zones' : 'nodes'} not yet used by "${input.row.name}", each with ${rule}; ${chosen.length} ${chosen.length === 1 ? 'is' : 'are'} available.`,
+			problem: `${need} need${input.count === 1 ? 's' : ''} ${input.count} ${spread === 'zone' ? 'zones' : 'nodes'} not yet used by "${row.name}", each with ${rule}; ${chosen.length} ${chosen.length === 1 ? 'is' : 'are'} available.${unusable.length ? ` Not usable: ${unusable.join(' ')}` : ''}`,
 		};
 	return { nodes: chosen, problem: null };
 }

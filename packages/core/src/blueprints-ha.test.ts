@@ -255,7 +255,9 @@ describe('the §8 blueprint', () => {
 		setFlags(true);
 		serveMain();
 		const view = await plan(section8NoStandby);
-		expect(view.warnings).toEqual([]);
+		expect(view.warnings).toEqual([
+			'databases.main.failover: arming re-checks the policy when it runs, so a change in the meantime (a member going offline, a drill expiring) can still refuse it then.',
+		]);
 		expect(haSection(view)).toEqual([
 			{ key: 'cluster.requires', kind: 'ha', action: 'noop', changes: [], reason: 'online: 3 zones, 2 ingress nodes, 3 data nodes' },
 			{
@@ -426,5 +428,149 @@ describe('previews match the services', () => {
 			'databases.solo.failover: failover: auto is refused [no-drill]: No failover drill has run for this database; run one before arming auto.',
 		]);
 		await expect(core.failoverPolicies.arm(owner, 'solo', { confirm: true, acceptDataLoss: true })).rejects.toThrow(/No failover drill has run/);
+	});
+});
+
+describe('review fixes', () => {
+	const agentPrincipal = buildPrincipal({ kind: 'mcp', userId: 'user_1', orgId: 'org_1', role: 'owner', clientId: 'client_1' });
+	const solo = () => core.databases.requireRow(owner, 'solo');
+	const main = () => core.databases.requireRow(owner, 'main');
+	const drill = (databaseId: string, id: string) =>
+		opened.sqlite.run(
+			`INSERT INTO database_failover_drills
+			 (id, database_id, drill_database_id, status, durability, started_at, finished_at, time_to_writable_ms,
+			  lost_commits, generation, arbiter_tested, arbiter_tested_at, created_by, created_at)
+			 VALUES (?, ?, 'db_disposable', 'passed', 'async', ?, ?, 21000, 0, 0, 1, ?, 'user_1', 1)`,
+			[id, databaseId, clock - 1_000, clock, clock],
+		);
+	const replica = (databaseId: string, id: string, node: string, removing = false) =>
+		opened.sqlite.run(
+			`INSERT INTO database_replicas (id, database_id, node_id, status, slot, primary_generation, replay_lsn, reported_at, removing_at, created_at, updated_at)
+			 VALUES (?, ?, ?, 'streaming', ?, 0, '0/100', ?, ?, 1, 1)`,
+			[id, databaseId, nodeIds[node]!, `slot_${id}`, clock, removing ? clock : null],
+		);
+	const doc = (body: string) => `apiVersion: yoal/v1\nname: ha-fixes\ndatabases:\n${body}\n`;
+
+	test('setup: a fifth zone and a passed drill on main and solo', () => {
+		setFlags(true);
+		enrol('data-e', 'uksouth-5', ['compute', 'data'], '10.47.0.5');
+		core.cluster.update(owner, { database: { maxReplicas: 5 } });
+		drill(main().id, 'drl_main_2');
+		drill(solo().id, 'drl_solo');
+	});
+
+	test('failover: auto is refused in a plan that adds replicas; alone it plans, with an apply-time warning', async () => {
+		setFlags(true);
+		expect(await problems(doc('  main: { engine: postgres, replicas: 4, spread: zone, failover: auto }'))).toEqual([
+			'databases.main.failover: failover: auto is refused: this plan also adds replicas, which must stream before automatic failover can count on them. Apply without failover: auto first, wait for the replicas to stream (`yoal db replica list main`), then set failover: auto and apply again.',
+		]);
+		const alone = await plan(doc('  main: { engine: postgres, replicas: 3, spread: zone, failover: auto }'));
+		expect(alone.warnings).toEqual([
+			'databases.main.failover: arming re-checks the policy when it runs, so a change in the meantime (a member going offline, a drill expiring) can still refuse it then.',
+		]);
+	});
+
+	test('acceptDataLoss: false while armed with it is refused with a fix that works, and no loop follows', async () => {
+		setFlags(true);
+		await applyPlan(await plan(doc('  solo: { engine: postgres, failover: auto, acceptDataLoss: true }')));
+		expect(solo()).toMatchObject({ failoverMode: 'auto', acceptDataLoss: true });
+		expect(await problems(doc('  solo: { engine: postgres, failover: auto, acceptDataLoss: false }'))).toEqual([
+			'databases.solo.acceptDataLoss: "solo" is armed with acceptDataLoss: true, and arming never clears it. Set failover: manual and apply, then set failover: auto with acceptDataLoss: false and apply again.',
+		]);
+		await applyPlan(await plan(doc('  solo: { engine: postgres, failover: manual }')));
+		expect(solo()).toMatchObject({ failoverMode: 'manual', acceptDataLoss: false });
+		await applyPlan(await plan(doc('  solo: { engine: postgres, failover: auto, acceptDataLoss: true }')));
+		const again = await plan(doc('  solo: { engine: postgres, failover: auto, acceptDataLoss: true }'));
+		expect(haSection(again).map((step) => step.action)).toEqual(['noop']);
+		await applyPlan(await plan(doc('  solo: { engine: postgres, failover: manual }')));
+	});
+
+	test('the memory quota is checked for every replica the step adds, together', async () => {
+		setFlags(true);
+		features.QUOTAS = true;
+		const used = core.ctx.quota.snapshotCounts('org_1').workloadMemoryMb;
+		opened.sqlite.run('INSERT OR REPLACE INTO org_quotas (org_id, workload_memory_mb, updated_at) VALUES (?, ?, ?)', ['org_1', used + solo().memoryMb + 10, clock]);
+		try {
+			expect(await problems(doc('  solo: { engine: postgres, replicas: 3, spread: zone }'))).toEqual([
+				expect.stringMatching(/^databases\.solo\.replicas: Workload memory/),
+			]);
+			expect(await problems(doc('  solo: { engine: postgres, replicas: 2, spread: zone }'))).toEqual([]);
+		} finally {
+			opened.sqlite.run('DELETE FROM org_quotas WHERE org_id = ?', ['org_1']);
+			features.QUOTAS = false;
+		}
+	});
+
+	test('a database that is moving or failing over refuses its HA changes at plan time', async () => {
+		setFlags(true);
+		opened.sqlite.run(
+			`INSERT INTO database_moves (id, org_id, database_id, source_node_id, target_node_id, source_host_port, phase, created_by, created_at, updated_at)
+			 VALUES ('mv_solo', 'org_1', ?, ?, ?, 15432, 'dumping', 'user_1', ?, ?)`,
+			[solo().id, nodeIds['edge-a']!, nodeIds['data-c']!, clock, clock],
+		);
+		try {
+			expect(await problems(doc('  solo: { engine: postgres, replicas: 2 }'))).toEqual([
+				'databases.solo: "solo" is moving to another node. Wait for the move to finish.',
+			]);
+		} finally {
+			opened.sqlite.run("DELETE FROM database_moves WHERE id = 'mv_solo'");
+		}
+		opened.sqlite.run(
+			"INSERT INTO database_failovers (id, database_id, from_node_id, to_node_id, generation, status, started_at) VALUES ('fo_solo', ?, ?, ?, 1, 'pending', ?)",
+			[solo().id, nodeIds['edge-a']!, nodeIds['edge-b']!, clock],
+		);
+		try {
+			expect(await problems(doc('  solo: { engine: postgres, replicas: 2 }'))).toEqual([
+				'databases.solo: "solo" is failing over; wait for the promotion to finish.',
+			]);
+		} finally {
+			opened.sqlite.run("DELETE FROM database_failovers WHERE id = 'fo_solo'");
+		}
+	});
+
+	test('the replica disk is picked at plan time', async () => {
+		setFlags(true);
+		opened.sqlite.run(
+			`INSERT INTO node_volumes (id, node_id, name, kind, source_key, mount_path, fs_type, tier, tier_set, status, size_bytes, free_bytes, created_by, created_at, updated_at)
+			 VALUES ('dsk_fast_a', ?, 'fast-a', 'filesystem', 'src-a', '/mnt/fast-a', 'ext4', 'fast', 1, 'ready', ?, ?, 'user_1', 1, 1)`,
+			[nodeIds['edge-a']!, 100 * 1024 ** 3, 90 * 1024 ** 3],
+		);
+		opened.sqlite.run("UPDATE databases SET volume_id = 'dsk_fast_a' WHERE id = ?", [solo().id]);
+		try {
+			expect(await problems(doc('  solo: { engine: postgres, replicas: 2, spread: zone }'))).toEqual([
+				expect.stringMatching(/^databases\.solo\.replicas: 1 more replica with spread: zone needs 1 zones .* Not usable: data-c cannot hold this on/),
+			]);
+		} finally {
+			opened.sqlite.run('UPDATE databases SET volume_id = NULL WHERE id = ?', [solo().id]);
+			opened.sqlite.run("DELETE FROM node_volumes WHERE id = 'dsk_fast_a'");
+		}
+	});
+
+	test('PITR counts a replica that is being removed, as setPitrPolicy does', async () => {
+		setFlags(true);
+		replica(solo().id, 'dbr_solo_removing', 'data-c', true);
+		try {
+			expect(await problems(doc('  solo: { engine: postgres, pitr: true }'))).toEqual([
+				'databases.solo.pitr: "solo" has read replicas; turning point-in-time recovery on needs YOAL_FEATURE_PITR_REWIND and the "pitr-rewind" agent capability on every member, or remove the replicas first.',
+			]);
+		} finally {
+			opened.sqlite.run("DELETE FROM database_replicas WHERE id = 'dbr_solo_removing'");
+		}
+	});
+
+	test('AI agents (MCP) cannot change failover or durability through a blueprint', async () => {
+		setFlags(true);
+		expect(await problems(doc('  solo: { engine: postgres, durability: sync }'), agentPrincipal)).toEqual(
+			expect.arrayContaining([
+				'databases.solo.durability: AI agents cannot change durability through a blueprint; it changes how the database commits. Apply it from the dashboard or CLI.',
+			]),
+		);
+		expect(await problems(doc('  solo: { engine: postgres, failover: auto, acceptDataLoss: true }'), agentPrincipal)).toEqual(
+			expect.arrayContaining([
+				'databases.solo.failover: AI agents cannot change failover through a blueprint; it arms or disarms automatic promotion. Apply it from the dashboard or CLI.',
+			]),
+		);
+		// Reads and other keys stay open to agents.
+		expect(await problems(doc('  solo: { engine: postgres, failover: manual }'), agentPrincipal)).toEqual([]);
 	});
 });
