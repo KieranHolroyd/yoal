@@ -78,8 +78,6 @@
 			description: `${who} stops heartbeating, stops taking new desired state and fails its ingress health probe. The failover controller, alerts and DNS steering react exactly as for a real loss: copies may move, a database may fail over and you will get a “Node offline” alert after 2 minutes. Its workloads keep running unless their run lease fences them. It comes back by itself when the time is up; Cancel brings it back within 5 s.`,
 			confirmLabel: 'Start drill',
 			tone: 'danger',
-			// A destructive drill needs the target typed back (HA-PLAN §10); a random pick types "random".
-			typeToConfirm: node ? node.nodeName : 'random',
 			action: '?/startDrill',
 			// The server checks it too: the node's name, or "random" for a random pick.
 			typeToConfirm: node ? node.nodeName : 'random',

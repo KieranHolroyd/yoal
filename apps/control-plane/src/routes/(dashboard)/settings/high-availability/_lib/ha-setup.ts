@@ -24,25 +24,46 @@ import {
 
 // ------------------------------------------------------------------ profiles
 
+/**
+ * The display name of each profile, used for every label on the page. The id (`single`, `ha`,
+ * `ha-dr`) is what commands and the API take, and stays in code font where it appears.
+ */
+export const profileLabel: Readonly<Record<HaProfile, string>> = {
+	single: 'Single',
+	ha: 'HA',
+	'ha-dr': 'HA with disaster recovery'
+};
+
 export const profileChoices: ReadonlyArray<{ id: HaProfile; label: string; summary: string }> = [
 	{
 		id: 'single',
-		label: 'Single',
+		label: profileLabel.single,
 		summary:
-			'One edge and manual recovery. Choosing it turns off what an earlier HA setup turned on.'
+			'One edge and manual recovery. After HA, it puts back the cluster settings HA changed; you turn the flags off in yoal.env.'
 	},
 	{
 		id: 'ha',
-		label: 'HA',
+		label: profileLabel.ha,
 		summary:
 			'Several ingress nodes, steering, a control-plane standby and database replicas across zones, in one region.'
 	},
 	{
 		id: 'ha-dr',
-		label: 'HA with disaster recovery',
+		label: profileLabel['ha-dr'],
 		summary:
 			'HA, plus a standby region with async replicas that a person promotes when the primary region is lost.'
 	}
+];
+
+/**
+ * What returning to `single` does and does not undo, as `ha init --profile single` behaves
+ * (`haInitPlan`'s single plan and `HaInitService`). One sentence each, for the page to list.
+ */
+export const undoFacts: readonly string[] = [
+	'It sets the profile to single and puts back each cluster setting an earlier HA apply recorded changing, at its earlier value. A setting nothing recorded is left as it is.',
+	'It never edits yoal.env. Once nothing depends on an HA feature, it shows a YOAL_FEATURE_…=0 line for each flag the earlier apply recorded. Set them on every control-plane host (keep any flag you had on before HA) and restart; apply stays off until the running flags match.',
+	'It is refused while anything still depends on an HA feature, such as a synchronous or armed database, an enrolled standby or a node in a named region. Each refusal names its own way back.',
+	'Steering goes back to the driver it had before, usually direct, in the same change. After a driver that writes at a provider (a floating IP, DNS records, a webhook target), set steering to direct and withdraw what it wrote by hand first: the way back is refused until then.'
 ];
 
 // ------------------------------------------------------------------ questions
@@ -121,6 +142,12 @@ export interface CheckRow {
 	required: boolean;
 	/** This entry stops apply: a required check that fails or did not run. */
 	blocks: boolean;
+	/**
+	 * A required entry that fails but does not stop apply, because applying clears it: on the way
+	 * back to `single`, a steering driver that wrote nothing at a provider goes back to `direct` in
+	 * the same change (`HaInitService.plan` excuses it, and does not list it among its blockers).
+	 */
+	clearedByApply: boolean;
 }
 
 export interface CheckGroup {
@@ -131,8 +158,8 @@ export interface CheckGroup {
 
 const statusOrder: Readonly<Record<HaCheckStatus, number>> = { fail: 0, skip: 1, warn: 2, pass: 3 };
 
-/** One entry is blocking when the profile requires its check and it is neither `pass` nor `warn`. */
-function blocks(profile: HaProfile, check: HaCheck): boolean {
+/** One entry fails the profile when the profile requires its check and it is neither `pass` nor `warn`. */
+function failsRequired(profile: HaProfile, check: HaCheck): boolean {
 	return (
 		HA_PROFILE_REQUIRED_CHECKS[profile].includes(check.id) &&
 		check.status !== 'pass' &&
@@ -141,10 +168,32 @@ function blocks(profile: HaProfile, check: HaCheck): boolean {
 }
 
 /**
- * Every check, grouped by area in contract order; inside an area the worst first. A required
- * check that did not appear at all is added as `skip`, so a missing check never reads as a pass.
+ * The one entry the server excuses: on `single`, the platform-level `ha-dependents` entry for a
+ * steering driver, when the server's blockers do not name it (it names each blocking entry as
+ * `"<title>: <fix>"`). Without the server's blockers nothing is excused.
  */
-export function groupChecks(profile: HaProfile, checks: readonly HaCheck[]): CheckGroup[] {
+function excused(profile: HaProfile, check: HaCheck, blockers: readonly string[] | undefined): boolean {
+	return (
+		blockers !== undefined &&
+		profile === 'single' &&
+		check.id === 'ha-dependents' &&
+		check.subject?.kind === 'platform' &&
+		!blockers.some((blocker) => blocker.startsWith(`${check.title}:`))
+	);
+}
+
+/**
+ * Every check, grouped by area in contract order; inside an area the worst first. Platform-level
+ * entries (no subject: the platform store, registry, identity, mail, telemetry spool, flags) and
+ * per-subject entries (a node, zone, database, ingress) are all kept, several of one id included.
+ * A required check that did not appear at all is added as `skip`, so a missing check never reads
+ * as a pass. Pass the plan's `blockers` so an entry the server excuses is not shown as blocking.
+ */
+export function groupChecks(
+	profile: HaProfile,
+	checks: readonly HaCheck[],
+	blockers?: readonly string[]
+): CheckGroup[] {
 	const all = [...checks];
 	for (const id of HA_PROFILE_REQUIRED_CHECKS[profile])
 		if (!all.some((check) => check.id === id))
@@ -163,14 +212,23 @@ export function groupChecks(profile: HaProfile, checks: readonly HaCheck[]): Che
 	)) {
 		const area = HA_CHECK_AREAS[check.id];
 		const rows = groups.get(area) ?? [];
+		const fails = failsRequired(profile, check);
+		const cleared = fails && excused(profile, check, blockers);
 		rows.push({
 			check,
 			required: HA_PROFILE_REQUIRED_CHECKS[profile].includes(check.id),
-			blocks: blocks(profile, check)
+			blocks: fails && !cleared,
+			clearedByApply: cleared
 		});
 		groups.set(area, rows);
 	}
 	return [...groups.entries()].map(([area, rows]) => ({ area, label: areaLabel[area], rows }));
+}
+
+/** A key unique within a check list: one id can repeat for several subjects, or with none. */
+export function checkRowKey(row: CheckRow, index: number): string {
+	const subject = row.check.subject;
+	return `${row.check.id}:${subject ? `${subject.kind}:${subject.id}` : 'platform'}:${index}`;
 }
 
 // ------------------------------------------------------------------ apply
@@ -204,17 +262,20 @@ export function applyGate(
 		reasons.push(
 			`${view.flagsToChange.length} feature flag${view.flagsToChange.length === 1 ? '' : 's'} must be set in yoal.env on every control-plane host first, then the control plane restarted.`
 		);
-	const failing = groupChecks(view.plan.profile, view.preflight.checks)
+	const failing = groupChecks(view.plan.profile, view.preflight.checks, view.blockers)
 		.flatMap((group) => group.rows)
 		.filter((row) => row.blocks);
 	if (failing.length > 0)
 		reasons.push(
 			`${failing.length} required check${failing.length === 1 ? '' : 's'} must pass first: ${[...new Set(failing.map((row) => row.check.id))].join(', ')}.`
 		);
-	if (!view.preflight.ok && failing.length === 0) reasons.push('The preflight is not passing.');
 	for (const blocker of view.blockers) if (!reasons.includes(blocker)) reasons.push(blocker);
 	if (!view.ready && reasons.length === 0)
-		reasons.push('The control plane says the plan is not ready to apply.');
+		reasons.push(
+			view.settingsToChange.length === 0
+				? 'Nothing to change: this install already has these settings.'
+				: 'The control plane says the plan is not ready to apply.'
+		);
 	return { enabled: reasons.length === 0, reasons };
 }
 
@@ -248,7 +309,7 @@ export function setupSteps(input: {
 			state: index === 0 ? 'done' : index === 1 ? 'current' : 'todo'
 		}));
 	const questionsDone = view.plan.unanswered.length === 0;
-	const checksDone = groupChecks(view.plan.profile, view.preflight.checks).every((group) =>
+	const checksDone = groupChecks(view.plan.profile, view.preflight.checks, view.blockers).every((group) =>
 		group.rows.every((row) => !row.blocks)
 	);
 	const flagsDone = view.flagsToChange.length === 0;
@@ -525,4 +586,15 @@ export function migrationGate(
 	if (input.typed.trim() !== MIGRATE_CONFIRM)
 		return { visible: true, enabled: false, reason: `Type ${MIGRATE_CONFIRM} to confirm.` };
 	return { visible: true, enabled: true, reason: null };
+}
+
+/**
+ * The apps an apply moves: the slugs the confirmed dry run lists as `will-move`, in its order.
+ * Apply sends exactly these. Empty means there is nothing to apply (the server would read an empty
+ * list as every app, so the page never sends one).
+ */
+export function migrationApplyProjects(
+	plan: { projects: ReadonlyArray<{ slug: string; status: 'will-move' | 'moved' | 'blocked' }> } | undefined
+): string[] {
+	return (plan?.projects ?? []).filter((item) => item.status === 'will-move').map((item) => item.slug);
 }

@@ -13,6 +13,7 @@
 		CA_ROTATE_CONFIRM,
 		MIGRATE_CONFIRM,
 		caRotateGate,
+		migrationApplyProjects,
 		migrationGate
 	} from './_lib/ha-setup.js';
 	import type { AttachmentMigrationResponse } from './_lib/ha-types.js';
@@ -30,10 +31,13 @@
 		queryFn: ({ signal }) => loadCa(signal),
 		staleTime: 30_000
 	}));
+	// The dry run the admin reads is the one apply sends: it never refreshes on its own, so the
+	// list cannot change between reading it and typing the word. "Run the dry run again" refreshes.
 	const migration = createQuery(() => ({
 		queryKey: haKeys.migration,
 		queryFn: ({ signal }) => loadMigrationPlan(signal),
-		staleTime: 30_000
+		staleTime: Infinity,
+		refetchOnWindowFocus: false
 	}));
 
 	let caTyped = $state('');
@@ -66,7 +70,7 @@
 			caTyped = '';
 			caMessage = {
 				tone: 'success',
-				text: 'The CA is rotated. Nodes move to the new CA as they renew, within 60 days; the old one stays trusted until then.'
+				text: 'The CA is rotated. Each node moves to the new CA when it next renews its certificate, within 60 days; the old CA stays trusted until then.'
 			};
 		} catch (error) {
 			caMessage = { tone: 'error', text: errorText(error, 'Could not rotate the CA.') };
@@ -80,13 +84,14 @@
 		busy = 'migrate';
 		migrateMessage = null;
 		try {
-			moved = await applyMigration();
+			moved = await applyMigration(migrationApplyProjects(migration.data));
 			const count = moved.projects.filter((item) => item.status === 'moved').length;
 			migrateTyped = '';
 			migrateMessage = {
 				tone: 'success',
 				text: `${count} app${count === 1 ? '' : 's'} moved to ${count === 1 ? 'its' : 'their'} stable endpoint. Each restarts once on its next heartbeat.`
 			};
+			// Read the dry run again; the result above stays until the next one.
 			await queryClient.invalidateQueries({ queryKey: haKeys.migration });
 		} catch (error) {
 			migrateMessage = { tone: 'error', text: errorText(error, 'Could not move the apps.') };
@@ -216,6 +221,17 @@
 				{plan.projects.filter((item) => item.status === 'blocked').length} blocked, {plan.alreadyMoved}
 				already on their endpoints.
 				{#if !plan.gateway}The gateway is off, so nothing can move.{/if}
+				<Button
+					variant="link"
+					size="sm"
+					class="h-auto p-0 text-xs"
+					disabled={migration.isFetching || busy !== null}
+					onclick={() => {
+						moved = null;
+						migrateTyped = '';
+						void migration.refetch();
+					}}>Run the dry run again</Button
+				>
 			</p>
 			{#if plan.projects.length > 0}
 				<div class="mt-2 overflow-x-auto rounded-md border">
@@ -252,6 +268,11 @@
 		{#if migrateGate.visible}
 			<div class="mt-4 space-y-2 rounded-md border p-3" data-testid="migrate-apply">
 				<p class="text-sm font-medium">Move them now</p>
+				<p class="text-xs text-muted-foreground">
+					Moves exactly the apps this dry run lists as will-move{#if migrationApplyProjects(migration.data).length}: <span
+							class="font-mono">{migrationApplyProjects(migration.data).join(', ')}</span
+						>{/if}. Each restarts once.
+				</p>
 				<div class="flex flex-wrap items-center gap-2">
 					<input
 						bind:value={migrateTyped}

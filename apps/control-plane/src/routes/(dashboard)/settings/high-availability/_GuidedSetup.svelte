@@ -3,6 +3,7 @@
 	import CompassIcon from '@lucide/svelte/icons/compass';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
 	import type { HaInitAnswers, HaInitApplyView, HaProfile } from '@yoal/contracts';
+	import { browser } from '$app/env';
 	import { createQuery, keepPreviousData, useQueryClient } from '@tanstack/svelte-query';
 	import { invalidateAll } from '$app/navigation';
 	import { errorText } from '#lib/query.js';
@@ -10,21 +11,26 @@
 	import { Button } from '#lib/components/ui/button/index.js';
 	import Panel from '../../_lib/Panel.svelte';
 	import CheckList from './_CheckList.svelte';
-	import { NotAvailableError, applyInit, haKeys, planInit } from './_lib/ha-api.js';
+	import { NotAvailableError, applyInit, haKeys, loadPreflight, planInit } from './_lib/ha-api.js';
 	import {
 		applyGate,
 		changedAnswers,
 		optionLabel,
 		planIsNoop,
 		profileChoices,
+		profileLabel,
 		setupSteps,
-		stepLabel
+		stepLabel,
+		undoFacts
 	} from './_lib/ha-setup.js';
 
 	/**
 	 * The guided setup (the dashboard's `yoal ha init`): choose a profile, see what it changes,
 	 * answer at most three questions, see every preflight check with its fix, then apply. Apply
-	 * stays off while a required check fails. Returning to `single` is the way back.
+	 * stays off while a required check fails. Returning to `single` is the way back. Before a
+	 * profile is chosen, the install's own preflight is shown (`GET /api/v1/ha/preflight`), with the
+	 * platform-level findings (object store, registry, identity, mail, telemetry spool, flags) and
+	 * the per-node ones.
 	 */
 	let { currentProfile, canApply }: { currentProfile: HaProfile; canApply: boolean } = $props();
 
@@ -46,6 +52,12 @@
 	const view = $derived(
 		chosen !== null && plan.data?.plan.profile === chosen ? plan.data : undefined
 	);
+	const current = createQuery(() => ({
+		queryKey: haKeys.preflight,
+		queryFn: ({ signal }) => loadPreflight(undefined, signal),
+		enabled: browser && chosen === null,
+		staleTime: 30_000
+	}));
 	const stale = $derived(plan.isPlaceholderData || plan.isFetching);
 	const gate = $derived(applyGate(view, { canApply, stale, applying }));
 	const steps = $derived(setupSteps({ chosen, view, gate }));
@@ -93,7 +105,7 @@
 >
 	{#snippet actions()}
 		<Badge variant={currentProfile === 'single' ? 'neutral' : 'success'}
-			>Current profile: {currentProfile}</Badge
+			>Current profile: {profileLabel[currentProfile]}</Badge
 		>
 	{/snippet}
 
@@ -131,24 +143,62 @@
 						class="size-4"
 					/>
 					{choice.label}
-					{#if choice.id === currentProfile}<Badge variant="outline" class="ml-auto">current</Badge
+					{#if choice.id === currentProfile}<Badge variant="outline" class="ml-auto">Current</Badge
 						>{/if}
 				</span>
 				<span class="text-xs text-muted-foreground">{choice.summary}</span>
 			</label>
 		{/each}
 	</fieldset>
-	{#if currentProfile !== 'single' && chosen !== 'single'}
-		<p class="mt-3 text-xs text-muted-foreground">
-			To undo, choose <span class="font-medium">Single</span>: it turns off the flags and puts back
-			the settings the profile changed.
-			<Button variant="link" size="sm" class="h-auto p-0 text-xs" onclick={() => choose('single')}>
-				<RotateCcwIcon class="size-3" /> Return to single
-			</Button>
-		</p>
+	{#if currentProfile !== 'single' || chosen === 'single'}
+		<div class="mt-3 text-xs text-muted-foreground" data-testid="ha-undo">
+			<p>
+				To undo, choose <span class="font-medium">Single</span>.
+				{#if chosen !== 'single'}
+					<Button
+						variant="link"
+						size="sm"
+						class="h-auto p-0 text-xs"
+						onclick={() => choose('single')}
+					>
+						<RotateCcwIcon class="size-3" /> Return to single
+					</Button>
+				{/if}
+			</p>
+			<ul class="mt-1 list-disc space-y-0.5 pl-5">
+				{#each undoFacts as fact (fact)}<li>{fact}</li>{/each}
+			</ul>
+		</div>
 	{/if}
 
-	{#if chosen !== null}
+	{#if chosen === null}
+		<section class="mt-6">
+			<h3 class="flex flex-wrap items-center gap-2 text-sm font-semibold">
+				Where this install stands
+				{#if current.data}
+					<span class="text-xs font-normal text-muted-foreground">
+						against {profileLabel[current.data.profile]}: {current.data.counts.pass} pass · {current
+							.data.counts.warn} warn · {current.data.counts.fail} fail · {current.data.counts.skip} not
+						checked
+					</span>
+				{/if}
+			</h3>
+			<p class="mb-2 text-xs text-muted-foreground">
+				The platform checks and the checks for each node, the same list as <code class="font-mono"
+					>yoal ha preflight</code
+				>. Choose a profile above to check against it.
+			</p>
+			{#if current.isError}
+				<p class="text-sm text-destructive" role="alert">
+					{errorText(current.error, 'Could not run the preflight.')}
+				</p>
+			{:else if !current.data}
+				<p class="text-sm text-muted-foreground">Running the preflight…</p>
+			{:else}
+				<CheckList profile={current.data.profile} checks={current.data.checks} />
+			{/if}
+		</section>
+	{:else}
 		{#if plan.isError && !view}
 			{#if plan.error instanceof NotAvailableError}
 				<p
@@ -168,12 +218,12 @@
 				</p>
 			{/if}
 		{:else if !view}
-			<p class="mt-5 text-sm text-muted-foreground">Planning the {chosen} profile…</p>
+			<p class="mt-5 text-sm text-muted-foreground">Planning {profileLabel[chosen]}…</p>
 		{:else}
 			<div class="mt-6 space-y-6" class:opacity-70={stale}>
 				<!-- 2. Plan -->
 				<section>
-					<h3 class="text-sm font-semibold">What the {view.plan.profile} profile changes</h3>
+					<h3 class="text-sm font-semibold">What {profileLabel[view.plan.profile]} changes</h3>
 					{#if planIsNoop(view, currentProfile)}
 						<p class="mt-1 text-sm text-muted-foreground">
 							Nothing: this install already runs this profile with these settings.
@@ -292,18 +342,22 @@
 						A check marked “Blocks apply” must pass first. Warnings never block. Run the same list
 						with <code class="font-mono">yoal ha preflight --profile {view.plan.profile}</code>.
 					</p>
-					<CheckList profile={view.plan.profile} checks={view.preflight.checks} />
+					<CheckList
+						profile={view.plan.profile}
+						checks={view.preflight.checks}
+						blockers={view.blockers}
+					/>
 				</section>
 
 				<!-- 5. Apply -->
 				<section class="rounded-md border p-3" aria-live="polite">
 					<div class="flex flex-wrap items-center justify-between gap-3">
 						<div>
-							<h3 class="text-sm font-semibold">Apply the {view.plan.profile} profile</h3>
+							<h3 class="text-sm font-semibold">Apply {profileLabel[view.plan.profile]}</h3>
 							<p class="text-xs text-muted-foreground">
 								{view.plan.profile === 'single'
-									? 'Puts back the cluster settings the HA profile changed, in one step.'
-									: 'Changes the cluster settings above in one step. You can return to single at any time.'}
+									? 'Sets the profile to single and puts back the recorded cluster settings, in one change. It does not edit yoal.env.'
+									: 'Changes the cluster settings above in one change. It does not edit yoal.env. Single is the way back.'}
 							</p>
 						</div>
 						<Button disabled={!gate.enabled} onclick={apply} data-testid="ha-apply">
@@ -311,7 +365,7 @@
 								? 'Applying…'
 								: view.plan.profile === 'single'
 									? 'Return to single'
-									: `Apply ${view.plan.profile}`}
+									: `Apply ${profileLabel[view.plan.profile]}`}
 						</Button>
 					</div>
 					{#if !gate.enabled && gate.reasons.length > 0 && !applying}
@@ -324,7 +378,7 @@
 					{/if}
 					{#if applied}
 						<p class="mt-2 rounded-md border border-success/40 bg-success/10 px-3 py-2 text-sm">
-							The {applied.profile} profile is applied{applied.applied.length
+							{profileLabel[applied.profile]} is applied{applied.applied.length
 								? `: ${applied.applied.map((change) => change.path).join(', ')} changed`
 								: ''}.
 						</p>

@@ -314,23 +314,23 @@ These are the keys that code reads today:
 
 ## Settings → High availability
 
-**Settings → High availability** is available to platform owners only. It starts with a guided setup, the dashboard's form of `yoal ha init`:
+**Settings → High availability** is available to platform operators and admins. Applying a profile, running a drill, rotating the CA and moving apps need a platform admin. The page starts with a guided setup, the dashboard's form of `yoal ha init`. Before you choose a profile it shows where the install stands: every check against its current profile, the platform ones (object store, registry, identity, mail, telemetry spool, flags) and the ones for each node.
 
-1. Choose a profile: **Single**, **HA**, or **HA with disaster recovery**.
-2. Review the plan: the `YOAL_FEATURE_*` lines the profile needs and the cluster settings it changes. Flags are read from `yoal.env` when the control plane starts, so add the lines on every control-plane host and restart before you apply.
-3. Answer at most three questions (how traffic reaches the ingress nodes, where certificates come from and, for disaster recovery, the standby region). Each has a default.
+1. Choose a profile: **Single** (`single`), **HA** (`ha`) or **HA with disaster recovery** (`ha-dr`).
+2. Review the plan: the `YOAL_FEATURE_*` lines the profile needs and the cluster settings it changes. The dashboard never edits `yoal.env`, and flags are read from it only when the control plane starts: add the lines on every control-plane host and restart each control plane before you apply.
+3. Answer at most three questions (how traffic reaches the ingress nodes, where certificates come from and, for disaster recovery, the standby region). Each has a default. Changing an answer plans and checks again.
 4. Check the preflight: every check with its status, what was seen and the exact fix, the same list as `yoal ha preflight`. A check marked **Blocks apply** must pass first; warnings never block.
-5. Apply. The button stays off while a flag differs from the plan or a required check fails, and says why.
+5. Apply. The button stays off while a flag differs from the plan, a question has no answer or a required check fails, and says why. Applying writes the cluster settings in one change. Like any cluster setting, each is read at the next join, placement, failover check or maintenance sweep.
 
-To undo, choose **Single**: it turns off what the HA profile turned on and puts back the settings it changed. It is refused while anything still depends on an HA feature, such as a synchronous database, and each refusal names its own way back.
+To undo, choose **Single**. It sets the profile to `single` and puts back only the cluster settings an earlier apply recorded changing, at their earlier values; with no record, only the profile changes. It never edits `yoal.env`: once nothing depends on an HA feature it shows a `=0` line for each flag the earlier apply recorded, and the button stays off until the control plane runs with them. Keep any flag you had on before HA. Single is refused while anything still depends on an HA feature, such as a synchronous or armed database, an enrolled standby or a node in a named region, and each refusal names its own way back. Steering goes back to its earlier driver in the same change; after a driver that writes at a provider (`vip`, `dns-failover`, `webhook`), set steering to `direct` and withdraw what it wrote by hand first.
 
 Below the setup, **What is in force** shows the profile, the ingress nodes and steering driver, the arbiter and control-plane standby, databases with their durability and automatic failover state, regions and recent drills. Automatic database failover reads **Not available yet**, with the reason, until every data node can fence itself; until then the controller only reports which replica it would promote.
 
-**Drills** lists every drill scenario, which runs on a fleet and which only in a lab, and what each measures. A platform admin can run a fleet scenario on a named resource; a destructive one needs the resource's name typed back. Results show the measured recovery time and data loss against each scenario's bound.
+**Drills** lists every drill scenario, which runs on a fleet and which only in a lab, and what each measures. A platform admin can run a fleet scenario on a named resource; a destructive one needs the resource's name typed back, and the node that hosts the control plane needs **Allow the node that hosts the control plane** as well. Results show the measured recovery time and data loss against each scenario's bound, and refresh every 3 seconds while a drill runs.
 
-**Install CA** and **Move apps to their endpoints** are the dashboard controls for `yoal ha ca rotate` and `yoal ha migrate attachments --apply`. Anyone with HA access sees the status and the dry run; only a platform admin sees the controls.
+**Install CA** and **Move apps to their endpoints** are the dashboard controls for `yoal ha ca rotate` and `yoal ha migrate attachments --apply`. Anyone with HA access sees the status and the dry run; only a platform admin sees the controls. **Move and restart** moves exactly the apps the dry run on the page lists; **Run the dry run again** refreshes the list first.
 
-The page also refreshes every 10 seconds and shows:
+The failover controller's state on the page refreshes every 10 seconds. The page also shows:
 
 - the failover controller: whether automatic failover is on, who holds the lease and at which epoch, when it last ran, and its limits
 - every node, how long since its last heartbeat, how many replica copies it holds, and when they would move

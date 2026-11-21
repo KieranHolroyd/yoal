@@ -7,11 +7,13 @@ import {
 	applyGate,
 	caRotateGate,
 	changedAnswers,
+	checkRowKey,
 	databaseFailoverState,
 	drillConfirmValue,
 	drillGate,
 	formatRpo,
 	groupChecks,
+	migrationApplyProjects,
 	migrationGate,
 	setupSteps,
 	type DatabaseFailoverFacts
@@ -142,6 +144,85 @@ describe('checks', () => {
 		const rows = groupChecks('ha', []).flatMap((group) => group.rows);
 		expect(rows.length).toBeGreaterThan(0);
 		expect(rows.every((row) => row.check.status === 'skip' && row.blocks)).toBe(true);
+	});
+
+	test('platform-level findings are listed beside the per-node ones, repeats included', () => {
+		// As lane B's preflight reports them: W12 findings have no subject, and one id can repeat.
+		const platform = (id: HaCheck['id'], title: string, status: HaCheck['status']): HaCheck => ({
+			id,
+			title,
+			status,
+			evidence: [`${title}.`],
+			fix: status === 'pass' ? null : { kind: 'setting', value: 'Settings → Registry → Storage' },
+			subject: null
+		});
+		const checks: HaCheck[] = [
+			...failingChecks('ha').filter(
+				(check) => check.id !== 'platform-store' && check.id !== 'registry-storage'
+			),
+			platform('platform-store', 'The platform object store is the control host’s disk', 'fail'),
+			platform('platform-store', 'Release artifacts are on the control host', 'warn'),
+			platform('registry-storage', 'Registry blobs are on one node', 'fail'),
+			{
+				id: 'clocks',
+				title: 'Clock skew',
+				status: 'warn',
+				evidence: ['edge-d is 3 s ahead.'],
+				fix: { kind: 'manual', value: 'timedatectl set-ntp true' },
+				subject: { kind: 'node', id: 'node_d', name: 'edge-d' }
+			}
+		];
+		const groups = groupChecks('ha', checks);
+		const rows = groups.flatMap((group) => group.rows);
+		// Nothing is dropped: every reported entry is a row.
+		expect(rows).toHaveLength(checks.length);
+		const platformRows = groups.find((group) => group.area === 'platform')!.rows;
+		expect(platformRows.filter((row) => row.check.id === 'platform-store')).toHaveLength(2);
+		expect(
+			platformRows.filter((row) => row.check.subject === null).map((row) => row.check.id)
+		).toEqual(expect.arrayContaining(['platform-store', 'registry-storage', 'identity', 'mail']));
+		expect(platformRows.find((row) => row.check.id === 'registry-storage')).toMatchObject({
+			required: true,
+			blocks: true
+		});
+		const clocks = groups.find((group) => group.area === 'time')!.rows;
+		expect(clocks.map((row) => row.check.subject?.name)).toEqual(['edge-c', 'edge-d']);
+		// Each row has its own key, so the list renders every one of them.
+		const keys = groups.flatMap((group) => group.rows.map((row, index) => checkRowKey(row, index)));
+		expect(new Set(keys).size).toBe(keys.length);
+		expect(applyGate(planView('ha', { checks }), admin).reasons.join(' ')).toContain(
+			'platform-store'
+		);
+	});
+
+	test('on the way back to single, a steering entry the server excuses does not block', () => {
+		const steering: HaCheck = {
+			id: 'ha-dependents',
+			title: 'A steering driver is in use',
+			status: 'fail',
+			evidence: ['external-lb still depends on an HA feature; turning the flags off would strand it.'],
+			fix: { kind: 'setting', value: 'cluster_config steering.driver = direct' },
+			subject: { kind: 'platform', id: 'external-lb', name: 'external-lb' }
+		};
+		const view = planView('single', { currentProfile: 'ha', checks: [steering] });
+		// The server puts steering back to direct in the same write, so it names no blocker for it.
+		const excused = { ...view, ready: true, blockers: [] };
+		const row = groupChecks('single', [steering], excused.blockers)[0]!.rows[0]!;
+		expect(row).toMatchObject({ blocks: false, clearedByApply: true });
+		expect(applyGate(excused, admin).enabled).toBe(true);
+		// A driver that wrote at a provider is named among the blockers: then it blocks.
+		const named = {
+			...view,
+			ready: false,
+			blockers: [`${steering.title}: Set steering to direct, then withdraw what vip put at the provider by hand.`]
+		};
+		expect(groupChecks('single', [steering], named.blockers)[0]!.rows[0]).toMatchObject({
+			blocks: true,
+			clearedByApply: false
+		});
+		expect(applyGate(named, admin).enabled).toBe(false);
+		// Without the server's blockers, nothing is excused.
+		expect(groupChecks('single', [steering])[0]!.rows[0]!.blocks).toBe(true);
 	});
 });
 
@@ -353,6 +434,21 @@ describe('admin actions', () => {
 		expect(
 			caRotateGate({ ...ca, inUse: false }, { isAdmin: true, typed: CA_ROTATE_CONFIRM }).enabled
 		).toBe(false);
+	});
+
+	test('apply moves the will-move apps of the confirmed dry run, never everything', () => {
+		expect(migrationApplyProjects(migrationPlan)).toEqual(['shop']);
+		expect(migrationApplyProjects(undefined)).toEqual([]);
+		expect(
+			migrationApplyProjects({
+				projects: [
+					{ slug: 'b', status: 'will-move' },
+					{ slug: 'a', status: 'blocked' },
+					{ slug: 'c', status: 'moved' },
+					{ slug: 'd', status: 'will-move' }
+				]
+			})
+		).toEqual(['b', 'd']);
 	});
 
 	test('migration applies only with apps to move and the word typed', () => {

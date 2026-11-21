@@ -5,12 +5,26 @@
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 	import type { HaCheck, HaProfile } from '@yoal/contracts';
 	import { Badge } from '#lib/components/ui/badge/index.js';
-	import { checkStatusLabel, checkStatusTone, fixKindLabel, groupChecks } from './_lib/ha-setup.js';
+	import {
+		checkRowKey,
+		checkStatusLabel,
+		checkStatusTone,
+		fixKindLabel,
+		groupChecks
+	} from './_lib/ha-setup.js';
 
-	/** Every preflight check with its status, what was seen and the exact fix (the same list as `yoal ha preflight`). */
-	let { profile, checks }: { profile: HaProfile; checks: readonly HaCheck[] } = $props();
+	/**
+	 * Every preflight check with its status, what was seen and the exact fix (the same list as `yoal
+	 * ha preflight`): the platform-level entries and the per-node (zone, database, ingress) ones.
+	 * `blockers` are the plan's, so an entry the server excuses is not shown as blocking.
+	 */
+	let {
+		profile,
+		checks,
+		blockers
+	}: { profile: HaProfile; checks: readonly HaCheck[]; blockers?: readonly string[] } = $props();
 
-	const groups = $derived(groupChecks(profile, checks));
+	const groups = $derived(groupChecks(profile, checks, blockers));
 	const icons = {
 		pass: CircleCheckIcon,
 		warn: TriangleAlertIcon,
@@ -30,12 +44,13 @@
 		<section>
 			<h4 class="mb-1.5 text-xs font-medium text-muted-foreground">{group.label}</h4>
 			<ul class="divide-y rounded-md border">
-				{#each group.rows as row, index (`${row.check.id}:${row.check.subject?.id ?? index}`)}
+				{#each group.rows as row, index (checkRowKey(row, index))}
 					{@const Icon = icons[row.check.status]}
 					<li
 						class="flex items-start gap-2.5 px-3 py-2"
 						data-check={row.check.id}
 						data-status={row.check.status}
+						data-subject={row.check.subject?.kind ?? 'platform'}
 					>
 						<Icon class="mt-0.5 size-4 shrink-0 {iconClass[row.check.status]}" aria-hidden="true" />
 						<div class="min-w-0 flex-1">
@@ -50,6 +65,8 @@
 								>
 								{#if row.blocks}
 									<Badge variant="outline">Blocks apply</Badge>
+								{:else if row.clearedByApply}
+									<Badge variant="outline">Cleared by this change</Badge>
 								{:else if !row.required && row.check.status === 'fail'}
 									<Badge variant="outline">Not required for this profile</Badge>
 								{/if}

@@ -1,12 +1,13 @@
 <script lang="ts">
 	import ActivityIcon from '@lucide/svelte/icons/activity';
+	import { browser } from '$app/env';
 	import { createQuery } from '@tanstack/svelte-query';
 	import { errorText } from '#lib/query.js';
 	import { Badge } from '#lib/components/ui/badge/index.js';
 	import Panel from '../../_lib/Panel.svelte';
 	import { formatRelative } from '../../_lib/format.js';
 	import { NotAvailableError, haKeys, listDrillRuns, loadRegions } from './_lib/ha-api.js';
-	import { databaseFailoverState, type StatusCardsInput } from './_lib/ha-setup.js';
+	import { databaseFailoverState, profileLabel, type StatusCardsInput } from './_lib/ha-setup.js';
 
 	/** One card per part of the HA stack, each saying what is in force now (not what is configured). */
 	let { input }: { input: StatusCardsInput } = $props();
@@ -14,7 +15,7 @@
 	const regions = createQuery(() => ({
 		queryKey: haKeys.regions,
 		queryFn: ({ signal }) => loadRegions(signal),
-		enabled: input.regionsFlag,
+		enabled: browser && input.regionsFlag,
 		retry: (count: number, error: Error) => !(error instanceof NotAvailableError) && count < 1
 	}));
 	const runs = createQuery(() => ({
@@ -24,9 +25,11 @@
 	}));
 
 	const fleetFailover = $derived(databaseFailoverState(input.failover));
+	// A catalogue run hands node-offline and database-failover to their own records; show each once.
+	const handedOff = $derived(new Set((runs.data ?? []).map((run) => run.recordId)));
 	const drills = $derived(
 		[
-			...input.recentDrills,
+			...input.recentDrills.filter((drill) => !handedOff.has(drill.id)),
 			...(runs.data ?? []).map((run) => ({
 				id: run.id,
 				at: run.startedAt ?? '',
@@ -60,7 +63,9 @@
 		<div class="rounded-lg border p-3" data-card="profile">
 			<p class="text-xs text-muted-foreground">Profile</p>
 			<p class="mt-1">
-				<Badge variant={input.profile === 'single' ? 'neutral' : 'success'}>{input.profile}</Badge>
+				<Badge variant={input.profile === 'single' ? 'neutral' : 'success'}
+					>{profileLabel[input.profile]}</Badge
+				>
 			</p>
 			<p class="mt-1 text-xs text-muted-foreground">
 				{input.profile === 'single'
@@ -104,8 +109,7 @@
 				</p>
 			{:else if input.control.members.length === 0}
 				<p class="mt-1 text-xs text-muted-foreground">
-					No standby enrolled. Run <code class="font-mono">yoal ha control enrol</code> on a second control
-					node.
+					No standby enrolled. Enrol one with <code class="font-mono">yoal ha control enrol</code>.
 				</p>
 			{:else}
 				<ul class="mt-1 space-y-0.5 text-xs">
@@ -160,7 +164,7 @@
 			{#if !input.regionsFlag}
 				<p class="mt-1 text-sm font-medium">One region</p>
 				<p class="mt-1 text-xs text-muted-foreground">
-					Regions are off. The HA with disaster recovery profile turns them on.
+					Regions are off. {profileLabel['ha-dr']} needs <code class="font-mono">YOAL_FEATURE_REGIONS=1</code>.
 				</p>
 			{:else if regions.isError}
 				<p class="mt-1 text-xs text-muted-foreground">

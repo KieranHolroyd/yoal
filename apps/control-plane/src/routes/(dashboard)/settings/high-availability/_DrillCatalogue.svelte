@@ -19,7 +19,13 @@
 	import EmptyState from '../../_lib/EmptyState.svelte';
 	import Panel from '../../_lib/Panel.svelte';
 	import { formatRelative } from '../../_lib/format.js';
-	import { NotAvailableError, haKeys, listDrillRuns, runDrill } from './_lib/ha-api.js';
+	import {
+		NotAvailableError,
+		haKeys,
+		listDrillRuns,
+		loadDrillCatalogue,
+		runDrill
+	} from './_lib/ha-api.js';
 	import {
 		drillConfirmValue,
 		drillGate,
@@ -37,6 +43,14 @@
 		$props();
 
 	const queryClient = useQueryClient();
+	// The server's catalogue (`GET /api/v1/ha/drills/catalogue`); the contract's list shows until it loads.
+	const catalogue = createQuery(() => ({
+		queryKey: haKeys.catalogue,
+		queryFn: ({ signal }) => loadDrillCatalogue(signal),
+		placeholderData: { scenarios: HA_DRILL_CATALOGUE },
+		staleTime: Infinity
+	}));
+	const scenarios = $derived(catalogue.data?.scenarios ?? HA_DRILL_CATALOGUE);
 	const runs = createQuery(() => ({
 		queryKey: haKeys.drillRuns,
 		queryFn: ({ signal }) => listDrillRuns(signal),
@@ -51,10 +65,11 @@
 	let confirmed = $state(false);
 	let drillDatabase = $state('');
 	let minutes = $state('5');
+	let includeControl = $state(false);
 	let running = $state(false);
 	let message = $state<{ tone: 'success' | 'error'; text: string } | null>(null);
 
-	const scenario = $derived(HA_DRILL_CATALOGUE.find((entry) => entry.id === selected) ?? null);
+	const scenario = $derived(scenarios.find((entry) => entry.id === selected) ?? null);
 	const gate = $derived(
 		scenario
 			? drillGate(scenario, { resource, typed, confirmed, flags, canRun, drillDatabase })
@@ -68,6 +83,7 @@
 		typed = '';
 		confirmed = false;
 		drillDatabase = '';
+		includeControl = false;
 		message = null;
 	}
 
@@ -80,12 +96,12 @@
 				scenario: scenario.id,
 				resource: resource.trim(),
 				confirm: drillConfirmValue(scenario, typed, confirmed),
-				...(bounded ? { durationSeconds: Number(minutes) * 60 } : {}),
+				...(bounded ? { durationSeconds: Number(minutes) * 60, includeControlNode: includeControl } : {}),
 				...(scenario.id === 'database-failover' ? { drillDatabase: drillDatabase.trim() } : {})
 			});
 			message = {
-				tone: 'success',
-				text: `The ${result.scenario} drill on ${result.resource.name} is ${result.status}. Its result appears below.`
+				tone: result.status === 'failed' ? 'error' : 'success',
+				text: `The ${result.scenario} drill on ${result.resource.name} is ${result.status}.${result.message ? ` ${result.message}` : ''} Its result appears below.`
 			};
 			typed = '';
 			confirmed = false;
@@ -139,13 +155,13 @@
 				</Table.Row>
 			</Table.Header>
 			<Table.Body>
-				{#each HA_DRILL_CATALOGUE as entry (entry.id)}
+				{#each scenarios as entry (entry.id)}
 					{@const missing = entry.flags.filter((name) => !flags[name])}
 					<Table.Row class={selected === entry.id ? 'bg-primary/5' : ''}>
 						<Table.Cell class="max-w-md pl-4 whitespace-normal">
 							<p class="flex flex-wrap items-center gap-1.5 text-sm font-medium">
 								<span class="font-mono text-xs">{entry.id}</span>
-								{#if entry.destructive}<Badge variant="danger">destructive</Badge>{/if}
+								{#if entry.destructive}<Badge variant="danger">Destructive</Badge>{/if}
 							</p>
 							<p class="text-xs text-muted-foreground">{entry.title}</p>
 							{#if entry.availability === 'fleet' && missing.length > 0}
@@ -204,7 +220,7 @@
 			</div>
 			<div class="flex flex-wrap items-end gap-3">
 				<label class="flex min-w-48 flex-1 flex-col gap-1 text-xs text-muted-foreground">
-					The {scenario.resourceKind} to drill (name or id)
+					The {scenario.resourceKind} to drill, by name
 					<input
 						bind:value={resource}
 						required
@@ -224,6 +240,12 @@
 									>{value} min</option
 								>{/each}
 						</select>
+					</label>
+				{/if}
+				{#if bounded}
+					<label class="flex items-center gap-2 self-center text-xs text-muted-foreground">
+						<input type="checkbox" bind:checked={includeControl} class="size-4" />
+						Allow the node that hosts the control plane
 					</label>
 				{/if}
 				{#if scenario.id === 'database-failover'}
