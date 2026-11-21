@@ -65,6 +65,126 @@ export interface HaStatusView {
 	recent: HaEventView[];
 	/** Control-plane standby nodes (HA-PLAN H21, W9); present only while CONTROL_STANDBY is on. */
 	controlPlane?: HaControlNodeView[];
+	/** The install CA; present only while ENDPOINTS_GATEWAY is on. */
+	nodeCa?: NodeCaStatusView;
+}
+
+/** Mirrors `NodeCaStatus` in packages/core/src/node-ca.ts. */
+export interface NodeCaStatusView {
+	inUse: boolean;
+	authorities: Array<{ fingerprint: string; subject: string; notBefore: string; notAfter: string; state: 'active' | 'previous' | 'retired'; createdAt: string }>;
+	leaves: { issued: number; live: number; nodes: number; revoked: number; renewDue: number; nextExpiry: string | null };
+}
+
+/** Mirrors `AttachmentMigrationView` in packages/core/src/service-endpoints.ts. */
+export interface AttachmentMigrationView {
+	apply: boolean;
+	gateway: boolean;
+	alreadyMoved: number;
+	projects: Array<{
+		projectId: string;
+		slug: string;
+		runtime: string;
+		nodes: string[];
+		databases: string[];
+		status: 'will-move' | 'moved' | 'blocked';
+		reason: string;
+	}>;
+}
+
+/** Mirrors `AttachmentsView` in packages/core/src/service-endpoints.ts. */
+export interface AttachmentsView {
+	attachments: Array<{
+		projectId: string;
+		project: string;
+		runtime: string;
+		databaseId: string;
+		database: string;
+		databaseNode: string;
+		envPrefix: string;
+		gateway: boolean;
+		consumers: Array<{
+			nodeId: string;
+			node: string;
+			mode: 'gateway' | 'endpoint' | 'direct' | 'none';
+			host: string | null;
+			port: number | null;
+			poolPort: number | null;
+			readPort: number | null;
+			upstreamNode: string | null;
+			version: number | null;
+		}>;
+	}>;
+}
+
+/** The install CA's lines in `yoal ha status` and `yoal ha ca`. */
+export function formatNodeCa(ca: NodeCaStatusView): string {
+	const active = ca.authorities.find((item) => item.state === 'active');
+	const previous = ca.authorities.find((item) => item.state === 'previous');
+	const lines = [
+		active
+			? `Install CA: active ${active.fingerprint.slice(0, 16)}, valid until ${formatTime(active.notAfter)}`
+			: 'Install CA: not created yet (the first node that needs a certificate creates it)',
+	];
+	if (previous) lines.push(`  previous ${previous.fingerprint.slice(0, 16)} still trusted until every node renews`);
+	const leaves = ca.leaves;
+	lines.push(
+		`  ${leaves.nodes} ${leaves.nodes === 1 ? 'node holds' : 'nodes hold'} a leaf, ${leaves.renewDue} due to renew, ${leaves.revoked} revoked` +
+			(leaves.nextExpiry ? `; next expiry ${formatTime(leaves.nextExpiry)}` : ''),
+	);
+	return lines.join('\n');
+}
+
+/** `yoal ha migrate attachments`: what moves (or moved) to its stable endpoint. */
+export function formatMigration(view: AttachmentMigrationView): string {
+	if (!view.gateway && view.projects.every((item) => item.status === 'blocked'))
+		return view.projects.length === 0
+			? 'ENDPOINTS_GATEWAY is off: apps connect to their databases as before, and there is nothing to migrate.'
+			: `ENDPOINTS_GATEWAY is off: ${view.projects.length} ${view.projects.length === 1 ? 'app stays' : 'apps stay'} as ${view.projects.length === 1 ? 'it is' : 'they are'}.`;
+	const lines: string[] = [];
+	if (view.projects.length === 0) lines.push('Every app with a database attachment already uses its stable endpoint.');
+	else
+		lines.push(
+			renderTable(
+				['APP', 'RUNTIME', 'NODES', 'DATABASES', 'STATUS', 'WHY'],
+				view.projects.map((item) => [
+					item.slug,
+					item.runtime,
+					item.nodes.join(',') || '-',
+					item.databases.join(','),
+					item.status === 'will-move' ? 'will move' : item.status,
+					truncate(item.reason, 70),
+				]),
+			),
+		);
+	const moving = view.projects.filter((item) => item.status === (view.apply ? 'moved' : 'will-move')).length;
+	if (view.apply) lines.push('', `Moved ${moving} ${moving === 1 ? 'app' : 'apps'}; each restarts once on its node's next heartbeat.`);
+	else if (moving > 0)
+		lines.push(
+			'',
+			`Dry run: nothing changed. ${moving} ${moving === 1 ? 'app would move' : 'apps would move'} to ${moving === 1 ? 'its' : 'their'} stable endpoint and restart once.`,
+			'Run `yoal ha migrate attachments --apply` to move them now, or let each move on its own next deploy.',
+		);
+	if (view.alreadyMoved > 0) lines.push(`${view.alreadyMoved} ${view.alreadyMoved === 1 ? 'app already uses its endpoint' : 'apps already use their endpoints'}.`);
+	return lines.join('\n');
+}
+
+/** `yoal ha attachments`: how each copy reaches each attached database. */
+export function formatAttachments(view: AttachmentsView): string {
+	const rows = view.attachments.flatMap((item) =>
+		(item.consumers.length ? item.consumers : [null]).map((consumer) => [
+			item.project,
+			item.database,
+			consumer?.node ?? '-',
+			consumer?.mode ?? 'no copy',
+			consumer?.host && consumer.port !== null ? `${consumer.host}:${consumer.port}` : '-',
+			consumer?.poolPort === null || consumer?.poolPort === undefined ? '-' : String(consumer.poolPort),
+			consumer?.readPort === null || consumer?.readPort === undefined ? '-' : String(consumer.readPort),
+			consumer?.upstreamNode ?? item.databaseNode,
+		]),
+	);
+	if (rows.length === 0) return 'No app has a database attached.';
+	return renderTable(['APP', 'DATABASE', 'NODE', 'MODE', 'ENDPOINT', 'POOL', 'READ', 'REACHES'], rows);
 }
 
 export interface HaControlNodeView {
@@ -146,6 +266,7 @@ export function formatHaStatus(view: HaStatusView, options: { events?: number } 
 			),
 		);
 	}
+	if (view.nodeCa?.inUse) lines.push('', formatNodeCa(view.nodeCa));
 	if (options.events === 0) return lines.join('\n');
 	const events = view.recent.slice(0, options.events ?? 10);
 	lines.push('', events.length ? 'Recent events:' : 'No failover events yet.');

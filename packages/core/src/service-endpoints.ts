@@ -8,11 +8,70 @@ import {
 	storageInstances,
 	workloads,
 } from '@yoal/db';
-import { ENDPOINTS_GATEWAY_CAPABILITY, readEndpointPortRange } from '@yoal/contracts';
+import {
+	ENDPOINTS_GATEWAY_CAPABILITY,
+	databaseAlias,
+	databaseEngineRegistry,
+	readEndpointPortRange,
+	type Principal,
+} from '@yoal/contracts';
 import { endpointKey, planReadEndpoints, planServiceEndpoints, type ExistingEndpoint, type EndpointService as PlannedService } from './endpoints.ts';
 import { nodeHasCapability } from './capability-gate.ts';
 import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
+import { CoreError, ValidationError } from './errors.ts';
+
+export interface AttachmentMigrationItem {
+	projectId: string;
+	slug: string;
+	runtime: string;
+	/** Nodes holding a copy, by name. */
+	nodes: string[];
+	databases: string[];
+	/** `will-move` in a dry run, `moved` once applied, `blocked` when a node or flag stops it. */
+	status: 'will-move' | 'moved' | 'blocked';
+	reason: string;
+}
+
+export interface AttachmentMigrationView {
+	apply: boolean;
+	/** Both ENDPOINTS_GATEWAY and SERVICE_ENDPOINTS are on. */
+	gateway: boolean;
+	/** Apps with attachments already on their endpoints. */
+	alreadyMoved: number;
+	/** Apps with attachments not on their endpoints yet. */
+	projects: AttachmentMigrationItem[];
+}
+
+export interface AttachmentConsumerView {
+	nodeId: string;
+	node: string;
+	/** `gateway`: the stable endpoint (H24); `endpoint`: a C2 loopback endpoint to another node; `direct`: on the database's node; `none`: no URL. */
+	mode: 'gateway' | 'endpoint' | 'direct' | 'none';
+	host: string | null;
+	port: number | null;
+	poolPort: number | null;
+	readPort: number | null;
+	/** Where the connection lands: the primary's node for a gateway or C2 endpoint. */
+	upstreamNode: string | null;
+	version: number | null;
+	databaseNode?: string;
+}
+
+export interface AttachmentsView {
+	attachments: Array<{
+		projectId: string;
+		project: string;
+		runtime: string;
+		databaseId: string;
+		database: string;
+		databaseNode: string;
+		envPrefix: string;
+		/** The project chose the gateway on its own deploy, attach or migration. */
+		gateway: boolean;
+		consumers: AttachmentConsumerView[];
+	}>;
+}
 
 /**
  * Materialises C2/H24 service endpoints from a project's live attachments (docs/CLUSTERING.md
@@ -39,24 +98,17 @@ export class ServiceEndpointService {
 		const gateway = this.gatewayAt(consumerNodeId);
 		const projectIds = new Set(this.projectsOnNode(consumerNodeId));
 		if (projectId) projectIds.add(projectId);
-		// A read endpoint survives losing every readable replica: its stable port keeps pointing at
-		// the primary as a fallback, so a promotion or a replica going away never changes an app's
-		// environment. It is created only once a replica actually serves reads.
-		const existingReadIds = new Set(
-			this.ctx.db
-				.select({ serviceId: serviceEndpoints.serviceId })
-				.from(serviceEndpoints)
-				.where(and(eq(serviceEndpoints.consumerNodeId, consumerNodeId), eq(serviceEndpoints.role, 'read')))
-				.all()
-				.map((row) => row.serviceId),
-		);
 		const services: PlannedService[] = [];
-		const readServices: Array<{ serviceId: string; upstreamNodeId: string; upstreamPort: number }> = [];
+		const readServices: Array<{ serviceId: string; upstreamNodeId: string; upstreamPort: number; upstreamsKey: string }> = [];
 		for (const id of projectIds) {
-			const planned = this.servicesForProject(id, consumerNodeId, gateway, existingReadIds);
+			// Same-node, pooled and read endpoints only for a project whose own deploy (or attach, or
+			// `ha migrate attachments`) chose the gateway: a neighbour's deploy or a replica coming
+			// and going must never move another app to its endpoint and restart it (HA-PLAN §9).
+			const planned = this.servicesForProject(id, consumerNodeId, gateway && this.marked(id));
 			services.push(...planned.services);
 			readServices.push(...planned.reads);
 		}
+		const readKeys = new Map(readServices.map((service) => [service.serviceId, service.upstreamsKey]));
 		const existingRows = this.ctx.db
 			.select()
 			.from(serviceEndpoints)
@@ -71,7 +123,8 @@ export class ServiceEndpointService {
 			role: row.role === 'pool' ? 'pool' : 'primary',
 		}));
 		const range = this.ctx.cluster.get().endpoints;
-		const plan = planServiceEndpoints(consumerNodeId, services, existing, { min: range.portMin, max: range.portMax }, { includeSameNode: gateway });
+		// Each project's services are already filtered for the same-node case (`servicesForProject`).
+		const plan = planServiceEndpoints(consumerNodeId, services, existing, { min: range.portMin, max: range.portMax }, { includeSameNode: true });
 		const readPlan = planReadEndpoints(
 			consumerNodeId,
 			readServices,
@@ -156,28 +209,37 @@ export class ServiceEndpointService {
 							upstreamNodeId: endpoint.upstreamNodeId,
 							upstreamPort: endpoint.upstreamPort,
 							version: 0,
+							upstreamsKey: readKeys.get(endpoint.serviceId) ?? null,
 							createdAt: now,
 							updatedAt: now,
 						})
 						.run();
 					created += 1;
-				} else if (
-					row.localPort !== endpoint.localPort ||
-					row.upstreamNodeId !== endpoint.upstreamNodeId ||
-					row.upstreamPort !== endpoint.upstreamPort
-				) {
-					this.ctx.db
-						.update(serviceEndpoints)
-						.set({
-							localPort: endpoint.localPort,
-							upstreamNodeId: endpoint.upstreamNodeId,
-							upstreamPort: endpoint.upstreamPort,
-							version: row.version + 1,
-							updatedAt: now,
-						})
-						.where(eq(serviceEndpoints.id, row.id))
-						.run();
-					updated += 1;
+				} else {
+					const key = readKeys.get(endpoint.serviceId) ?? null;
+					const repointed =
+						row.localPort !== endpoint.localPort ||
+						row.upstreamNodeId !== endpoint.upstreamNodeId ||
+						row.upstreamPort !== endpoint.upstreamPort;
+					// A replica joining or leaving the set is a re-point too: the forwarder cuts the
+					// sessions still on a replica that left. A row from before 0132 learns its set
+					// without a bump.
+					const setChanged = row.upstreamsKey !== null && key !== null && row.upstreamsKey !== key;
+					if (repointed || setChanged || row.upstreamsKey !== key) {
+						this.ctx.db
+							.update(serviceEndpoints)
+							.set({
+								localPort: endpoint.localPort,
+								upstreamNodeId: endpoint.upstreamNodeId,
+								upstreamPort: endpoint.upstreamPort,
+								upstreamsKey: key,
+								version: repointed || setChanged ? row.version + 1 : row.version,
+								updatedAt: now,
+							})
+							.where(eq(serviceEndpoints.id, row.id))
+							.run();
+						if (repointed || setChanged) updated += 1;
+					}
 				}
 			}
 		});
@@ -209,11 +271,246 @@ export class ServiceEndpointService {
 		for (const nodeId of consumerNodes) this.reconcile(null, nodeId);
 	}
 
+	/** The project's own last deploy, attach or migration chose the gateway (0132). */
+	marked(projectId: string): boolean {
+		return (
+			this.ctx.db.select({ on: workloads.endpointsGateway }).from(workloads).where(eq(workloads.projectId, projectId)).get()?.on ===
+			true
+		);
+	}
+
+	/**
+	 * Whether this project's copy on this node goes through H24's endpoints: the flags are on, the
+	 * node runs the gateway, and the project chose it on its own deploy, attach or migration.
+	 */
+	projectGateway(projectId: string, nodeId: string): boolean {
+		return featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS') && this.gatewayAt(nodeId) && this.marked(projectId);
+	}
+
+	/**
+	 * Why this project's copies cannot all use the gateway right now, or null when they can: both
+	 * flags on and every node holding a copy advertising `endpoints-gateway`.
+	 */
+	gatewayBlocker(projectId: string): string | null {
+		if (!featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY') || !featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS'))
+			return 'ENDPOINTS_GATEWAY and SERVICE_ENDPOINTS are not both on';
+		const nodeIds = this.copyNodes(projectId);
+		if (nodeIds.length === 0) return 'it has no running copy';
+		const missing = nodeIds.filter((nodeId) => !this.gatewayAt(nodeId));
+		if (missing.length === 0) return null;
+		return `${missing.map((nodeId) => this.nodeName(nodeId)).join(', ')} ${missing.length === 1 ? 'runs an agent' : 'run agents'} without the endpoint gateway; update ${missing.length === 1 ? 'it' : 'them'} first`;
+	}
+
+	/**
+	 * A deploy (or promote, or rollback) of this project was just recorded: it uses the gateway from
+	 * now on exactly when every copy's node can (HA-PLAN §9: existing attachments move on the
+	 * project's own next deploy). Called before the endpoints are re-planned.
+	 */
+	recordGatewayMarker(projectId: string): void {
+		const on = this.gatewayBlocker(projectId) === null;
+		if (this.marked(projectId) === on) return;
+		this.ctx.db.update(workloads).set({ endpointsGateway: on }).where(eq(workloads.projectId, projectId)).run();
+	}
+
+	/**
+	 * An attachment was just added to a project. Its running copies get their endpoints now, not on
+	 * the next deploy, so a container on another node has its URL at once. The attach restarts the
+	 * app anyway (its environment changes), so it also moves to the gateway if it can.
+	 */
+	attached(projectId: string): void {
+		if (!featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS')) return;
+		if (!this.marked(projectId) && this.gatewayBlocker(projectId) === null)
+			this.ctx.db.update(workloads).set({ endpointsGateway: true }).where(eq(workloads.projectId, projectId)).run();
+		for (const nodeId of this.copyNodes(projectId)) this.reconcile(projectId, nodeId);
+	}
+
+	/**
+	 * `yoal ha migrate attachments` (HA-PLAN §9): every app with a database attachment that still
+	 * connects directly, and whether moving it to its stable endpoint is possible now. A dry run
+	 * changes nothing; `apply` moves each listed app at once, which restarts it.
+	 */
+	migrationPlan(principal: Principal, options: { projects?: string[] } = {}): AttachmentMigrationView {
+		this.requireHa(principal);
+		const gateway = featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY') && featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS');
+		const rows = this.ctx.sqlite
+			.query<{ projectId: string; slug: string; runtime: string; marked: number }, []>(
+				`SELECT DISTINCT w.project_id AS projectId, p.slug AS slug, w.runtime AS runtime, w.endpoints_gateway AS marked
+				 FROM workloads w
+				 JOIN projects p ON p.id = w.project_id AND p.deleted_at IS NULL
+				 JOIN database_attachments a ON a.project_id = w.project_id
+				 JOIN databases d ON d.id = a.database_id AND d.deleted_at IS NULL
+				 ORDER BY p.slug`,
+			)
+			.all();
+		const wanted = options.projects?.length ? new Set(options.projects) : null;
+		if (wanted) {
+			const known = new Set(rows.flatMap((row) => [row.slug, row.projectId]));
+			const unknown = [...wanted].filter((name) => !known.has(name));
+			if (unknown.length) throw new ValidationError(`No app with a database attachment named ${unknown.map((name) => `"${name}"`).join(', ')}.`);
+		}
+		const projects: AttachmentMigrationItem[] = rows
+			.filter((row) => !row.marked && (!wanted || wanted.has(row.slug) || wanted.has(row.projectId)))
+			.map((row) => {
+				const blocker = this.gatewayBlocker(row.projectId);
+				return {
+					projectId: row.projectId,
+					slug: row.slug,
+					runtime: row.runtime,
+					nodes: this.copyNodes(row.projectId).map((nodeId) => this.nodeName(nodeId)),
+					databases: this.attachedDatabases(row.projectId).map((database) => database.name),
+					status: blocker ? 'blocked' : 'will-move',
+					reason: blocker ? `Cannot move: ${blocker}.` : 'Moves to its stable endpoint; the app restarts once.',
+				};
+			});
+		return {
+			apply: false,
+			gateway,
+			alreadyMoved: rows.filter((row) => row.marked && (!wanted || wanted.has(row.slug) || wanted.has(row.projectId))).length,
+			projects,
+		};
+	}
+
+	migrateAttachments(principal: Principal, input: { apply?: boolean; projects?: string[] } = {}): AttachmentMigrationView {
+		const plan = this.migrationPlan(principal, { projects: input.projects });
+		if (!input.apply) return plan;
+		const projects = plan.projects.map((item): AttachmentMigrationItem => {
+			if (item.status !== 'will-move') return item;
+			this.ctx.db.update(workloads).set({ endpointsGateway: true }).where(eq(workloads.projectId, item.projectId)).run();
+			for (const nodeId of this.copyNodes(item.projectId)) this.reconcile(item.projectId, nodeId);
+			this.ctx.audit.record({
+				principal,
+				action: 'ha.migrate-attachments',
+				resource: 'project',
+				resourceId: item.projectId,
+				args: { project: item.slug, databases: item.databases },
+				result: 'ok',
+			});
+			return { ...item, status: 'moved', reason: 'Moved to its stable endpoint; the app restarts on its next heartbeat.' };
+		});
+		this.ctx.projects.bump();
+		return { ...plan, apply: true, projects };
+	}
+
+	/**
+	 * Every database attachment and, per node holding a copy, how that copy reaches it: through its
+	 * gateway endpoint, a C2 endpoint, directly on the database's node, or not at all. No secrets.
+	 */
+	attachmentsView(principal: Principal): AttachmentsView {
+		this.requireHa(principal);
+		const rows = this.ctx.sqlite
+			.query<
+				{ projectId: string; slug: string; runtime: string; databaseId: string; database: string; engine: string; databaseNodeId: string; hostPort: number; envPrefix: string },
+				[]
+			>(
+				`SELECT w.project_id AS projectId, p.slug AS slug, w.runtime AS runtime, d.id AS databaseId, d.name AS database,
+				        d.engine_name AS engine, d.node_id AS databaseNodeId, d.host_port AS hostPort, a.env_prefix AS envPrefix
+				 FROM workloads w
+				 JOIN projects p ON p.id = w.project_id AND p.deleted_at IS NULL
+				 JOIN database_attachments a ON a.project_id = w.project_id
+				 JOIN databases d ON d.id = a.database_id AND d.deleted_at IS NULL
+				 ORDER BY p.slug, d.name`,
+			)
+			.all();
+		const endpointsByKey = new Map(
+			this.ctx.db
+				.select()
+				.from(serviceEndpoints)
+				.where(eq(serviceEndpoints.serviceKind, 'database'))
+				.all()
+				.map((row) => [`${row.consumerNodeId}:${row.serviceId}:${row.role}`, row]),
+		);
+		const attachments = rows.map((row) => {
+			const container = row.runtime === 'container';
+			const info = databaseEngineRegistry[row.engine as keyof typeof databaseEngineRegistry];
+			const consumers = this.copyNodes(row.projectId).map((nodeId): AttachmentConsumerView => {
+				const primary = endpointsByKey.get(`${nodeId}:${row.databaseId}:primary`);
+				const sameNode = nodeId === row.databaseNodeId;
+				const base = { nodeId, node: this.nodeName(nodeId) };
+				if (this.projectGateway(row.projectId, nodeId) && primary)
+					return {
+						...base,
+						mode: 'gateway',
+						host: container ? databaseAlias(row.databaseId) : '127.0.0.1',
+						port: primary.localPort,
+						poolPort: endpointsByKey.get(`${nodeId}:${row.databaseId}:pool`)?.localPort ?? null,
+						readPort: endpointsByKey.get(`${nodeId}:${row.databaseId}:read`)?.localPort ?? null,
+						upstreamNode: this.nodeName(primary.upstreamNodeId),
+						version: primary.version,
+					};
+				if (sameNode)
+					return {
+						...base,
+						mode: 'direct',
+						host: container ? databaseAlias(row.databaseId) : '127.0.0.1',
+						port: container ? (info?.containerPort ?? row.hostPort) : row.hostPort,
+						poolPort: null,
+						readPort: null,
+						upstreamNode: this.nodeName(row.databaseNodeId),
+						version: null,
+					};
+				if (primary && !container)
+					return {
+						...base,
+						mode: 'endpoint',
+						host: '127.0.0.1',
+						port: primary.localPort,
+						poolPort: null,
+						readPort: null,
+						upstreamNode: this.nodeName(primary.upstreamNodeId),
+						version: primary.version,
+					};
+				return { ...base, mode: 'none', host: null, port: null, poolPort: null, readPort: null, upstreamNode: null, version: null };
+			});
+			return {
+				projectId: row.projectId,
+				project: row.slug,
+				runtime: row.runtime,
+				databaseId: row.databaseId,
+				database: row.database,
+				databaseNode: this.nodeName(row.databaseNodeId),
+				envPrefix: row.envPrefix,
+				gateway: this.marked(row.projectId),
+				consumers: consumers.map((consumer) => ({ ...consumer, databaseNode: this.nodeName(row.databaseNodeId) })),
+			};
+		});
+		return { attachments };
+	}
+
 	/** Whether a node gets H24's same-node, pooled and read endpoints. */
 	gatewayAt(nodeId: string): boolean {
 		if (!featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY')) return false;
 		const node = this.ctx.db.select({ capabilitiesJson: nodes.capabilitiesJson }).from(nodes).where(eq(nodes.id, nodeId)).get();
 		return node ? nodeHasCapability(node, ENDPOINTS_GATEWAY_CAPABILITY) : false;
+	}
+
+	/** Nodes that hold a copy of the project: its workload's node, spread copies and a copy mid-move. */
+	private copyNodes(projectId: string): string[] {
+		const rows = this.ctx.sqlite
+			.query<{ nodeId: string | null }, [string, string, string]>(
+				`SELECT w.node_id AS nodeId FROM workloads w WHERE w.project_id = ?
+				 UNION SELECT w.moving_from_node_id FROM workloads w WHERE w.project_id = ?
+				 UNION SELECT r.node_id FROM workload_replicas r JOIN workloads w ON w.id = r.workload_id WHERE w.project_id = ?`,
+			)
+			.all(projectId, projectId, projectId);
+		return [...new Set(rows.map((row) => row.nodeId).filter((nodeId): nodeId is string => Boolean(nodeId)))].sort();
+	}
+
+	private attachedDatabases(projectId: string): Array<{ id: string; name: string }> {
+		return this.ctx.db
+			.select({ id: databases.id, name: databases.name })
+			.from(databaseAttachments)
+			.innerJoin(databases, eq(databases.id, databaseAttachments.databaseId))
+			.where(and(eq(databaseAttachments.projectId, projectId), isNull(databases.deletedAt)))
+			.all();
+	}
+
+	private nodeName(nodeId: string): string {
+		return this.ctx.db.select({ name: nodes.name }).from(nodes).where(eq(nodes.id, nodeId)).get()?.name ?? nodeId;
+	}
+
+	private requireHa(principal: Principal): void {
+		if (!this.ctx.platformIam.allows(principal, 'platform:ha'))
+			throw new CoreError('forbidden', 'High availability is for platform operators and admins.', 403);
 	}
 
 	/** Live projects with a copy on a node: the workload's own node, a spread copy, or a copy mid-move. */
@@ -234,13 +531,12 @@ export class ServiceEndpointService {
 		projectId: string,
 		consumerNodeId: string,
 		gateway: boolean,
-		existingReadIds: ReadonlySet<string>,
 	): {
 		services: PlannedService[];
-		reads: Array<{ serviceId: string; upstreamNodeId: string; upstreamPort: number }>;
+		reads: Array<{ serviceId: string; upstreamNodeId: string; upstreamPort: number; upstreamsKey: string }>;
 	} {
 		const services: PlannedService[] = [];
-		const reads: Array<{ serviceId: string; upstreamNodeId: string; upstreamPort: number }> = [];
+		const reads: Array<{ serviceId: string; upstreamNodeId: string; upstreamPort: number; upstreamsKey: string }> = [];
 		const databasesOnProject = this.ctx.db
 			.select({
 				id: databases.id,
@@ -279,19 +575,26 @@ export class ServiceEndpointService {
 					upstreamNodeId: row.nodeId,
 					upstreamPort: row.poolerPort,
 				});
-			// A read endpoint follows every readable replica; one representative upstream allocates it.
-			// Once it exists it stays, pointing at the primary as a fallback when none serves reads.
+			// A read endpoint exists from the deploy (or attach) on, pointing at the primary until a
+			// replica serves reads, so adding, removing or promoting a replica changes no app's
+			// environment. It follows every readable replica; one representative upstream allocates
+			// it, and the set's key bumps its version when the set changes.
 			if (row.engine === 'postgres') {
 				const upstreams = this.ctx.databaseReplicas.readableUpstreamsFor(row.id);
-				if (upstreams.length > 0)
-					reads.push({
-						serviceId: row.id,
-						upstreamNodeId: upstreams[0]!.nodeId,
-						upstreamPort: upstreams[0]!.port,
-					});
-				else if (existingReadIds.has(row.id))
-					reads.push({ serviceId: row.id, upstreamNodeId: row.nodeId, upstreamPort: row.port });
+				const first = upstreams[0];
+				reads.push({
+					serviceId: row.id,
+					upstreamNodeId: first?.nodeId ?? row.nodeId,
+					upstreamPort: first?.port ?? row.port,
+					upstreamsKey: [...upstreams.map((item) => `${item.nodeId}:${item.port}`), `${row.nodeId}:${row.port}`].join(','),
+				});
 			}
+		}
+		// Without the gateway a same-node attachment connects directly (C2): no endpoint for it.
+		if (!gateway) {
+			const remote = services.filter((service) => service.upstreamNodeId !== consumerNodeId);
+			services.length = 0;
+			services.push(...remote);
 		}
 		const storageOnProject = this.ctx.db
 			.select({

@@ -281,8 +281,8 @@ describe('promotion changes no app environment and restarts none', () => {
 				},
 			],
 		});
-		// Capture after the replica exists: a read URL appearing is a deliberate restart (C7), and
-		// everything after it — the promotion — must change nothing.
+		// The read URL exists from the deploy on (review debt 2, item 8); everything after it — the
+		// replica, the promotion — must change nothing.
 		const beforeEnv = core.databases.consumerEnv(project.id, workerB.nodeId, 'container');
 		const beforeVersion = core.databases.consumerVersion(project.id, workerB.nodeId, 'container');
 		const beforeState = await core.nodes.desiredState(workerB.token);
@@ -348,9 +348,12 @@ describe('promotion changes no app environment and restarts none', () => {
 		expect(env.DATABASE_READ_URL).toContain(`@${databaseAlias(db.id)}:${read.localPort}/`);
 		expect(env.DATABASE_READ_URLS).toBe(env.DATABASE_READ_URL);
 		const state = await core.nodes.desiredState(workerC.token);
-		expect(state.readEndpoints).toHaveLength(1);
-		expect(state.readEndpoints![0]).toMatchObject({ localPort: read.localPort, gatewayAddress: CONTAINER_GATEWAY_ADDRESS });
-		expect(state.readEndpoints![0]!.upstreams.map((item) => item.nodeId)).toEqual(
+		// Other apps on worker-c have their own read endpoints from their first deploy (item 8 of
+		// review debt 2): look at this database's.
+		const ours = (state.readEndpoints ?? []).filter((item) => item.serviceId === db.id);
+		expect(ours).toHaveLength(1);
+		expect(ours[0]).toMatchObject({ localPort: read.localPort, gatewayAddress: CONTAINER_GATEWAY_ADDRESS });
+		expect(ours[0]!.upstreams.map((item) => item.nodeId)).toEqual(
 			expect.arrayContaining([workerA.nodeId, data.nodeId]),
 		);
 

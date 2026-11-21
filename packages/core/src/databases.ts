@@ -29,7 +29,6 @@ import {
 	DATABASE_POOLER_PORT_MIN,
 	databaseAlias,
 	CONTAINER_GATEWAY_ADDRESS,
-	ENDPOINTS_GATEWAY_CAPABILITY,
 	type ContainerAddHost,
 	databaseAttachSchema,
 	databaseBackupCreateSchema,
@@ -2874,6 +2873,9 @@ export class DatabaseService {
 		const credential = input.credential ? this.attachableCredential(row, input.credential) : null;
 
 		this.insertAttachment(principal, row.id, project, envPrefix, credential?.id);
+		// Running copies get the endpoint now rather than on the next deploy (a container on another
+		// node would otherwise have no URL until then).
+		this.ctx.endpoints.attached(project.id);
 		this.ctx.audit.record({
 			principal,
 			action: 'database.attach',
@@ -3712,7 +3714,9 @@ export class DatabaseService {
 
 	private resolveForConsumer(projectId: string, nodeId: string | null, runtime: WorkloadRuntime): ResolvedAttachment[] {
 		if (!nodeId) return [];
-		const gateway = this.gatewayAt(nodeId);
+		// Per project: only an app whose own deploy, attach or migration chose the gateway uses it,
+		// so the flag or a neighbour never moves it (HA-PLAN §9).
+		const gateway = this.ctx.endpoints.projectGateway(projectId, nodeId);
 		return this.liveAttachmentRows(projectId).flatMap(({ db, prefix, credential }): ResolvedAttachment[] => {
 			const info = databaseEngineRegistry[db.engine];
 			// A named credential keeps its last confirmed secret while a rotation is in flight; one
@@ -3791,24 +3795,12 @@ export class DatabaseService {
 		);
 	}
 
-	/** Whether this node gets H24's endpoints: the flag is on and its agent advertises the capability. */
-	private gatewayAt(nodeId: string): boolean {
-		if (!featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY')) return false;
-		if (!featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS')) return false;
-		const row = this.ctx.db
-			.select({ capabilitiesJson: nodes.capabilitiesJson })
-			.from(nodes)
-			.where(eq(nodes.id, nodeId))
-			.get();
-		return row ? nodeHasCapability(row, ENDPOINTS_GATEWAY_CAPABILITY) : false;
-	}
-
 	/**
 	 * `AddHost=db-<id>:<gateway>` for a container app on this node (H24). One entry per attached
 	 * database, whatever node it runs on; the helper writes the Quadlet lines itself.
 	 */
 	containerAddHosts(projectId: string, nodeId: string): ContainerAddHost[] {
-		if (!this.gatewayAt(nodeId)) return [];
+		if (!this.ctx.endpoints.projectGateway(projectId, nodeId)) return [];
 		const attached = new Set(
 			this.ctx.db
 				.select({ id: databases.id })
