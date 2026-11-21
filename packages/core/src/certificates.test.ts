@@ -1,4 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test';
+import { X509Certificate } from 'node:crypto';
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -342,11 +343,11 @@ describe('bring your own certificate', () => {
 		expect(sweep.alerts.map((alert) => alert.key)).toEqual([expect.stringMatching(key(30))]);
 		expect(sweep.alerts[0]!.severity).toBe('warning');
 
-		f.setClock(clockStart + 12 * 86_400_000);
+		f.setClock(base + 12 * 86_400_000);
 		sweep = f.core.certificates.sweep();
 		expect(sweep.alerts.map((alert) => alert.key)).toEqual([expect.stringMatching(key(14))]);
 
-		f.setClock(clockStart + 23 * 86_400_000);
+		f.setClock(base + 23 * 86_400_000);
 		sweep = f.core.certificates.sweep();
 		expect(sweep.alerts.map((alert) => alert.key)).toEqual([expect.stringMatching(key(3))]);
 		expect(sweep.alerts[0]!.severity).toBe('critical');
