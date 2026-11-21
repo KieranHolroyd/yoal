@@ -12,7 +12,7 @@ Most of these commands need a **platform admin**, an install-wide role separate 
 | Commands | Who can run them |
 | --- | --- |
 | `ha status`, `ha preflight`, `ha init` (until it applies), `ha drill`, `doctor`, `ha attachments`, `ha migrate attachments` (without `--apply`), `ha ca`, `fleet status`, `fleet links`, `fleet rebalance` (preview), `nodes rollout plan`, `status` and `list`, `upgrade plan` | A platform admin, with any credential, including the API key the CLI uses. |
-| `ha init` when it applies, `ha migrate attachments --apply`, `ha ca rotate`, `fleet rebalance --apply`, `fleet link-test`, `nodes update`, `nodes rollout start`, `resume` and `cancel` | A platform admin signed in to the dashboard. By default an API key gets `403` for these, even a platform admin's; make the change from the dashboard instead. |
+| `ha init` when it applies, `ha migrate attachments --apply`, `ha ca rotate`, `fleet rebalance --apply`, `fleet link-test`, `nodes enrol`, `nodes update`, `nodes rollout start`, `resume` and `cancel` | A platform admin signed in to the dashboard. By default an API key gets `403` for these, even a platform admin's; make the change from the dashboard instead. |
 | `fleet move` | Anyone with `project:update` on the project. `--status` needs read access to the project. |
 | `upgrade apply`, `upgrade rollback` | Root on the Yoal host. No API credential can do this. |
 
@@ -277,14 +277,26 @@ yoal fleet link-test --from edge --to edge-b --seconds 10
 ## nodes
 
 ```sh
-yoal nodes <update|rollout> [options]
+yoal nodes <enrol|update|rollout> [options]
 ```
 
-Updates worker nodes to the control plane's own version, one at a time or across the fleet in waves. A node never downgrades. The control-plane host itself is upgraded with [`upgrade`](#upgrade). See [worker nodes](/self-hosting/upgrades#worker-nodes).
+`nodes enrol` creates a join token for a new machine. The other actions update worker nodes to the control plane's own version, one at a time or across the fleet in waves. A node never downgrades. The control-plane host itself is upgraded with [`upgrade`](#upgrade). See [worker nodes](/self-hosting/upgrades#worker-nodes).
 
 Aliases: `node`. `rollouts` is accepted for `rollout`.
 
 Wherever a node is named, you can use its id or its name; a name shared by several nodes is an error that lists their ids.
+
+### nodes enrol
+
+```sh
+yoal nodes enrol [--name <name>] [--roles <role,...>] [--json]
+```
+
+Creates a single-use join token that expires after an hour, and prints the `node.sh` line to run on the new machine. `--roles` lists the roles a join with this token may take: `ingress`, `control`, `compute`, `data`, `build`. The join can ask for some or all of them, never more; a join that asks for more is refused and the token stays unused. A token without `--roles` allows none, and the node joins as `compute` and `data`. An ingress receives the shared certificate and session secrets, so a token that allows `ingress` deserves the same care as those secrets.
+
+```sh
+yoal nodes enrol --name node-b --roles ingress,compute,data,control
+```
 
 ### nodes update
 

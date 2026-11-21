@@ -422,7 +422,12 @@ describe('join with --zone and --roles (node.sh, HA-PLAN §8 step 2)', () => {
 	test('the zone and roles land on the node; a zone other nodes use keeps their region; bad values are refused', async () => {
 		const { core, sqlite, ids } = await fleet('ha');
 		sqlite.run("UPDATE nodes SET region = 'ukwest' WHERE id = ?", [ids.a3!]);
-		const joined = core.nodes.join({ token: core.nodes.createJoinToken(admin, 'b1').token, name: 'b1', zone: 'uksouth-3', roles: ['ingress', 'compute'] });
+		const joined = core.nodes.join({
+			token: core.nodes.createJoinToken(admin, 'b1', { roles: ['ingress', 'compute'] }).token,
+			name: 'b1',
+			zone: 'uksouth-3',
+			roles: ['ingress', 'compute'],
+		});
 		const row = sqlite.query<{ zone: string; region: string; roles_json: string }, [string]>('SELECT zone, region, roles_json FROM nodes WHERE id = ?').get(joined.nodeId);
 		expect(row).toEqual({ zone: 'uksouth-3', region: 'ukwest', roles_json: '["ingress","compute"]' });
 		const plain = core.nodes.join({ token: core.nodes.createJoinToken(admin, 'b2').token, name: 'b2' });
@@ -432,5 +437,21 @@ describe('join with --zone and --roles (node.sh, HA-PLAN §8 step 2)', () => {
 		});
 		expect(() => core.nodes.join({ token: core.nodes.createJoinToken(admin, 'b3').token, name: 'b3', zone: 'has space' })).toThrow(/Invalid zone/);
 		expect(() => core.nodes.join({ token: core.nodes.createJoinToken(admin, 'b4').token, name: 'b4', roles: ['router' as never] })).toThrow(/Invalid roles/);
+	});
+
+	test('a join token carries the roles it allows: a join may take a subset, never more, and a token without roles allows none', async () => {
+		const { core, sqlite } = await fleet('ha');
+		const rolesOf = (id: string) => sqlite.query<{ roles_json: string | null }, [string]>('SELECT roles_json FROM nodes WHERE id = ?').get(id)?.roles_json;
+		// A token made without roles: asking for ingress (which would hand over the wildcard key) is refused.
+		const bare = core.nodes.createJoinToken(admin, 'c1');
+		expect(() => core.nodes.join({ token: bare.token, name: 'c1', roles: ['ingress'] })).toThrow(/allows no roles.*ingress/);
+		// The refusal does not spend the token: it still joins with today's defaults.
+		expect(rolesOf(core.nodes.join({ token: bare.token, name: 'c1' }).nodeId)).toBeNull();
+		// A token for compute and data cannot be used to become an ingress.
+		const worker = core.nodes.createJoinToken(admin, 'c2', { roles: ['compute', 'data'] });
+		expect(() => core.nodes.join({ token: worker.token, name: 'c2', roles: ['compute', 'ingress'] })).toThrow(/does not allow ingress/);
+		expect(rolesOf(core.nodes.join({ token: worker.token, name: 'c2', roles: ['data'] }).nodeId)).toBe('["data"]');
+		expect(() => core.nodes.createJoinToken(admin, 'c3', { roles: ['router' as never] })).toThrow(/Invalid roles/);
+		expect(sqlite.query<{ roles_json: string | null }, []>("SELECT roles_json FROM node_join_tokens WHERE node_name = 'c2'").get()?.roles_json).toBe('["compute","data"]');
 	});
 });

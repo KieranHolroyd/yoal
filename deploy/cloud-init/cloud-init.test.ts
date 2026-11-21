@@ -190,6 +190,8 @@ describe('cloud-init templates', () => {
 		expect(first).toContain('TODO(terraform): --object-store azure://');
 		expect(parse('join').script).toContain('| sh /root/yoal-node.sh "$@"');
 		expect(parse('join').script).not.toContain('--token "$JOIN_TOKEN"');
+		// A token must allow the roles the join asks for, so the README creates them with roles.
+		expect(read('../README.md')).toContain('yoal nodes enrol --name node-b --roles ');
 	});
 
 	test('the flag scanner sees flags on lines that run the installer, not only set -- lines', () => {

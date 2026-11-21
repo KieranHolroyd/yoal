@@ -193,3 +193,17 @@ describe('the ha init, preflight, drill and doctor dispatchers', () => {
 		expect(lines.join('\n')).toBe(doctorUsage);
 	});
 });
+
+describe('yoal nodes enrol', () => {
+	test('validates --roles before it needs a login, and renders the join line with the roles the token allows', async () => {
+		const { nodesCommand, enrolCommandLine } = await import('./commands/nodes.ts');
+		await expect(nodesCommand(['enrol', '--roles', 'ingress,router'])).rejects.toThrow(/--roles/);
+		await expect(nodesCommand(['enrol', 'extra'])).rejects.toThrow(/Usage: yoal nodes enrol/);
+		expect(enrolCommandLine('https://control.example.com', 'node-b', ['ingress', 'compute'])).toBe(
+			'curl -fsSL https://control.example.com/install/node.sh -o node.sh && sudo sh node.sh --token-file <file> --name node-b --roles ingress,compute',
+		);
+		expect(enrolCommandLine('https://control.example.com', null, [])).toBe(
+			'curl -fsSL https://control.example.com/install/node.sh -o node.sh && sudo sh node.sh --token-file <file> --name <name>',
+		);
+	});
+});

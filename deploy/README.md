@@ -74,20 +74,25 @@ terraform apply                       # 1. network, balancer, bucket, Key Vault,
      -d '{"endpoint":"10.40.1.10"}'   # node-a's private_ip
    ```
    This needs a platform admin key, which exists only after setup, so cloud-init cannot do it.
-7. **Join tokens**, one per node, within the hour before the next step:
+7. **Join tokens**, one per node, within the hour before the next step. A token carries the roles
+   its join may take: the join template passes each node's `roles`, and a join that asks for a role
+   its token does not allow is refused (so a leaked token cannot make a machine an ingress). Creating
+   a token needs a platform admin's dashboard session (by default an API key gets 403), or use
+   **Nodes → Add node** and tick the roles:
    ```sh
-   for n in node-b node-c node-d; do
-     curl -sS -X POST "https://control.example.org/api/v1/nodes/join-token" \
-       -H "Authorization: Bearer $YOAL_KEY" -H 'Content-Type: application/json' -d "{\"name\":\"$n\"}"
-   done
+   yoal nodes enrol --name node-b --roles ingress,compute,data,control --json
+   yoal nodes enrol --name node-c --roles ingress,compute,data --json
+   # or: curl -sS -X POST "https://control.example.org/api/v1/nodes/join-token" \
+   #   -H "Authorization: Bearer $YOAL_KEY" -H 'Content-Type: application/json' \
+   #   -d '{"name":"node-b","roles":["ingress","compute","data","control"]}'
    ```
    Put them in `join_tokens = { node-b = "…", … }` in a git-ignored `tokens.auto.tfvars`, then
    `terraform apply -var create_join_nodes=true`. A node without a token boots and prints the
    `node.sh` line to run by hand. Each joining machine pins the platform host to node-a's
    private address in `/etc/hosts` for the join only, and removes the pin afterwards.
-8. **Zones and roles.** Set each node's zone and roles under **Nodes → Edit node**, or with
-   `PATCH /api/v1/nodes/<id>` and `{"zone":"uksouth-2","roles":["ingress","compute","data"]}`
-   (the outputs and `/var/log/yoal-provision.log` name the intended ones). Then `yoal ha status`.
+8. **Zones and roles** are set at the join from each node's `zone` and `roles` (first machine: its
+   `zone`; it holds every role). Change them later under **Nodes → Edit node**, or with
+   `PATCH /api/v1/nodes/<id>`. Then `yoal ha status`.
 9. **Platform store (optional).** `terraform output platform_store_env` gives the non-secret lines
    for `/etc/yoal/yoal.env`; add `YOAL_AZURE_SAS_TOKEN` (or `YOAL_AZURE_ACCOUNT_KEY`) yourself and
    restart `yoal-control-plane`. AWS: the same with the `R2_*` keys and an IAM user's key.

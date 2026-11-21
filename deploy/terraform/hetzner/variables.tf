@@ -178,8 +178,9 @@ variable "create_join_nodes" {
 
 variable "join_tokens" {
   description = <<-EOT
-    One single-use join token per joining node, keyed by node name, from Nodes > Enroll node or
-    POST /api/v1/nodes/join-token. Tokens expire after an hour and are consumed on use. A node
+    One single-use join token per joining node, keyed by node name, from `yoal nodes enrol --roles`,
+    Nodes > Enroll node or POST /api/v1/nodes/join-token. The token must allow the node's roles, or
+    its join is refused. Tokens expire after an hour and are consumed on use. A node
     without a token boots and prints the join command instead.
   EOT
   type        = map(string)

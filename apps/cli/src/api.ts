@@ -747,6 +747,12 @@ export class ApiClient {
 	// ---------------------------------------------------------------- fleet node updates (D217)
 
 	/** Enrolled nodes (platform admin): id, name, agent version and status. */
+	/** A single-use join token; `roles` are the roles a join with it may request (HA Wave 5). */
+	async createJoinToken(input: { name?: string; roles?: string[] }): Promise<{ token: string; expiresAt: string; roles: string[] }> {
+		const raw = (await this.request('POST', '/api/v1/nodes/join-token', { body: input })) as { token: string; expiresAt: string; roles?: string[] };
+		return { token: raw.token, expiresAt: raw.expiresAt, roles: raw.roles ?? [] };
+	}
+
 	async listNodes(): Promise<{ nodes: NodeSummary[]; raw: unknown }> {
 		const raw = await this.request('GET', '/api/v1/nodes');
 		const record = asRecord(unwrap(raw)) ?? {};

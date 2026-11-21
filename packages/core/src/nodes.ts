@@ -371,8 +371,16 @@ export class NodeService {
 	}
 
 	/** Single-use join token, valid for one hour. Returned in clear exactly once. */
-	createJoinToken(principal: Principal, nodeName?: string): { token: string; expiresAt: string } {
+	/**
+	 * `roles` are the roles a join with this token may ask for (HA Wave 5): `node.sh --roles` may
+	 * request a subset and is refused for more. Without them the token allows none and the node joins
+	 * with the defaults its mode implies, so a leaked token cannot make a node an ingress.
+	 */
+	createJoinToken(principal: Principal, nodeName?: string, options: { roles?: NodeRole[] } = {}): { token: string; expiresAt: string; roles: NodeRole[] } {
 		this.assertPlatformAdmin(principal);
+		const roles = options.roles === undefined ? [] : [...new Set(options.roles)];
+		if (roles.some((role) => !nodeRoleSchema.safeParse(role).success))
+			throw new ValidationError('Invalid roles: use ingress, control, compute, data or build.');
 		const token = randomToken(32);
 		const now = this.ctx.now();
 		const expiresAt = now + JOIN_TTL_MS;
@@ -385,16 +393,17 @@ export class NodeService {
 				createdBy: principal.userId,
 				expiresAt,
 				createdAt: now,
+				rolesJson: roles.length > 0 ? JSON.stringify(roles) : null,
 			})
 			.run();
 		this.ctx.audit.record({
 			principal,
 			action: 'node.join_token',
 			resource: 'node',
-			args: { nodeName },
+			args: { nodeName, ...(roles.length > 0 ? { roles } : {}) },
 			result: 'ok',
 		});
-		return { token, expiresAt: new Date(expiresAt).toISOString() };
+		return { token, expiresAt: new Date(expiresAt).toISOString(), roles };
 	}
 
 	/**
@@ -423,12 +432,25 @@ export class NodeService {
 		assertJoinTokenUnused(this.ctx, input);
 		const tokenHash = sha256Hex(input.token);
 		const join = this.ctx.sqlite
-			.query<{ id: string; expiresAt: number; usedAt: number | null }, [string]>(
-				'SELECT id, expires_at AS expiresAt, used_at AS usedAt FROM node_join_tokens WHERE token_hash = ?',
+			.query<{ id: string; expiresAt: number; usedAt: number | null; rolesJson: string | null }, [string]>(
+				'SELECT id, expires_at AS expiresAt, used_at AS usedAt, roles_json AS rolesJson FROM node_join_tokens WHERE token_hash = ?',
 			)
 			.get(tokenHash);
 		if (!join || join.usedAt || join.expiresAt < this.ctx.now())
 			throw new UnauthorizedError('Invalid or expired join token.');
+		// The token says which roles a join may take; asking for more is refused before anything is spent.
+		if (input.roles !== undefined && input.roles.every((role) => nodeRoleSchema.safeParse(role).success)) {
+			const allowed = parseJson<string[]>(join.rolesJson, []);
+			const extra = [...new Set(input.roles)].filter((role) => !allowed.includes(role));
+			if (extra.length > 0)
+				throw new CoreError(
+					'forbidden',
+					allowed.length === 0
+						? `This join token allows no roles, so it cannot request ${extra.join(', ')}. Create one that does: yoal nodes enrol --roles ${input.roles.join(',')}.`
+						: `This join token allows ${allowed.join(', ')}; it does not allow ${extra.join(', ')}. Create one that does: yoal nodes enrol --roles ${input.roles.join(',')}.`,
+					403,
+				);
+		}
 		const edgeCount = this.ctx.sqlite.query<{ n: number }, []>("SELECT count(*) AS n FROM nodes WHERE mode = 'edge'").get();
 		const mode: 'edge' | 'worker' = (edgeCount?.n ?? 0) === 0 ? 'edge' : 'worker';
 		const nodeId = newId('nod_');

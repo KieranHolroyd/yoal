@@ -24,10 +24,12 @@ Roles are set per node on the **Nodes** page (**Edit node**). You cannot remove 
 Adding a node takes three steps: generate a join token, run one command on the new machine, and wait for the node to appear.
 
 1. Install the signed Yoal release bundle (`yoal-agent` and `yoal-helper`) on the new machine. See [installation](/self-hosting/installation).
-2. In the dashboard, go to **Nodes → Add node**. Choose a network (below) and select **Generate join command**.
+2. In the dashboard, go to **Nodes → Add node**. Choose a network (below), tick the roles the node may take, and select **Generate join command**. Or run [`yoal nodes enrol`](/cli/platform#nodes-enrol) from a dashboard session.
 3. Run the command on the new machine as root. The node appears on the **Nodes** page after its first heartbeat, usually within seconds.
 
 A join token is single-use and expires one hour after you create it. Only a platform admin can create one, from their dashboard session.
+
+A token also says which roles its join may take. `--roles` on the join command can ask for those or fewer; asking for more is refused, and the token stays unused. A token created with no roles ticked allows none, and the node joins as `compute` and `data`. An ingress receives the shared certificate and session secrets, so only allow `ingress` for a machine you trust with them.
 
 A join token works once. Using it a second time is refused with a message that names the node the first join created. This happens even when the first attempt failed after the control plane accepted it. To try again, create a new join token. If that node never sent a heartbeat, remove it on the **Nodes** page first. The node's own credentials don't change, so a copied or leaked token can't take over a node. A join is also refused if another node already holds its WireGuard key, and that message names the node. The token is not used up in that case. To join that machine again, first remove the node on the **Nodes** page.
 
@@ -72,7 +74,7 @@ sudo sh node.sh --token-file /root/join-token --name node-b --zone uksouth-2 --r
 | `--name <name>` | The node's name. |
 | `--endpoint <host[:port]>` | The address other nodes dial for WireGuard. Default: the machine's IPv4, port 51820. |
 | `--zone <zone>` | The node's zone: lowercase letters, digits and single hyphens. Default `default`. |
-| `--roles <list>` | Comma-separated: `ingress`, `compute`, `data`, `control`, `build`. Default `compute,data`. |
+| `--roles <list>` | Comma-separated: `ingress`, `compute`, `data`, `control`, `build`. Only roles the token allows. Default `compute,data`. |
 
 The script checks that it runs as root and that `yoal-agent` is installed, starts `yoal-helper`, exchanges the token for the node's identity, writes `/etc/yoal/agent.env` (mode `0600`, keeping a timestamped backup of any earlier file), and enables `yoal-agent`. A rerun repairs the environment file rather than destroying it. The script needs systemd.
 

@@ -619,6 +619,22 @@
 			</div>
 		</Field.Field>
 
+		<Field.Field>
+			<Field.Label>Roles the node may take</Field.Label>
+			<div class="flex flex-wrap gap-x-4 gap-y-2">
+				{#each ['ingress', 'control', 'compute', 'data', 'build'] as role (role)}
+					<label class="flex items-center gap-2 text-sm">
+						<input type="checkbox" name="roles" value={role} class="size-4 accent-brand" />
+						<span>{role}</span>
+					</label>
+				{/each}
+			</div>
+			<p class="text-xs text-muted-foreground">
+				The join command can ask for these and no others. With none ticked the node joins as compute and data. An
+				ingress gets the shared certificate and session secrets, so only tick it for a machine you trust with them.
+			</p>
+		</Field.Field>
+
 		<ol class="space-y-3 text-sm">
 			{#each ['Generate a join command. It works once and expires after one hour.', 'Run it on the new machine, where yoal-agent is installed. It registers the agent with this control plane.', 'The node appears on this page after its first heartbeat, usually within seconds.'] as step, i (i)}
 				<li class="flex gap-3">
