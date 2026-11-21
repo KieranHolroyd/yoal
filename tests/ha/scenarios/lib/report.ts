@@ -40,6 +40,26 @@ export function worst(verdicts: Verdict[]): Verdict {
 	return verdicts.reduce<Verdict>((acc, verdict) => (SEVERITY[verdict] > SEVERITY[acc] ? verdict : acc), 'pass');
 }
 
+/**
+ * A scenario's overall verdict (`Scenario.finish`): an early stop's verdict and reason, unless a
+ * check already failed (a later skip or invalid never hides a failure; a harness error stays an
+ * error); else the worst check's, with the reasons of every check at that verdict; no checks at
+ * all is an error.
+ */
+export function decideVerdict(checks: Check[], stopped: { verdict: Verdict; reason: string } | null): { verdict: Verdict; reason: string | null } {
+	if (stopped) {
+		if (stopped.verdict !== 'error' && worst(checks.map((check) => check.verdict)) === 'fail')
+			return { verdict: 'fail', reason: `${checks.filter((check) => check.verdict === 'fail').map((check) => `${check.name}: ${check.reason}`).join('; ')} (then: ${stopped.reason})` };
+		return { verdict: stopped.verdict, reason: stopped.reason };
+	}
+	if (checks.length === 0) return { verdict: 'error', reason: 'the scenario judged nothing' };
+	const verdict = worst(checks.map((check) => check.verdict));
+	return {
+		verdict,
+		reason: verdict === 'pass' ? null : checks.filter((check) => check.verdict === verdict).map((check) => `${check.name}: ${check.reason}`).join('; '),
+	};
+}
+
 /** `--accept invalid,skip` → the verdicts that exit 0. */
 export function parseAccept(value: string | undefined): Set<Verdict> {
 	const out = new Set<Verdict>(['pass']);

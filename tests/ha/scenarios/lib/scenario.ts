@@ -11,7 +11,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import { Observer } from '../../../lab/lib/api.ts';
-import { exitCodeFor, parseAccept, readCheckerReport, worst, writeScenarioReport, type Check, type ScenarioReport, type Verdict } from './report.ts';
+import { decideVerdict, exitCodeFor, parseAccept, readCheckerReport, writeScenarioReport, type Check, type ScenarioReport, type Verdict } from './report.ts';
 
 export const REPO = resolve(import.meta.dir, '../../../..');
 
@@ -199,33 +199,10 @@ export class Scenario {
 		process.exit(code);
 	}
 
-	/** Overall verdict: an early stop's, else the worst check's (no checks at all is an error). */
+	/** Overall verdict: lib/report.ts decideVerdict (tested there). */
 	private finish(stoppedVerdict: Verdict | null, stoppedReason: string | null): number {
 		this.report.checker = readCheckerReport(this.checkerReportPath);
-		let verdict: Verdict;
-		let reason: string | null;
-		if (stoppedVerdict) {
-			verdict = stoppedVerdict;
-			reason = stoppedReason;
-			// A sub-check that already failed outranks a later invalid or skip.
-			const judged = worst(this.report.checks.map((check) => check.verdict));
-			if (verdict !== 'error' && judged === 'fail') {
-				verdict = 'fail';
-				reason = `${this.report.checks.filter((check) => check.verdict === 'fail').map((check) => `${check.name}: ${check.reason}`).join('; ')} (then: ${stoppedReason})`;
-			}
-		} else if (this.report.checks.length === 0) {
-			verdict = 'error';
-			reason = 'the scenario judged nothing';
-		} else {
-			verdict = worst(this.report.checks.map((check) => check.verdict));
-			reason =
-				verdict === 'pass'
-					? null
-					: this.report.checks
-							.filter((check) => check.verdict === verdict)
-							.map((check) => `${check.name}: ${check.reason}`)
-							.join('; ');
-		}
+		const { verdict, reason } = decideVerdict(this.report.checks, stoppedVerdict ? { verdict: stoppedVerdict, reason: stoppedReason ?? '' } : null);
 		this.report.verdict = verdict;
 		this.report.reason = reason;
 		this.report.endedAt = new Date().toISOString();

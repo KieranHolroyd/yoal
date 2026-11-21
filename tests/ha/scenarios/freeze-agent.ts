@@ -16,12 +16,15 @@
  *   traffic-before      both copies served before the freeze (else invalid)
  *   copy-kept-serving   the frozen node's copy answered every `/healthz?db=1` probe during the
  *                       freeze (so it still reached its database, through the node's endpoint
- *                       forwarder when the database is elsewhere)
+ *                       forwarder when the database is elsewhere). The probe goes to the copy
+ *                       itself, at the address the edge dials (lib/ingress.ts CopyBalancer.probe),
+ *                       never through the edge's least_conn, which picks another copy half the time
  *   no-restart          the copy's unit kept its invocation (it was not restarted, before or after thaw)
  *   no-replacement      no copy was re-placed (the freeze is shorter than the failover grace)
  *   agent-recovers      the node is reported online again within 60 s of the thaw
- *   checker             no invariant failed
- *   no-failed-requests  edge target only, as kill-node
+ *   checker             no invariant failed and I6 passed (a run with no surviving write is not evidence)
+ *   no-failed-requests  zero failed requests, on either target (on `direct` through the harness
+ *                       balancer: a frozen agent loses no copy, so nothing excuses a failure)
  */
 import { parseArgs } from 'node:util';
 import { CONTROL, LAB, labNode } from '../../lab/lab.config.ts';
@@ -30,6 +33,7 @@ import { copies, deployChecker, describeCopies, unitInfo, type Copy } from './li
 import { startChecker } from './lib/checker.ts';
 import { Faults } from './lib/faults.ts';
 import { EDGE_BYPASSED_NOTE, formatShare, openTarget, parseTarget, shareUntil } from './lib/ingress.ts';
+import { checkerVerdict, failedRequestsVerdict } from './lib/judge.ts';
 import { readCheckerReport } from './lib/report.ts';
 import { COMMON_OPTIONS, Scenario, positiveInt, waitFor } from './lib/scenario.ts';
 
@@ -97,6 +101,10 @@ await scenario.run(async (s) => {
 		);
 	}
 	s.check('traffic-before', 'pass', null, { share: shareBefore });
+	// Probe the frozen node's copy itself: through the edge, least_conn sends a probe to the other
+	// copy about half the time, and six misses in a row read as "not serving".
+	const prober = target === 'direct' ? route : await openTarget('direct', deployed.host, fleet, deployed.copies.map((copy) => copy.nodeName));
+	if (prober !== route) s.onCleanup('close copy prober', () => prober.stop());
 
 	s.say(`checker ${durationS} s; freeze yoal-agent on ${node} at +${freezeAfterS} s for ${freezeS} s`);
 	const checker = startChecker(s, route, { durationS, rate: Number(flags.rate), seed: Number(flags.seed), cli: flags.checker });
@@ -117,7 +125,7 @@ await scenario.run(async (s) => {
 		if (phase === 'after' && freeze.revertedAt === null) faults.expired(freeze, thawAt);
 		// /healthz?db=1: the copy must reach its database too (through the node's endpoint, when the
 		// database is on another node), not only answer.
-		if ((await route.answers(node, '/healthz?db=1')) === true) probes[phase].answered++;
+		if ((await prober.answers(node, '/healthz?db=1')) === true) probes[phase].answered++;
 		else probes[phase].failed++;
 		if (now - lastFleet > 3000) {
 			lastFleet = now;
@@ -188,9 +196,10 @@ await scenario.run(async (s) => {
 		{ offlineAfterMs: offline, onlineAgainAfterThawMs: recoveredMs },
 	);
 	const report = readCheckerReport(s.checkerReportPath);
-	if (!report) s.check('checker', 'error', `no checker report (exit ${checkerExit})`);
-	else s.check('checker', report.failedInvariants.length ? 'fail' : 'pass', report.failedInvariants.length ? `invariants failed: ${report.failedInvariants.join(', ')}` : null, { exit: checkerExit });
-	if (report && target === 'edge')
-		s.check('no-failed-requests', report.failedRequests === 0 ? 'pass' : 'fail', report.failedRequests ? `${report.failedRequests} of ${report.requests} requests failed` : null, { failedByStatus: report.failedByStatus });
-	else if (report) s.measure('failedRequests (not judged: harness balancer)', { failed: report.failedRequests, byStatus: report.failedByStatus });
+	const verdict = checkerVerdict(report, checkerExit);
+	s.check('checker', verdict.verdict, verdict.reason, verdict.values);
+	if (report) {
+		const failed = failedRequestsVerdict(target, report);
+		s.check('no-failed-requests', failed.verdict, failed.reason, failed.values);
+	}
 });

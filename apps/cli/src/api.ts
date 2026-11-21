@@ -87,7 +87,7 @@ import type { BlueprintPlanView, BlueprintRunView, BlueprintValidation } from '.
 import type { ConfigExportDocument } from './config-export.ts';
 import type { ImportView } from './config-import.ts';
 import type { OperationItemView, OperationView } from './operations.ts';
-import type { HaStatusView } from './ha.ts';
+import type { AttachmentMigrationView, AttachmentsView, HaStatusView, NodeCaStatusView } from './ha.ts';
 import type { DrillListView, DrillView } from './drills.ts';
 import type { FleetLinksView, FleetRebalanceResult, FleetStatusView, RelocationStatusView } from './fleet.ts';
 import type { NodeSummary, RolloutCreateInput, RolloutOptions, RolloutPlanView, RolloutView } from './node-rollouts.ts';
@@ -555,6 +555,32 @@ export class ApiClient {
 	async getHaStatus(): Promise<{ status: HaStatusView; raw: unknown }> {
 		const raw = await this.request('GET', '/api/v1/ha/status');
 		return { status: raw as HaStatusView, raw };
+	}
+
+	/** Every database attachment and how each copy reaches it (H24): endpoint, port and node. */
+	async getAttachments(): Promise<{ view: AttachmentsView; raw: unknown }> {
+		const raw = await this.request('GET', '/api/v1/ha/attachments');
+		return { view: raw as AttachmentsView, raw };
+	}
+
+	/** `yoal ha migrate attachments`: a dry run unless `apply`. */
+	async migrateAttachments(input: { apply: boolean; projects?: string[] }): Promise<{ view: AttachmentMigrationView; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/ha/attachments/migrate', {
+			body: { apply: input.apply, ...(input.projects?.length ? { projects: input.projects } : {}) },
+		});
+		return { view: raw as AttachmentMigrationView, raw };
+	}
+
+	/** The install CA: the CAs nodes trust and the leaves they hold. */
+	async getNodeCa(): Promise<{ view: NodeCaStatusView; raw: unknown }> {
+		const raw = await this.request('GET', '/api/v1/ha/ca');
+		return { view: raw as NodeCaStatusView, raw };
+	}
+
+	/** Rotate the install CA (platform admin); the old one stays trusted while nodes renew. */
+	async rotateNodeCa(): Promise<{ view: NodeCaStatusView; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/ha/ca/rotate', { body: {} });
+		return { view: raw as NodeCaStatusView, raw };
 	}
 
 	/** Node offline drills (D235): the running drill, recent ones and which nodes may be drilled. */

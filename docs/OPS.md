@@ -208,7 +208,7 @@ the default below (on). Set `0` to turn a feature off, then restart
 | `YOAL_FEATURE_SERVICE_ENDPOINTS` | **on** | networking | Cross-node database attachments through consumer loopback endpoints (CLUSTERING.md C2). |
 | `YOAL_FEATURE_MULTI_NODE_REPLICAS` | **on** | workloads | Spread HTTP workload replicas across nodes behind a load-balanced route (CLUSTERING.md C4). |
 | `YOAL_FEATURE_DB_AUTO_PROMOTE` | off | databases | Let the failover controller (with `failover.enabled`) promote a Postgres read replica when its primary's node goes silent (CLUSTERING.md §9.3). Opt-in, and ignored with a startup warning until database self-fencing (HA-PLAN H22) is active, which it is not yet: setting it today changes nothing. |
-| `YOAL_FEATURE_ENDPOINTS_GATEWAY` | off | networking | HA Wave 1 (HA-PLAN H24): every attachment through a loopback endpoint, containers included (forwarder on the container gateway, `AddHost=db-<id>`), pooled and read endpoints, per-install CA. Built in Wave 1 lane B and rendered only to nodes that advertise `endpoints-gateway`; with the flag off, or on a node without the capability, every desired-state field is today's. The lab scenario is the gate before it ships on. |
+| `YOAL_FEATURE_ENDPOINTS_GATEWAY` | off | networking | HA Wave 1 (HA-PLAN H24): every attachment through a loopback endpoint, containers included (forwarder on the container gateway, `AddHost=db-<id>`), pooled and read endpoints, per-install CA. Built in Wave 1 lane B and rendered only to nodes that advertise `endpoints-gateway`; with the flag off, or on a node without the capability, every desired-state field is today's. The lab scenario is the gate before it ships on. Turning it on moves no running app: each moves on its own next deploy, or all at once with `yoal ha migrate attachments` (§3.10). |
 | `YOAL_FEATURE_RELEASE_PHASE` | off | workloads | HA Wave 1 (HA-PLAN H25): release command, readiness path, drain, stop timeout, canary and per-app spread. While off, every write that sets or changes one of those fields is refused (REST, dashboard, MCP, which also stops advertising them, blueprints, config import, deploys), and none is rendered to any node; a value saved while it was on is kept but inert. Rendered only to nodes that advertise `release-phase`. Not built yet. |
 | `YOAL_FEATURE_OBJECT_STORE_AZURE` | off | storage | HA Wave 1 (HA-PLAN W3, G17): Azure Blob as a backup target, PITR repository and platform store. While off, Azure targets are refused. Not built yet. |
 | `YOAL_FEATURE_OBJECT_STORE_GCS` | off | storage | HA Wave 1 (HA-PLAN W3, G17): Google Cloud Storage as a backup target, PITR repository and platform store. While off, GCS targets are refused. Not built yet. |
@@ -876,6 +876,84 @@ The target must advertise `mail` and have a public IPv4 for the PTR (OPS §3.8).
 deleted after the mail node has spooled a message, so queued mail stays on the control plane and is
 claimed by the new node; messages already in `/var/lib/yoal/mail` on the old node are not moved and
 should be allowed to drain first.
+
+### 3.10 Attachment endpoints and the install CA
+
+With `YOAL_FEATURE_ENDPOINTS_GATEWAY=1` (and `SERVICE_ENDPOINTS`, on by default), an app reaches each
+attached database through a stable loopback endpoint on its own node: `127.0.0.1:<port>` for a
+process app, `db-<id>:<port>` for a container (the node's forwarder also listens on the container
+gateway). Primary and pooled ports come from `endpoints.portMin`–`portMax` (21000–21999), read
+ports from 23000–23999. A promotion re-points the endpoint and changes no app's environment.
+
+**Which apps use the endpoints.** Only an app whose own deploy, attach or migration ran with the
+flag on and with every node holding a copy advertising `endpoints-gateway`
+(`workloads.endpoints_gateway`, migration 0133). Turning the flag on, upgrading an agent, a
+neighbour deploying, or a replica being added, removed or promoted never moves another app or
+restarts it. Such an app has its read endpoint (`<P>_READ_URL`, pointing at the primary until a
+replica serves reads) from that deploy on, so replicas coming and going change nothing in its
+environment. `<P>_READ_POOL_URL` is not offered: replicas have no pooler.
+
+**Moving every app at once.**
+
+```sh
+yoal ha migrate attachments                       # dry run: which apps would move, and which cannot
+yoal ha migrate attachments --project shop        # one app
+yoal ha migrate attachments --apply               # move them now; each restarts once
+```
+
+REST: `GET /api/v1/ha/attachments/migrate` (dry run), `POST /api/v1/ha/attachments/migrate` with
+`{ "apply": true, "projects": ["shop"] }`. A platform operator can run the dry run; `--apply` needs
+a platform admin (the admin-only check other platform writes use, so by default a dashboard session:
+an API key gets `403`). An app the upgrade put on the gateway keeps exactly the variables it had,
+and gains its read URL on its own next deploy. A `blocked` app names the node whose agent lacks the
+gateway: update that agent (§4.1.2) and run it again. Each move is audited as
+`ha.migrate-attachments`.
+
+#### Runbook: an app cannot reach its database
+
+1. `yoal ha attachments` (MCP `get_attachment_endpoints`, `GET /api/v1/ha/attachments`) lists, per
+   app, database and node holding a copy: the mode, host and port, pooled and read ports, and the
+   node the connection lands on.
+   - `none`: the copy has no URL. It is a container on another node than its database without the
+     gateway (the flag is off, or the app has not deployed since it was turned on). Run
+     `yoal ha migrate attachments --project <app> --apply`, or redeploy it.
+   - `direct`: the copy is on the database's node and connects to its port directly. Check the
+     database itself (`yoal db info <name>`).
+   - `endpoint` or `gateway`: the port is a listener the agent owns on that node. Continue below.
+2. On the node, `ss -ltnp | grep <port>` must show `yoal-agent` on `127.0.0.1` (and, for a
+   container, on the gateway address). If it is missing, `journalctl -u yoal-agent | grep -i endpoint`
+   shows a bind failure (another process holds the port) or a forwarder error.
+3. `nc -zv 127.0.0.1 <port>` from the node. A connection that opens and closes at once means the
+   upstream refused it: on the database's node, `ss -ltnp` must show the provider listener on the
+   overlay address, and `wg show` a recent handshake with the consumer node.
+4. A TLS error in the agent log (`unknown CA`, `certificate expired`, `bad certificate`) points at
+   the install CA: `yoal ha ca` must show a live leaf for every node. A node without one asks again
+   on every heartbeat; a node whose leaf was revoked (removed and re-joined) gets a new one on its
+   next heartbeat.
+5. After a promotion the endpoint's `version` bumps and the forwarder cuts the sessions still on the
+   old primary; apps reconnect.
+
+#### Runbook: CA rotation
+
+The install CA signs a 90-day certificate (a leaf) for every node; nodes renew theirs at two-thirds
+of its life. Endpoint mTLS between nodes trusts the CA, not individual nodes. Rotate the CA when its
+key may be exposed (a leaked copy of the control plane's database together with the master key), or
+before it expires (`yoal ha ca` shows the date; it is valid for 10 years). `yoal ha ca` and
+`yoal ha status` show the CA only while the gateway flag is on.
+
+1. `yoal ha ca`: note the active fingerprint, and that every node holds a live leaf.
+2. `yoal ha ca rotate` (`POST /api/v1/ha/ca/rotate`; a platform admin, by default from a dashboard
+   session: an API key gets `403`). A new CA signs from now. The old one becomes `previous` and stays
+   in every node's trust bundle, so no endpoint loses mTLS. Audited as `ha.ca.rotate`.
+3. Each node moves to the new CA when it next renews, within 60 days. There is no command to force a
+   node to renew early.
+4. A second rotation is refused (`409`) while `yoal ha ca` says nodes still hold leaves the
+   previous CA signed: it would drop that CA from the bundle, and those nodes would lose mTLS with
+   every peer until they renew. Wait until the count is 0.
+
+**Turning the gateway off.** Set `YOAL_FEATURE_ENDPOINTS_GATEWAY=0` and restart the control plane.
+A container on another node than its database loses its URL until it is redeployed, which places it
+next to the database; same-node apps return to the database's own port, which restarts each once.
 
 ## 4. Upgrade
 
@@ -2235,6 +2313,7 @@ the control plane.
 | `yoal-recover.sh` download returns 404 | `gh release list --repo KieranHolroyd/yoal` | `/releases/latest` can resolve to a CLI release; pin the platform tag instead: [§4.1.1](#411-recovering-a-stuck-or-failed-update). |
 | Restore fails health check | Journal + `status` | The pre-restore snapshot was restored automatically; inspect the release/migrations. |
 | Drill fails with table differences | `diff` of `live.json` / `restored.json` | R2 lag, wrong bucket, or writes during a no-quiesce run. Re-run with quiescing. |
+| App cannot reach its database (gateway on) | `yoal ha attachments`, `ss -ltnp` on the node | §3.10 runbook: mode `none` means redeploy or `yoal ha migrate attachments`; a TLS error means the install CA (`yoal ha ca`). |
 | Disk > 85% | `du -sh /opt/yoal/releases /var/lib/yoal/* /var/log` | GC releases, rotate journald, prune drill runs/backups. |
 | `systemd-analyze security` score regressed | Unit diff | Reinstall the release units; local drop-ins may weaken sandboxing. |
 

@@ -308,7 +308,7 @@ describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () =
 			 VALUES ('bt_local', 'org_1', 'local-main', 'local', '/var/lib/yoal/backups', 1, 1)`,
 		);
 
-		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql', '0123_ingress_drift.sql', '0124_shared_certificates.sql', '0125_control_epoch.sql', '0126_replica_durability.sql', '0127_replica_rewind.sql', '0128_sync_switchover_rewind.sql', '0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql']);
+		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql', '0123_ingress_drift.sql', '0124_shared_certificates.sql', '0125_control_epoch.sql', '0126_replica_durability.sql', '0127_replica_rewind.sql', '0128_sync_switchover_rewind.sql', '0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql', '0133_attachment_gateway_marker.sql']);
 
 		const rows = sqlite
 			.query<{ id: string; kind: string; store_kind: string | null; store_options_json: string; object_lock: number; immutable_retention_days: number | null; secret_sealed: string | null }, []>(
@@ -455,7 +455,7 @@ describe('HA Wave 4 migrations 0129–0130 (docs/build-plan/HA-WAVE-4.md)', () =
 			 VALUES ('dbf_old', 'db_old', 'nod_1', 'nod_2', 1, 'completed', 1)`,
 		);
 
-		expect(migrate(sqlite)).toEqual(['0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql']);
+		expect(migrate(sqlite)).toEqual(['0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql', '0133_attachment_gateway_marker.sql']);
 
 		expect(
 			sqlite
@@ -493,6 +493,62 @@ describe('HA Wave 4 migrations 0129–0130 (docs/build-plan/HA-WAVE-4.md)', () =
 		expect(() => sqlite.run("UPDATE database_failover_drills SET lost_commits = -1 WHERE id = 'drl_old'")).toThrow();
 		expect(() => sqlite.run("UPDATE database_failover_drills SET durability = 'sync-ish' WHERE id = 'drl_old'")).toThrow();
 		expect(() => sqlite.run("UPDATE database_failover_drills SET generation = -1 WHERE id = 'drl_old'")).toThrow();
+		sqlite.close();
+	});
+	test('0133 keeps every app that already uses the endpoint gateway on it, and marks nothing else', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		sqlite.run('CREATE TABLE yoal_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+		for (const migration of migrations) {
+			if (Number(migration.id.slice(0, 4)) >= 133) continue;
+			sqlite.run(migration.sql);
+			sqlite.run('INSERT INTO yoal_migrations (id, applied_at) VALUES (?, ?)', [migration.id, 1]);
+		}
+		const workload = (id: string, project: string, runtime: string, node: string) =>
+			sqlite.run(
+				`INSERT INTO workloads (id, org_id, project_id, deployment_id, node_id, runtime, spec_json, memory_mb, created_at, updated_at)
+				 VALUES (?, 'org_1', ?, 'dep', ?, ?, '{}', 128, 1, 1)`,
+				[id, project, node, runtime],
+			);
+		const attach = (project: string, database: string) =>
+			sqlite.run(
+				`INSERT INTO database_attachments (id, org_id, database_id, project_id, created_by, created_at) VALUES (?, 'org_1', ?, ?, 'u', 1)`,
+				[`att_${project}`, database, project],
+			);
+		const endpoint = (consumer: string, database: string, role: string, upstream: string, port: number) =>
+			sqlite.run(
+				`INSERT INTO service_endpoints (id, consumer_node_id, service_kind, service_id, role, local_port, upstream_node_id, upstream_port, version, created_at, updated_at)
+				 VALUES (?, ?, 'database', ?, ?, ?, ?, 5432, 0, 1, 1)`,
+				[`sep_${consumer}_${database}_${role}`, consumer, database, role, port, upstream],
+			);
+		// Same-node gateway endpoint, a remote container, a remote process app (C2, no gateway), and a
+		// same-node app with no endpoint (connects directly).
+		workload('w_same', 'p_same', 'container', 'n1');
+		attach('p_same', 'db1');
+		endpoint('n1', 'db1', 'primary', 'n1', 21000);
+		// A replica served reads on main, so p_same already has <P>_READ_* through this row.
+		endpoint('n1', 'db1', 'read', 'n9', 23000);
+		workload('w_box', 'p_box', 'container', 'n2');
+		attach('p_box', 'db2');
+		endpoint('n2', 'db2', 'primary', 'n3', 21000);
+		workload('w_proc', 'p_proc', 'process', 'n4');
+		attach('p_proc', 'db2');
+		endpoint('n4', 'db2', 'primary', 'n3', 21000);
+		workload('w_direct', 'p_direct', 'container', 'n3');
+		attach('p_direct', 'db2');
+		expect(migrate(sqlite)).toEqual(['0133_attachment_gateway_marker.sql']);
+		const marked = sqlite
+			.query<{ id: string }, []>('SELECT id FROM workloads WHERE endpoints_gateway = 1 ORDER BY id')
+			.all()
+			.map((row) => row.id);
+		expect(marked).toEqual(['w_box', 'w_same']);
+		// Only the attachment that already had read variables keeps them; nobody gains them here.
+		expect(
+			sqlite
+				.query<{ project_id: string }, []>('SELECT project_id FROM database_attachments WHERE read_endpoint = 1 ORDER BY project_id')
+				.all()
+				.map((row) => row.project_id),
+		).toEqual(['p_same']);
+		expect(sqlite.query<{ k: string | null }, []>('SELECT upstreams_key AS k FROM service_endpoints LIMIT 1').get()!.k).toBeNull();
 		sqlite.close();
 	});
 });
@@ -611,7 +667,7 @@ describe('HA Wave 5 migration 0132 (docs/build-plan/HA-WAVE-5.md)', () => {
 		const databaseBefore = sqlite.query<Record<string, unknown>, []>('SELECT * FROM databases').all();
 		const controlBefore = sqlite.query<Record<string, unknown>, []>('SELECT * FROM control_state').all();
 
-		expect(migrate(sqlite)).toEqual(['0132_regions.sql']);
+		expect(migrate(sqlite)).toEqual(['0132_regions.sql', '0133_attachment_gateway_marker.sql']);
 
 		const after = sqlite.query<Record<string, unknown>, []>('SELECT * FROM nodes ORDER BY id').all();
 		expect(after).toEqual(before.map((row) => ({ ...row, region: 'default' })));

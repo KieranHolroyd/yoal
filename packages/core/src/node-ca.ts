@@ -6,10 +6,11 @@ import {
 	type NodeCaView,
 	type NodeCsr,
 	type NodeTrustDesired,
+	type Principal,
 } from '@yoal/contracts';
 import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
-import { ValidationError } from './errors.ts';
+import { ConflictError, CoreError, ValidationError } from './errors.ts';
 import { generateInstallCa, issueNodeCertificate, parseNodeCsr } from './node-pki.ts';
 import { decrypt, encrypt, newId, randomBytes, sha256Hex } from './util.ts';
 
@@ -25,6 +26,27 @@ export interface SignedNodeCertificate {
 	certPem: string;
 	/** ISO 8601. */
 	notAfter: string;
+}
+
+/** The install CA and its leaves, for `yoal ha status` and `GET /api/v1/ha/status`. */
+export interface NodeCaStatus {
+	/** ENDPOINTS_GATEWAY is on, so nodes use the CA for endpoint mTLS. */
+	inUse: boolean;
+	/** The active CA first, then a previous one still trusted after a rotation. */
+	authorities: NodeCaView[];
+	leaves: {
+		issued: number;
+		/** Not revoked and not expired. */
+		live: number;
+		/** Nodes holding a live leaf. */
+		nodes: number;
+		revoked: number;
+		/** Nodes past two-thirds of their leaf's life (they renew on their next heartbeat). */
+		renewDue: number;
+		/** Nodes whose leaf the previous CA signed: rotating again before this is 0 cuts them off. */
+		onPreviousCa: number;
+		nextExpiry: string | null;
+	};
 }
 
 const CA_COMMON_NAME = 'Yoal install CA';
@@ -234,7 +256,84 @@ export class NodeCaService {
 		};
 	}
 
-	/** Revoke every leaf of `nodeId` (node removed or re-keyed). */
+	/** ENDPOINTS_GATEWAY is on: nodes use the install CA for endpoint mTLS. */
+	inUse(): boolean {
+		return featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY');
+	}
+
+	/** `GET /api/v1/ha/ca`: the status, for platform operators. */
+	statusFor(principal: Principal): NodeCaStatus {
+		if (!this.ctx.platformIam.allows(principal, 'platform:ha'))
+			throw new CoreError('forbidden', 'High availability is for platform operators and admins.', 403);
+		return this.status();
+	}
+
+	/**
+	 * `POST /api/v1/ha/ca/rotate` and `yoal ha ca rotate`, audited. A platform admin only (a platform
+	 * operator reads the CA). Refused while a node still holds a leaf the previous CA signed: a second
+	 * rotation retires that CA and the node would lose mTLS with every peer until it renews.
+	 */
+	rotateAs(principal: Principal): NodeCaStatus {
+		if (!this.ctx.platformIam.canAdminister(principal))
+			throw new CoreError('forbidden', 'Only a platform admin role can rotate the install CA.', 403);
+		const waiting = this.status().leaves.onPreviousCa;
+		if (waiting > 0)
+			throw new ConflictError(
+				`${waiting} ${waiting === 1 ? 'node still holds a certificate' : 'nodes still hold certificates'} the previous CA signed. Rotating again would retire that CA and cut ${waiting === 1 ? 'it' : 'them'} off from every peer; wait until each has renewed (yoal ha ca shows the count).`,
+			);
+		const before = this.activeRow()?.fingerprint ?? null;
+		const active = this.rotate();
+		this.ctx.audit.record({
+			principal,
+			action: 'ha.ca.rotate',
+			resource: 'platform',
+			resourceId: 'node-ca',
+			args: { previous: before, active: active.fingerprint },
+			result: 'ok',
+		});
+		return this.status();
+	}
+
+	/**
+	 * The install CA as `yoal ha status` shows it: the CAs nodes trust, and the leaves they hold.
+	 * Read-only: it never creates the CA (that happens on the first node that needs a leaf).
+	 */
+	status(): NodeCaStatus {
+		const now = this.ctx.now();
+		const authorities = this.ctx.db
+			.select()
+			.from(nodeCa)
+			.all()
+			.filter((row) => row.state !== 'retired')
+			// The CA that signs first, then the one still trusted after a rotation.
+			.sort((a, b) => (a.state === b.state ? b.createdAt - a.createdAt : a.state === 'active' ? -1 : 1))
+			.map((row) => this.view(row));
+		const leaves = this.ctx.db.select().from(nodeCaCertificates).all();
+		const live = leaves.filter((row) => row.revokedAt === null && row.notAfter > now);
+		// The newest live leaf per node is the one it serves; a node renews at two-thirds of its life.
+		const newest = new Map<string, LeafRow>();
+		for (const row of live) if ((newest.get(row.nodeId)?.notAfter ?? 0) < row.notAfter) newest.set(row.nodeId, row);
+		const renewDue = [...newest.values()].filter((row) => now >= row.notBefore + ((row.notAfter - row.notBefore) * 2) / 3).length;
+		const soonest = [...newest.values()].sort((a, b) => a.notAfter - b.notAfter)[0];
+		const previousIds = new Set(
+			this.ctx.db.select({ id: nodeCa.id }).from(nodeCa).where(eq(nodeCa.state, 'previous')).all().map((row) => row.id),
+		);
+		return {
+			inUse: this.inUse(),
+			authorities,
+			leaves: {
+				issued: leaves.length,
+				live: live.length,
+				nodes: newest.size,
+				revoked: leaves.filter((row) => row.revokedAt !== null).length,
+				renewDue,
+				onPreviousCa: [...newest.values()].filter((row) => previousIds.has(row.caId)).length,
+				nextExpiry: soonest ? new Date(soonest.notAfter).toISOString() : null,
+			},
+		};
+	}
+
+
 	revoke(nodeId: string, reason: string): number {
 		const result = this.ctx.sqlite.run(
 			'UPDATE node_ca_certificates SET revoked_at = ?, revoke_reason = ? WHERE node_id = ? AND revoked_at IS NULL',

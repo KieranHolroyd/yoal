@@ -5968,6 +5968,22 @@ function buildServer(
 	);
 
 	tool(
+		'get_attachment_endpoints',
+		{
+			title: 'Get attachment endpoints',
+			description:
+				'Read how every app reaches each database attached to it (read-only): per node holding a copy, the mode ' +
+				'(`gateway`: its stable endpoint; `endpoint`: a loopback endpoint to another node; `direct`: on the database’s node; `none`: no URL), ' +
+				'the host and port the app connects to, its pooled and read ports, and the node the connection lands on. ' +
+				'Ports and nodes only, never a credential. Use it when an app cannot reach its database. ' +
+				'Requires a platform operator or admin role. Moving apps to their endpoints needs `yoal ha migrate attachments --apply` (platform admin).',
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async () => run(() => core.endpoints.attachmentsView(principal)),
+	);
+
+	tool(
 		'get_fleet',
 		{
 			title: 'Get fleet',

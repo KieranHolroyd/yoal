@@ -2,10 +2,12 @@
 /**
  * The HA lab, nested-container form (docs/HA-PLAN.md W1, docs/CLUSTERING.md §19.3). See README.md.
  *
- *   bun tests/lab/lab.ts up [--only lab-a] [--upgrade]
+ *   bun tests/lab/lab.ts up [--only lab-a] [--upgrade] [--feature NAME=1 …]
  *                                           build the image, start s3lab and four nodes (or the
  *                                           --only subset), install Yoal from this checkout, join
- *                                           one fleet over the overlay
+ *                                           one fleet over the overlay; --feature (repeatable)
+ *                                           sets YOAL_FEATURE_<NAME> on every node and is kept
+ *                                           for later `up`s
  *   bun tests/lab/lab.ts down [--keep-image] remove every yoal-w0-* container, volume, network, image
  *   bun tests/lab/lab.ts status [--json]
  *   bun tests/lab/lab.ts fault <node|all> <verb|list|revert <id>|clear-all> [--flags]
@@ -22,7 +24,8 @@ import { join, resolve } from 'node:path';
 import { AwsClient } from 'aws4fetch';
 import { CONTROL, LAB, WORKERS, containerName, labNode, type LabNode } from './lab.config.ts';
 import { checkoutTar, containerState, docker, exec, imageExists, labContainers, labVolumes, run, stream } from './lib/docker.ts';
-import { Observer, PLATFORM_HOST, PUBLIC_BASE, api, fleetNodes, helperCall, type FleetNode } from './lib/api.ts';
+import { Observer, PLATFORM_HOST, PUBLIC_BASE, api, fleetNodes, helperCall, platformFeatures, type FleetNode } from './lib/api.ts';
+import { featureEnvFiles, featureMismatches, formatFeatures, mergeFeatures, parseFeatureArgs, renderFeatureEnv, type LabFeatures } from './lib/features.ts';
 
 const HERE = import.meta.dir;
 const REPO = resolve(HERE, '../..');
@@ -39,6 +42,8 @@ interface LabState {
 	/** True when `lab up` pulled the MinIO image itself, so `down` may remove it. */
 	pulledMinio: boolean;
 	s3Secret: string;
+	/** `up --feature NAME=0|1`, merged across runs: what every node's env files say. */
+	features?: LabFeatures;
 }
 
 function readState(): LabState | null {
@@ -229,6 +234,40 @@ function installFaultHelper(nodes: LabNode[]): void {
 	rmSync(local, { force: true });
 }
 
+/**
+ * Render the lab's feature flags into every node's env files (lib/features.ts) and restart the unit
+ * that reads a file that changed. Then wait until the control plane reports the same values: a flag
+ * the platform does not resolve as asked fails `up`, so a scenario never runs on a lab that only
+ * claims a flag.
+ */
+async function applyFeatures(nodes: LabNode[], features: LabFeatures): Promise<void> {
+	if (!Object.keys(features).length) return;
+	say(`feature flags: ${formatFeatures(features)}`);
+	let controlRestarted = false;
+	for (const node of nodes) {
+		const name = containerName(node.name);
+		for (const { file, unit } of featureEnvFiles(node.role)) {
+			const current = exec(name, ['cat', file], { allowFailure: true });
+			if (current.code !== 0) continue;
+			const rendered = renderFeatureEnv(current.stdout, features);
+			if (!rendered.changed) continue;
+			// tee keeps the file's owner and mode (root:yoal 0640 for yoal.env).
+			exec(name, ['tee', file], { stdin: rendered.text });
+			exec(name, ['systemctl', 'restart', unit]);
+			note(`${node.name}: ${file} updated, ${unit} restarted`);
+			if (unit === 'yoal-control-plane.service') controlRestarted = true;
+		}
+	}
+	const deadline = Date.now() + 180_000;
+	let wrong = featureMismatches(features, await platformFeatures());
+	while (wrong.length && Date.now() < deadline) {
+		await Bun.sleep(2000);
+		wrong = featureMismatches(features, await platformFeatures());
+	}
+	if (wrong.length) throw new Error(`the control plane does not report ${wrong.join(', ')} as asked${controlRestarted ? ' after its restart' : ''} (GET /api/setup/status → features)`);
+	note(`the control plane reports ${formatFeatures(features)}`);
+}
+
 async function waitForFleet(expected: string[], timeoutMs = 180_000): Promise<FleetNode[]> {
 	const deadline = Date.now() + timeoutMs;
 	let nodes: FleetNode[] = [];
@@ -275,12 +314,14 @@ async function up(flags: Set<string>, args: string[]): Promise<void> {
 	const nodes = selectedNodes(args);
 	const single = nodes.length === 1;
 	const workers = WORKERS.filter((node) => nodes.includes(node));
+	const asked = parseFeatureArgs(args);
 	const state: LabState = readState() ?? {
 		createdAt: new Date().toISOString(),
 		image: '',
 		pulledMinio: false,
 		s3Secret: createHash('sha256').update(crypto.getRandomValues(new Uint8Array(16))).digest('hex').slice(0, 24),
 	};
+	state.features = mergeFeatures(state.features, asked);
 	state.image = ensureImage();
 	writeState(state);
 	phase('image');
@@ -331,6 +372,9 @@ async function up(flags: Set<string>, args: string[]): Promise<void> {
 		}
 	}
 	phase('workers');
+
+	await applyFeatures(nodes, state.features ?? {});
+	phase('features');
 
 	if (!flags.has('--no-faults')) installFaultHelper(nodes);
 	phase('faultHelper');
@@ -458,7 +502,8 @@ async function status(asJson: boolean): Promise<void> {
 		tunnels[node.name] = exec(containerName(node.name), ['sh', '-c', 'wg show all latest-handshakes 2>/dev/null | wc -l; ip -4 -o addr show wg0 2>/dev/null | awk "{print \\$4}"'], { allowFailure: true }).stdout.trim().replace('\n', ' peers, ');
 	}
 	const s3 = await fetch(`http://127.0.0.1:${LAB.s3lab.hostControlPort}/healthz`).then((r) => r.json()).catch(() => null);
-	const report = { containers, fleet, tunnels, s3lab: s3, publicBase: PUBLIC_BASE, platformHost: PLATFORM_HOST };
+	const features = { asked: readState()?.features ?? {}, platform: containers[containerName(CONTROL.name)] === 'running' ? await platformFeatures() : null };
+	const report = { containers, fleet, tunnels, s3lab: s3, features, publicBase: PUBLIC_BASE, platformHost: PLATFORM_HOST };
 	if (asJson) {
 		console.log(JSON.stringify(report, null, 2));
 		return;
@@ -468,6 +513,8 @@ async function status(asJson: boolean): Promise<void> {
 	for (const node of fleet) note(`node ${node.name.padEnd(8)} ${String(node.status).padEnd(8)} zone=${node.zone ?? '-'} overlay=${node.privateAddress ?? '-'}${node.draining ? ' draining' : ''}`);
 	for (const [name, tunnel] of Object.entries(tunnels)) note(`wg ${name.padEnd(8)} ${tunnel || 'no tunnel'}`);
 	note(`s3lab ${s3 ? `up, ${s3.rules} rules` : 'down'}; platform ${PUBLIC_BASE} (Host: ${PLATFORM_HOST})`);
+	const wrong = featureMismatches(features.asked, features.platform);
+	note(`feature flags asked: ${formatFeatures(features.asked)}${wrong.length ? `; the platform does not report ${wrong.join(', ')} as asked` : ''}`);
 }
 
 // --- faults ----------------------------------------------------------------------------------

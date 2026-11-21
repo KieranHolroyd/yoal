@@ -12,6 +12,7 @@ import { readFileSync } from 'node:fs';
 import { CONTROL, LAB, containerName } from '../../../lab/lab.config.ts';
 import { docker, exec, run } from '../../../lab/lib/docker.ts';
 import { PUBLIC_BASE, api, fleetNodes, labToken, ownerAction, type FleetNode } from '../../../lab/lib/api.ts';
+import { envHashOrNull, parseListeners, unitsSettled, type ReleaseRunRow } from './judge.ts';
 import { REPO, waitFor, type Scenario } from './scenario.ts';
 
 export interface Copy {
@@ -343,8 +344,8 @@ export function unitInfo(copy: Copy): UnitInfo {
 	}
 	info.envFiles = [...files];
 	if (info.envFiles.length) {
-		const hashed = exec(box, ['sh', '-c', 'cat "$@" 2>/dev/null | LC_ALL=C sort | sha256sum | cut -c1-16', 'hash', ...info.envFiles], { allowFailure: true }).stdout.trim();
-		info.envHash = hashed || null;
+		// Nothing read (a missing or unreadable file) hashes the empty input: unreadable, not a baseline.
+		info.envHash = envHashOrNull(exec(box, ['sh', '-c', 'cat "$@" 2>/dev/null | LC_ALL=C sort | sha256sum | cut -c1-16', 'hash', ...info.envFiles], { allowFailure: true }).stdout);
 	}
 	return info;
 }
@@ -396,4 +397,43 @@ export async function deployChecker(
 	const placed = await placeCopies(options.project, options.nodes, () => deploy(options.project, options.runtime, { image: image ?? undefined, message: options.message }), { log: scenario.note, redeploy: true, onCleanup: scenario.onCleanup.bind(scenario) });
 	scenario.event('copies placed', { copies: describeCopies(placed) });
 	return { project: options.project, host: await appHost(options.project), database, copies: placed, image };
+}
+
+/**
+ * Read every copy's unit until two reads `intervalMs` apart agree (same invocation and env hash for
+ * every copy): a copy still restarting after placement, or an env still being rewritten, must not
+ * become the baseline. Returns the last read; `settled` false when the copies never agreed.
+ */
+export async function settledUnits(project: string, options: { timeoutMs?: number; intervalMs?: number } = {}): Promise<{ units: UnitInfo[]; settled: boolean }> {
+	const deadline = Date.now() + (options.timeoutMs ?? 90_000);
+	let last = (await copies(project)).map(unitInfo);
+	while (Date.now() < deadline) {
+		await Bun.sleep(options.intervalMs ?? 5000);
+		const next = (await copies(project)).map(unitInfo);
+		if (unitsSettled(last, next)) return { units: next, settled: true };
+		last = next;
+	}
+	return { units: last, settled: false };
+}
+
+/** TCP listeners on a lab node whose port is in one of `ranges` (`ss -ltnH`, inside the node). */
+export function nodeListeners(node: string, ranges: Array<[number, number]>): Array<{ address: string; port: number }> {
+	return parseListeners(exec(containerName(node), ['ss', '-ltnH'], { allowFailure: true }).stdout, ranges);
+}
+
+/** Can a process inside `node` open a TCP connection to address:port (3 s)? */
+export function connectsFrom(node: string, address: string, port: number): boolean {
+	const host = address === '*' || address === '0.0.0.0' ? '127.0.0.1' : address === '::' ? '::1' : address;
+	return exec(containerName(node), ['timeout', '3', 'bash', '-c', 'exec 3<>"/dev/tcp/$0/$1"', host, String(port)], { allowFailure: true }).code === 0;
+}
+
+/**
+ * The platform's release-command runs for `project` created at or after `since` (epoch ms, the
+ * control plane's clock: the same kernel clock as the lab host in the container form). Read
+ * read-only from the control plane's database on lab-a (tests/lab/node/release-runs.ts): no REST
+ * route lists them yet.
+ */
+export function releaseRuns(project: string, since = 0): ReleaseRunRow[] {
+	const out = exec(containerName(CONTROL.name), ['/opt/yoal/runtime/bin/bun', `${LAB.sourceDir}/tests/lab/node/release-runs.ts`, '--project', project, '--since', String(Math.floor(since))]).stdout;
+	return (JSON.parse(out) as { runs: ReleaseRunRow[] }).runs;
 }

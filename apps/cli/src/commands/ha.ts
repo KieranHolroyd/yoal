@@ -3,7 +3,7 @@ import { dirname, join } from 'node:path';
 import { parseArgs, requirePositional, type FlagSpec } from '../args.ts';
 import { installControlEnrolment, parseSealedControlBundle } from '../control-enrol.ts';
 import { UsageError } from '../errors.ts';
-import { formatControlStatus, formatHaStatus } from '../ha.ts';
+import { formatAttachments, formatControlStatus, formatHaStatus, formatMigration, formatNodeCa } from '../ha.ts';
 import { formatDrill, formatDrillList, formatMs } from '../drills.ts';
 import { printJson } from '../output.ts';
 import { authenticatedClient } from './common.ts';
@@ -26,6 +26,8 @@ const flags: FlagSpec = {
 	minutes: { type: 'string' },
 	'include-control': { type: 'boolean' },
 	wait: { type: 'boolean' },
+	apply: { type: 'boolean' },
+	project: { type: 'string', multiple: true },
 	help: { type: 'boolean', short: 'h' },
 };
 
@@ -63,6 +65,21 @@ Actions:
   drill show <id> [--json]   One drill's report.
   drill cancel <id> [--json] End a running drill; the node is back within about 5 s.
 
+  attachments [--json]
+      Every database attachment and how each copy reaches it: through its stable endpoint
+      (gateway), a loopback endpoint to another node, directly on the database's node, or not at
+      all. Ports and nodes only.
+  migrate attachments [--project <slug>]... [--apply] [--json]
+      With ENDPOINTS_GATEWAY on, an app moves to its stable endpoint on its own next deploy. This
+      lists the apps that still connect directly (a dry run, the default); --apply moves them now,
+      which restarts each once (platform admin).
+  ca [--json]
+      The install CA: the CA that signs, a previous one still trusted after a rotation, and the
+      node certificates (how many, due to renew, revoked).
+  ca rotate [--json]
+      Rotate the install CA (platform admin). The old CA stays trusted until every node renews; a
+      second rotation is refused while a node still holds a certificate the previous CA signed.
+
   db arm|disarm|drill <database> [--json]
       Automatic database failover (W11): arm after the policy and a passed drill, disarm now, or run
       a measured drill. Same path as \`yoal db failover\`.
@@ -80,6 +97,8 @@ Options:
   --data-dir <dir>   Standby data directory for the enrolment record (default /var/lib/yoal/data)
   --master-key <f>   Master key path (default /etc/yoal/master.key)
   --env <file>       Allowlisted env file to merge (default /etc/yoal/yoal.env)
+  --project <slug>   Limit the migration to this app (repeatable)
+  --apply            Move the listed apps now (without it, a dry run)
   --json             Print the raw response`;
 
 export async function haCommand(argv: string[]): Promise<void> {
@@ -97,6 +116,7 @@ export async function haCommand(argv: string[]): Promise<void> {
 	const action = requirePositional(args, 0, 'action');
 	if (action === 'control') return controlCommand(args);
 	if (action === 'drill') return drillCommand(args);
+	if (action === 'attachments' || action === 'migrate' || action === 'ca') return attachmentCommand(action, args);
 
 	if (action !== 'status') throw new UsageError(`Unknown ha action "${action}".\n\n${usage}`);
 	if (args.positionals.length > 1) throw new UsageError(usage);
@@ -283,4 +303,31 @@ async function drillCommand(args: ReturnType<typeof parseArgs>): Promise<void> {
 	if (json) printJson(drill);
 	else console.log(formatDrill(drill));
 	if (drill.status === 'failed') process.exitCode = 1;
+}
+
+/** `yoal ha attachments`, `yoal ha migrate attachments` and `yoal ha ca` (HA-PLAN H24, §9). */
+async function attachmentCommand(action: 'attachments' | 'migrate' | 'ca', args: ReturnType<typeof parseArgs>): Promise<void> {
+	const json = args.boolean('json');
+	if (action === 'migrate' && args.positionals[1] !== 'attachments')
+		throw new UsageError('Usage: yoal ha migrate attachments [--project <slug>]... [--apply] [--json]');
+	const sub = action === 'ca' ? args.positionals[1] : undefined;
+	if (action === 'ca' && sub !== undefined && sub !== 'rotate') throw new UsageError('Usage: yoal ha ca [rotate] [--json]');
+	if (args.positionals.length > 2) throw new UsageError(usage);
+	const client = await authenticatedClient();
+	if (action === 'attachments') {
+		const { view, raw } = await client.getAttachments();
+		if (json) printJson(raw);
+		else console.log(formatAttachments(view));
+		return;
+	}
+	if (action === 'migrate') {
+		const { view, raw } = await client.migrateAttachments({ apply: args.boolean('apply'), projects: args.strings('project') });
+		if (json) printJson(raw);
+		else console.log(formatMigration(view));
+		return;
+	}
+	const { view, raw } = sub === 'rotate' ? await client.rotateNodeCa() : await client.getNodeCa();
+	if (json) printJson(raw);
+	else if (!view.inUse && view.authorities.length === 0) console.log('The install CA is not in use: ENDPOINTS_GATEWAY is off.');
+	else console.log(`${sub === 'rotate' ? 'Rotated. ' : ''}${formatNodeCa(view)}`);
 }

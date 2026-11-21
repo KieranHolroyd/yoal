@@ -739,6 +739,8 @@ export class WorkloadService {
 				createdBy: null,
 			});
 		}
+		// The project's own deploy decides whether it uses the endpoint gateway (HA-PLAN §9).
+		if (featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS')) this.ctx.endpoints.recordGatewayMarker(project.id);
 		this.reconcileEndpoints(project.id, nodesBefore);
 	}
 

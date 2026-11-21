@@ -120,12 +120,31 @@ checker's logs.
 
 | Scenario | For | What it does | Today on `ha/integration` |
 |---|---|---|---|
-| `single-node-gate.ts` | Every lane (§7.3) | One node, every HA flag off: deploy, scale 1→2→1, redeploy, under the checker | **pass** |
+| `single-node-gate.ts` | Every lane (§7.3) | One node, every opt-in flag off (every flag whose registry default is false): deploy, scale 1→2→1, redeploy, under the checker | **pass** |
 | `kill-node.ts` | M1, §1.2 node loss | Two copies (keeper + `--node`); power off (`--method kill`), stop, or partition the node; time offline (≤ 40 s), re-placement, answering (≤ grace + 120 s), rejoin | **pass** direct, **fail** edge |
 | `kill-node-b.ts` | W1 exit | `kill-node.ts --node lab-b` | as kill-node |
 | `freeze-agent.ts` | §7.2 Process | `SIGSTOP` the agent on a copy's node for 60 s; the copy must keep serving with its database, nothing restarts or moves | **fail** |
-| `attachments-three-nodes.ts` | W4 exit, M1 | Container app, three copies on lab-a/b/c, Postgres on lab-ctl; manual promotion must change no env and restart nothing; port scan from the lab bridge | **skip** (container); `--runtime process` **fail** |
-| `rolling-deploy-under-load.ts` | W5 exit, M1 | 10,000 requests a minute through a rolling deploy; a failing release command; a release command under a partition (I16) | B **fail** (3 non-2xx); C, D **skip** |
+| `attachments-three-nodes.ts` | W4 exit, M1 | Container app, three copies on lab-a/b/c, Postgres on lab-ctl; manual promotion must change no env and restart nothing (two after-snapshots: 20 s after it, and after the checker); a positive control, then a port scan of the endpoint, read, database and pooler ranges from the lab bridge. Needs `ENDPOINTS_GATEWAY`; `--skip-promotion` leaves the promotion out | **skip** (container, flag off); `--runtime process` **fail** |
+| `rolling-deploy-under-load.ts` | W5 exit, M1 | 10,000 requests a minute through a rolling deploy; a failing release command; a release command under a partition of the node the platform leased it to (I16). C and D need `RELEASE_PHASE` | B **fail** (3 non-2xx); C, D **skip** (flag off) |
+
+**Feature flags.** A scenario that needs an opt-in flag reads the platform's resolved flags (`GET
+/api/setup/status` → `features`) and is `skip` only when the flag is off, naming the command that
+turns it on. With the flag on, a refusal is a `fail`. Bring the lab up with the flags the scenario
+needs:
+
+```sh
+bun tests/lab/lab.ts up --feature ENDPOINTS_GATEWAY=1 --feature RELEASE_PHASE=1
+bun tests/ha/scenarios/attachments-three-nodes.ts                 # container, judged
+bun tests/ha/scenarios/attachments-three-nodes.ts --skip-promotion   # placement, traffic and the scan only
+bun tests/ha/scenarios/rolling-deploy-under-load.ts               # A–D, judged
+```
+
+| Scenario | Needs | Without it |
+|---|---|---|
+| `attachments-three-nodes --runtime container` | `SERVICE_ENDPOINTS` (default on), `ENDPOINTS_GATEWAY` | `spread` skip; the port scan still runs |
+| `attachments-three-nodes --runtime process` | `SERVICE_ENDPOINTS` | as above |
+| `rolling-deploy-under-load` C and D | `RELEASE_PHASE` | C and D skip; A judges nothing; B runs |
+| `single-node-gate` | every opt-in flag **off** | `invalid` |
 
 ### Verdicts
 
@@ -145,9 +164,17 @@ invalid or skipped on this tree (each such step in `.github/workflows/ha.yml` sa
 
 **Targets.** `--target edge` (default) sends the checker through lab-a's public route, as a user.
 `--target direct` bypasses the edge: the scenario's own balancer sends each request straight to a
-copy (relayed through lab-a). A direct run judges re-placement, restarts and the checker's
-invariants, and records request failures without judging them (they describe the harness balancer
-as much as the platform); its report says "Edge bypassed" at the top. On a tree without F7
+copy (relayed through lab-a). A direct run judges re-placement, restarts, the checker's invariants
+and failed requests: zero, as on the edge, except in `kill-node`, where failures inside the fault
+window are allowed (the balancer marks the lost copy down only after it failed a request: the fault
+to 10 s after it, or the whole partition) and any outside it fails. The reason says the failures
+went through the harness balancer, and the report says "Edge bypassed" at the top.
+
+**The checker check.** Every scenario fails `checker` when an invariant failed **or I6 did not
+pass** (`not-observed` means no write survived to judge, so the run is not evidence);
+`attachments-three-nodes` also needs one acknowledged write. All judging is in
+`scenarios/lib/judge.ts`, unit-tested in `judge.test.ts`; `Scenario.finish`'s overall verdict is
+`decideVerdict` in `report.ts`, tested in `report.test.ts` and end to end in `scenario.test.ts`. On a tree without F7
 (`ha/w1-fixes`), every edge run with a remote copy is `invalid`: the edge's active health check
 sends no app Host (`packages/site-config/src/compile.ts`), so remote copies take no traffic.
 
@@ -156,7 +183,8 @@ sends no app Host (`packages/site-config/src/compile.ts`), so remote copies take
 | Module | Gives |
 |---|---|
 | `scenario.ts` | `Scenario`: output directory, observation log, timeline, `check()`, `stop()`, cleanups that run on any exit (Ctrl-C too), the report written last; `waitFor`, `COMMON_OPTIONS` |
-| `app.ts` | `deployChecker()` (project, Postgres on a chosen node, process or container workload, N copies placed on named nodes by drain/resume), `placeCopies`, `copies`, `scaling`, `unitInfo` (a copy's unit invocation, start time and env-file hash, never the values), `loadCheckerImage` (the checker app's image into every node's Podman as `localhost/…`), `appPort` (one port per project in 24000–24999) |
+| `judge.ts` | every verdict as a pure function: the checker check, failed requests, feature gates, the release-phase decision, unit and env comparisons, listener parsing, the I16 judgement over the platform's release-command runs |
+| `app.ts` | `deployChecker()` (project, Postgres on a chosen node, process or container workload, N copies placed on named nodes by drain/resume), `placeCopies`, `copies`, `scaling`, `unitInfo` (a copy's unit invocation, start time and env-file hash, never the values; nothing read is `null`, never the hash of empty input), `settledUnits` (two reads that agree), `nodeListeners`/`connectsFrom` (the port scan's positive control), `releaseRuns` (the platform's release-command runs, read-only from lab-a's database: no REST route lists them yet), `loadCheckerImage` (the checker app's image into every node's Podman as `localhost/…`), `appPort` (one port per project in 24000–24999) |
 | `ingress.ts` | `openTarget(edge\|direct)`, `share` (who answers), the direct `CopyBalancer` |
 | `faults.ts` | `Faults.apply(power-off\|stop\|partition\|freeze)` with revert, timeline entries and `fault` observations; everything reverted on exit unless `keep()` |
 | `checker.ts` | `startChecker()`: the checker CLI against a target, reading the scenario's observations |

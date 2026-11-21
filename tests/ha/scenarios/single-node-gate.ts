@@ -7,9 +7,10 @@
  * On a one-node lab (`bun tests/lab/lab.ts up --only lab-a`: a plain install, no overlay, no cluster
  * settings):
  *
- *   0. preflight: the fleet is exactly one online node; every HA flag is off (the feature flags of
- *      HA-PLAN §9 that exist on this tree, read from the control node's environment and the
- *      defaults in packages/contracts/src/features.ts); `failover.enabled` is off
+ *   0. preflight: the fleet is exactly one online node; every opt-in flag is off (every flag whose
+ *      default is false in packages/contracts/src/features.ts, as the platform resolves it, `GET
+ *      /api/setup/status`; the control node's env files when it does not answer);
+ *      `failover.enabled` is off
  *   1. deploy the checker app (process, Postgres on the same node)
  *   2. run the checker through the public route; during it:
  *        +--scale-after-s  scale to 2 copies (one node: the platform must refuse or leave the second
@@ -27,10 +28,10 @@
  * quick local check only: the gate's verdict is then `invalid`, never `pass`).
  */
 import { parseArgs } from 'node:util';
-import { FEATURE_FLAGS } from '../../../packages/contracts/src/features.ts';
 import { CONTROL, containerName } from '../../lab/lab.config.ts';
 import { exec } from '../../lab/lib/docker.ts';
-import { api, fleetNodes, ownerAction } from '../../lab/lib/api.ts';
+import { api, fleetNodes, ownerAction, platformFeatures } from '../../lab/lib/api.ts';
+import { checkerVerdict, optInFlagState } from './lib/judge.ts';
 import { CHECKER_APP_DIR, copies, deployChecker, deployDirectory, describeCopies, scaling } from './lib/app.ts';
 import { failuresByWindow, startChecker } from './lib/checker.ts';
 import { openTarget, share, formatShare } from './lib/ingress.ts';
@@ -48,21 +49,6 @@ const { values: flags } = parseArgs({
 		'allow-multi-node': { type: 'boolean', default: false },
 	},
 });
-
-/**
- * The flags of HA-PLAN §4/§9 (one per workstream). Those not on this tree yet are listed so the gate
- * picks them up the day a lane registers them; DB_AUTO_PROMOTE is the existing opt-in (F1).
- */
-const HA_FLAGS = [
-	'INGRESS_SET',
-	'SHARED_CERTIFICATES',
-	'RELEASE_PHASE',
-	'CONTROL_STANDBY',
-	'DB_SYNC',
-	'DB_AUTO_FAILOVER',
-	'DB_AUTO_PROMOTE',
-	'REGIONS',
-];
 
 const project = flags.project ?? 'ha-single';
 const scenario = new Scenario('single-node-gate', { ...flags, project }, flags);
@@ -83,7 +69,7 @@ await scenario.run(async (s) => {
 	if (redeployAfterS + 60 > durationS) s.stop('error', '--duration-s must leave 60 s after the redeploy');
 
 	// --- 0. one node, flags off -------------------------------------------------------------------
-	s.say('preflight: one node, HA flags off');
+	s.say('preflight: one node, every opt-in flag off');
 	const fleet = await waitFor(`${CONTROL.name} online`, 180_000, () => {
 		const rows = fleetNodes();
 		return rows.find((row) => row.name === CONTROL.name)?.status === 'online' ? rows : null;
@@ -93,22 +79,16 @@ await scenario.run(async (s) => {
 	if (!singleNode && !flags['allow-multi-node'])
 		s.stop('invalid', `the fleet has ${fleet.length} nodes (${fleet.map((node) => node.name).join(', ')}); the gate runs on one: \`bun tests/lab/lab.ts down && bun tests/lab/lab.ts up --only ${CONTROL.name}\``);
 	if (!singleNode) s.notice(`--allow-multi-node: ${fleet.length} nodes; the others are drained for the run. This is not the gate.`);
-	const overrides = featureOverrides();
-	const flagState = Object.fromEntries(
-		HA_FLAGS.map((name) => {
-			const definition = (FEATURE_FLAGS as Record<string, { default: boolean }>)[name];
-			const override = overrides[name];
-			const on = override !== undefined ? ['1', 'true', 'on', 'yes'].includes(override.toLowerCase()) : (definition?.default ?? false);
-			return [name, definition ? (on ? 'on' : 'off') : 'not on this tree'];
-		}),
-	);
+	// Every opt-in flag (default false in the registry), not a list that goes stale: the platform's
+	// resolved value, else the control node's env files.
+	const flagState = optInFlagState(featureOverrides(), await platformFeatures());
 	const cluster = (await api<any>('GET', '/api/v1/cluster/config')).body;
 	const failoverOn = Boolean((cluster?.failover ?? cluster?.config?.failover ?? {}).enabled);
-	s.measure('haFlags', flagState);
+	s.measure('optInFlags', flagState);
 	s.measure('failoverEnabled', failoverOn);
 	const on = Object.entries(flagState).filter(([, state]) => state === 'on').map(([name]) => name);
 	if (failoverOn) on.push('failover.enabled');
-	if (on.length) s.stop('invalid', `HA settings are on (${on.join(', ')}); the gate runs with every HA flag off`);
+	if (on.length) s.stop('invalid', `opt-in settings are on (${on.join(', ')}); the gate runs with every opt-in flag off`);
 	s.check('flags-off', 'pass', null, flagState);
 
 	const drained: string[] = [];
@@ -171,18 +151,9 @@ await scenario.run(async (s) => {
 
 	const checkerExit = await checker.exited;
 	const report = readCheckerReport(s.checkerReportPath);
-	if (!report) s.check('checker', 'error', `no checker report (exit ${checkerExit})`);
-	else {
-		s.check(
-			'checker',
-			report.failedInvariants.length || report.invariants?.I6 !== 'pass' ? 'fail' : 'pass',
-			report.failedInvariants.length
-				? `invariants failed: ${report.failedInvariants.join(', ')}`
-				: report.invariants?.I6 !== 'pass'
-					? `I6 was ${report.invariants?.I6 ?? 'missing'}: no write survived to judge`
-					: null,
-			{ exit: checkerExit, lostAcknowledgedWrites: report.lostAcknowledgedWrites },
-		);
+	const verdict = checkerVerdict(report, checkerExit);
+	s.check('checker', verdict.verdict, verdict.reason, verdict.values);
+	if (report) {
 		// One copy on one node has nowhere to surge to: its redeploy restarts it, and a request in
 		// that moment may fail (HA-PLAN §1.2 promises no failed request on a deploy only with 2+
 		// copies). Outside the redeploy window nothing may fail; inside it, at most a few.

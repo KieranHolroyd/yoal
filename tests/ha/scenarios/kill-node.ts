@@ -26,21 +26,28 @@
  *   offline-detected the victim reported offline within 40 s (F9: 30–35 s, plus polling)
  *   replaced         the victim's copy re-placed, running and answering within the failover grace
  *                    + 120 s (HA-PLAN §1.2); skip when failover is off
- *   checker          no invariant failed (I6 lost writes, I4 duplicate singletons, …)
- *   no-failed-requests  edge target only: zero failed requests (§1.2: retried on another copy).
- *                    With --target direct the harness balancer decides retries, so failures are
- *                    recorded, not judged.
+ *   checker          no invariant failed (I6 lost writes, I4 duplicate singletons, …) and I6 passed
+ *   no-failed-requests  edge: zero failed requests (§1.2: retried on another copy). With --target
+ *                    direct the harness balancer decides retries and marks a copy down only after
+ *                    a failure, so failures inside the fault window (the fault to 10 s after it:
+ *                    a 3 s request timeout plus the 5 s mark-down; with --method partition, the
+ *                    whole partition, since the victim's copy stays listed) are allowed and every
+ *                    failure outside it fails.
  */
 import { parseArgs } from 'node:util';
 import { CONTROL, LAB, labNode } from '../../lab/lab.config.ts';
 import { api, fleetNodes, type FleetNode } from '../../lab/lib/api.ts';
 import { copies, deployChecker, describeCopies, type Copy } from './lib/app.ts';
-import { startChecker } from './lib/checker.ts';
+import { failuresByWindow, startChecker } from './lib/checker.ts';
+import { checkerVerdict, failedRequestsVerdict } from './lib/judge.ts';
 import { Faults, FAULT_MAX_S, type FaultKind } from './lib/faults.ts';
 import { EDGE_BYPASSED_NOTE, formatShare, openTarget, parseTarget, shareUntil, share, type Target } from './lib/ingress.ts';
 import { LabRelay } from '../../lab/lib/relay.ts';
 import { readCheckerReport } from './lib/report.ts';
 import { COMMON_OPTIONS, Scenario, positiveInt, waitFor } from './lib/scenario.ts';
+
+/** --target direct: a 3 s request timeout plus the balancer's 5 s passive mark-down, with margin. */
+const DIRECT_FAULT_WINDOW_MS = 10_000;
 
 const { values: flags } = parseArgs({
 	options: {
@@ -236,21 +243,17 @@ await scenario.run(async (s) => {
 		s.check('replaced', 'fail', `${why}; bound ${boundMs / 1000} s (failover grace ${graceS} s + 120 s)`, { answeringAfterMs: answering, boundMs, replacement: replacement ? `${replacement.id}@${replacement.nodeName}:${replacement.status}` : null });
 	}
 	const report = readCheckerReport(s.checkerReportPath);
-	if (!report) s.check('checker', 'error', `no checker report (exit ${checkerExit})`, {});
-	else if (report.failedInvariants.length)
-		s.check('checker', 'fail', `invariants failed: ${report.failedInvariants.join(', ')} (lost writes ${report.lostAcknowledgedWrites})`, { exit: checkerExit });
-	else if (report.invariants?.I6 !== 'pass')
-		s.check('checker', 'fail', `I6 was ${report.invariants?.I6 ?? 'missing'}: no write survived to judge, so the checker is not evidence`, { exit: checkerExit });
-	else s.check('checker', 'pass', null, { exit: checkerExit, lostAcknowledgedWrites: report.lostAcknowledgedWrites });
+	const verdict = checkerVerdict(report, checkerExit);
+	s.check('checker', verdict.verdict, verdict.reason, verdict.values);
 	if (report) {
-		if (target === 'edge')
-			s.check(
-				'no-failed-requests',
-				report.failedRequests === 0 ? 'pass' : 'fail',
-				report.failedRequests === 0 ? null : `${report.failedRequests} of ${report.requests} requests failed (${JSON.stringify(report.failedByStatus)})`,
-				{ failedRequests: report.failedRequests, failedByStatus: report.failedByStatus },
-			);
-		else s.measure('failedRequests (not judged: harness balancer)', { failed: report.failedRequests, byStatus: report.failedByStatus });
+		// Direct: the harness balancer only marks the lost copy down after it failed a request.
+		// A partitioned victim stays in the balancer's set (its copy is still listed), so its half-open
+		// probes time out for as long as the partition lasts: the whole fault is the window then.
+		const windowEnd = method === 'partition' ? Number.MAX_SAFE_INTEGER : s.zero + DIRECT_FAULT_WINDOW_MS;
+		const windows = target === 'direct' ? failuresByWindow(s, [{ name: 'fault', from: s.zero, to: windowEnd }]) : undefined;
+		if (windows) s.measure('failuresByWindow', windows);
+		const failed = failedRequestsVerdict(target, report, windows ? { windows, window: 'fault' } : {});
+		s.check('no-failed-requests', failed.verdict, failed.reason, failed.values);
 	}
 
 	// --- restore ---------------------------------------------------------------------------------

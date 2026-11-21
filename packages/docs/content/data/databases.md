@@ -348,7 +348,7 @@ While a replica the app can reach is streaming or lagging, attached apps get fou
 | `<PREFIX>_READ_URLS` | Every reachable replica, comma-separated |
 | `<PREFIX>_READ_HOST`, `<PREFIX>_READ_PORT` | Host and port of the first one |
 
-An app reaches a replica on its own node directly. A process app reaches one on another node only when cross-node service endpoints are on (`YOAL_FEATURE_SERVICE_ENDPOINTS`). The variables appear and disappear as replicas start and stop streaming, and the app restarts each time. Reads can trail the primary by the replica's lag, so use `<PREFIX>_URL` when a read must see a write the app just made.
+An app reaches a replica on its own node directly. A process app reaches one on another node only when cross-node service endpoints are on (`YOAL_FEATURE_SERVICE_ENDPOINTS`). The variables appear and disappear as replicas start and stop streaming, and the app restarts each time. With [attachment endpoints](/self-hosting/clustering#attachment-endpoints) on, an app instead gets one stable read URL from its first deploy: it points at the primary until a replica streams, then spreads reads over the replicas, and replicas starting, stopping or being promoted never change the variables or restart the app. `<PREFIX>_READ_URLS` then holds that one URL. Reads can trail the primary by the replica's lag, so use `<PREFIX>_URL` when a read must see a write the app just made.
 
 ### Promote a replica
 

@@ -29,7 +29,6 @@ import {
 	DATABASE_POOLER_PORT_MIN,
 	databaseAlias,
 	CONTAINER_GATEWAY_ADDRESS,
-	ENDPOINTS_GATEWAY_CAPABILITY,
 	type ContainerAddHost,
 	databaseAttachSchema,
 	databaseBackupCreateSchema,
@@ -148,6 +147,8 @@ interface ResolvedAttachment {
 	poolHost: string | null;
 	/** True when this attachment goes through an endpoint on the consumer (H24, same node too). */
 	gateway: boolean;
+	/** Under the gateway: the attachment exposes `<P>_READ_*` through the read endpoint (0133). */
+	readEndpoint: boolean;
 	/** Sealed password the app connects with: the owner's, or its named credential's. */
 	secretSealed: string;
 	/** Set when the attachment connects as a named (non-owner) credential. */
@@ -2879,6 +2880,9 @@ export class DatabaseService {
 		const credential = input.credential ? this.attachableCredential(row, input.credential) : null;
 
 		this.insertAttachment(principal, row.id, project, envPrefix, credential?.id);
+		// Running copies get the endpoint now rather than on the next deploy (a container on another
+		// node would otherwise have no URL until then).
+		this.ctx.endpoints.attached(project.id);
 		this.ctx.audit.record({
 			principal,
 			action: 'database.attach',
@@ -3002,7 +3006,9 @@ export class DatabaseService {
 			// Read replicas (C7): same-node replicas directly, or with the gateway a stable read port
 			// that follows the replicas without changing the app's environment (H24).
 			if (item.gateway) {
-				const read = this.endpointRow(nodeId!, item.row.id, 'read');
+				// Only an attachment whose own deploy asked for it: the row is shared by every app on
+				// the node attached to this database.
+				const read = item.readEndpoint ? this.endpointRow(nodeId!, item.row.id, 'read') : null;
 				if (read) {
 					const host = runtime === 'container' ? databaseAlias(item.row.id) : '127.0.0.1';
 					const url = databaseConnectionUrl({
@@ -3072,7 +3078,7 @@ export class DatabaseService {
 						const reads = this.ctx.databaseReplicas.readTargets(item.row, nodeId!, runtime);
 						return reads.length > 0 ? { reads: reads.map((target) => `${target.replicaId}@${target.host}:${target.port}`) } : {};
 					})()
-				: this.endpointRow(nodeId!, item.row.id, 'read')
+				: item.readEndpoint && this.endpointRow(nodeId!, item.row.id, 'read')
 					? { reads: true }
 					: {}),
 			...(item.credential
@@ -3668,7 +3674,7 @@ export class DatabaseService {
 
 	private liveAttachmentRows(
 		projectId: string,
-	): Array<{ db: DatabaseRow; prefix: string; credential: CredentialRow | null }> {
+	): Array<{ db: DatabaseRow; prefix: string; credential: CredentialRow | null; readEndpoint: boolean }> {
 		return this.ctx.db
 			.select({ attachment: databaseAttachments, db: databases, credential: databaseCredentials })
 			.from(databaseAttachments)
@@ -3676,7 +3682,12 @@ export class DatabaseService {
 			.leftJoin(databaseCredentials, eq(databaseCredentials.id, databaseAttachments.credentialId))
 			.where(and(eq(databaseAttachments.projectId, projectId), isNull(databases.deletedAt)))
 			.all()
-			.map(({ attachment, db, credential }) => ({ db, prefix: attachment.envPrefix, credential: namedCredential(credential) }))
+			.map(({ attachment, db, credential }) => ({
+				db,
+				prefix: attachment.envPrefix,
+				credential: namedCredential(credential),
+				readEndpoint: attachment.readEndpoint,
+			}))
 			.sort((a, b) => a.prefix.localeCompare(b.prefix));
 	}
 
@@ -3717,8 +3728,10 @@ export class DatabaseService {
 
 	private resolveForConsumer(projectId: string, nodeId: string | null, runtime: WorkloadRuntime): ResolvedAttachment[] {
 		if (!nodeId) return [];
-		const gateway = this.gatewayAt(nodeId);
-		return this.liveAttachmentRows(projectId).flatMap(({ db, prefix, credential }): ResolvedAttachment[] => {
+		// Per project: only an app whose own deploy, attach or migration chose the gateway uses it,
+		// so the flag or a neighbour never moves it (HA-PLAN §9).
+		const gateway = this.ctx.endpoints.projectGateway(projectId, nodeId);
+		return this.liveAttachmentRows(projectId).flatMap(({ db, prefix, credential, readEndpoint }): ResolvedAttachment[] => {
 			const info = databaseEngineRegistry[db.engine];
 			// A named credential keeps its last confirmed secret while a rotation is in flight; one
 			// that never got a secret (or was revoked underneath) yields no env rather than a bad URL.
@@ -3745,6 +3758,7 @@ export class DatabaseService {
 						poolerPort: pool?.localPort ?? null,
 						poolHost: pool ? host : null,
 						gateway: true,
+						readEndpoint,
 						secretSealed: credential ? credential.secretSealed! : db.ownerSecret,
 						credential: credential ? { id: credential.id, role: credential.role } : null,
 					},
@@ -3771,6 +3785,7 @@ export class DatabaseService {
 					poolerPort: pooler ? (container ? 6_432 : db.poolerPort) : null,
 					poolHost: pooler ? (container ? `${databaseAlias(db.id)}-pool` : '127.0.0.1') : null,
 					gateway: false,
+					readEndpoint: false,
 					secretSealed: credential ? credential.secretSealed! : db.ownerSecret,
 					credential: credential ? { id: credential.id, role: credential.role } : null,
 				},
@@ -3796,24 +3811,12 @@ export class DatabaseService {
 		);
 	}
 
-	/** Whether this node gets H24's endpoints: the flag is on and its agent advertises the capability. */
-	private gatewayAt(nodeId: string): boolean {
-		if (!featureEnabled(this.ctx.config, 'ENDPOINTS_GATEWAY')) return false;
-		if (!featureEnabled(this.ctx.config, 'SERVICE_ENDPOINTS')) return false;
-		const row = this.ctx.db
-			.select({ capabilitiesJson: nodes.capabilitiesJson })
-			.from(nodes)
-			.where(eq(nodes.id, nodeId))
-			.get();
-		return row ? nodeHasCapability(row, ENDPOINTS_GATEWAY_CAPABILITY) : false;
-	}
-
 	/**
 	 * `AddHost=db-<id>:<gateway>` for a container app on this node (H24). One entry per attached
 	 * database, whatever node it runs on; the helper writes the Quadlet lines itself.
 	 */
 	containerAddHosts(projectId: string, nodeId: string): ContainerAddHost[] {
-		if (!this.gatewayAt(nodeId)) return [];
+		if (!this.ctx.endpoints.projectGateway(projectId, nodeId)) return [];
 		const attached = new Set(
 			this.ctx.db
 				.select({ id: databases.id })

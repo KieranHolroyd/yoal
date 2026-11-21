@@ -211,6 +211,49 @@ A storage replication target is a real copy: the source's node copies every buck
 > [!NOTE]
 > Not available yet: synchronous Postgres replicas, replicas of a database with point-in-time recovery, cascading replicas, rewinding the old primary after a promotion (its copy is deleted instead), and replicas for other engines.
 
+### Attachment endpoints
+
+By default an app with an attached database runs next to it, and a process app on another node
+reaches it through a loopback port. With `YOAL_FEATURE_ENDPOINTS_GATEWAY=1` in the control plane's
+environment (see [configuration](/self-hosting/configuration#feature-flags)), every attachment goes
+through a stable endpoint on the app's own node, containers included: `127.0.0.1:<port>` for a
+process app, `db-<id>:<port>` for a container. A container app can then run its copies on any node,
+and promoting a replica changes no app's environment and restarts nothing. An app also gets a
+pooled port when the database runs a pooler, and a read URL from its first deploy (see
+[read replicas](/data/databases#read-replicas)). Every involved node's agent must be recent enough
+to support it.
+
+Turning the flag on moves no running app. Each app moves to its endpoints on its own next deploy,
+or when you attach a database to it. To move every app at once:
+
+```sh
+yoal ha migrate attachments            # lists what would move and what cannot, changes nothing
+yoal ha migrate attachments --apply    # moves them; each app restarts once
+```
+
+Anyone who can read the HA status can run the first command. `--apply` needs a platform admin.
+
+An app listed as `blocked` runs a copy on a node whose agent does not support endpoints yet. Update
+that node, then run the command again.
+
+To see how every app reaches its databases, run `yoal ha attachments`, or use the MCP tool
+`get_attachment_endpoints`. For each app, database and node holding a copy it shows the mode, the
+host and port the app connects to, the pooled and read ports, and the node the connection lands on.
+The modes are:
+
+| Mode | Meaning |
+|---|---|
+| `gateway` | Through the app's stable endpoint |
+| `endpoint` | A process app on another node, through a loopback port |
+| `direct` | On the database's node, straight to its port |
+| `none` | No connection URL: a container on another node without endpoints. Run `yoal ha migrate attachments --apply` or redeploy it |
+
+Nodes authenticate each other's endpoint traffic with certificates from the install's own
+certificate authority. `yoal ha ca` shows it and the node certificates; `yoal ha ca rotate` replaces
+it (a platform admin only). The old authority stays trusted while each node renews its certificate,
+within 60 days. A second rotation is refused until no node holds a certificate the previous one
+signed; `yoal ha ca` shows how many still do.
+
 ## Settings → Clustering
 
 **Settings → Clustering** is a JSON editor for cluster tunables. It is available to platform owners only. The JSON is validated against the schema. An unknown section is rejected; an unknown key inside a section is ignored. Changes apply to the next join, placement, failover check or maintenance sweep.

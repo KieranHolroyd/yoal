@@ -206,7 +206,7 @@ The assistant is on when `YOAL_ASSISTANT_MODEL` is set and `YOAL_ASSISTANT_DISAB
 
 ### Feature flags
 
-Each flag is set with `YOAL_FEATURE_<NAME>`. Accepted values are `1`, `true`, `on` or `yes` to enable, and `0`, `false`, `off` or `no` to disable. Any other value is ignored and the default applies. Flags are read at start-up, so restart the control plane after a change. Every flag defaults on; set one to `0` to turn that feature off. `YOAL_FEATURE_DB_CONSOLE` was removed; the control plane logs a warning and ignores it.
+Each flag is set with `YOAL_FEATURE_<NAME>`. Accepted values are `1`, `true`, `on` or `yes` to enable, and `0`, `false`, `off` or `no` to disable. Any other value is ignored and the default applies. Flags are read at start-up, so restart the control plane after a change. Most flags default on; set one to `0` to turn that feature off. The table says which default off. `YOAL_FEATURE_DB_CONSOLE` was removed; the control plane logs a warning and ignores it.
 
 | Flag | Default | What it controls |
 |---|---|---|
@@ -223,6 +223,7 @@ Each flag is set with `YOAL_FEATURE_<NAME>`. Accepted values are `1`, `true`, `o
 | `ORG_NETWORKS` | on | Private per-organisation networks across nodes. |
 | `MULTI_NODE_REPLICAS` | on | Spread HTTP workload replicas across nodes. |
 | `SERVICE_ENDPOINTS` | on | Cross-node database attachments through loopback service endpoints. |
+| `ENDPOINTS_GATEWAY` | off | Every attachment, containers included, through a stable endpoint on the app's own node, with pooled and read ports, so promoting a replica changes no app's environment. Needs every involved node's agent to support it. Turning it on moves no running app; see [attachment endpoints](/self-hosting/clustering#attachment-endpoints). |
 | `DB_AUTO_PROMOTE` | off | Let automatic failover promote a PostgreSQL read replica when its primary's node goes silent. Needs `failover.enabled`, and has no effect until primaries can fence themselves; see [clustering](/self-hosting/clustering#automatic-failover). |
 | `APP_VOLUMES` | on | Attach persistent volumes to deployed workloads. |
 | `JOBS` | on | Cron jobs and one-off commands on process and container apps. See [app jobs](/compute/scheduled-jobs#app-jobs). |

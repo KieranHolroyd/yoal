@@ -342,6 +342,8 @@ export const serviceEndpoints = sqliteTable(
 		upstreamPort: integer('upstream_port').notNull(),
 		/** Bumps on every re-point of the upstream; the local port never changes with it. */
 		version: integer('version').notNull().default(0),
+		/** A read endpoint's replica set (`node:port,…`); a change bumps `version` (0133). */
+		upstreamsKey: text('upstreams_key'),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
 		updatedAt: integer('updated_at').notNull().$defaultFn(now),
 	},
@@ -1241,6 +1243,12 @@ export const workloads = sqliteTable(
 		/** What the last automatic rollback undid and why; shown until the next deploy. */
 		rollbackNote: text('rollback_note'),
 		rollbackAt: integer('rollback_at'),
+		/**
+		 * The project's own last deploy, attach or `ha migrate attachments` ran with the endpoint
+		 * gateway on every copy's node (0133): only then does it get same-node, pooled and read
+		 * endpoints (HA-PLAN §9, H24).
+		 */
+		endpointsGateway: integer('endpoints_gateway', { mode: 'boolean' }).notNull().default(false),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
 		updatedAt: integer('updated_at').notNull().$defaultFn(now),
 	},
@@ -1392,6 +1400,11 @@ export const databaseAttachments = sqliteTable(
 		envPrefix: text('env_prefix').notNull().default('DATABASE'),
 		/** Credential row this attachment consumes; null on rows created before named credentials. */
 		credentialId: text('credential_id'),
+		/**
+		 * `<P>_READ_*` through the stable read endpoint (H24): set by the project's own deploy, attach
+		 * or `ha migrate attachments` under the gateway, never by a neighbour (0133).
+		 */
+		readEndpoint: integer('read_endpoint', { mode: 'boolean' }).notNull().default(false),
 		createdBy: text('created_by').notNull(),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
 	},

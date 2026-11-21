@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { formatControlStatus, formatHaStatus, type HaStatusView } from './ha.ts';
+import { formatAttachments, formatControlStatus, formatHaStatus, formatMigration, formatNodeCa, type HaStatusView, type NodeCaStatusView } from './ha.ts';
 
 const view: HaStatusView = {
 	enabled: true,
@@ -82,5 +82,68 @@ describe('yoal ha status', () => {
 		expect(text).toMatch(/edge-a\s+primary\s+7\s+nod_a\s+yes/);
 		expect(text).toMatch(/edge-b\s+standby-behind\s+7\s+nod_a\s+no\s+12s/);
 		expect(formatControlStatus([])).toContain('No control nodes have reported');
+	});
+});
+
+const ca: NodeCaStatusView = {
+	inUse: true,
+	authorities: [
+		{ fingerprint: 'a'.repeat(64), subject: 'CN=Yoal install CA', notBefore: '2026-11-21T00:00:00.000Z', notAfter: '2036-11-21T00:00:00.000Z', state: 'active', createdAt: '2026-11-21T00:00:00.000Z' },
+		{ fingerprint: 'b'.repeat(64), subject: 'CN=Yoal install CA', notBefore: '2026-01-01T00:00:00.000Z', notAfter: '2036-01-01T00:00:00.000Z', state: 'previous', createdAt: '2026-01-01T00:00:00.000Z' },
+	],
+	leaves: { issued: 5, live: 4, nodes: 4, revoked: 1, renewDue: 1, onPreviousCa: 2, nextExpiry: '2026-12-01T00:00:00.000Z' },
+};
+
+describe('the install CA in yoal ha status (review debt 2, item 10)', () => {
+	test('prints the active and previous CA and the leaves', () => {
+		const text = formatNodeCa(ca);
+		expect(text).toContain(`Install CA: active ${'a'.repeat(16)}`);
+		expect(text).toContain(`previous ${'b'.repeat(16)} still trusted; 2 nodes still hold leaves it signed (do not rotate again yet)`);
+		expect(text).toContain('4 nodes hold a leaf, 1 due to renew, 1 revoked');
+		expect(formatHaStatus({ ...view, nodeCa: ca })).toContain('Install CA: active');
+		expect(formatHaStatus(view)).not.toContain('Install CA');
+	});
+});
+
+describe('yoal ha migrate attachments', () => {
+	test('a dry run lists what would move and how to apply it', () => {
+		const text = formatMigration({
+			apply: false,
+			gateway: true,
+			alreadyMoved: 2,
+			projects: [
+				{ projectId: 'prj_1', slug: 'shop', runtime: 'container', nodes: ['w1'], databases: ['shop-db'], status: 'will-move', reason: 'Moves to its stable endpoint; the app restarts once.' },
+				{ projectId: 'prj_2', slug: 'old', runtime: 'process', nodes: ['w2'], databases: ['old-db'], status: 'blocked', reason: 'Cannot move: w2 runs an agent without the endpoint gateway; update it first.' },
+			],
+		});
+		expect(text).toMatch(/shop\s+container\s+w1\s+shop-db\s+will move/);
+		expect(text).toContain('Dry run: nothing changed. 1 app would move');
+		expect(text).toContain('yoal ha migrate attachments --apply');
+		expect(text).toContain('2 apps already use their endpoints.');
+	});
+
+	test('after apply it says each app restarts once', () => {
+		const text = formatMigration({ apply: true, gateway: true, alreadyMoved: 0, projects: [{ projectId: 'prj_1', slug: 'shop', runtime: 'container', nodes: ['w1'], databases: ['shop-db'], status: 'moved', reason: 'x' }] });
+		expect(text).toContain('Moved 1 app');
+		expect(formatMigration({ apply: false, gateway: false, alreadyMoved: 0, projects: [] })).toContain('ENDPOINTS_GATEWAY is off');
+	});
+
+	test('the attachment view shows the endpoint, port and node per copy', () => {
+		const text = formatAttachments({
+			attachments: [
+				{
+					projectId: 'prj_1',
+					project: 'shop',
+					runtime: 'container',
+					databaseId: 'db_1',
+					database: 'shop-db',
+					databaseNode: 'data',
+					envPrefix: 'DATABASE',
+					gateway: true,
+					consumers: [{ nodeId: 'n1', node: 'w1', mode: 'gateway', host: 'db-1', port: 21000, poolPort: 21001, readPort: 23000, upstreamNode: 'data', version: 2 }],
+				},
+			],
+		});
+		expect(text).toMatch(/shop\s+shop-db\s+w1\s+gateway\s+db-1:21000\s+21001\s+23000\s+data/);
 	});
 });
