@@ -529,6 +529,12 @@ export const blueprintResourceKinds = [
 	'bucket',
 	'broker',
 	'attachment',
+	/**
+	 * The plan's HA section (HA-PLAN §8, W14): `cluster.requires`, `cluster.steering`,
+	 * `projects.<slug>.ha` and `databases.<name>.ha`. Present only in a plan of a file that sets HA
+	 * keys, so a file written before Wave 5 plans exactly as before.
+	 */
+	'ha',
 ] as const;
 export type BlueprintResourceKind = (typeof blueprintResourceKinds)[number];
 
