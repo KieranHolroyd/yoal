@@ -167,6 +167,12 @@ These flags are passed to the installer. Each one is also available as an enviro
 | `--smtp-password <password>` | SMTP password. | `YOAL_SMTP_PASSWORD` |
 | `--smtp-from <address>` | From address. Default `Yoal <noreply@content domain>`. | `YOAL_SMTP_FROM` |
 | `--object-store local\|r2` | Where release artifacts are stored. Default `local`. | `YOAL_OBJECT_STORE` |
+| `--object-store azure://<container>` | An Azure Blob Storage container. Also writes `YOAL_FEATURE_OBJECT_STORE_AZURE=1`. Needs `YOAL_AZURE_ACCOUNT` and `YOAL_AZURE_ACCOUNT_KEY` or `YOAL_AZURE_SAS_TOKEN`. | `YOAL_AZURE_*` |
+| `--object-store gcs://<bucket>` | A Google Cloud Storage bucket. Also writes `YOAL_FEATURE_OBJECT_STORE_GCS=1`. Needs `YOAL_GCS_CREDENTIALS_FILE`, the path of a service-account key. | `YOAL_GCS_*` |
+| `--object-store s3://<bucket>` | A bucket on any S3 endpoint. Needs `R2_ENDPOINT`, `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`. | `R2_*` |
+| `--object-store-credentials-file <path>` | The store's keys, one `KEY=value` per line. For `gcs://` it can be the service-account key itself. The installer never takes these keys on the command line. | `YOAL_OBJECT_STORE_CREDENTIALS_FILE` |
+| `--profile single\|ha\|ha-dr` | Write the profile's `YOAL_FEATURE_*` lines into `/etc/yoal/yoal.env`: the same lines `yoal ha init --profile` prints. Run that command once the other nodes have joined. Without the flag no flag line changes. | none |
+| `--zone <zone>` | This machine's zone, set when it enrols: lowercase letters, digits and single hyphens. Change it later under **Nodes → Edit node**. | none |
 | `--r2-account-id <id>` | R2 account ID. Required with `--object-store r2`. | `R2_ACCOUNT_ID` |
 | `--r2-bucket <bucket>` | R2 bucket. Required with `--object-store r2`. | `R2_BUCKET` |
 | `--r2-access-key-id <id>` | R2 access key ID. Required with `--object-store r2`. | `R2_ACCESS_KEY_ID` |

@@ -59,6 +59,21 @@ The default. The node generates its WireGuard key locally and joins the managed 
 curl -fsSL https://control.example.com/install/node.sh | sudo sh -s -- --token <token> --name <name>
 ```
 
+To keep the token out of the process list and your shell history, save the script and pass the token in a file, or on standard input with `--token-file -`. `--zone` and `--roles` set what **Nodes → Edit node** would, at join:
+
+```sh
+curl -fsSL https://control.example.com/install/node.sh -o node.sh
+sudo sh node.sh --token-file /root/join-token --name node-b --zone uksouth-2 --roles ingress,compute,data,control
+```
+
+| Flag | Meaning |
+| --- | --- |
+| `--token <token>` or `--token-file <path\|->` | The single-use join token, from the command line, a file, or standard input. |
+| `--name <name>` | The node's name. |
+| `--endpoint <host[:port]>` | The address other nodes dial for WireGuard. Default: the machine's IPv4, port 51820. |
+| `--zone <zone>` | The node's zone: lowercase letters, digits and single hyphens. Default `default`. |
+| `--roles <list>` | Comma-separated: `ingress`, `compute`, `data`, `control`, `build`. Default `compute,data`. |
+
 The script checks that it runs as root and that `yoal-agent` is installed, starts `yoal-helper`, exchanges the token for the node's identity, writes `/etc/yoal/agent.env` (mode `0600`, keeping a timestamped backup of any earlier file), and enables `yoal-agent`. A rerun repairs the environment file rather than destroying it. The script needs systemd.
 
 ### Existing private network
@@ -83,6 +98,10 @@ Redirect the output to `/etc/yoal/agent.env` as the install script does. For a N
 | `--network-mode yoal\|external` | No | `yoal` joins the managed overlay. The default for the command line is `external`. |
 | `--wireguard-public-key <key>` | No | A WireGuard public key for a `yoal` join. If omitted, the helper generates the key. |
 | `--public-address <host:port>` | No | The address the edge proxies to. For a `yoal` join it defaults to the node's overlay address on port 8080. |
+| `--zone <zone>` | No | The node's zone. A zone other nodes already use keeps their region. |
+| `--roles <list>` | No | Comma-separated roles: `ingress`, `compute`, `data`, `control`, `build`. |
+
+`--token` can be left out when `YOAL_JOIN_TOKEN` holds the token.
 
 The control plane decides the mode, not the command.
 

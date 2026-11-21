@@ -36,7 +36,8 @@ describe('node installer script', () => {
 		expect(script).toContain('[ -z "$ROLES" ] || set -- "$@" --roles "$ROLES"');
 		// The existing-agent path passes the token in the environment too.
 		expect(script).toContain('YOAL_JOIN_TOKEN=$TOKEN yoal-agent "$@"');
-		expect(script).not.toContain('--token "$TOKEN"');
+		// Only an older agent, which cannot read the variable, still gets it as an argument.
+		expect(script).toContain('yoal-agent join --help 2>&1 | grep -q YOAL_JOIN_TOKEN');
 		expect(Bun.spawnSync({ cmd: ['sh', '-n', '/dev/stdin'], stdin: new TextEncoder().encode(script) }).exitCode).toBe(0);
 
 		const dir = mkdtempSync(join(tmpdir(), 'yoal-node-sh-'));

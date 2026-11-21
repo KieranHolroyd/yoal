@@ -108,8 +108,13 @@ set -- join "$ORIGIN" --name "$NAME" --network-mode yoal
 [ -z "$ENDPOINT" ] || set -- "$@" --public-address "$ENDPOINT"
 [ -z "$ZONE" ] || set -- "$@" --zone "$ZONE"
 [ -z "$ROLES" ] || set -- "$@" --roles "$ROLES"
-# The token travels in the environment, not on yoal-agent's command line.
-YOAL_JOIN_TOKEN=$TOKEN yoal-agent "$@" > /etc/yoal/agent.env
+# The token travels in the environment, not on yoal-agent's command line. An agent from before
+# YOAL_JOIN_TOKEN (its join usage does not mention it) still needs --token.
+if yoal-agent join --help 2>&1 | grep -q YOAL_JOIN_TOKEN; then
+	YOAL_JOIN_TOKEN=$TOKEN yoal-agent "$@" > /etc/yoal/agent.env
+else
+	yoal-agent "$@" --token "$TOKEN" > /etc/yoal/agent.env
+fi
 chmod 600 /etc/yoal/agent.env
 
 systemctl enable --now yoal-helper >/dev/null 2>&1 || true
