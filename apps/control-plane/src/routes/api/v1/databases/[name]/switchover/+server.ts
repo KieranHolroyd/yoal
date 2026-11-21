@@ -2,6 +2,7 @@ import type { RequestHandler } from './$types';
 import { databaseSwitchoverRequestSchema } from '@yoal/contracts';
 import { core } from '#lib/server/core.js';
 import { json, readJson, route } from '#lib/server/api.js';
+import { requireIfMatch } from '#lib/server/if-match.js';
 import { requirePrincipal } from '#lib/server/principal.js';
 
 /**
@@ -19,9 +20,10 @@ export const POST: RequestHandler = (event) =>
 	route(async () => {
 		const principal = requirePrincipal(event);
 		const input = await readJson(event.request, databaseSwitchoverRequestSchema);
-		const header = event.request.headers.get('if-match')?.replace(/^W\//, '').replace(/"/g, '').trim();
-		const ifMatch = header ? Number(header) : null;
-		if (header && !Number.isInteger(ifMatch))
-			return json({ error: 'If-Match must be the primary generation (an integer).' }, 400);
-		return json({ switchover: await core.databaseMembers.switchover(principal, event.params.name, input, { ifMatch }) }, 202);
+		const ifMatch = requireIfMatch(event.request.headers.get('if-match'));
+		if (!ifMatch.ok) return json({ error: ifMatch.error }, ifMatch.status);
+		return json(
+			{ switchover: await core.databaseMembers.switchover(principal, event.params.name, input, { ifMatch: ifMatch.generation }) },
+			202,
+		);
 	});

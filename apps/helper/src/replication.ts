@@ -402,11 +402,23 @@ END $$;`,
 	].join('\n');
 }
 
-/** Resume writes after a refused switchover. */
+/** Resume writes after a refused switchover, and prove read-only is actually off. */
 export function renderResumeWritesSql(): string {
 	return [
 		`ALTER SYSTEM RESET default_transaction_read_only;`,
-		'SELECT pg_reload_conf();',
+		`DO $$
+DECLARE
+  deadline timestamptz := clock_timestamp() + interval '10 seconds';
+BEGIN
+  PERFORM pg_reload_conf();
+  LOOP
+    EXIT WHEN current_setting('default_transaction_read_only') = 'off';
+    IF clock_timestamp() > deadline THEN
+      RAISE EXCEPTION 'default_transaction_read_only did not clear; the database is still read-only';
+    END IF;
+    PERFORM pg_sleep(0.1);
+  END LOOP;
+END $$;`,
 		'',
 	].join('\n');
 }

@@ -272,20 +272,22 @@ describe('sync-set safety (W10 review blockers)', () => {
 		const target = db.replicas.find((replica) => replica.nodeId === second.nodeId)!;
 		await core.databaseMembers.switchover(owner, 'resumefail', { replicaId: target.id, confirm: true });
 		const drain = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((task) => task.databaseId === db.id)!;
-		core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
 			{ switchoverId: drain.switchoverId, step: 'drain', status: 'ok', lsn: '0/4000000', replayLsn: '0/3000148' },
 		]);
 		const resume = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((task) => task.databaseId === db.id)!;
 		expect(resume.step).toBe('resume');
-		core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+		const resumeVersion = resume.version;
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
 			{ switchoverId: resume.switchoverId, version: resume.version, step: 'resume', status: 'failed', error: 'read-only stuck' },
 		]);
 		const still = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((task) => task.databaseId === db.id)!;
 		expect(still.step).toBe('resume');
+		expect(still.version).not.toBe(resumeVersion);
 		expect(core.databaseMembers.switchovers(owner, 'resumefail')[0]!.message).toContain('Resuming writes failed');
 	});
 
-	test('the node watchdog applies on_sync_loss only at the lease ETag it acted on', async () => {
+	test('a stale node watchdog result is reconciled, never recorded as sync', async () => {
 		const db = database('watchdog');
 		reportSlots(db.id, db.replicas);
 		await core.databaseMembers.setDurability(owner, 'watchdog', { durability: 'sync' });
@@ -297,15 +299,43 @@ describe('sync-set safety (W10 review blockers)', () => {
 			.query<{ sync_lease_etag: string }, [string]>('SELECT sync_lease_etag FROM databases WHERE id = ?')
 			.get(db.id)!;
 		expect(row.sync_lease_etag).toBeTruthy();
+		// A node that applied on_sync_loss at an older ETag is stale; the control plane reconciles
+		// from the current lease (no healthy member left) rather than recording sync.
 		await core.databaseMembers.applySyncResults(primary.nodeId, [
-			{ databaseId: db.id, version: 'watchdog', step: 'watchdog', status: 'ok', targetSyncState: 'downgrade', leaseEtag: '"stale"' },
-		]);
-		expect((await core.databaseMembers.status(owner, 'watchdog')).durabilityEffective).toBe('sync');
-		await core.databaseMembers.applySyncResults(primary.nodeId, [
-			{ databaseId: db.id, version: 'watchdog', step: 'watchdog', status: 'ok', targetSyncState: 'downgrade', leaseEtag: row.sync_lease_etag },
+			{ databaseId: db.id, version: 'watchdog', step: 'watchdog', status: 'ok', targetSyncState: 'downgrade', leaseEtag: '"stale"', applied: [] },
 		]);
 		const downgraded = await core.databaseMembers.status(owner, 'watchdog');
 		expect(downgraded).toMatchObject({ durability: 'sync', durabilityEffective: 'async' });
+		expect((await lease(db.id))!.durabilityEffective).toBe('async');
+	});
+
+	test('a stale set-sync result re-opens the transition instead of recording sync', async () => {
+		const db = database('staleset');
+		reportSlots(db.id, db.replicas);
+		await core.databaseMembers.setDurability(owner, 'staleset', { durability: 'sync' });
+		const task = taskFor(db.id)!;
+		await core.databaseMembers.applySyncResults(primary.nodeId, [
+			{ databaseId: db.id, version: task.version, step: 'set-sync', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148', targetSyncState: 'sync' },
+		]);
+		const steady = await core.databaseMembers.status(owner, 'staleset');
+		const slot = core.databaseReplicas.rowsFor(db.id).find((row) => row.nodeId === steady.sync[0])!.slot!;
+		await core.databaseMembers.applySyncResults(primary.nodeId, [
+			{
+				databaseId: db.id,
+				version: 'stale',
+				step: 'set-sync',
+				status: 'ok',
+				lsn: '0/3000148',
+				replayLsn: '0/3000148',
+				targetSyncState: 'sync',
+				leaseEtag: '"stale"',
+				applied: [slot],
+			},
+		]);
+		const rearmed = await core.databaseMembers.status(owner, 'staleset');
+		expect(rearmed.syncState).toBe('changing');
+		expect(rearmed.sync).toEqual([]);
+		expect((await lease(db.id))!.syncState).toBe('changing');
 	});
 
 	test('a switchover requires If-Match and refuses a stale generation', async () => {
@@ -325,20 +355,114 @@ describe('sync-set safety (W10 review blockers)', () => {
 		await core.databaseMembers.applySyncResults(primary.nodeId, [
 			{ databaseId: db.id, version: task.version, step: 'set-sync', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148', targetSyncState: 'sync' },
 		]);
-		const target = db.replicas.find((replica) => replica.nodeId === second.nodeId)!;
+		const syncMember = (await core.databaseMembers.status(owner, 'promotelase')).sync[0]!;
+		const target = db.replicas.find((replica) => replica.nodeId === syncMember)!;
 		await core.databaseMembers.switchover(owner, 'promotelase', { replicaId: target.id, confirm: true });
 		const drain = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id)!;
-		core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
 			{ switchoverId: drain.switchoverId, version: drain.version, step: 'drain', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148' },
 		]);
-		const promotion = core.databaseReplicas.promotionsForNode(second.nodeId).find((item) => item.databaseId === db.id)!;
-		await core.databaseReplicas.applyPromotionResults(second.nodeId, [{ failoverId: promotion.failoverId, status: 'ok', lsn: '0/3000148' }]);
+		const promotion = (await core.databaseReplicas.promotionsForNode(target.nodeId)).find((item) => item.databaseId === db.id)!;
+		await core.databaseReplicas.applyPromotionResults(target.nodeId, [{ failoverId: promotion.failoverId, status: 'ok', lsn: '0/3000148' }]);
 		const stored = (await lease(db.id))!;
-		expect(stored).toMatchObject({ generation: 1, holderNodeId: second.nodeId, sync: [], syncState: 'changing' });
+		expect(stored).toMatchObject({ generation: 1, holderNodeId: target.nodeId, sync: [], syncState: 'changing' });
 		const status = await core.databaseMembers.status(owner, 'promotelase');
 		expect(status).toMatchObject({ syncState: 'changing', durability: 'sync', durabilityEffective: 'async' });
 		// The new primary is told to clear any inherited setting before arming a target.
-		expect(core.databaseMembers.syncTasksForNode(second.nodeId).find((item) => item.databaseId === db.id)?.step).toBe('clear-sync');
+		expect(core.databaseMembers.syncTasksForNode(target.nodeId).find((item) => item.databaseId === db.id)?.step).toBe('clear-sync');
+	});
+
+	test('durability refuses while a failover is active', async () => {
+		const db = database('faildurability');
+		reportSlots(db.id, db.replicas);
+		await core.databaseMembers.switchover(owner, 'faildurability', { replicaId: db.replicas[0]!.id, confirm: true });
+		await expect(core.databaseMembers.setDurability(owner, 'faildurability', { durability: 'sync' })).rejects.toThrow(/failing over/);
+	});
+
+	test('promotion refuses a node the lease does not name', async () => {
+		const db = database('refusepromote');
+		reportSlots(db.id, db.replicas);
+		await core.databaseMembers.setDurability(owner, 'refusepromote', { durability: 'sync' });
+		const task = taskFor(db.id)!;
+		await core.databaseMembers.applySyncResults(primary.nodeId, [
+			{ databaseId: db.id, version: task.version, step: 'set-sync', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148', targetSyncState: 'sync' },
+		]);
+		const syncMember = (await core.databaseMembers.status(owner, 'refusepromote')).sync[0]!;
+		const other = db.replicas.find((replica) => replica.nodeId !== syncMember)!;
+		await expect(
+			core.databaseReplicas.promote(owner, 'refusepromote', other.id, { confirm: true }),
+		).rejects.toThrow(/synchronous set/);
+		// acceptDataLoss is the explicit manual override; it still may not race an open change.
+		await expect(
+			core.databaseReplicas.promote(owner, 'refusepromote', other.id, { confirm: true, acceptDataLoss: true }),
+		).resolves.toBeDefined();
+	});
+
+	test('a steady lease is renewed by the tick before it expires', async () => {		const db = database('steadyrenew');
+		reportSlots(db.id, db.replicas);
+		await core.databaseMembers.setDurability(owner, 'steadyrenew', { durability: 'sync' });
+		const task = taskFor(db.id)!;
+		await core.databaseMembers.applySyncResults(primary.nodeId, [
+			{ databaseId: db.id, version: task.version, step: 'set-sync', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148', targetSyncState: 'sync' },
+		]);
+		const before = (await lease(db.id))!;
+		// The tick renews when less than half a TTL remains; place the clock inside that window.
+		clock = Date.parse(before.expiresAt as string) - 3_000;
+		await core.databaseMembers.tick();
+		const after = (await lease(db.id))!;
+		expect(Date.parse(after.expiresAt as string)).toBeGreaterThan(Date.parse(before.expiresAt as string));
+		expect((await core.databaseMembers.status(owner, 'steadyrenew')).syncState).toBe('steady');
+	});
+
+	test('a drain that finishes while a change is open is refused before promotion is handed out', async () => {		const db = database('racedrain');
+		reportSlots(db.id, db.replicas);
+		const target = db.replicas[0]!;
+		await core.databaseMembers.switchover(owner, 'racedrain', { replicaId: target.id, confirm: true });
+		const drain = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id)!;
+		opened.sqlite.run("UPDATE databases SET sync_state = 'changing' WHERE id = ?", [db.id]);
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+			{ switchoverId: drain.switchoverId, version: drain.version, step: 'drain', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148' },
+		]);
+		const resume = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id)!;
+		expect(resume.step).toBe('resume');
+		expect((await core.databaseReplicas.promotionsForNode(target.nodeId)).some((item) => item.databaseId === db.id)).toBe(false);
+	});
+
+	test('a successful promotion that races a change is promoted-but-not-repointed, never resumed', async () => {
+		const db = database('racedpromote');
+		reportSlots(db.id, db.replicas);
+		const target = db.replicas[0]!;
+		await core.databaseMembers.switchover(owner, 'racedpromote', { replicaId: target.id, confirm: true });
+		const drain = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id)!;
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+			{ switchoverId: drain.switchoverId, version: drain.version, step: 'drain', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148' },
+		]);
+		// The promotion task was handed out before the change opened; the result races the change.
+		const promotion = (await core.databaseReplicas.promotionsForNode(target.nodeId)).find((item) => item.databaseId === db.id)!;
+		opened.sqlite.run("UPDATE databases SET sync_state = 'changing' WHERE id = ?", [db.id]);
+		await core.databaseReplicas.applyPromotionResults(target.nodeId, [{ failoverId: promotion.failoverId, status: 'ok', lsn: '0/3000148' }]);
+		const resumed = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id);
+		expect(resumed).toBeUndefined();
+		const view = core.databaseMembers.switchovers(owner, 'racedpromote')[0]!;
+		expect(view.promoted).toBe(true);
+		expect(view.message).toContain('not re-pointed');
+	});
+
+	test('a lease CAS failure after promotion alerts and the tick retries it', async () => {
+		const db = database('leaseretry');
+		reportSlots(db.id, db.replicas);
+		const target = db.replicas[0]!;
+		await core.databaseMembers.switchover(owner, 'leaseretry', { replicaId: target.id, confirm: true });
+		const drain = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((item) => item.databaseId === db.id)!;
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+			{ switchoverId: drain.switchoverId, version: drain.version, step: 'drain', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148' },
+		]);
+		const promotion = (await core.databaseReplicas.promotionsForNode(target.nodeId)).find((item) => item.databaseId === db.id)!;
+		arbiter.failNext = { status: 500, count: 1 };
+		await core.databaseReplicas.applyPromotionResults(target.nodeId, [{ failoverId: promotion.failoverId, status: 'ok', lsn: '0/3000148' }]);
+		expect(core.databaseMembers.switchovers(owner, 'leaseretry')[0]!.message).toContain('no lease yet');
+		await core.databaseMembers.tick();
+		expect(core.databaseMembers.switchovers(owner, 'leaseretry')[0]!.message).toContain('lease taken');
 	});
 });
 
@@ -351,14 +475,14 @@ describe('planned switchover (W10)', () => {
 		expect(view).toMatchObject({ step: 'checkpoint', toNodeId: second.nodeId, generation: 1 });
 
 		// The old primary's node drains and reports its final LSN equal to the replica's replay.
-		core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
 			{ switchoverId: 'x', step: 'drain', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148' },
 		]);
 		// Wrong id is ignored; use the real one from the desired state.
 		const drains = core.databaseMembers.switchoverTasksForNode(primary.nodeId).filter((task) => task.databaseId === db.id);
 		expect(drains).toHaveLength(1);
 		expect(drains[0]!.step).toBe('drain');
-		core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
 			{ switchoverId: drains[0]!.switchoverId, step: 'drain', status: 'ok', lsn: '0/3000148', replayLsn: '0/3000148' },
 		]);
 		const promoting = core.databaseMembers.switchovers(owner, 'billing')[0]!;
@@ -366,7 +490,7 @@ describe('planned switchover (W10)', () => {
 		expect(promoting.primaryLsn).toBe('0/3000148');
 
 		// The replica's node promotes through the existing C7 task, then the re-point runs.
-		const promotion = core.databaseReplicas.promotionsForNode(second.nodeId).find((task) => task.databaseId === db.id)!;
+		const promotion = (await core.databaseReplicas.promotionsForNode(second.nodeId)).find((task) => task.databaseId === db.id)!;
 		await core.databaseReplicas.applyPromotionResults(second.nodeId, [{ failoverId: promotion.failoverId, status: 'ok', lsn: '0/3000148' }]);
 		// The promoted database reports running on its new node, which completes the switchover.
 		core.databaseReplicas.applyWorkloadReports(second.nodeId, [{ id: db.id, status: 'running', restarts: 0 }]);
@@ -393,7 +517,7 @@ describe('planned switchover (W10)', () => {
 		await core.databaseMembers.switchover(owner, 'analytics', { replicaId: target.id, confirm: true });
 		const drain = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((task) => task.databaseId === db.id)!;
 		// The primary's final LSN is ahead of the replica: the switchover must refuse.
-		core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
 			{ switchoverId: drain.switchoverId, step: 'drain', status: 'ok', lsn: '0/4000000', replayLsn: '0/3000148' },
 		]);
 		const refused = core.databaseMembers.switchovers(owner, 'analytics')[0]!;
@@ -402,8 +526,8 @@ describe('planned switchover (W10)', () => {
 		expect(refused.primaryLsn).toBe('0/4000000');
 		const resume = core.databaseMembers.switchoverTasksForNode(primary.nodeId).find((task) => task.databaseId === db.id)!;
 		expect(resume.step).toBe('resume');
-		expect(core.databaseReplicas.promotionsForNode(third.nodeId).some((task) => task.databaseId === db.id)).toBe(false);
-		core.databaseMembers.applySwitchoverResults(primary.nodeId, [
+		expect((await core.databaseReplicas.promotionsForNode(third.nodeId)).some((task) => task.databaseId === db.id)).toBe(false);
+		await core.databaseMembers.applySwitchoverResults(primary.nodeId, [
 			{ switchoverId: resume.switchoverId, step: 'resume', status: 'ok' },
 		]);
 		expect(core.databaseMembers.switchoverTasksForNode(primary.nodeId).some((task) => task.databaseId === db.id)).toBe(false);

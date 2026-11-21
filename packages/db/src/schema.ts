@@ -500,6 +500,8 @@ export const databaseFailovers = sqliteTable(
 		/** `drain` | `resume` | `promote`, for the switchover surface (0127). */
 		switchoverStep: text('switchover_step'),
 		switchoverStartedAt: integer('switchover_started_at'),
+		/** Counts switchover drain/resume/promote attempts, so a retry is a new task version (0127). */
+		switchoverAttempt: integer('switchover_attempt').notNull().default(0),
 		/** The old primary was rewound (or rebuilt) and no longer needs handling (0127). */
 		rewoundAt: integer('rewound_at'),
 		/** `rewound` re-attached the old copy; `rebuild` needs a fresh replica there (0127). */
@@ -510,6 +512,8 @@ export const databaseFailovers = sqliteTable(
 		fenceVersion: integer('fence_version'),
 		fencedAt: integer('fenced_at'),
 		promotedAt: integer('promoted_at'),
+		/** When the database lease was last taken at the promoted generation (0127 review). */
+		leaseTakenAt: integer('lease_taken_at'),
 		/** The old primary's data dir was deleted on its node. */
 		oldPurgedAt: integer('old_purged_at'),
 		/** The promoted replica's leftover directory was deleted. */

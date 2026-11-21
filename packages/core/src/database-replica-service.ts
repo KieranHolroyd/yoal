@@ -241,13 +241,13 @@ export class DatabaseReplicaService {
 	 * with a fresh report, and the old primary's node must be able to confirm the fence, or the
 	 * caller must accept the data loss. A replica on the primary's own node is never promoted.
 	 */
-	promote(
+	async promote(
 		principal: Principal,
 		databaseName: string,
 		replicaId: string,
 		raw: DatabaseReplicaPromote,
 		options: { ifMatch?: number | null } = {},
-	): DatabaseFailoverView {
+	): Promise<DatabaseFailoverView> {
 		const input = databaseReplicaPromoteSchema.parse(raw);
 		const database = this.ctx.databases.requireRow(principal, databaseName);
 		this.ctx.iam.require(principal, 'database:update', { type: 'database', id: database.id });
@@ -263,16 +263,20 @@ export class DatabaseReplicaService {
 			.where(and(eq(databaseReplicas.id, replicaId), eq(databaseReplicas.databaseId, database.id)))
 			.get();
 		if (!row || row.removingAt) throw new NotFoundError('Database replica');
-		// I12 / acquireRefusal: a change is non-promotable, and a `sync` database may only promote a
-		// member the lease names (or an operator who explicitly accepts the loss).
-		if (database.syncState === 'changing')
-			throw new ConflictError(
-				`"${database.name}" has a sync-set change open, which is non-promotable (W9-SPEC §5.5). Wait for it to close, or choose manually after it does.`,
-			);
-		if (database.durability === 'sync' && database.durabilityEffective === 'sync' && database.syncReplicaNodeId !== row.nodeId && !input.acceptDataLoss)
-			throw new ConflictError(
-				`This node is not in "${database.name}"'s synchronous set, so promoting it could lose an acknowledged commit. Pass acceptDataLoss: true to promote anyway.`,
-			);
+		return this.promoteRow(principal, database, row, input);
+	}
+
+	/** The async half of `promote`: the lease read is the gate, the row is the display cache. */
+	private async promoteRow(
+		principal: Principal,
+		database: DatabaseRow,
+		row: ReplicaRow,
+		input: DatabaseReplicaPromote,
+	): Promise<DatabaseFailoverView> {
+		// I12 / acquireRefusal: read the lease, not the cached row. A change makes the database
+		// non-promotable for everyone; an expired or foreign-held lease cannot be acquired.
+		const refusal = await this.ctx.databaseMembers.promotionRefusal(database, row.nodeId, input.acceptDataLoss);
+		if (refusal) throw new ConflictError(`"${database.name}" cannot be promoted: ${refusal}`);
 		const risks = this.promotionRisks(database, row);
 		if (risks.length > 0 && !input.acceptDataLoss)
 			throw new ConflictError(
@@ -738,17 +742,24 @@ export class DatabaseReplicaService {
 	}
 
 	/** Replicas this node must promote, once their old primary is fenced. */
-	promotionsForNode(nodeId: string): DatabaseReplicaPromotionTask[] {
-		return this.ctx.db
+	async promotionsForNode(nodeId: string): Promise<DatabaseReplicaPromotionTask[]> {
+		const rows = this.ctx.db
 			.select()
 			.from(databaseFailovers)
 			.where(and(eq(databaseFailovers.toNodeId, nodeId), eq(databaseFailovers.status, 'promoting'), isNull(databaseFailovers.promotedAt)))
-			.all()
-			.flatMap((row) =>
-				row.replicaId
-					? [{ failoverId: row.id, databaseId: row.databaseId, replicaWorkloadId: databaseReplicaWorkloadId(row.replicaId) }]
-					: [],
-			);
+			.all();
+		const tasks: DatabaseReplicaPromotionTask[] = [];
+		for (const row of rows) {
+			if (!row.replicaId) continue;
+			const database = this.ctx.db.select().from(databases).where(eq(databases.id, row.databaseId)).get();
+			if (!database || database.deletedAt) continue;
+			// Do not hand the promotion to the node while the database is non-promotable. The row is
+			// the display cache; the lease is the gate (W10 review blocker 2).
+			if (database.syncState === 'changing') continue;
+			if (await this.ctx.databaseMembers.promotionRefusal(database, row.toNodeId, false)) continue;
+			tasks.push({ failoverId: row.id, databaseId: row.databaseId, replicaWorkloadId: databaseReplicaWorkloadId(row.replicaId) });
+		}
+		return tasks;
 	}
 
 	/**
@@ -922,18 +933,37 @@ export class DatabaseReplicaService {
 						.set({ status: 'failed', message: `${message} Remove this replica and add a new one.`, updatedAt: this.ctx.now() })
 						.where(eq(databaseReplicas.id, failover.replicaId))
 						.run();
-				// A switchover's old primary is read-only: ask its node to resume and alert (major 6).
+				// Only a *failed* promotion may put the old primary back: nothing was promoted.
 				if (failover.kind === 'switchover') await this.ctx.databaseMembers.onPromotionFailed(failover, message);
 				continue;
 			}
-			// The promotion must not re-point a lease that a sync change has made non-promotable.
+			// Any non-failed result means `pg_ctl promote` succeeded. The old primary must never be
+			// resumed again. If a sync change opened in the race, the database is non-promotable now:
+			// mark it promoted, take the lease, alert, and leave the re-point to a person.
 			if (database?.syncState === 'changing') {
-				const message = 'The promotion was refused: a sync-set change is open, so the database is non-promotable (W9-SPEC §5.5).';
-				this.failFailover(failover, message);
-				if (failover.kind === 'switchover') await this.ctx.databaseMembers.onPromotionFailed(failover, message);
+				const now = this.ctx.now();
+				const message =
+					'The promotion succeeded, but a sync-set change is open, so the database is non-promotable and was not re-pointed. The new primary is live; do not resume the old one.';
+				this.ctx.db
+					.update(databaseFailovers)
+					.set({ promotedAt: now, message: message.slice(0, 2_000) })
+					.where(eq(databaseFailovers.id, failover.id))
+					.run();
+				try {
+					await this.ctx.databaseMembers.onPromotion(failover.databaseId, failover.toNodeId, failover.generation, failover.id);
+				} catch (error) {
+					await this.ctx.databaseMembers.onLeaseTakeFailed(failover, (error as Error).message);
+				}
+				await this.ctx.databaseMembers.onPromotionBlocked(failover, message);
 				continue;
 			}
-			await this.repoint(failover, result.lsn ?? null);
+			try {
+				await this.repoint(failover, result.lsn ?? null);
+			} catch (error) {
+				// The row may already be on the new primary; the lease is the part that failed. Alert
+				// and let `tick()` retry it rather than swallowing this in a heartbeat handler.
+				await this.ctx.databaseMembers.onLeaseTakeFailed(failover, (error as Error).message);
+			}
 		}
 	}
 

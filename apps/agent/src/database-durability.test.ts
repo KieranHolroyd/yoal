@@ -24,9 +24,12 @@ interface Call {
 
 function harness(options: {
 	slots?: Array<{ slot: string; replayLsn: string | null; syncState: string | null; state?: string }>;
+	slotSequence?: Array<Array<{ slot: string; replayLsn: string | null; syncState: string | null; state?: string }>>;
 	now?: () => number;
+	barrierWaitMs?: number;
 } = {}) {
 	const calls: Call = { syncConfigure: [], barrier: [], checkpoint: [], stop: [], resume: [], rewinds: [] };
+	let sample = 0;
 	const helper = {
 		async syncConfigure(id: string, members: string[]): Promise<void> {
 			calls.syncConfigure.push({ id, members });
@@ -48,7 +51,11 @@ function harness(options: {
 			return { inRecovery: false, lsn: '0/3000148', streaming: true, readOnly: false };
 		},
 		async replicationStatus() {
-			return (options.slots ?? []).map((slot) => ({
+			const rows =
+				options.slotSequence
+					? options.slotSequence[Math.min(sample++, options.slotSequence.length - 1)]!
+					: (options.slots ?? []);
+			return rows.map((slot) => ({
 				slot: slot.slot,
 				active: true,
 				walStatus: 'reserved',
@@ -74,6 +81,11 @@ function harness(options: {
 		nodeId: NODE,
 		helper,
 		now: options.now,
+		// The replay poll must not add real time to a unit test; the deadline is exercised by
+		// `barrierWaitMs: 0`, so one sample decides.
+		sleep: async () => undefined,
+		barrierWaitMs: options.barrierWaitMs ?? 0,
+		pollMs: 0,
 		fetch: (async () =>
 			new Response(
 				JSON.stringify({
@@ -122,6 +134,40 @@ describe('the agent barrier proof', () => {
 			new AbortController().signal,
 		);
 		expect(runner.pendingSyncResults()[0]).toMatchObject({ status: 'failed', targetSyncState: 'potential' });
+	});
+
+	test('a target that is not sync before the barrier never writes the barrier', async () => {
+		const { calls, runner } = harness({ slots: [{ slot: SLOT, replayLsn: '0/3000148', syncState: 'potential' }] });
+		await runner.runOnce(
+			state({
+				databaseSyncTasks: [{ databaseId: DATABASE, version: 'v1', step: 'set-sync', sync: [SLOT], leaseEtag: '"1"' }],
+			}),
+			new AbortController().signal,
+		);
+		expect(calls.barrier).toEqual([]);
+		expect(runner.pendingSyncResults()[0]).toMatchObject({ status: 'failed', targetSyncState: 'potential' });
+	});
+
+	test('the runner polls the target replay until it reaches the barrier', async () => {
+		let tick = 0;
+		const { runner } = harness({
+			barrierWaitMs: 10,
+			now: () => {
+				tick += 1;
+				return tick;
+			},
+			slotSequence: [
+				[{ slot: SLOT, replayLsn: '0/2000000', syncState: 'sync' }],
+				[{ slot: SLOT, replayLsn: '0/3000148', syncState: 'sync' }],
+			],
+		});
+		await runner.runOnce(
+			state({
+				databaseSyncTasks: [{ databaseId: DATABASE, version: 'v1', step: 'set-sync', sync: [SLOT], leaseEtag: '"1"' }],
+			}),
+			new AbortController().signal,
+		);
+		expect(runner.pendingSyncResults()[0]).toMatchObject({ status: 'ok', replayLsn: '0/3000148', applied: [SLOT] });
 	});
 
 	test('a target that replayed the barrier and is sync reports the target LSN and the task version', async () => {
@@ -181,6 +227,122 @@ describe('the agent drain and rewind', () => {
 			new AbortController().signal,
 		);
 		expect(calls.rewinds).toEqual([{ id: workloadId, databaseId: DATABASE }]);
+	});
+});
+
+describe('the shipped drain path can lose an in-flight commit', () => {
+	/**
+	 * The commit-loss harness around `DatabaseDurabilityRunner`'s drain (the shipped path), not the
+	 * unused `runSwitchover` model. `writesStop` leaves one transaction in flight; with the correct
+	 * helper it commits before the sample, without the wait it commits only on the next
+	 * `pg_stat_replication` call, after the sampled LSN. The assertion detects that loss.
+	 */
+	function drainHarness(skipWait: boolean) {
+		let committed = 0x1000000n;
+		let acked = committed;
+		let replica = committed;
+		let inflight: bigint | null = null;
+		let lastSample = 0n;
+		const calls: string[] = [];
+		const helper = {
+			async syncConfigure() {},
+			async syncBarrier() {
+				return '0/1000000';
+			},
+			async checkpoint() {
+				calls.push('checkpoint');
+				// Commits that land between the checkpoint and the stop, as under load.
+				committed += 3n;
+				acked = committed;
+				replica = committed;
+			},
+			async writesStop() {
+				calls.push('stop');
+				inflight = committed + 1n;
+				if (!skipWait) {
+					committed = inflight;
+					acked = inflight;
+					inflight = null;
+				}
+			},
+			async writesResume() {},
+			async memberStatus() {
+				calls.push('sample');
+				return { inRecovery: false, lsn: `0/${committed.toString(16).toUpperCase()}`, streaming: true, readOnly: true };
+			},
+			async replicationStatus() {
+				calls.push('slots');
+				// The in-flight transaction only reaches the WAL after the sample when the stop did not
+				// wait: this is the acknowledged commit the switchover would lose.
+				if (inflight !== null) {
+					committed = inflight;
+					acked = inflight;
+					inflight = null;
+				}
+				if (!skipWait) replica = committed;
+				return [
+					{
+						slot: SLOT,
+						active: true,
+						walStatus: 'reserved',
+						state: 'streaming',
+						sentLsn: `0/${replica.toString(16).toUpperCase()}`,
+						replayLsn: `0/${replica.toString(16).toUpperCase()}`,
+						lagBytes: 0,
+						lagSeconds: 0,
+						syncState: 'sync',
+					},
+				];
+			},
+			async replicaRewind() {
+				return { status: 'rewound' as const };
+			},
+		};
+		const runner = new DatabaseDurabilityRunner({
+			controlUrl: 'https://control.test',
+			nodeToken: 'token',
+			nodeId: NODE,
+			helper,
+			sleep: async () => undefined,
+			barrierWaitMs: 0,
+			fetch: (async () => new Response('{}', { status: 404 })) as unknown as typeof fetch,
+		});
+		const drain = async () => {
+			await runner.runOnce(
+				state({
+					databaseSwitchovers: [{ switchoverId: 'dfo_1', databaseId: DATABASE, step: 'drain', replicaSlot: SLOT, version: 'v1' }],
+				}),
+				new AbortController().signal,
+			);
+			const reported = runner.pendingSwitchoverResults()[0]?.lsn;
+			const match = reported ? /^([0-9A-F]{1,8})\/([0-9A-F]{1,8})$/i.exec(reported) : null;
+			lastSample = match ? (BigInt(`0x${match[1]}`) << 32n) + BigInt(`0x${match[2]}`) : 0n;
+		};
+		return {
+			calls,
+			drain,
+			get acked() {
+				return acked;
+			},
+			get sample() {
+				return lastSample;
+			},
+		};
+	}
+
+	test('100 shipped drains lose no acknowledged commit', async () => {
+		for (let run = 0; run < 100; run += 1) {
+			const f = drainHarness(false);
+			await f.drain();
+			expect(f.calls.slice(0, 2)).toEqual(['checkpoint', 'stop']);
+			expect(f.acked <= f.sample).toBe(true);
+		}
+	});
+
+	test('the same harness detects the loss when stop-writes does not wait', async () => {
+		const f = drainHarness(true);
+		await f.drain();
+		expect(f.acked > f.sample).toBe(true);
 	});
 });
 

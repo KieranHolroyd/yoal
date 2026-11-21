@@ -294,7 +294,7 @@ describe('promotion changes no app environment and restarts none', () => {
 		expect(beforeEnv.DATABASE_HOST).toBe(databaseAlias(db.id));
 		expect(beforeWorkload.activationVersion).not.toBe('');
 		const beforePrimary = endpointRows(workerB.nodeId, db.id).find((row) => row.role === 'primary')!;
-		const started = core.databaseReplicas.promote(owner, 'promotion-db', replica.id, { confirm: true }, { ifMatch: 0 });
+		const started = await core.databaseReplicas.promote(owner, 'promotion-db', replica.id, { confirm: true }, { ifMatch: 0 });
 		beat(data, { workloads: [] });
 		beat(workerB, {
 			databaseReplicaPromotionResults: [{ failoverId: started.id, status: 'ok', lsn: '0/4000000' }],

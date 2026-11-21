@@ -177,7 +177,7 @@ export const actions: Actions = {
 		const data = await request.formData();
 		const generation = Number(formString(data, 'generation'));
 		try {
-			core.databaseReplicas.promote(
+			await core.databaseReplicas.promote(
 				principal,
 				params.name,
 				formString(data, 'id'),

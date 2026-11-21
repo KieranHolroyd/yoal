@@ -19,9 +19,14 @@ ALTER TABLE database_failovers ADD COLUMN kind TEXT NOT NULL DEFAULT 'failover'
 ALTER TABLE database_failovers ADD COLUMN drain_lsn TEXT;
 ALTER TABLE database_failovers ADD COLUMN switchover_step TEXT;
 ALTER TABLE database_failovers ADD COLUMN switchover_started_at INTEGER;
+-- A retry must be a new task version or the node de-duplicates it forever (W10 review).
+ALTER TABLE database_failovers ADD COLUMN switchover_attempt INTEGER NOT NULL DEFAULT 0;
 ALTER TABLE database_failovers ADD COLUMN rewound_at INTEGER;
 -- `rewound` re-attached the old copy; `rebuild` needs a fresh replica on that node instead.
 ALTER TABLE database_failovers ADD COLUMN rewind_status TEXT;
+-- The new primary's lease generation is taken after the data hand-over; this records success so a
+-- failed take can be retried on a later tick instead of being swallowed (W10 review).
+ALTER TABLE database_failovers ADD COLUMN lease_taken_at INTEGER;
 -- The replica row created on the old primary's node to hold the rewound copy.
 ALTER TABLE database_failovers ADD COLUMN rewind_replica_id TEXT;
 -- When the current change was opened; a stuck change older than SYNC_CHANGE_TIMEOUT falls back.

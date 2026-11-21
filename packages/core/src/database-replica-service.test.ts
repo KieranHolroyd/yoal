@@ -161,9 +161,9 @@ describe('adding replicas', () => {
 		});
 		// A same-node replica never needs an overlay listener.
 		expect(state.serviceProviders.some((item) => item.listenPort === db.hostPort)).toBe(false);
-		expect(() =>
+		await expect(
 			core.databaseReplicas.promote(owner, 'reads', replica.id, { confirm: true, acceptDataLoss: true }),
-		).toThrow(/own node/);
+		).rejects.toThrow(/own node/);
 	});
 });
 
@@ -257,31 +257,31 @@ describe('promotion', () => {
 		const db = core.databases.create(owner, { name: 'ledger', placement: primary.nodeId });
 		const target = core.databaseReplicas.add(owner, 'ledger', { node: second.nodeId });
 		const other = core.databaseReplicas.add(owner, 'ledger', { node: third.nodeId });
-		expect(() => core.databaseReplicas.promote(owner, 'ledger', target.id, { confirm: true })).toThrow(/not streamed/);
+		await expect(core.databaseReplicas.promote(owner, 'ledger', target.id, { confirm: true })).rejects.toThrow(/not streamed/);
 		report(primary, db.id, [slotSample(target.slot!), slotSample(other.slot!)]);
-		expect(() =>
+		await expect(
 			core.databaseReplicas.promote(owner, 'ledger', target.id, { confirm: true }, { ifMatch: 7 }),
-		).toThrow(/generation 0/);
+		).rejects.toThrow(/generation 0/);
 
 		// A stale report needs acceptDataLoss.
 		clock += 5 * 60_000;
 		for (const node of [edge, second, third]) beat(node);
-		expect(() => core.databaseReplicas.promote(owner, 'ledger', target.id, { confirm: true })).toThrow(/acceptDataLoss/);
+		await expect(core.databaseReplicas.promote(owner, 'ledger', target.id, { confirm: true })).rejects.toThrow(/acceptDataLoss/);
 		report(primary, db.id, [slotSample(target.slot!), slotSample(other.slot!)]);
 
-		const started = core.databaseReplicas.promote(owner, 'ledger', target.id, { confirm: true }, { ifMatch: 0 });
+		const started = await core.databaseReplicas.promote(owner, 'ledger', target.id, { confirm: true }, { ifMatch: 0 });
 		expect(started).toMatchObject({ stage: 'fencing', fromNodeId: primary.nodeId, toNodeId: second.nodeId, generation: 1 });
 		// Fenced: the primary left its node's desired state, and nothing is promoted yet.
 		const fencedState = await core.nodes.desiredState(primary.token);
 		expect(fencedState.workloads.some((item) => item.id === db.id)).toBe(false);
 		expect(fencedState.databaseReplication.some((item) => item.databaseId === db.id)).toBe(false);
-		expect(core.databaseReplicas.promotionsForNode(second.nodeId)).toEqual([]);
+		expect(await core.databaseReplicas.promotionsForNode(second.nodeId)).toEqual([]);
 		// The node still reports the primary running: not fenced yet.
 		beat(primary, { workloads: [{ id: db.id, status: 'running', restarts: 0 }] });
 		expect(core.databaseReplicas.failovers(owner, 'ledger')[0]!.stage).toBe('fencing');
 		beat(primary, { workloads: [] });
 		expect(core.databaseReplicas.failovers(owner, 'ledger')[0]!.stage).toBe('promoting');
-		expect(core.databaseReplicas.promotionsForNode(second.nodeId)).toEqual([
+		expect(await core.databaseReplicas.promotionsForNode(second.nodeId)).toEqual([
 			{ failoverId: started.id, databaseId: db.id, replicaWorkloadId: target.workloadId },
 		]);
 
@@ -319,7 +319,7 @@ describe('promotion', () => {
 		const db = core.databases.create(owner, { name: 'safe', placement: primary.nodeId });
 		const replica = core.databaseReplicas.add(owner, 'safe', { node: third.nodeId });
 		report(primary, db.id, [slotSample(replica.slot!)]);
-		const started = core.databaseReplicas.promote(owner, 'safe', replica.id, { confirm: true });
+		const started = await core.databaseReplicas.promote(owner, 'safe', replica.id, { confirm: true });
 		beat(primary, { workloads: [] });
 		beat(third, { databaseReplicaPromotionResults: [{ failoverId: started.id, status: 'failed', error: 'target exists' }] });
 		expect(core.databaseReplicas.failovers(owner, 'safe')[0]).toMatchObject({ stage: 'failed', message: expect.stringContaining('target exists') });
@@ -329,14 +329,14 @@ describe('promotion', () => {
 		const again = core.databases.create(owner, { name: 'slow-fence', placement: primary.nodeId });
 		const next = core.databaseReplicas.add(owner, 'slow-fence', { node: third.nodeId });
 		report(primary, again.id, [slotSample(next.slot!)]);
-		core.databaseReplicas.promote(owner, 'slow-fence', next.id, { confirm: true });
+		await core.databaseReplicas.promote(owner, 'slow-fence', next.id, { confirm: true });
 		clock += DATABASE_FENCE_TIMEOUT_MS + 1;
 		expect(core.databaseReplicas.tick()).toBe(1);
 		expect(core.databaseReplicas.failovers(owner, 'slow-fence')[0]!.stage).toBe('failed');
 		for (const node of [edge, primary, second, third]) beat(node);
 	});
 
-	test('the failover controller handler fences an unreachable primary at once and reports each stage', () => {
+	test('the failover controller handler fences an unreachable primary at once and reports each stage', async () => {
 		const db = core.databases.create(owner, { name: 'auto', placement: third.nodeId });
 		const replica = core.databaseReplicas.add(owner, 'auto', { node: second.nodeId });
 		report(third, db.id, [slotSample(replica.slot!)]);
@@ -346,7 +346,7 @@ describe('promotion', () => {
 		const plan = { databaseId: db.id, candidateNodeId: second.nodeId, generation: 1, stage: 'fence' as const, reason: 'lost' };
 		expect(handler.run('fence', plan, fence)).toMatchObject({ status: 'done' });
 		expect(handler.run('promote', { ...plan, stage: 'promote' }, fence)).toMatchObject({ status: 'waiting' });
-		const task = core.databaseReplicas.promotionsForNode(second.nodeId).find((item) => item.databaseId === db.id)!;
+		const task = (await core.databaseReplicas.promotionsForNode(second.nodeId)).find((item) => item.databaseId === db.id)!;
 		beat(second, { databaseReplicaPromotionResults: [{ failoverId: task.failoverId, status: 'ok', lsn: null }] });
 		expect(handler.run('promote', { ...plan, stage: 'promote' }, fence)).toMatchObject({ status: 'done' });
 		expect(handler.run('repoint', { ...plan, stage: 'repoint' }, fence)).toMatchObject({ status: 'waiting' });

@@ -384,6 +384,8 @@ describe('synchronous set and rewind (H23, W10)', () => {
 		expect(stop).toContain("state <> 'idle'");
 		expect(stop).toContain('in-flight transactions did not finish');
 		expect(renderResumeWritesSql()).toContain('ALTER SYSTEM RESET default_transaction_read_only');
+		expect(renderResumeWritesSql()).toContain("current_setting('default_transaction_read_only') = 'off'");
+		expect(renderResumeWritesSql()).toContain('did not clear');
 		expect(stop).not.toContain('pg_ctl');
 		expect(renderCheckpointSql()).toBe('CHECKPOINT;\n');
 	});

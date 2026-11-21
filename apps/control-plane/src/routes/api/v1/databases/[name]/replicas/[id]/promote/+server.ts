@@ -17,7 +17,7 @@ export const POST: RequestHandler = (event) =>
 		const ifMatch = header ? Number(header) : null;
 		if (header && !Number.isInteger(ifMatch)) return json({ error: 'If-Match must be the primary generation (an integer).' }, 400);
 		return json(
-			{ failover: core.databaseReplicas.promote(principal, event.params.name, event.params.id, input, { ifMatch }) },
+			{ failover: await core.databaseReplicas.promote(principal, event.params.name, event.params.id, input, { ifMatch }) },
 			202,
 		);
 	});

@@ -33,13 +33,25 @@ revision fixes the independent review in `REVIEW-FINDINGS.md`. No merge to `main
 | 16 | Fixed `POST /v1/workloads/:id/checkpoint`; the drain calls it before stop-writes. | Helper + agent tests. |
 | 17 | `yoal db switchover` has its own dispatcher (`switchoverCommand`) instead of being fed to the durability verb parser. | CLI test. |
 | 18 | Fallback requires the previous member's replay ≥ the failed barrier and applies the setting/barrier before the CAS; a failed revert is `on_sync_loss`, never swallowed. | Engine + service tests. |
-| 19 | `sync_attempt` increments on every open/re-arm and is part of the task version hash, so re-opening the same target is a new instruction. | Migration 0127. |
+| 19 | `sync_attempt` increments on every open/re-arm and is part of the task version hash, so re-opening the same target is a new instruction. | Migration 0128. |
 | 20 | The switchover route requires `If-Match: <primaryGeneration>`; the CLI sends it. | Service throws 412; test. |
 | 21 | Replica units pass `-c default_transaction_read_only=off`, and the rewind path starts as a standby with it reset. | Unit + helper tests. |
 | 22 | Dead `addRebuiltReplica` deleted; rebuild uses the existing rewind replica row + `activateRewindReplica`. | |
-| 23 | `status().transition` reports the stored phase and barrier LSN (`sync_phase`, `sync_barrier_lsn`) instead of a fabricated `switching`/null. | Migration 0127. |
+| 23 | `status().transition` reports the stored phase and barrier LSN (`sync_phase`, `sync_barrier_lsn`) instead of a fabricated `switching`/null. | Migration 0128. |
 | 24 | `parseLease` rejects malformed/repeated sync entries; it no longer truncates silently. | Test. |
 | 25 | The 100-switchover harness can now lose an in-flight commit: `stopWrites` leaves one transaction in flight, `quiesceWrites` commits it, and the test asserts `acked <= promoted`. A negative-control run that skips quiescence proves the harness detects the loss. Durations are explicitly the simulated clock. | `database-switchover.test.ts`. |
+
+## Second review response (verification round)
+
+| # | Fixed | Evidence |
+| --- | --- | --- |
+| 1 | A non-failed promotion result is never turned into a resume. If a change opened in the race, the promotion is marked promoted, the lease is taken via `onPromotion`, the database is alerted as promoted-but-not-repointed, and no resume task exists. The non-promotable gate now runs before the task is handed out (`promotionsForNode`) and before the drain advances to promote. `setDurability`/`#openChange` refuse while a failover is active. | `applyPromotionResults`, `promotionsForNode`, `applySwitchoverResults`, `setDurability`, `#openChange`; tests “a drain that finishes while a change is open…”, “a successful promotion that races a change…”, “durability refuses while a failover is active”. |
+| 2 | `promote` and `promotionsForNode` read the lease and apply `acquireRefusal(lease, nodeId)`; the row stays a display cache. `acceptDataLoss` is the explicit manual override for membership/expiry, never for an open change. | `promotionRefusal`, `promoteRow`, `promotionsForNode`; “promotion refuses a node the lease does not name”. |
+| 3 | A steady lease is renewed by the tick when less than half a TTL remains, CAS at its ETag; `acquireRefusal`/`mayAcquire` treat an expired lease as un-held. | `#renewLeaseIfDue`, `acquireRefusal`; “a steady lease is renewed…”, “an expired steady lease is un-held”. |
+| 4 | A post-promotion lease CAS failure is caught in `applyPromotionResults`, alerted critically, and retried by the tick through `lease_taken_at`. The heartbeat handler no longer turns it into a console-only log. | `onLeaseTakeFailed`, `#retryPromotionLeases`; “a lease CAS failure after promotion alerts and the tick retries it”. |
+| 5 | `switchover_attempt` is in the task version hash and is bumped on refusal and on a failed resume; a failed resume now produces a new task version and is retried. | `switchoverAttempt`, `switchoverTasksForNode`, `applySwitchoverResults`; “a failed resume keeps the resume task…”. |
+| 6 | The switchover route requires `If-Match` (missing = 428, malformed = 400). The node samples the target's `sync_state = 'sync'` before writing the barrier and polls `replay_lsn` until it reaches the barrier. Resume verifies read-only is off. The commit-loss harness now wraps the shipped `DatabaseDurabilityRunner` drain (100 runs) with a negative control, not only `runSwitchover`. | `if-match.ts`, agent `#sync`/`#waitForReplay`, `renderResumeWritesSql`, agent drain harness; tests across the helper, agent and control-plane suites. |
+| 7 | A node result at a stale lease ETag reports the setting it applied (`applied`) and is reconciled: a healthy named member re-opens the transition, otherwise `on_sync_loss` is recorded, and every path alerts. It is never recorded as a steady sync set. | `#reconcileStaleSyncAction`, agent `applied`; “a stale node watchdog result is reconciled…”, “a stale set-sync result re-opens the transition…”. |
 
 ## What is implemented
 
@@ -58,24 +70,25 @@ revision fixes the independent review in `REVIEW-FINDINGS.md`. No merge to `main
 - **Role discovery + alerts**: member reports (role, generation, epoch, recovery, LSN, read-only,
   fenced), `database_member_status`, `GET /databases/:name/members`, and `database_replica` alerts
   for down/lag/lost slot, refused switchover, sync fallback/downgrade/block and failed resume.
-- **Migration 0127** (additive) adds the display cache, switchover/rewind fields, member status and
-  the `sync_attempt`/`sync_phase`/`sync_barrier_lsn`/lease-token columns. It is still numbered
-  **0127**, not 0128: the checker rejects a gap. Renumber at merge if lane A's 0127 lands first.
+- **Migration 0128** (additive) adds the display cache, switchover/rewind fields, member status, the
+  `sync_attempt`/`sync_phase`/`sync_barrier_lsn`/lease-token columns, `switchover_attempt` and
+  `lease_taken_at`. `0127_replica_rewind.sql` is lane C's file copied verbatim from `origin/main` so
+  the local stream is sequential without a gap; it is not this lane's change and should be dropped
+  by the integrator if the branch is rebased. No VERSION bump.
 
 ## Verified
 
 - `bun run check` — all packages, 0 errors (one pre-existing Svelte warning in
   `settings/registry/+page.svelte`). `iam lint: no new role/kind checks`.
-- `bun test` — 6,500 pass, 74 skip, 0 fail across 590 files. (One first run had a single unrelated
-  flake; two clean re-runs.)
-- `YOAL_MIGRATION_BASE_REF=origin/main bun scripts/check-migrations.ts` — ok, 127 migrations, no
-  unreviewed destructive statement. Running it against `HEAD` reports “0127 modified” because 0127
-  is committed on this branch and not on `main`; the PR-base comparison is the meaningful one.
-- Focused: 84 tests across `database-sync.test.ts`, `database-switchover.test.ts`,
+- `bun test` — 6,516 pass, 74 skip, 0 fail across 592 files.
+- `YOAL_MIGRATION_BASE_REF=origin/main bun scripts/check-migrations.ts` — ok, 128 embedded
+  migrations, no unreviewed destructive statement.
+- Focused: 98 tests across `database-sync.test.ts`, `database-switchover.test.ts`,
   `database-member-service.test.ts`, `database-replica-service.test.ts`,
-  `apps/helper/src/replication.test.ts`, `apps/agent/src/database-durability.test.ts`; plus the CLI
-  dispatcher test. The switchover suite includes the 100-run in-flight-loss harness and its negative
-  control.
+  `apps/helper/src/replication.test.ts`, `apps/agent/src/database-durability.test.ts`,
+  `apps/control-plane/src/lib/server/if-match.test.ts`, plus the CLI dispatcher and migration
+  tests. Both switchover harnesses (the core model and the shipped agent drain) include a 100-run
+  zero-loss assertion and a negative control that loses an in-flight commit.
 - Flag-off golden desired state: 1 pass, byte-identical; the W10 keys are absent, not empty.
 
 ## Not verified / deliberately left
@@ -96,21 +109,23 @@ revision fixes the independent review in `REVIEW-FINDINGS.md`. No merge to `main
 
 ## W9-SPEC change needed (not made)
 
-Revision 1 §5.5 says the lease is written first and the setting follows. The node-hosted watchdog
-necessarily clears `synchronous_standby_names` **before** the control plane can CAS the lease, to
-keep I11 (the data plane keeps working while the control plane is unreachable); it gates the action
-on the lease ETag and the control plane then records the same outcome. The spec should state that
-node-hosted `on_sync_loss` may apply the setting at the last observed lease ETag, with the lease CAS
-following. No other spec change was needed; the fallback is stricter than §5.5 (a fresh barrier and
-target replay proof), which is consistent with I13.
+The requested §5.5 clarification is accepted in principle and implemented: a node may apply the
+setting at the last observed lease ETag and the CAS follows. The spec should also say what happens
+when that CAS is stale: the node reports the setting it actually left, the control plane must
+reconcile from the current lease (re-open the transition when it names a healthy member, otherwise
+record `on_sync_loss`) and alert, and it must never record the stale result as `steady`/`durability
+sync`. That is what `#reconcileStaleSyncAction` does. The rest of §5.5 stands; the fallback is
+stricter (fresh barrier + target replay proof), consistent with I13.
 
 ## Files
 
 Core: `database-sync.ts`, `database-switchover.ts`, `database-member-service.ts`,
 `database-replica-service.ts`, `nodes.ts`. Contracts: `database-member.ts`. DB: `schema.ts`,
-`migrations/0127_sync_switchover_rewind.sql`, generated `migrations.ts`. Helper: `replication.ts`,
+`migrations/0128_sync_switchover_rewind.sql`, `migrations/0127_replica_rewind.sql` (copied verbatim
+from `origin/main` for stream continuity), generated `migrations.ts`. Helper: `replication.ts`,
 `server.ts`, `systemd.ts`. Agent: `database-durability.ts`, `helper-client.ts`. Surfaces:
-control-plane `hooks.server.ts`, the three database routes, CLI `db-durability.ts`, `db.ts`,
-`api.ts`, `databases.ts`. Tests: the six focused files above plus the CLI dispatcher test.
+control-plane `hooks.server.ts`, `if-match.ts`, the three database routes, CLI `db-durability.ts`,
+`db.ts`, `api.ts`, `databases.ts`. Tests: the focused files above plus the CLI dispatcher, If-Match
+and migration tests.
 
 Final head SHA: reported in the hand-back message (this file is its own commit).

@@ -298,6 +298,8 @@ export const databaseSyncResultSchema = z.object({
 	targetSyncState: z.string().max(32).nullable().optional(),
 	/** The lease ETag the node acted at (its ownership token). */
 	leaseEtag: z.string().max(256).nullable().optional(),
+	/** The application names the node actually left in `synchronous_standby_names`. */
+	applied: z.array(z.string().max(100)).max(3).optional(),
 	error: z.string().max(2_000).optional(),
 });
 export type DatabaseSyncResult = z.infer<typeof databaseSyncResultSchema>;

@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import {
 	databaseFailovers,
 	databaseReplicas,
@@ -219,6 +219,10 @@ export class DatabaseMemberService {
 		if (!this.#nodeHasDbMember(database.nodeId))
 			throw new ConflictError(`The agent on the primary's node is too old to apply a sync set; update it first (needs "${DB_MEMBER_CAPABILITY}").`);
 		this.ctx.moves.assertNotMoving(database);
+		// A sync-set change and a failover are mutually exclusive: opening one while the other is
+		// active makes promotion/durability decisions race (W10 review).
+		if (this.#activeFailover(database.id))
+			throw new ConflictError(`"${database.name}" is failing over; wait for it to finish before changing durability.`);
 		if (this.ctx.databaseReplicas.rowsFor(database.id).some((row) => row.removingAt))
 			throw new ConflictError('A replica is being removed; wait for it to finish before changing durability.');
 		const current = this.durability(database.id);
@@ -316,6 +320,7 @@ export class DatabaseMemberService {
 				kind: 'switchover',
 				switchoverStep: 'drain',
 				switchoverStartedAt: now,
+				switchoverAttempt: 1,
 				reason: `Planned switchover by ${principal.userId ?? principal.kind ?? 'operator'}.`,
 				startedAt: now,
 				replicaId: replica.id,
@@ -392,11 +397,42 @@ export class DatabaseMemberService {
 	}
 
 	/**
+	 * The arbiter's answer to "may this node promote?" (I12). The row cache is for display; this
+	 * reads the lease. `acceptDataLoss` overrides a membership/expiry refusal (a manual choice), but
+	 * never an open change: that is non-promotable for everyone until it closes.
+	 */
+	async promotionRefusal(
+		database: Pick<DatabaseRow, 'id' | 'durability'>,
+		nodeId: string,
+		acceptDataLoss = false,
+	): Promise<string | null> {
+		const store = this.#store();
+		// No arbiter configured means this deployment predates the sync lease; the row remains the
+		// only gate (an explicit `sync` already fails closed without an arbiter).
+		if (!store) return null;
+		let record;
+		try {
+			record = await store.read(database.id);
+		} catch (error) {
+			return `the database lease could not be read: ${errorText(error)}`;
+		}
+		if (!record) {
+			return database.durability === 'sync'
+				? 'there is no database lease, so this node cannot prove it may promote.'
+				: null;
+		}
+		const refusal = acquireRefusal(record.lease, nodeId, this.ctx.now());
+		if (!refusal) return null;
+		if (acceptDataLoss && !refusal.startsWith('a sync-set change is open')) return null;
+		return refusal;
+	}
+
+	/**
 	 * A promotion is now authoritative: take the lease at the new generation, name nobody, and
 	 * re-open the Revision 1 transition so the new primary clears its inherited setting and arms a
 	 * healthy replica through `set-sync` (W10 review major 9). The old primary is never a candidate.
 	 */
-	async onPromotion(databaseId: string, toNodeId: string, generation: number): Promise<void> {
+	async onPromotion(databaseId: string, toNodeId: string, generation: number, failoverId?: string): Promise<void> {
 		const database = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
 		if (!database || database.deletedAt) return;
 		const now = this.ctx.now();
@@ -448,6 +484,12 @@ export class DatabaseMemberService {
 			})
 			.where(eq(databases.id, databaseId))
 			.run();
+		if (failoverId)
+			this.ctx.db
+				.update(databaseFailovers)
+				.set({ leaseTakenAt: now, message: `Promoted at generation ${generation}; lease taken by ${toNodeId}.` })
+				.where(eq(databaseFailovers.id, failoverId))
+				.run();
 		this.ctx.audit.record({
 			orgId: database.orgId,
 			action: 'database.sync.promotion',
@@ -458,13 +500,77 @@ export class DatabaseMemberService {
 		});
 	}
 
-	/** A switchover's promotion failed on the replica's node: resume writes and alert. */
-	async onPromotionFailed(failover: { id: string; databaseId: string }, message: string): Promise<void> {
+	/**
+	 * A promotion succeeded but its re-point is refused (an open sync change): the new primary is
+	 * live, so there is no safe resume and no automatic re-point. Alert and leave it for a person.
+	 */
+	async onPromotionBlocked(failover: { id: string; databaseId: string }, message: string): Promise<void> {
 		const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
 		if (!database) return;
 		this.ctx.db
 			.update(databaseFailovers)
-			.set({ switchoverStep: 'resume', message: message.slice(0, 2_000) })
+			.set({ message: message.slice(0, 2_000) })
+			.where(eq(databaseFailovers.id, failover.id))
+			.run();
+		await this.#notify(
+			database,
+			'switchover_promoted_not_repointed',
+			'critical',
+			'Promotion succeeded but the database was not re-pointed',
+			`${message} The new primary is live; the old primary stays stopped/read-only. Nothing resumed writes. Repair by hand.`,
+		);
+	}
+
+	/** The re-point succeeded but the lease CAS failed: alert and let the tick retry it. */
+	async onLeaseTakeFailed(failover: { id: string; databaseId: string }, message: string): Promise<void> {
+		const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
+		if (!database) return;
+		this.ctx.db
+			.update(databaseFailovers)
+			.set({ message: `The promoted database has no lease yet: ${message}`.slice(0, 2_000) })
+			.where(eq(databaseFailovers.id, failover.id))
+			.run();
+		await this.#notify(
+			database,
+			'promotion_lease_failed',
+			'critical',
+			'Promoted database has no lease',
+			`${message} The database serves from its new primary, but no member can prove the lease. Retrying every tick; promote nothing else until it clears.`,
+		);
+	}
+
+	/** A promotion result could not be processed at all: alert with the failover when we know it. */
+	async onPromotionResultFailure(failoverId: string | undefined, error: unknown): Promise<void> {
+		const failover = failoverId ? this.#failover(failoverId) : undefined;
+		const database = failover
+			? this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get()
+			: undefined;
+		if (!database) {
+			console.error(`[database-replicas] promotion result: ${errorText(error)}`);
+			return;
+		}
+		await this.#notify(
+			database,
+			'promotion_result_failed',
+			'critical',
+			'A promotion result could not be applied',
+			`${errorText(error)}. The node's promotion state is unknown; check the replica and the lease.`,
+		);
+	}
+
+	/** A switchover's promotion failed on the replica's node: resume writes and alert. */
+	async onPromotionFailed(failover: { id: string; databaseId: string }, message: string): Promise<void> {
+		const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
+		if (!database) return;
+		const row = this.#failover(failover.id);
+		this.ctx.db
+			.update(databaseFailovers)
+			.set({
+				switchoverStep: 'resume',
+				switchoverStartedAt: this.ctx.now(),
+				switchoverAttempt: (row?.switchoverAttempt ?? 0) + 1,
+				message: message.slice(0, 2_000),
+			})
 			.where(eq(databaseFailovers.id, failover.id))
 			.run();
 		await this.#notify(
@@ -594,7 +700,7 @@ export class DatabaseMemberService {
 				databaseId: row.databaseId,
 				step,
 				replicaSlot: replica?.slot ?? null,
-				version: sha256Hex(JSON.stringify({ v: 1, id: row.id, step, attempt: row.switchoverStartedAt ?? row.startedAt })),
+				version: sha256Hex(JSON.stringify({ v: 1, id: row.id, step, attempt: row.switchoverAttempt })),
 			}];
 		});
 	}
@@ -706,18 +812,51 @@ export class DatabaseMemberService {
 			if (result.step === 'watchdog') {
 				if (result.status !== 'ok' || database.durability !== 'sync' || database.syncState !== 'steady') continue;
 				const policy = result.targetSyncState === 'block' ? 'block' : 'downgrade';
+				const current = await this.#readLease(database.id);
+				if (current && result.leaseEtag && current.etag !== result.leaseEtag) {
+					await this.#reconcileStaleSyncAction(database, result, current);
+					continue;
+				}
 				await this.#loseSync(
 					database,
 					policy,
 					'The primary node observed no synchronous standby for its sync timeout and applied on_sync_loss.',
 					this.ctx.now(),
 					result.leaseEtag ?? null,
-				);
+				).catch(async (error: unknown) => {
+					const latest = await this.#readLease(database.id);
+					if (latest) await this.#reconcileStaleSyncAction(database, result, latest);
+					else
+						await this.#notify(
+							database,
+							'sync_watchdog_failed',
+							'critical',
+							'The node watchdog result could not be recorded',
+							`${errorText(error)}. The setting may already have changed on the primary; reconcile by hand.`,
+						);
+				});
+				continue;
+			}
+			// The node applies the setting at the lease ETag it last saw; if the lease moved under it
+			// the result is stale. Never record the applied setting as a steady sync set: reconcile
+			// from the current lease and alert (W9-SPEC §5.5 clarification, W10 review).
+			const leaseRecord = await this.#readLease(database.id);
+			if (leaseRecord && result.leaseEtag && leaseRecord.etag !== result.leaseEtag) {
+				await this.#reconcileStaleSyncAction(database, result, leaseRecord);
 				continue;
 			}
 			if (database.syncState !== 'changing') continue;
 			// Echoed version: a result for an earlier attempt must not close this change (major 10).
-			if (result.version !== undefined && result.version !== this.#expectedSyncVersion(database)) continue;
+			if (result.version !== undefined && result.version !== this.#expectedSyncVersion(database)) {
+				await this.#notify(
+					database,
+					'sync_stale_result',
+					'warning',
+					'A stale sync-set result was ignored',
+					`The node reported ${result.step} at version ${result.version}, but the current instruction is ${this.#expectedSyncVersion(database) ?? 'none'}. Nothing was recorded.`,
+				);
+				continue;
+			}
 			if (result.status === 'ok' && result.step === 'clear-sync') {
 				// A change opened by a promotion has no target yet; clearing the inherited setting is
 				// step 2's first half. The next tick arms a target through the same transition.
@@ -734,11 +873,24 @@ export class DatabaseMemberService {
 				const barrierLsn = result.lsn ?? null;
 				const replayLsn = result.replayLsn ?? null;
 				if (!barrierLsn || !replayLsn || !barrierHolds(replayLsn, barrierLsn) || result.targetSyncState !== 'sync') {
-					await this.#switchFailed(
-						database,
-						`The target did not prove the barrier (barrier ${barrierLsn ?? 'unknown'}, target replay ${replayLsn ?? 'missing'}, sync_state ${result.targetSyncState ?? 'missing'}).`,
-						barrierLsn,
-					);
+					try {
+						await this.#switchFailed(
+							database,
+							`The target did not prove the barrier (barrier ${barrierLsn ?? 'unknown'}, target replay ${replayLsn ?? 'missing'}, sync_state ${result.targetSyncState ?? 'missing'}).`,
+							barrierLsn,
+						);
+					} catch (error) {
+						const latest = await this.#readLease(database.id);
+						if (latest) await this.#reconcileStaleSyncAction(database, result, latest);
+						else
+							await this.#notify(
+								database,
+								'sync_failure_unrecorded',
+								'critical',
+								'A sync failure could not be recorded',
+								`${errorText(error)}. Nothing was recorded as sync.`,
+							);
+					}
 					continue;
 				}
 				this.ctx.db
@@ -746,13 +898,160 @@ export class DatabaseMemberService {
 					.set({ syncPhase: 'closing', syncBarrierLsn: barrierLsn, updatedAt: this.ctx.now() })
 					.where(eq(databases.id, database.id))
 					.run();
-				await this.#closeChange(database, barrierLsn);
+				try {
+					await this.#closeChange(database, barrierLsn);
+				} catch (error) {
+					// The lease moved under the node (or another writer won). Never record the setting
+					// as steady sync; reconcile from the current lease and alert.
+					const latest = await this.#readLease(database.id);
+					if (latest) await this.#reconcileStaleSyncAction(database, result, latest);
+					else
+						await this.#notify(
+							database,
+							'sync_close_failed',
+							'critical',
+							'Sync-set close failed',
+							`The target proved the barrier, but the lease could not be closed: ${errorText(error)}. Nothing was recorded as sync.`,
+						);
+				}
 				continue;
 			}
 			await this.#switchFailed(
 				database,
 				result.error ?? "the primary's node could not apply the sync setting",
 				result.lsn ?? null,
+			).catch(async (error: unknown) => {
+				const latest = await this.#readLease(database.id);
+				if (latest) await this.#reconcileStaleSyncAction(database, result, latest);
+				else
+					await this.#notify(
+						database,
+						'sync_failure_unrecorded',
+						'critical',
+						'A sync failure could not be recorded',
+						`${errorText(error)}. Nothing was recorded as sync.`,
+					);
+			});
+		}
+	}
+
+	async #readLease(databaseId: string) {
+		const store = this.#store();
+		if (!store) return null;
+		try {
+			return await store.read(databaseId);
+		} catch {
+			return null;
+		}
+	}
+
+	/**
+	 * A node applied `synchronous_standby_names` at a lease ETag that has since moved. The node did
+	 * its job; the control plane must not record its setting as a steady sync set. Reconcile from
+	 * the current lease: if it still names a healthy member, re-open the Revision 1 transition to
+	 * re-prove the setting; if not (or the node left the setting empty), apply `on_sync_loss`. Every
+	 * path alerts with the setting the node actually left.
+	 */
+	async #reconcileStaleSyncAction(
+		database: DatabaseRow,
+		result: DatabaseSyncResult,
+		current: { lease: DatabaseLease; etag: string },
+	): Promise<void> {
+		const now = this.ctx.now();
+		const applied = result.applied ?? [];
+		const detail = `The node applied [${applied.length > 0 ? applied.join(', ') : 'no members'}] at lease ETag ${result.leaseEtag ?? 'unknown'}, but the lease moved to ${current.etag}.`;
+		const lease = current.lease;
+		if (lease.syncState !== 'steady') {
+			await this.#notify(
+				database,
+				'sync_stale_change',
+				'critical',
+				'A sync result raced an open change',
+				`${detail} The lease is changing, so the node's setting is not recorded as sync. Recover the open change deliberately.`,
+			);
+			return;
+		}
+		if (lease.durability === 'async' || lease.durabilityEffective === 'async') {
+			// The current authority already says async: make the row agree, never record sync.
+			this.ctx.db
+				.update(databases)
+				.set({
+					syncState: 'steady',
+					syncReplicaNodeId: null,
+					syncPreviousNodeId: null,
+					syncChangeStartedAt: null,
+					syncPhase: null,
+					durabilityEffective: 'async',
+					syncLeaseEtag: current.etag,
+					syncLeaseExpiresAt: Date.parse(lease.expiresAt),
+					updatedAt: now,
+				})
+				.where(eq(databases.id, database.id))
+				.run();
+			await this.#notify(database, 'sync_stale_async', 'warning', 'A stale sync result matched an async lease', `${detail} The database is recorded async, as the lease says.`);
+			return;
+		}
+		const members = this.#memberViews(database.id);
+		const healthy = lease.sync.find((nodeId) => members.find((member) => member.nodeId === nodeId)?.streaming === true) ?? null;
+		if (applied.length > 0 && healthy) {
+			// The node's setting names a healthy member; re-apply it through a real transition so a
+			// barrier proves it again, rather than trusting a stale result.
+			try {
+				await this.#openChange(database, healthy, now);
+				await this.#notify(
+					database,
+					'sync_stale_reapplied',
+					'warning',
+					'A sync setting is being re-applied after a stale result',
+					`${detail} The lease still names ${healthy}; a fresh transition will require its barrier before anything is recorded.`,
+				);
+			} catch (error) {
+				await this.#notify(
+					database,
+					'sync_stale_reapply_failed',
+					'critical',
+					'A stale sync setting could not be re-applied',
+					`${detail} Re-opening the transition failed: ${errorText(error)}.`,
+				);
+			}
+			return;
+		}
+		const policy = database.onSyncLoss;
+		const next = renewedLease(loseSyncSet(lease, policy, { durability: database.durability }, now), now);
+		const store = this.#store();
+		if (store && (await store.compareAndSwap(database.id, current.etag, next))) {
+			this.ctx.db
+				.update(databases)
+				.set({
+					syncState: 'steady',
+					syncReplicaNodeId: null,
+					syncPreviousNodeId: null,
+					syncChangeStartedAt: null,
+					syncPhase: null,
+					syncSetAt: now,
+					durability: database.durability,
+					durabilityEffective: policy === 'downgrade' ? 'async' : 'sync',
+					syncLostAt: policy === 'block' ? (database.syncLostAt ?? now) : null,
+					syncLeaseEtag: null,
+					syncLeaseExpiresAt: null,
+					updatedAt: now,
+				})
+				.where(eq(databases.id, database.id))
+				.run();
+			await this.#notify(
+				database,
+				'sync_stale_reconciled',
+				'critical',
+				'A stale sync action was reconciled to on_sync_loss',
+				`${detail} No healthy member is named, so ${policy} is now recorded. Nothing was recorded as sync.`,
+			);
+		} else {
+			await this.#notify(
+				database,
+				'sync_stale_reconcile_failed',
+				'critical',
+				'A stale sync action could not be reconciled',
+				`${detail} The arbitration write lost; nothing was recorded. The next tick re-reads the lease.`,
 			);
 		}
 	}
@@ -769,22 +1068,28 @@ export class DatabaseMemberService {
 	}
 
 	/** Planned switchover drain/resume outcomes. */
-	applySwitchoverResults(nodeId: string, results: readonly DatabaseSwitchoverResult[]): void {
+	async applySwitchoverResults(nodeId: string, results: readonly DatabaseSwitchoverResult[]): Promise<void> {
 		for (const result of results) {
 			const failover = this.#failover(result.switchoverId);
 			if (!failover || failover.fromNodeId !== nodeId || failover.kind !== 'switchover') continue;
 			const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
 			if (!database) continue;
 			const expected = sha256Hex(
-				JSON.stringify({ v: 1, id: failover.id, step: result.step, attempt: failover.switchoverStartedAt ?? failover.startedAt }),
+				JSON.stringify({ v: 1, id: failover.id, step: result.step, attempt: failover.switchoverAttempt }),
 			);
 			if (result.version !== undefined && result.version !== expected) continue;
 			if (result.step === 'resume') {
 				if (result.status !== 'ok') {
-					// A failed resume is not success: keep the task so the node retries, and alert.
+					// A failed resume is not success: keep the task, bump its version so the node retries
+					// it (a stable version would be de-duplicated forever), and alert.
 					this.ctx.db
 						.update(databaseFailovers)
-						.set({ message: `Resuming writes failed: ${result.error ?? 'unknown error'}. Retrying.` })
+						.set({
+							switchoverStep: 'resume',
+							switchoverStartedAt: this.ctx.now(),
+							switchoverAttempt: failover.switchoverAttempt + 1,
+							message: `Resuming writes failed: ${result.error ?? 'unknown error'}. Retrying.`,
+						})
 						.where(eq(databaseFailovers.id, failover.id))
 						.run();
 					void this.#notify(
@@ -829,6 +1134,17 @@ export class DatabaseMemberService {
 					gap,
 					result.lsn,
 				);
+				continue;
+			}
+			// The non-promotable gate is moved before the promotion is handed out: read the lease,
+			// not just the row cache, so an open change or an expired lease refuses here while writes
+			// can still be resumed.
+			const refusal =
+				database.syncState === 'changing'
+					? 'a sync-set change is open; the database is non-promotable'
+					: await this.promotionRefusal(database, replica.nodeId, false);
+			if (refusal) {
+				this.#refuseSwitchover(failover, `Promotion refused: ${refusal}.`, 0, result.lsn);
 				continue;
 			}
 			this.ctx.db
@@ -907,12 +1223,18 @@ export class DatabaseMemberService {
 		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA')) return 0;
 		await this.#replicaAlerts(now);
 		let changed = 0;
+		// A promotion whose re-point succeeded but whose lease CAS failed is retried here instead of
+		// being swallowed by a heartbeat handler (W10 review).
+		changed += await this.#retryPromotionLeases(now);
 		const rows = this.ctx.db
 			.select()
 			.from(databases)
 			.where(and(isNull(databases.deletedAt), eq(databases.durability, 'sync')))
 			.all();
 		for (const database of rows) {
+			// CAS writes renew the lease, but a steady set otherwise never writes again: without this
+			// the holder's lease is permanently expired one TTL after arming (W10 review blocker 3).
+			if (await this.#renewLeaseIfDue(database, now)) changed += 1;
 			if (database.syncState === 'changing') {
 				// A change opened by a promotion starts with nobody named: arm the first healthy
 				// replica through the same non-promotable transition (major 9), or lose sync once the
@@ -963,8 +1285,12 @@ export class DatabaseMemberService {
 				now,
 			});
 			if (decision.action === 'transition' && decision.target) {
-				await this.#openChange(database, decision.target, now);
-				changed += 1;
+				try {
+					await this.#openChange(database, decision.target, now);
+					changed += 1;
+				} catch {
+					// A failover is active or the CAS was lost; the next tick re-evaluates.
+				}
 			} else if (decision.action === 'none' && database.syncLostAt === null && !this.#syncHeld(database, members)) {
 				this.ctx.db.update(databases).set({ syncLostAt: now, updatedAt: now }).where(eq(databases.id, database.id)).run();
 				changed += 1;
@@ -1028,6 +1354,55 @@ export class DatabaseMemberService {
 		return this.ctx.arbiter ? new ObjectStoreDatabaseLeaseStore(this.ctx.arbiter) : null;
 	}
 
+	/** Renew a lease the primary holds when it is inside half a TTL of expiry; CAS at its ETag. */
+	async #renewLeaseIfDue(database: DatabaseRow, now: number): Promise<boolean> {
+		const store = this.#store();
+		if (!store) return false;
+		try {
+			const current = await store.read(database.id);
+			if (!current || current.lease.holderNodeId !== database.nodeId) return false;
+			const expiresAt = Date.parse(current.lease.expiresAt);
+			if (Number.isFinite(expiresAt) && expiresAt - now >= DB_LEASE_TTL_MS / 2) return false;
+			const renewed = renewedLease(current.lease, now);
+			if (!(await store.compareAndSwap(database.id, current.etag, renewed))) return false;
+			const written = await store.read(database.id);
+			this.ctx.db
+				.update(databases)
+				.set({
+					syncLeaseEtag: written?.etag ?? current.etag,
+					syncLeaseExpiresAt: written ? Date.parse(written.lease.expiresAt) : expiresAt,
+					updatedAt: now,
+				})
+				.where(eq(databases.id, database.id))
+				.run();
+			return true;
+		} catch {
+			// The arbiter is unreachable: the holder cannot prove the lease, and the next tick retries.
+			return false;
+		}
+	}
+
+	/** Retry a promotion's lease take that failed after the database was already re-pointed. */
+	async #retryPromotionLeases(now: number): Promise<number> {
+		let changed = 0;
+		const rows = this.ctx.db
+			.select()
+			.from(databaseFailovers)
+			.where(and(isNotNull(databaseFailovers.promotedAt), isNull(databaseFailovers.leaseTakenAt)))
+			.all();
+		for (const row of rows) {
+			const database = this.ctx.db.select().from(databases).where(eq(databases.id, row.databaseId)).get();
+			if (!database || database.deletedAt) continue;
+			try {
+				await this.onPromotion(database.id, row.toNodeId, row.generation, row.id);
+				changed += 1;
+			} catch (error) {
+				await this.onLeaseTakeFailed(row, errorText(error));
+			}
+		}
+		return changed;
+	}
+
 	#note(database: DatabaseRow): string | null {
 		if (database.durability !== 'sync') return null;
 		if (database.syncState === 'changing') return 'A sync-set change is open; no member may promote automatically.';
@@ -1079,6 +1454,8 @@ export class DatabaseMemberService {
 		settings: DurabilitySettings = this.durability(database.id),
 		principal?: { userId?: string | null; kind?: string },
 	): Promise<void> {
+		if (this.#activeFailover(database.id))
+			throw new ConflictError('A failover is active; a sync-set change cannot be opened until it finishes.');
 		const store = this.#store();
 		if (!store) throw new CoreError('unavailable', 'No arbiter is configured; a sync change cannot be recorded.', 409);
 		const current = await store.read(database.id);
@@ -1450,6 +1827,9 @@ export class DatabaseMemberService {
 			.set({
 				status: 'failed',
 				switchoverStep: 'resume',
+				// Bump the attempt so the resume task has a new version and the node retries it.
+				switchoverStartedAt: now,
+				switchoverAttempt: failover.switchoverAttempt + 1,
 				...(lsn ? { drainLsn: lsn } : {}),
 				message: message.slice(0, 2_000),
 				finishedAt: now,

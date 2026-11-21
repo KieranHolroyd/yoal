@@ -570,7 +570,9 @@ export class NodeService {
 		if (input.databaseReplicaPromotionResults?.length)
 			void this.ctx.databaseReplicas
 				.applyPromotionResults(node.id, input.databaseReplicaPromotionResults)
-				.catch((error: unknown) => console.error(`[database-replicas] promotion result: ${(error as Error).message}`));
+				.catch((error: unknown) =>
+					this.ctx.databaseMembers.onPromotionResultFailure(input.databaseReplicaPromotionResults?.[0]?.failoverId, error),
+				);
 		// W10: member roles, sync steps, switchover drain/resume and rewind outcomes.
 		if (input.databaseMembers?.length) this.ctx.databaseMembers.applyMemberReports(node.id, input.databaseMembers);
 		if (input.databaseSyncResults?.length)
@@ -578,7 +580,9 @@ export class NodeService {
 				.applySyncResults(node.id, input.databaseSyncResults)
 				.catch((error: unknown) => console.error(`[database-members] sync result: ${(error as Error).message}`));
 		if (input.databaseSwitchoverResults?.length)
-			this.ctx.databaseMembers.applySwitchoverResults(node.id, input.databaseSwitchoverResults);
+			void this.ctx.databaseMembers
+				.applySwitchoverResults(node.id, input.databaseSwitchoverResults)
+				.catch((error: unknown) => console.error(`[database-members] switchover result: ${(error as Error).message}`));
 		if (input.databaseRewindResults?.length)
 			this.ctx.databaseMembers.applyRewindResults(node.id, input.databaseRewindResults);
 		if (input.databaseBackupResults?.length)

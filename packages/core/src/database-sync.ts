@@ -183,17 +183,21 @@ export function barrierHolds(replayLsn: string | null, barrierLsn: string | null
 	return replay !== null && barrier !== null && replay >= barrier;
 }
 
-/** I12 gate (W9-SPEC §5.1/§5.5): a member may acquire only from a steady lease, and if in `sync` it must be named. */
-export function mayAcquire(lease: DatabaseLease, nodeId: string): boolean {
+/** I12 gate (W9-SPEC §5.1/§5.5): a member may acquire only from a steady, unexpired lease, and if in `sync` it must be named. */
+export function mayAcquire(lease: DatabaseLease, nodeId: string, now = Date.now()): boolean {
 	if (lease.syncState !== 'steady') return false;
+	if (leaseExpired(lease, now)) return false;
 	return lease.durability === 'async' || lease.sync.includes(nodeId);
 }
 
 /** Why a member may not acquire: `null` when it may. */
-export function acquireRefusal(lease: DatabaseLease | null, nodeId: string): string | null {
+export function acquireRefusal(lease: DatabaseLease | null, nodeId: string, now = Date.now()): string | null {
 	if (!lease) return 'there is no database lease';
 	if (lease.syncState === 'changing')
 		return 'a sync-set change is open; no member may promote automatically (W9-SPEC §5.5). Choose manually.';
+	// An expired lease is un-held: whoever held it could not prove it to the arbiter, so a member
+	// must not treat it as permission to promote (W9-SPEC §3).
+	if (leaseExpired(lease, now)) return 'the database lease has expired, so no member can prove it is the holder.';
 	if (lease.durability === 'sync' && !lease.sync.includes(nodeId))
 		return 'this node is not in the lease’s synchronous set, so promoting it could lose an acknowledged commit.';
 	return null;

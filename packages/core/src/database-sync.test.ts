@@ -29,6 +29,8 @@ const DATABASE = 'db_orders';
 const PRIMARY = 'nod_primary';
 const OLD = 'nod_old';
 const NEW = 'nod_new';
+/** The lease's own expiry is in 2026; tests pass this "now" so expiry checks stay meaningful. */
+const AT = Date.parse('2026-11-20T20:41:00Z');
 
 function lease(overrides: Partial<DatabaseLease> = {}): DatabaseLease {
 	return {
@@ -104,8 +106,8 @@ describe('the three-step sync change (H23, Revision 1)', () => {
 		expect(f.names).toEqual([[NEW]]);
 
 		// The old two-step bug is impossible: while changing, nobody is named and nobody may acquire.
-		expect(mayAcquire(opened, OLD)).toBe(false);
-		expect(mayAcquire(opened, NEW)).toBe(false);
+		expect(mayAcquire(opened, OLD, AT)).toBe(false);
+		expect(mayAcquire(opened, NEW, AT)).toBe(false);
 		expect(acquireRefusal(opened, NEW)).toContain('sync-set change is open');
 
 		expect(await f.engine.tick({ nodeId: NEW, streaming: true, replayLsn: '0/1FFFFFF' }, null)).toBeNull();
@@ -113,8 +115,8 @@ describe('the three-step sync change (H23, Revision 1)', () => {
 		expect(closed?.kind).toBe('closed');
 		const final = f.store.peek(DATABASE)!;
 		expect(final).toMatchObject({ sync: [NEW], syncState: 'steady', durability: 'sync', durabilityEffective: 'sync' });
-		expect(mayAcquire(final, NEW)).toBe(true);
-		expect(mayAcquire(final, OLD)).toBe(false);
+		expect(mayAcquire(final, NEW, AT)).toBe(true);
+		expect(mayAcquire(final, OLD, AT)).toBe(false);
 	});
 
 	test('a primary death while changing leaves the lease changing and allows no automatic promotion', async () => {
@@ -238,7 +240,7 @@ describe('the three-step sync change (H23, Revision 1)', () => {
 	test('durability changes to async close at once; sync closes only with the barrier', async () => {
 		const f = harness({ durability: 'async' });
 		await f.seed(lease({ durability: 'async', durabilityEffective: 'async', sync: [] }));
-		expect(mayAcquire(f.store.peek(DATABASE)!, PRIMARY)).toBe(true);
+		expect(mayAcquire(f.store.peek(DATABASE)!, PRIMARY, AT)).toBe(true);
 	});
 });
 
@@ -323,6 +325,14 @@ describe('lease helpers', () => {
 		// A Revision 0 lease without durabilityEffective is accepted; the requested value is in force.
 		const { durabilityEffective: _ignored, ...specShaped } = lease();
 		expect(parseLease(JSON.stringify(specShaped)).durabilityEffective).toBe('sync');
+	});
+
+	test('an expired steady lease is un-held: no member may acquire from it', () => {
+		const expired = lease({ expiresAt: new Date(AT - 1_000).toISOString() });
+		expect(acquireRefusal(expired, NEW, AT)).toContain('expired');
+		expect(mayAcquire(expired, NEW, AT)).toBe(false);
+		// A changing lease is still refused as changing first.
+		expect(acquireRefusal({ ...expired, syncState: 'changing' }, NEW, AT)).toContain('sync-set change is open');
 	});
 
 	test('the synced test harness records expiry-renewing opens and closes', async () => {
