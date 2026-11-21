@@ -152,9 +152,10 @@ elicitation, and clients that don't support elicitation get a dashboard hand-off
 | Identity & docs | `whoami` · `search_docs` · `read_docs` |
 | Projects | `list_projects` · `get_project` · `create_project` · `update_project` · `delete_project` · `delete_projects` · `restore_projects` · `get_operation` · `get_task` · `cancel_task` |
 | Deploy | `deploy_site` · `deploy_files` · `create_upload` · `finalize_upload` |
-| Releases | `list_deployments` · `get_deployment` · `promote_deployment` · `rollback` |
+| Releases | `list_deployments` · `get_deployment` · `promote_deployment` · `rollback` · `list_builds` · `get_build` · `cancel_build` |
 | Git & pipelines | `list_github_repositories` · `deploy_from_github` · `list_git_repositories` · `deploy_from_git` · `list_pipeline_runs` · `get_pipeline_run` · `dispatch_workflow` · `rerun_pipeline_run` · `cancel_pipeline_run` |
-| Environments | `list_environments` · `create_environment` · `deploy_to_environment` |
+| Environments | `list_environments` · `create_environment` · `update_environment` · `delete_environment` · `deploy_to_environment` |
+| Custom domains | `list_domains` · `add_domain` · `check_domain` · `remove_domain` |
 | Workloads & functions | `get_workload` · `get_function` · `invoke_function` · `run_function_cron` · `set_workload` · `get_scaling` · `scale_project` · `set_autoscaling` · `get_node_capacity` |
 | Volumes | `list_volumes` · `create_volume` · `attach_volume` · `detach_volume` · `list_volume_snapshots` · `snapshot_volume` · `restore_volume` |
 | Jobs (while the feature is on) | `list_jobs` · `create_job` · `update_job` · `pause_job` · `run_job` · `run_command` · `get_job_runs` · `get_job_run` · `cancel_job_run` · `delete_job` |
@@ -173,7 +174,7 @@ elicitation, and clients that don't support elicitation get a dashboard hand-off
 | App errors | `list_app_errors` · `get_app_error` · `update_app_errors` |
 | Email (while the feature is on) | `get_email_status` · `list_email_domains` · `get_email_domain` · `create_email_domain` · `check_email_domain` · `send_email` · `list_email_messages` · `get_email_message` · `list_email_suppressions` · `remove_email_suppression` · `list_email_addresses` · `add_email_address` · `remove_email_address` |
 | Blueprints (while the feature is on) | `plan_stack` · `apply_stack` |
-| Platform | `restart_services` · `list_nodes` · `get_ha_status` · `get_attachment_endpoints` · `get_fleet` · `get_node_links` · `get_usage` · `get_quotas` |
+| Platform | `restart_services` · `list_nodes` · `get_ha_status` · `get_ha_init_plan` · `get_ha_checks` · `list_ha_drills` · `get_attachment_endpoints` · `get_fleet` · `get_node_links` · `get_usage` · `get_quotas` |
 
 A token's effective permissions are always **its scopes ∩ the user's current role**. Demote someone
 and every token they've issued narrows straight away. Every tool call is recorded in the audit log
