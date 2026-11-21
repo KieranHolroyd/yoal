@@ -507,10 +507,16 @@ export class NodeService {
 		return row;
 	}
 
-	heartbeat(token: string, input: Heartbeat): { ok: true; desiredStateVersion: number } {
+	/**
+	 * `agentTimeMs` is the agent's clock when it sent the heartbeat (the `x-yoal-agent-time` header,
+	 * HA Wave 5): the `clocks` preflight check compares it with this control plane's. Optional: an
+	 * older agent does not send it.
+	 */
+	heartbeat(token: string, input: Heartbeat, agentTimeMs?: number): { ok: true; desiredStateVersion: number } {
 		const node = this.authenticate(token);
 		if (node.id !== input.nodeId) throw new UnauthorizedError('Node id does not match token');
 		const now = this.ctx.now();
+		if (agentTimeMs !== undefined) this.ctx.haDoctor.recordClock(node.id, agentTimeMs, now);
 		this.storeCertificate(node.id, input.nodeCertificate, now);
 		// A node that advertises `endpoints-gateway` sends its CSR here; only the public request
 		// travels and the install CA signs it (HA-PLAN H24 "Trust").
