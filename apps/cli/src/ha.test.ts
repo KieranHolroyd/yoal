@@ -91,14 +91,14 @@ const ca: NodeCaStatusView = {
 		{ fingerprint: 'a'.repeat(64), subject: 'CN=Yoal install CA', notBefore: '2026-11-21T00:00:00.000Z', notAfter: '2036-11-21T00:00:00.000Z', state: 'active', createdAt: '2026-11-21T00:00:00.000Z' },
 		{ fingerprint: 'b'.repeat(64), subject: 'CN=Yoal install CA', notBefore: '2026-01-01T00:00:00.000Z', notAfter: '2036-01-01T00:00:00.000Z', state: 'previous', createdAt: '2026-01-01T00:00:00.000Z' },
 	],
-	leaves: { issued: 5, live: 4, nodes: 4, revoked: 1, renewDue: 1, nextExpiry: '2026-12-01T00:00:00.000Z' },
+	leaves: { issued: 5, live: 4, nodes: 4, revoked: 1, renewDue: 1, onPreviousCa: 2, nextExpiry: '2026-12-01T00:00:00.000Z' },
 };
 
 describe('the install CA in yoal ha status (review debt 2, item 10)', () => {
 	test('prints the active and previous CA and the leaves', () => {
 		const text = formatNodeCa(ca);
 		expect(text).toContain(`Install CA: active ${'a'.repeat(16)}`);
-		expect(text).toContain(`previous ${'b'.repeat(16)} still trusted`);
+		expect(text).toContain(`previous ${'b'.repeat(16)} still trusted; 2 nodes still hold leaves it signed (do not rotate again yet)`);
 		expect(text).toContain('4 nodes hold a leaf, 1 due to renew, 1 revoked');
 		expect(formatHaStatus({ ...view, nodeCa: ca })).toContain('Install CA: active');
 		expect(formatHaStatus(view)).not.toContain('Install CA');

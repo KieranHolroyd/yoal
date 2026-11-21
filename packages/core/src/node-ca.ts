@@ -43,6 +43,8 @@ export interface NodeCaStatus {
 		revoked: number;
 		/** Nodes past two-thirds of their leaf's life (they renew on their next heartbeat). */
 		renewDue: number;
+		/** Nodes whose leaf the previous CA signed: rotating again before this is 0 cuts them off. */
+		onPreviousCa: number;
 		nextExpiry: string | null;
 	};
 }
@@ -266,9 +268,12 @@ export class NodeCaService {
 		return this.status();
 	}
 
-	/** `POST /api/v1/ha/ca/rotate` and `yoal ha ca rotate`: a platform admin rotates the CA, audited. */
+	/**
+	 * `POST /api/v1/ha/ca/rotate` and `yoal ha ca rotate`, audited. `platform:ha`, like drills and
+	 * `ha migrate attachments`: there is no dashboard control for it, so a CLI API key must do.
+	 */
 	rotateAs(principal: Principal): NodeCaStatus {
-		if (!this.ctx.platformIam.canAdminister(principal))
+		if (!this.ctx.platformIam.allows(principal, 'platform:ha'))
 			throw new CoreError('forbidden', 'Only a platform admin role can rotate the install CA.', 403);
 		const before = this.activeRow()?.fingerprint ?? null;
 		const active = this.rotate();
@@ -304,6 +309,9 @@ export class NodeCaService {
 		for (const row of live) if ((newest.get(row.nodeId)?.notAfter ?? 0) < row.notAfter) newest.set(row.nodeId, row);
 		const renewDue = [...newest.values()].filter((row) => now >= row.notBefore + ((row.notAfter - row.notBefore) * 2) / 3).length;
 		const soonest = [...newest.values()].sort((a, b) => a.notAfter - b.notAfter)[0];
+		const previousIds = new Set(
+			this.ctx.db.select({ id: nodeCa.id }).from(nodeCa).where(eq(nodeCa.state, 'previous')).all().map((row) => row.id),
+		);
 		return {
 			inUse: this.inUse(),
 			authorities,
@@ -313,6 +321,7 @@ export class NodeCaService {
 				nodes: newest.size,
 				revoked: leaves.filter((row) => row.revokedAt !== null).length,
 				renewDue,
+				onPreviousCa: [...newest.values()].filter((row) => previousIds.has(row.caId)).length,
 				nextExpiry: soonest ? new Date(soonest.notAfter).toISOString() : null,
 			},
 		};

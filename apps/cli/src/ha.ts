@@ -73,7 +73,7 @@ export interface HaStatusView {
 export interface NodeCaStatusView {
 	inUse: boolean;
 	authorities: Array<{ fingerprint: string; subject: string; notBefore: string; notAfter: string; state: 'active' | 'previous' | 'retired'; createdAt: string }>;
-	leaves: { issued: number; live: number; nodes: number; revoked: number; renewDue: number; nextExpiry: string | null };
+	leaves: { issued: number; live: number; nodes: number; revoked: number; renewDue: number; onPreviousCa: number; nextExpiry: string | null };
 }
 
 /** Mirrors `AttachmentMigrationView` in packages/core/src/service-endpoints.ts. */
@@ -126,7 +126,10 @@ export function formatNodeCa(ca: NodeCaStatusView): string {
 			? `Install CA: active ${active.fingerprint.slice(0, 16)}, valid until ${formatTime(active.notAfter)}`
 			: 'Install CA: not created yet (the first node that needs a certificate creates it)',
 	];
-	if (previous) lines.push(`  previous ${previous.fingerprint.slice(0, 16)} still trusted until every node renews`);
+	if (previous)
+		lines.push(
+			`  previous ${previous.fingerprint.slice(0, 16)} still trusted; ${ca.leaves.onPreviousCa} ${ca.leaves.onPreviousCa === 1 ? 'node still holds a leaf' : 'nodes still hold leaves'} it signed${ca.leaves.onPreviousCa ? ' (do not rotate again yet)' : ''}`,
+		);
 	const leaves = ca.leaves;
 	lines.push(
 		`  ${leaves.nodes} ${leaves.nodes === 1 ? 'node holds' : 'nodes hold'} a leaf, ${leaves.renewDue} due to renew, ${leaves.revoked} revoked` +

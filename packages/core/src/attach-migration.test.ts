@@ -297,6 +297,8 @@ describe('the install CA in the HA status (item 10)', () => {
 		expect(after.authorities.map((ca) => ca.state)).toEqual(['active', 'previous']);
 		expect(after.authorities[1]!.fingerprint).toBe(before.fingerprint);
 		expect(after.authorities[0]!.fingerprint).not.toBe(before.fingerprint);
+		// Every leaf issued so far came from the old CA; none has renewed under the new one yet.
+		expect(after.leaves.onPreviousCa).toBe(after.leaves.nodes);
 		expect(opened.sqlite.query<{ n: number }, []>("SELECT count(*) AS n FROM audit_log WHERE action = 'ha.ca.rotate'").get()!.n).toBe(1);
 	});
 });
