@@ -23,6 +23,12 @@ export interface AgentConfig {
 	nodeToken: string;
 	/** Stable id of this node (`nod_…`). */
 	nodeId: string;
+	/**
+	 * This host's own control-plane `/readyz`, used for the heartbeat's `control` field. Set when
+	 * the agent is co-located with a control plane; null means the node has no local control plane
+	 * and the heartbeat omits `control`.
+	 */
+	controlLocalUrl: string | null;
 	/** Root for cached state, releases and site symlinks. */
 	dataDir: string;
 	/** What yoal-storage.service last applied (D48). */
@@ -332,10 +338,22 @@ export function loadConfig(env: Env = process.env): AgentConfig {
 	const controlSocket = optionalValue(env, 'YOAL_CONTROL_SOCKET');
 	if (controlSocket && !controlSocket.startsWith('/'))
 		throw new ConfigError('YOAL_CONTROL_SOCKET must be an absolute path');
+	const controlLocalUrl = optionalValue(env, 'YOAL_CONTROL_LOCAL_URL');
+	if (controlLocalUrl !== null) {
+		let parsed: URL;
+		try {
+			parsed = new URL(controlLocalUrl);
+		} catch {
+			throw new ConfigError(`YOAL_CONTROL_LOCAL_URL is not a valid URL: ${controlLocalUrl}`);
+		}
+		if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:')
+			throw new ConfigError('YOAL_CONTROL_LOCAL_URL must be http or https');
+	}
 
 	return {
 		controlUrl,
 		controlSocket,
+		controlLocalUrl,
 		nodeToken,
 		nodeId,
 		dataDir,

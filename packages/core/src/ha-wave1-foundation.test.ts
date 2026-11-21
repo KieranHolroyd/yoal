@@ -147,6 +147,59 @@ describe('capability gate: flags (reviewer item 4)', () => {
 		expect(releaseOnly.releaseCommands).toHaveLength(1);
 		expect('nodeTrust' in releaseOnly).toBe(false);
 	});
+
+	test('CONTROL_STANDBY and ha-epoch gate the control address list', () => {
+		const withControl = desiredStateSchema.parse({
+			...plain,
+			control: {
+				epoch: 4,
+				nodes: [
+					{ nodeId: 'nod_a', url: 'https://control.example.com', zone: 'default' },
+				],
+			},
+			ingress: {
+				listeners: [],
+				tls: null,
+				platform: null,
+				platformUpstreams: [
+					{ nodeId: 'nod_a', upstream: 'unix//run/yoal/control.sock', priority: 0 },
+				],
+			},
+		});
+		const kept = gateDesiredState(withControl, ['ha-epoch', 'ingress-set'], {
+			ENDPOINTS_GATEWAY: false,
+			RELEASE_PHASE: false,
+			INGRESS_SET: true,
+			CONTROL_STANDBY: true,
+		});
+		expect(kept.control).toMatchObject({ epoch: 4 });
+		expect(kept.ingress?.platformUpstreams).toHaveLength(1);
+		// An older agent keeps the single relay and drops both W9 fields.
+		const older = gateDesiredState(withControl, ['ingress-set'], {
+			ENDPOINTS_GATEWAY: false,
+			RELEASE_PHASE: false,
+			INGRESS_SET: true,
+			CONTROL_STANDBY: true,
+		});
+		expect('control' in older).toBe(false);
+		expect('platformUpstreams' in (older.ingress ?? {})).toBe(false);
+		expect(
+			'control' in
+				gateDesiredState(withControl, [], {
+					ENDPOINTS_GATEWAY: false,
+					RELEASE_PHASE: false,
+					CONTROL_STANDBY: true,
+				}),
+		).toBe(false);
+		expect(
+			'control' in
+				gateDesiredState(withControl, ['ha-epoch'], {
+					ENDPOINTS_GATEWAY: false,
+					RELEASE_PHASE: false,
+					CONTROL_STANDBY: false,
+				}),
+		).toBe(false);
+	});
 });
 
 describe('capability gate (HA-PLAN §9 "Mixed versions")', () => {

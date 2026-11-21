@@ -231,6 +231,7 @@ Commands:
   import <file> [--apply] [--secrets <f>]   Recreate an export's configuration here (create-only; plan by default)
   volume [list|show|snapshot|restore|…]      Persistent app volumes and their snapshots (\`yoal volume --help\`)
   ha status                                  Failover controller: lease, lost nodes, recent failovers (platform admin)
+  ha control [status|promote|enrol]          Control-plane standby: roles, epochs, promotion, enrolment (platform admin)
   scale <project> [copies] [--auto --min --max --cpu]  Run more or fewer copies, or let Yoal decide (\`yoal scale --help\`)
   fleet [status|rebalance|move|links|link-test]  Node utilisation, rebalancing, and latency/throughput between nodes (\`yoal fleet --help\`)
   nodes [update|rollout]                     Update one node, or the fleet in waves: plan, start, status, resume, cancel (\`yoal nodes --help\`)

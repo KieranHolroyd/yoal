@@ -193,6 +193,67 @@ describe('ControlLease (CLUSTERING §6.3)', () => {
 		expect((await a.lease.tick()).role).toBe('fenced');
 	});
 
+	test('operator promotion without break-glass requires expiry and the unchanged-object window', async () => {
+		const w = world();
+		const a = w.node('a');
+		const b = w.node('b');
+		await a.lease.bootstrap();
+		await b.lease.tick();
+		await expect(b.lease.operatorTakeOver()).rejects.toThrow(/not expired|unchanged/);
+		expect(w.store.peek()).toMatchObject({ holderNodeId: 'a', epoch: 1 });
+		w.advance(30_000);
+		await expect(b.lease.operatorTakeOver()).rejects.toThrow(/unchanged/);
+		w.advance(11_000);
+		expect(await b.lease.operatorTakeOver()).toMatchObject({ role: 'primary', epoch: 2 });
+		expect(w.store.peek()).toMatchObject({ holderNodeId: 'b', epoch: 2 });
+	});
+
+	test('expectedEpoch is compared with the record read for the CAS, not a cached epoch', async () => {
+		const w = world();
+		const a = w.node('a');
+		const b = w.node('b');
+		const c = w.node('c');
+		await a.lease.bootstrap(1);
+		await b.lease.tick();
+		expect(b.lease.status().epoch).toBe(1);
+		// c moves the object to epoch 2 after b's last read.
+		await c.lease.forcePromote();
+		expect(w.store.peek()?.epoch).toBe(2);
+		await expect(b.lease.operatorTakeOver({ expectedEpoch: 1, breakGlass: true })).rejects.toThrow(
+			'epoch 2, not 1',
+		);
+		expect(w.store.peek()).toMatchObject({ holderNodeId: 'c', epoch: 2 });
+	});
+
+	test('a durable epoch on disk raises a create and a takeover above the stale object', async () => {
+		const w = world();
+		const a = w.node('a');
+		await a.lease.bootstrap(3);
+		const b = new ControlLease({
+			store: w.store.view(),
+			nodeId: 'b',
+			monotonic: () => w.now,
+			wallClock: () => w.now,
+			durableEpoch: () => 9,
+		});
+		await b.tick();
+		expect(await b.operatorTakeOver({ breakGlass: true })).toMatchObject({ role: 'primary', epoch: 10 });
+		expect(w.store.peek()).toMatchObject({ holderNodeId: 'b', epoch: 10 });
+	});
+
+	test('bootstrap does not write below a durable epoch', async () => {
+		const w = world();
+		const a = new ControlLease({
+			store: w.store.view(),
+			nodeId: 'a',
+			monotonic: () => w.now,
+			wallClock: () => w.now,
+			durableEpoch: () => 6,
+		});
+		expect(await a.bootstrap(2)).toMatchObject({ role: 'primary', epoch: 7 });
+		expect(w.store.peek()).toMatchObject({ holderNodeId: 'a', epoch: 7 });
+	});
+
 	test('a store without conditional writes fails closed', async () => {
 		const w = world();
 		const a = w.node('a');

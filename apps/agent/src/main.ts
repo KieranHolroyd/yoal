@@ -25,6 +25,7 @@ import {
 	type WireguardStatus,
 	type WorkloadActivation,
 	INGRESS_SET_CAPABILITY,
+	HA_EPOCH_CAPABILITY,
 } from '@yoal/contracts';
 import type { TlsOptions } from '@yoal/site-config';
 import { startAnalyticsSink, type AnalyticsSink } from './analytics-sink.ts';
@@ -42,6 +43,8 @@ import { ShareMountRunner } from './share-mounts.ts';
 import { DiskMountRunner } from './disk-mounts.ts';
 import { VolumeProfileRunner } from './volume-profiles.ts';
 import { LinkTestRunner } from './link-tests.ts';
+import { ControlEndpoints } from './control-endpoints.ts';
+import { readControlReport } from './control-report.ts';
 import { RunLeaseClock, leaseState } from './run-lease.ts';
 import { DatabasePitrRunner } from './database-pitr.ts';
 import { DatabaseCredentialRunner } from './database-credentials.ts';
@@ -126,6 +129,10 @@ class Backoff {
 class AgentRuntime {
 	private readonly config: AgentConfig;
 	private readonly store: DesiredStateStore;
+	/** The control address list and persisted epoch (W9). Rotates on silence or a non-primary. */
+	private readonly control: ControlEndpoints;
+	/** This host's local control-plane `/readyz` for the heartbeat, or null when not co-located. */
+	private readonly controlReadyzUrl: string | null;
 	private readonly releases: ReleaseManager;
 	private readonly caddy: CaddyAdmin;
 	private readonly stats: StatsCollector;
@@ -273,6 +280,16 @@ class AgentRuntime {
 					: this.refreshIngressHealth(),
 		});
 		this.store = new DesiredStateStore(config.dataDir);
+		this.control = new ControlEndpoints({
+			dataDir: config.dataDir,
+			initialUrl: config.controlUrl,
+			log: (level, message) => log(level, message),
+		});
+		// The socket path is what makes `controlUrl/readyz` this host's control plane. Without one, an
+		// explicit local URL is required: reading the public origin would report another node.
+		this.controlReadyzUrl =
+			config.controlLocalUrl ??
+			(config.controlSocket ? `${config.controlUrl.replace(/\/+$/, '')}/readyz` : null);
 		this.releases = new ReleaseManager(config.dataDir);
 		this.caddy = new CaddyAdmin(config.caddyAdminSocket);
 		this.stats = new StatsCollector(config.dataDir);
@@ -525,6 +542,7 @@ class AgentRuntime {
 		await fs.mkdir(this.config.dataDir, { recursive: true, mode: 0o755 });
 		await this.releases.init();
 		this.ingressSecrets = this.ingressSecretsStore.load();
+		await this.control.load();
 
 		const cached = await this.store.readCached();
 		if (cached) {
@@ -787,8 +805,8 @@ class AgentRuntime {
 
 		let response: Response;
 		try {
-			response = await fetch(
-				`${this.config.controlUrl}/api/agent/desired-state?wait=${request.waitSeconds}`,
+			response = await this.control.request(
+				`/api/agent/desired-state?wait=${request.waitSeconds}`,
 				{ headers, signal },
 			);
 		} catch (error) {
@@ -811,6 +829,14 @@ class AgentRuntime {
 		const state = parsed.data;
 		if (state.nodeId !== this.config.nodeId) {
 			throw new Error(`desired-state is for node ${state.nodeId}, not ${this.config.nodeId}`);
+		}
+		// W9: persist the epoch before applying anything at it, and refuse a lower one outright.
+		if (state.control) {
+			const control = await this.control.apply(state.control);
+			if (!control.ok) {
+				this.control.refuseCurrent();
+				throw new Error(control.reason);
+			}
 		}
 
 		const etagHeader = response.headers.get('etag') ?? desiredStateEtag(state);
@@ -1103,14 +1129,23 @@ class AgentRuntime {
 			...(state.ingress
 				? { ingress: state.ingress, ingressHealthDir: this.config.ingressHealthDir }
 				: {}),
-			...(state.ingress?.platform ?? this.config.platformHost
-				? {
-						platform: state.ingress?.platform ?? {
-							host: this.config.platformHost!,
-							upstream: this.config.platformUpstream,
-						},
-					}
-				: {}),
+			...(() => {
+				const upstreams = state.ingress?.platformUpstreams?.map((entry) => ({
+					dial: entry.upstream,
+					priority: entry.priority,
+				}));
+				const platform = state.ingress?.platform ?? (this.config.platformHost ? {
+					host: this.config.platformHost,
+					upstream: this.config.platformUpstream,
+				} : null);
+				if (!platform) return {};
+				return {
+					platform: {
+						...platform,
+						...(upstreams && upstreams.length > 0 ? { upstreams, healthUri: '/readyz' } : {}),
+					},
+				};
+			})(),
 		});
 		const caddyJson = JSON.stringify(caddyConfig);
 		if (caddyJson !== this.appliedCaddyJson) {
@@ -1663,6 +1698,7 @@ class AgentRuntime {
 			.catch((error: unknown) => log('warn', `Could not request a storage move: ${errorText(error)}`));
 		// The endpoint is Caddy's answer from the state file; refresh it so the fleet view matches.
 		await this.refreshIngressHealth().catch((error) => log('warn', `Ingress health update failed: ${errorText(error)}`));
+		const controlReport = this.controlReadyzUrl ? await readControlReport(this.controlReadyzUrl) : null;
 		const body: Heartbeat = {
 			nodeId: this.config.nodeId,
 			agentVersion: this.config.agentVersion,
@@ -1675,6 +1711,9 @@ class AgentRuntime {
 			certificateFingerprint: this.certificateDelivery.fingerprint(),
 			stats,
 			...(this.latestIngressHealth ? { ingressHealth: this.latestIngressHealth } : {}),
+			// A control node reports its own lease view so `/api/v1/ha/status` can show standbys
+			// instead of only the primary's row (W9-SPEC §4.6).
+			...(controlReport ? { control: controlReport } : {}),
 			...(hardware ? { hardware } : {}),
 			...(nodeCertificate ? { nodeCertificate } : {}),
 			...(nodeCsr ? { nodeCsr } : {}),
@@ -1723,7 +1762,7 @@ class AgentRuntime {
 		const parsed = heartbeatSchema.safeParse(body);
 		if (!parsed.success) throw new Error(`heartbeat failed validation: ${parsed.error.message}`);
 
-		const response = await fetch(`${this.config.controlUrl}/api/agent/heartbeat`, {
+		const response = await this.control.request('/api/agent/heartbeat', {
 			method: 'POST',
 			signal: AbortSignal.any([
 				this.shutdownController.signal,
@@ -2279,6 +2318,8 @@ export function advertisedCapabilities(
 	if (nodeCaAvailable) capabilities.push(ENDPOINTS_GATEWAY_CAPABILITY);
 	// This build serves the full edge payload and the health endpoint (W6/W8).
 	capabilities.push(INGRESS_SET_CAPABILITY);
+	// W9: holds the control address list in `control`, persists the epoch and refuses a lower one.
+	capabilities.push(HA_EPOCH_CAPABILITY);
 	return capabilities;
 }
 

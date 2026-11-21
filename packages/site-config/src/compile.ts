@@ -695,13 +695,26 @@ export function compileCaddyConfig(options: {
 	/** Serve plain HTTP on :80 only to redirect to HTTPS. */
 	httpRedirect?: boolean;
 	/** Platform dashboard/API/MCP route, preserved when the agent replaces the whole config. */
-	platform?: { host: string; upstream: string };
+	platform?: {
+		host: string;
+		upstream: string;
+		/** Control-node upstreams in preference order (W9); when present they replace `upstream`. */
+		upstreams?: Array<{ dial: string; priority: number }>;
+		/** Active health-check path for the platform route; `/readyz` when W9 renders the list. */
+		healthUri?: string;
+	};
 	/** Always keep the content apex + wildcard in config so Caddy maintains the wildcard cert. */
 	contentDomain?: string;
 }): Record<string, unknown> {
 	const routes = options.sites.map(compileSiteRoute);
 	if (options.platform) {
 		const upstream = options.platform.upstream.replace(/^https?:\/\//, '');
+		const upstreams = options.platform.upstreams?.length
+			? options.platform.upstreams
+					.slice()
+					.sort((a, b) => a.priority - b.priority)
+					.map((entry) => ({ dial: entry.dial.replace(/^https?:\/\//, '') }))
+			: [{ dial: upstream }];
 		routes.unshift({
 			'@id': 'platform',
 			match: [{ host: [options.platform.host] }],
@@ -710,7 +723,21 @@ export function compileCaddyConfig(options: {
 				{ handler: 'encode', encodings: { zstd: {}, gzip: {} } },
 				{
 					handler: 'reverse_proxy',
-					upstreams: [{ dial: upstream }],
+					upstreams,
+					// The control list is ordered: the lease holder first. Health checks on /readyz
+					// skip a fenced or dead control node within one interval (CLUSTERING §6.4).
+					...(options.platform.upstreams?.length
+						? {
+								lb_policy: 'first',
+								health_checks: {
+									active: {
+										uri: options.platform.healthUri ?? '/readyz',
+										interval: '5s',
+										timeout: '3s',
+									},
+								},
+							}
+						: {}),
 					headers: {
 						request: {
 							set: {

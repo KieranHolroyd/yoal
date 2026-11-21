@@ -552,6 +552,27 @@ export class ApiClient {
 		return { status: raw as HaStatusView, raw };
 	}
 
+	/** A control-plane standby promotion (W9): a CAS; a stale expectedEpoch is a 409. */
+	async promoteControl(expectedEpoch?: number, breakGlass?: boolean): Promise<{ result: unknown; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/ha/control/promote', {
+			body: {
+				...(expectedEpoch === undefined ? {} : { expectedEpoch }),
+				...(breakGlass ? { breakGlass: true } : {}),
+			},
+		});
+		return { result: raw, raw };
+	}
+
+	/** Enrol a warm control standby: send its CSR, receive a sealed bundle and one-time code. */
+	async enrolControl(input: {
+		nodeId: string;
+		csrPem: string;
+		reason?: string;
+	}): Promise<{ result: { activationCode: string; bundle: unknown; certificate: { serial: string; certPem: string; notAfter: string } }; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/ha/control/enrol', { body: input });
+		return { result: raw as { activationCode: string; bundle: unknown; certificate: { serial: string; certPem: string; notAfter: string } }, raw };
+	}
+
 	/** Horizontal scaling for one app: its copies, usage, rollout and autoscaling policy. */
 	async getScaling(slug: string): Promise<{ view: ScalingStatusView; raw: unknown }> {
 		const raw = await this.request('GET', `/api/v1/projects/${encodeURIComponent(slug)}/scaling`);

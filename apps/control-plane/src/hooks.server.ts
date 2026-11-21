@@ -71,17 +71,30 @@ export const init: ServerInit = async () => {
 		console.error('[domains] could not reconcile stored hosts:', error);
 	}
 
-	// A standby (zero-downtime update slot, or the updater's canary) serves requests only. The
-	// primary keeps owning background work, so nothing runs twice while both are up.
+	// Control-plane HA (W9). The lease loop is the only process allowed to decide the role; with
+	// `CONTROL_STANDBY` off it does nothing. It starts before the update-slot return below, because
+	// a W9 standby must take the lease if the primary dies even when YOAL_STANDBY is set for the
+	// updater's slot.
+	if (featureEnabled(core.ctx.config, 'CONTROL_STANDBY')) {
+		void core.controlPlane.start().catch((error) => {
+			reportBackgroundError('control-standby', error);
+		});
+	}
+	// The updater's slot: serve requests only. Background writers are gated per tick below anyway.
 	if (process.env.YOAL_STANDBY === '1') {
 		console.info('[standby] serving requests only; background work stays with the primary');
 		return;
 	}
 
 	// One maintenance loop per process (HMR can call init more than once).
+	// Every writer below runs only while this node is a confirmed primary. The role is re-read on
+	// each tick: an ex-primary that lost the lease must stop, and a promoted standby must start,
+	// without a restart. With CONTROL_STANDBY off this is always true (today's behaviour).
+	const mayAct = () => core.controlPlane.mayActAsPrimary();
 	const global = globalThis as typeof globalThis & { __yoalMaintenance?: ReturnType<typeof setInterval> };
 	if (!global.__yoalMaintenance) {
 		global.__yoalMaintenance = setInterval(() => {
+			if (!mayAct()) return;
 			void core.maintenance.run().catch((error) => reportBackgroundError('maintenance', error));
 		}, 60_000);
 		global.__yoalMaintenance.unref?.();
@@ -96,6 +109,13 @@ export const init: ServerInit = async () => {
 		const autoPromotion = core.databaseReplicas.installAutoPromotion();
 		if (!autoPromotion.installed && featureEnabled(core.ctx.config, 'DB_AUTO_PROMOTE'))
 			console.warn(`[failover] YOAL_FEATURE_DB_AUTO_PROMOTE is set but ignored: ${autoPromotion.reason}`);
+		// The failover controller starts once this node is actually primary (or immediately when HA
+		// is off), so a passive standby never races the holder for its lease.
+		const startFailover = () => {
+			if (!mayAct()) {
+				setTimeout(startFailover, 5_000).unref?.();
+				return;
+			}
 		startFailoverLoop(core.failover, {
 			onError: (error) => {
 				if (Date.now() - lastFailoverError < 60_000) return;
@@ -103,14 +123,18 @@ export const init: ServerInit = async () => {
 				reportBackgroundError('failover', error);
 			},
 		});
+		};
+		startFailover();
 		// Metric alert rules (docs/ALERTS.md): each rule has its own interval (≥ 1 min); this
 		// tick only picks up the ones that are due, so a rule runs at most ~20 s late.
 		setInterval(() => {
+			if (!mayAct()) return;
 			void core.alerts.evaluateDue().catch((error) => reportBackgroundError('alerts', error));
 		}, 20_000).unref?.();
 		// Jobs (plan 09): fire due crons every 10 s so a run starts close to its minute; the
 		// 60 s maintenance sweep also fires them, and a conditional update keeps each fire single.
 		setInterval(() => {
+			if (!mayAct()) return;
 			try {
 				core.jobs.scheduleDue();
 			} catch (error) {
@@ -120,11 +144,13 @@ export const init: ServerInit = async () => {
 		// Log drains (DESIGN §8): ship new lines every 5 s. A drain is leased while it is delivered
 		// and a tick that is still running skips the next, so a slow receiver never overlaps itself.
 		setInterval(() => {
+			if (!mayAct()) return;
 			void core.logDrains.deliverDue().catch((error) => reportBackgroundError('log-drains', error));
 		}, 5_000).unref?.();
 		// Flows (docs/FLOWS.md): signals and starts advance runs at once; this loop handles retries
 		// after backoff, wait timeouts and cancels requested while another process held the run.
 		setInterval(() => {
+			if (!mayAct()) return;
 			try {
 				void core.flows.drive().settled.catch((error) => reportBackgroundError('flows', error));
 			} catch (error) {
@@ -133,6 +159,7 @@ export const init: ServerInit = async () => {
 		}, 5_000).unref?.();
 		// Pick up mass operations whose runner died with the previous process (docs/OPERATIONS.md §2.2).
 		setTimeout(() => {
+			if (!mayAct()) return;
 			try {
 				const resumed = core.operations.resume();
 				if (resumed.length) console.info(`[operations] resumed ${resumed.length} operation(s)`);
@@ -185,6 +212,18 @@ const handleRequest: Handle = async ({ event, resolve }) => {
 	// Dev server only: serve `<slug>.localhost` content hosts straight from the local object store
 	// instead of requiring the agent + Caddy. Production never reaches this branch.
 	if (isDevContentHost(event.url.hostname)) return serveDevContent(event);
+
+	// Control-plane HA (W9-SPEC §4.4): an agent request, or any write, is served only by a confirmed
+	// primary. A standby or fenced node answers 503 with `x-yoal-role`/`x-yoal-epoch` so agents keep
+	// their cached desired state (I11) and never receive authority from a node that lost it.
+	const controlGate = core.controlPlane.writeGate(event.request.method, event.url.pathname);
+	if (controlGate)
+		return withFrameProtection(
+			Response.json(
+				{ error: 'control_plane_not_primary', reason: controlGate.reason },
+				{ status: controlGate.status, headers: controlGate.headers },
+			),
+		);
 
 	// Hosted user-pool pages are the pool's own sign-in surface. They use a per-pool cookie and
 	// must keep working when the platform is signed out or fails over, so the platform session,

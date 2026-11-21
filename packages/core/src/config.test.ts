@@ -10,6 +10,24 @@ const base = {
 };
 
 describe('coreConfigFromEnv', () => {
+	test('control role is fail-closed and addresses bind by node id', () => {
+		expect(coreConfigFromEnv(base, {}).controlRole).toBeUndefined();
+		expect(coreConfigFromEnv(base, { YOAL_CONTROL_ROLE: 'standby' }).controlRole).toBe('standby');
+		expect(coreConfigFromEnv(base, { YOAL_CONTROL_ROLE: 'PRIMARY' }).controlRole).toBe('primary');
+		expect(() => coreConfigFromEnv(base, { YOAL_CONTROL_ROLE: 'secondary' })).toThrow(/YOAL_CONTROL_ROLE/);
+		expect(
+			coreConfigFromEnv(base, {
+				YOAL_CONTROL_ADDRESSES: 'nod_a=https://a.example.com/,nod_b=https://b.example.com',
+			}).controlAddresses,
+		).toEqual([
+			{ nodeId: 'nod_a', url: 'https://a.example.com' },
+			{ nodeId: 'nod_b', url: 'https://b.example.com' },
+		]);
+		expect(() => coreConfigFromEnv(base, { YOAL_CONTROL_ADDRESSES: 'https://a.example.com' })).toThrow(
+			/nodeId=url/,
+		);
+	});
+
 	test('reads the documented YOAL_* variables (docs/OPS.md §2.1, §2.5.1)', () => {
 		const config = coreConfigFromEnv(base, {
 			YOAL_DATABASE_GATEWAY_PORT: '9182',
