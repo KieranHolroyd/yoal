@@ -204,6 +204,9 @@ export const systemAlertCatalog: SystemAlertInfo[] = [
 
 /** Map an alert key to its kind; unknown keys are treated as their own always-on kind. */
 export function systemAlertKindOf(key: string): SystemAlertKind | null {
+	// W15 keys are dotted (`ha.effective_below_target:<id>`), so the colon prefix is the whole key.
+	// Map them explicitly before the usual `kind:detail` split.
+	if (key.startsWith('ha.')) return 'ha';
 	const prefix = key.split(':')[0]!;
 	if (prefix === 'database_pool_saturation') return 'database_pool';
 	if (prefix === 'alerts') return 'telemetry';

@@ -36,7 +36,7 @@ Implementation SHA: `git log -1 --format=%H -- packages/core/src/slo-service.ts`
 | Command | Result |
 |---|---|
 | `bun run check` | all workspace packages exit 0; one pre-existing Svelte warning in `settings/registry/+page.svelte`. |
-| `bun test` | **6804 pass, 74 skip, 0 fail** (6878 tests, 612 files, 209 s). |
+| `bun test` | **6805 pass, 74 skip, 0 fail** (6879 tests, 612 files, 216 s). |
 | `bun test packages/core/src/slo-observability.test.ts` | 19 pass: flag-off gates, create/update/remove, error budget, multi-window burn, unsupported indicator note, database signal, burn sweep, effective target + 5 min grace, timeline order/TTF/lost commits, prober token/de-dupe/stale/revoke, metrics series. |
 | `bun test packages/core/src/ha-wave4-foundation.test.ts` | pass; the foundation’s “not implemented” expectations were replaced with the real lane-B behaviour. |
 | `bun test packages/contracts` | pass, including `ha-observability.test.ts`. |
@@ -65,6 +65,17 @@ Every review item is fixed in this revision; no item is deferred.
 | 12 | Tests clear `database_replicas`, reset the below-target first-seen state through the service, create an SLO before the flag-off list assertion, and include the prober HTTP test. | `slo-observability.test.ts` `beforeEach`; `prober-report.test.ts`. |
 | 13 | SLO remove controls are shown only for the caller’s org (platform-wide reads stay visible); the HA target selector lists only projects the caller’s org can edit. The services still enforce project scope. | `settings/slo/+page.*`, `settings/high-availability/+page.*`. |
 | 14 | `docs/API.md` documents every new route; `docs/METRICS.md` documents the authenticated-vs-public split. | both docs. |
+
+## 2b. Review fixes (round 2)
+
+| # | Fix | Test / evidence |
+|---|---|---|
+| 1 | `systemAlertKindOf` maps every `ha.` prefix to the `ha` kind before the `kind:detail` split, so `ha.effective_below_target:…`, `ha.slo_burn:…` and `ha.prober_stale:…` all route and mute. | `system-alerts.ts`; contract test asserts all three keys resolve to `ha` and `systemAlertRoutingSchema` accepts `{ ha: { enabled: false, channels: [...] } }`. |
+| 2 | Corrected the docs rather than changing existing public behavior: anonymous `/metrics` includes node, disk, certificate and traffic series; only the W15 HA/lease/steering series are authenticated. Updated the `/metrics/platform` row and the “Fleet” note. | `docs/METRICS.md`; public-metrics test still asserts the W15 families are absent anonymously. |
+| 3 | Steering ingress health uses the exported `rolesFor(row)` instead of `nodes.view(row)`, removing one `node_certificates` query per node. | `metrics-export.ts`, `nodes.ts`. |
+| 4 | The declared-target scan uses `substr(key, 1, 10) = ?` (the exact `ha_target:` prefix), not `LIKE` with `%`. | `slo-service.ts`; target tests pass. |
+| 5 | `hooks.server.ts` skips session and access-key/Better Auth resolution for `/api/v1/ha/prober/report`; the handler’s Bearer token is the only lookup. | `hooks.server.ts` (`tokenOnly`); HTTP-edge tests pass. |
+| 6 | Docs now distinguish platform reads (`platform:read`: viewer/operator/admin) from prober registration/revocation (`platform:settings`), matching `platformIam.canView`/`canAdminister`. | `docs/API.md`, `docs/METRICS.md`. |
 
 ## 3. Not verified, and why
 

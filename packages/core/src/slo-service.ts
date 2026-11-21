@@ -252,8 +252,8 @@ export class SloService {
 			.all();
 		const declarations = new Map(
 			this.ctx.sqlite
-				.query<{ key: string; value: string }, []>(`SELECT key, value FROM settings WHERE key LIKE '${HA_TARGET_PREFIX}%'`)
-				.all()
+				.query<{ key: string; value: string }, [string]>('SELECT key, value FROM settings WHERE substr(key, 1, 10) = ?')
+				.all(HA_TARGET_PREFIX)
 				.map((row) => [row.key.slice(HA_TARGET_PREFIX.length), row.value]),
 		);
 

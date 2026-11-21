@@ -13,6 +13,7 @@ import {
 } from '@yoal/contracts';
 import { nodes } from '@yoal/db';
 import type { CoreContext } from './context.ts';
+import { rolesFor } from './nodes.ts';
 import { DB_COUNTERS } from './database-metrics-sql.ts';
 import { CoreError, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError } from './errors.ts';
 import type { ScrapeSampleRow, ScrapeSamples } from './telemetry.ts';
@@ -666,7 +667,8 @@ export class MetricsExporter {
 			out.gauge('yoal_steering_findings', 'Preflight findings that keep the steering driver from acting.', { driver: preflight.kind }, preflight.findings.length);
 			out.gauge('yoal_steering_healthy', '1 when the selected driver has no preflight findings.', { driver: preflight.kind }, preflight.findings.length === 0 ? 1 : 0);
 			for (const row of this.ctx.db.select().from(nodes).all()) {
-				if (!this.ctx.nodes.view(row).roles.includes('ingress')) continue;
+				// Roles are derived from the row; `nodes.view` would add one certificate query per node.
+				if (!rolesFor(row).includes('ingress')) continue;
 				out.gauge(
 					'yoal_steering_ingress_node_ready',
 					'1 while an ingress node is online.',

@@ -7,6 +7,8 @@ import {
 	projectHaTargetInputSchema,
 	projectHaTargetViewSchema,
 	sloOverviewSchema,
+	systemAlertKindOf,
+	systemAlertRoutingSchema,
 } from './index.ts';
 
 /** W15 read views: the shapes the REST surface, dashboard, prober and metrics agree on. */
@@ -101,6 +103,13 @@ describe('W15 observability contracts', () => {
 			counts: { up: 0, degraded: 0, down: 0 },
 		});
 		expect(view.stale).toBe(false);
+	});
+
+	test('every W15 key routes to the ha system-alert kind and can be muted', () => {
+		for (const key of ['ha.effective_below_target:prj_1', 'ha.slo_burn:slo_1:critical:3600:0', 'ha.prober_stale:prb_1'])
+			expect(systemAlertKindOf(key)).toBe('ha');
+		const routing = systemAlertRoutingSchema.parse({ ha: { enabled: false, channels: ['webhook'] } });
+		expect(routing.ha).toEqual({ enabled: false, channels: ['webhook'] });
 	});
 
 	test('the SLO overview is explicitly empty while the flag is off', () => {

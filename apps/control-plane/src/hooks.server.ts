@@ -252,10 +252,16 @@ const handleRequest: Handle = async ({ event, resolve }) => {
 		: checkCsrf(event.request, event.url, platformOrigin);
 	if (!csrf.ok) return new Response(`Forbidden: ${csrf.reason}`, { status: 403 });
 
-	const session = await auth.api.getSession({ headers: event.request.headers });
+	// The external prober authenticates in its handler with its own Bearer token. Skipping the
+	// session/access-key lookup here keeps an outside-in report from paying a database round trip
+	// before the token check, and no other surface relies on a principal for this path.
+	const tokenOnly = event.url.pathname === '/api/v1/ha/prober/report';
+	const session = tokenOnly ? undefined : await auth.api.getSession({ headers: event.request.headers });
 	event.locals.user = session?.user;
 	event.locals.session = session?.session;
-	if (session?.user) {
+	if (tokenOnly) {
+		event.locals.principal = undefined;
+	} else if (session?.user) {
 		event.locals.principal = principalFromSession(session.user.id, event.request, {
 			name: session.user.name ?? undefined,
 			activeOrganizationId: session.session.activeOrganizationId,

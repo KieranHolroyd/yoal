@@ -1291,7 +1291,7 @@ function capabilities(json: string | null): string[] {
 const RESERVED_LABEL_PREFIX = 'yoal.io/';
 
 /** Operator-set roles, or the mode/can_build derivation older rows rely on. */
-function rolesFor(row: typeof nodesTable.$inferSelect): NodeRole[] {
+export function rolesFor(row: typeof nodesTable.$inferSelect): NodeRole[] {
 	const stored = parseJson<unknown>(row.rolesJson, null);
 	if (Array.isArray(stored)) {
 		const roles = [...new Set(stored.filter((value): value is NodeRole => nodeRoleSchema.safeParse(value).success))];

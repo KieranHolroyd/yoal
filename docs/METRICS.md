@@ -8,7 +8,7 @@ control plane.
 
 | Request | Result |
 |---|---|
-| `GET /metrics`, no credentials | Fleet summary: node, disk and platform-wide traffic counts. Off when Settings → Metrics → *Public fleet summary* is off (then 401). |
+| `GET /metrics`, no credentials | Fleet summary: nodes, disks, certificate expiry and platform-wide traffic series. It is **not** tenant-free. Off when Settings → Metrics → *Public fleet summary* is off (then 401). |
 | `GET /metrics` with `Authorization: Bearer yoal_…` (or a dashboard session) | Every enabled section for **the key's organisation only**. Needs `metrics:read`; sections the key cannot read (`project:read`, `database:read`, `storage:read`, `broker:read`) are left out. |
 | `GET /metrics/<section>[/<name>]` | One section, or one app / database / storage instance / broker. Always needs a key. |
 | An `Authorization` header that does not resolve | 401, never the public view. |
@@ -24,7 +24,7 @@ The same paths work under `/api/v1/metrics/...`.
 | `/metrics/storage[/<name>]` | Object storage instances | `storage:read` |
 | `/metrics/brokers[/<name>]` | Queue brokers, plus one series family per stream | `broker:read` |
 | `/metrics/volumes[/<slug>]` | App volumes | `project:read` |
-| `/metrics/platform` | Nodes and disks | platform admin |
+| `/metrics/platform` | Nodes, disks and, for an authenticated platform read, HA/lease/steering series | platform read (`platform:read`) |
 
 With hundreds of apps, give each Grafana dashboard its own scrape job on the narrowest path it
 needs. For example, scrape `/metrics/usage` every 5 minutes and `/metrics/apps/shop` every 30
@@ -115,7 +115,7 @@ telemetry store's TTL would make a running total go backwards.
 
 Brokers are not in the public fleet summary.
 
-**Fleet** (public `/metrics`, `/metrics/platform`). The public anonymous summary is the tenant-free group below; HA, lease and steering series are returned only with an authenticated `metrics:read` platform scrape.
+**Fleet** (public `/metrics`, `/metrics/platform`). The anonymous public summary includes the node, disk, certificate and traffic series below; the W15 HA, lease and steering series are returned only for an authenticated `metrics:read` platform scrape.
 
 - `yoal_nodes_total`, `yoal_nodes_online`, `yoal_projects_total`, `yoal_deployments_active`,
   `yoal_storage_bytes`, `yoal_agent_desired_version_info{version}`
@@ -127,7 +127,8 @@ Brokers are not in the public fleet summary.
   `yoal_volume_free_bytes` (D80). The names predate disks and stay; `volume` is the disk name and
   `tier` is `fast` or `bulk` ([STORAGE.md](./STORAGE.md)).
 - **Authenticated platform scrape only** — these name tenants, databases, nodes and leases, so the
-  anonymous public `/metrics` never includes them. HA levels (W15): `yoal_ha_declared_level{project,project_id,level}`,
+  anonymous public `/metrics` never includes them (it still includes the node/disk/certificate and
+  traffic series above). HA levels (W15): `yoal_ha_declared_level{project,project_id,level}`,
   `yoal_ha_effective_level{...}`, `yoal_ha_effective_below_target{project,project_id}` (1 when the
   weakest live resource is under the declaration; `ha.effective_below_target` alerts after 5 min),
   `yoal_ha_level_blockers{project,project_id}`, and
