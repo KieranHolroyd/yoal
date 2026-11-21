@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { createDb } from '@yoal/db';
 import {
 	DATABASE_REPLICAS_CAPABILITY,
+	DB_MEMBER_SELF_FENCING_CAPABILITY,
 	DEFAULT_FEATURES,
 	nodeCapabilities,
 	type FeatureFlags,
@@ -345,6 +346,13 @@ describe('promotion', () => {
 		const fence = { epoch: 1, holderId: 'test', holds: () => true };
 		const plan = { databaseId: db.id, candidateNodeId: second.nodeId, generation: 1, stage: 'fence' as const, reason: 'lost' };
 		expect(handler.run('fence', plan, fence)).toMatchObject({ status: 'done' });
+		expect(
+			opened.sqlite
+				.query<{ promotion_source: string; evidence_json: string }, [string]>(
+					'SELECT promotion_source, evidence_json FROM database_failovers WHERE database_id = ?',
+				)
+				.get(db.id),
+		).toMatchObject({ promotion_source: 'auto' });
 		expect(handler.run('promote', { ...plan, stage: 'promote' }, fence)).toMatchObject({ status: 'waiting' });
 		const task = (await core.databaseReplicas.promotionsForNode(second.nodeId)).find((item) => item.databaseId === db.id)!;
 		beat(second, { databaseReplicaPromotionResults: [{ failoverId: task.failoverId, attempt: 0, status: 'ok', promoted: true, lsn: null }] });
@@ -383,14 +391,14 @@ describe('automatic promotion guard (HA-PLAN F1)', () => {
 		expect(registered).toHaveLength(0);
 	});
 
-	test('the flag alone does not install the handler while self-fencing is inactive', () => {
+	test('the flag alone does not install without a conditional arbiter', () => {
 		const { registered, failover } = recorder();
 		expect(core.databaseReplicas.selfFencing().active).toBe(false);
 		const result = withAutoPromote(true, () => core.databaseReplicas.installAutoPromotion(failover));
+		// This core's store is not a conditional arbiter, so self-fencing cannot be claimed.
 		expect(result.installed).toBe(false);
-		expect(result.reason).toContain('self-fencing');
+		expect(result.reason).toContain('arbiter');
 		expect(registered).toHaveLength(0);
-		// And the real controller reports no automatic path.
 		withAutoPromote(true, () => core.databaseReplicas.installAutoPromotion());
 		expect(core.failover.status(owner).databaseHandler).toBe(false);
 	});
@@ -404,5 +412,40 @@ describe('automatic promotion guard (HA-PLAN F1)', () => {
 		const result = withAutoPromote(true, () => core.databaseReplicas.installAutoPromotion(on.failover, active));
 		expect(result).toMatchObject({ installed: true, reason: null });
 		expect(on.registered).toHaveLength(1);
+	});
+
+	test('real self-fencing needs an involved member set, the capability, the flag and an arbiter', () => {
+		const config = core.ctx.config as { dbMemberSelfFencing?: boolean };
+		const previousArbiter = core.ctx.arbiter;
+		const previous = config.dbMemberSelfFencing;
+		try {
+			core.ctx.arbiter = {} as never;
+			// No armed database and no data-role nodes: the old roles-based check saw an empty set and
+			// returned active. The involved-member set is empty, so it must refuse.
+			opened.sqlite.run("UPDATE databases SET failover_mode = 'manual'");
+			opened.sqlite.run("UPDATE nodes SET roles_json = '[]'");
+			config.dbMemberSelfFencing = true;
+			expect(withAutoPromote(true, () => core.databaseReplicas.selfFencing())).toMatchObject({ active: false });
+			const refused = withAutoPromote(true, () => core.databaseReplicas.installAutoPromotion());
+			expect(refused.installed).toBe(false);
+			opened.sqlite.run("UPDATE nodes SET roles_json = '[\"data\"]'");
+			const armed = core.databases.create(owner, { name: 'self-fencing', placement: primary.nodeId });
+			core.databaseReplicas.add(owner, armed.name, { node: second.nodeId });
+			opened.sqlite.run("UPDATE databases SET failover_mode = 'auto' WHERE id = ?", [armed.id]);
+			// The involved members now exist but do not advertise the capability yet.
+			config.dbMemberSelfFencing = false;
+			expect(withAutoPromote(true, () => core.databaseReplicas.selfFencing()).active).toBe(false);
+			config.dbMemberSelfFencing = true;
+			for (const node of [primary, second])
+				opened.sqlite.run('UPDATE nodes SET capabilities_json = ? WHERE id = ?', [
+					JSON.stringify([...nodeCapabilities, DB_MEMBER_SELF_FENCING_CAPABILITY]),
+					node.nodeId,
+				]);
+			expect(withAutoPromote(true, () => core.databaseReplicas.selfFencing())).toMatchObject({ active: true, reason: '' });
+			expect(withAutoPromote(false, () => core.databaseReplicas.selfFencing()).active).toBe(false);
+		} finally {
+			core.ctx.arbiter = previousArbiter;
+			config.dbMemberSelfFencing = previous;
+		}
 	});
 });

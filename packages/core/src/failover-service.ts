@@ -178,6 +178,11 @@ export class FailoverService {
 		};
 	}
 
+	/** Whether an automatic database promotion handler is installed in this process. */
+	handlerInstalled(): boolean {
+		return this.#handler !== null;
+	}
+
 	/** Milliseconds between ticks: `renewSeconds`, capped at a third of the lease TTL. */
 	intervalMs(config: ClusterConfig = this.ctx.cluster.get()): number {
 		const { leaseTtlSeconds, renewSeconds } = config.controlPlane;
@@ -813,7 +818,14 @@ export class FailoverService {
 			}
 			if (!lost || event?.status === 'manual') continue;
 			const choice = this.#promotionChoice(byDatabase.get(database.id) ?? [], facts, config);
-			const automatic = config.failover.enabled && this.#handler !== null;
+			// W11: automatic promotion is per database and defaults to manual. A database that is
+			// not armed, or whose effective durability no longer meets §1.3, is a manual promotion
+			// even when the controller and the global flag are on. Arming enforced every §3 gate.
+			const automatic = config.failover.enabled && this.#handler !== null && this.ctx.failoverPolicies.autoActiveForRow(database);
+			const policyReason =
+				database.failoverMode === 'auto' && !automatic
+					? 'Automatic failover is disabled: the database is not armed or its durability no longer meets the policy.'
+					: null;
 			const silent = `${database.name}: its primary ${sourceReason(primary, database.nodeId, 'failover')}`;
 			if (!choice.replica) {
 				const reason = `${silent} No replica can be promoted: ${choice.refusals.map((r) => `${this.#nodeName(facts, r.nodeId)}: ${r.reason}`).join('; ') || choice.reason}`;
@@ -840,9 +852,37 @@ export class FailoverService {
 			}
 			const candidate = choice.replica;
 			const generation = Math.max(0, ...(byDatabase.get(database.id) ?? []).map((r) => r.primaryGeneration)) + 1;
+			if (automatic) {
+				// W11 review blocker 2: the controller must read the lease and refuse unless it is
+				// steady, expired and names this candidate. The node member machine is the W11 path.
+				const leaseRefusal = await this.ctx.databaseMembers.automaticPromotionRefusal(database, candidate.nodeId);
+				if (leaseRefusal) {
+					const reason = `${silent} Waiting to promote: ${leaseRefusal}.`;
+					if (event) this.#note(fence, event, 'blocked', now, reason);
+					else
+						this.#fenced(fence, () =>
+							this.#insertEvent({
+								kind: 'database',
+								status: 'blocked',
+								stage: 'decide',
+								subjectId: database.id,
+								subjectName: database.name,
+								orgId: database.orgId,
+								fromNodeId: database.nodeId,
+								toNodeId: candidate.nodeId,
+								reason,
+								epoch: fence.epoch,
+								generation,
+								detectedAt: now,
+							}),
+						);
+					alerts.push({ key: `failover:database:${database.id}`, title: `Database ${database.name} is waiting to promote`, detail: reason, severity: 'critical' });
+					continue;
+				}
+			}
 			if (!automatic) {
 				const reason =
-					`${silent} Promote the replica on ${this.#nodeName(facts, candidate.nodeId)} by hand ` +
+					`${silent} ${policyReason ?? ''} Promote the replica on ${this.#nodeName(facts, candidate.nodeId)} by hand ` +
 					(config.failover.enabled ? '(no automatic promotion path is installed).' : '(automatic failover is off).');
 				this.#fenced(fence, () => {
 					if (event) this.#finish(fence, event, 'cancelled', now, 'Superseded: a replica is now eligible.');

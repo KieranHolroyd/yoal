@@ -28,6 +28,7 @@ import {
 	type WorkloadActivation,
 	INGRESS_SET_CAPABILITY,
 	HA_EPOCH_CAPABILITY,
+	DB_MEMBER_SELF_FENCING_CAPABILITY,
 } from '@yoal/contracts';
 import type { TlsOptions } from '@yoal/site-config';
 import { startAnalyticsSink, type AnalyticsSink } from './analytics-sink.ts';
@@ -58,6 +59,7 @@ import { NodeUpdateRunner } from './node-update.ts';
 import { DatabasePoolerRestartRunner } from './database-pooler-restarts.ts';
 import { DatabaseReplicationRunner } from './database-replication.ts';
 import { DatabaseDurabilityRunner } from './database-durability.ts';
+import { DatabaseMemberRunner, memberOperations, reportOnlyPeerTransport } from './database-member.ts';
 import { ReplicaLinkForwarder } from './replica-links.ts';
 import { DatabaseRotationRunner } from './database-rotations.ts';
 import { DATABASE_STATS_INTERVAL_MS, DatabaseStatsSampler } from './database-stats.ts';
@@ -187,6 +189,11 @@ class AgentRuntime {
 	private readonly databaseReplication: DatabaseReplicationRunner;
 	/** W10: sync set, switchover drain/resume, rewind and member probes. */
 	private readonly databaseDurability: DatabaseDurabilityRunner;
+	/**
+	 * W11: the database member machine. It is report-only until this node has a direct arbiter
+	 * transport and a peer channel; with `arbiter: null` it never fences or promotes (LANE-A-HANDOFF).
+	 */
+	private readonly databaseMember: DatabaseMemberRunner;
 	/** Unix sockets the replica containers stream through (C7). */
 	private readonly replicaLinks: ReplicaLinkForwarder;
 	private readonly storageAdmin: StorageReconciler;
@@ -427,6 +434,15 @@ class AgentRuntime {
 			nodeId: config.nodeId,
 			helper: this.helper,
 			log,
+		});
+		this.databaseMember = new DatabaseMemberRunner({
+			nodeId: config.nodeId,
+			helper: memberOperations(this.helper),
+			// The foundation gives agents no direct arbiter transport or peer channel yet. Reporting
+			// still works; automatic fencing/promotion stays disabled rather than guessed.
+			arbiter: null,
+			peer: reportOnlyPeerTransport(),
+			log: (level, message) => log(level, message),
 		});
 		// Must equal the helper's YOAL_HELPER_REPLICATION_DIR (the installer uses /var/lib/yoal/agent).
 		this.replicaLinks = new ReplicaLinkForwarder({
@@ -1593,6 +1609,7 @@ class AgentRuntime {
 			if (!state) continue;
 			try {
 				await this.databaseDurability.runOnce(state, this.shutdownController.signal);
+				await this.databaseMember.runOnce(state, this.shutdownController.signal);
 			} catch (error) {
 				log('warn', `Database durability task failed: ${errorText(error)}`);
 			}
@@ -1771,7 +1788,13 @@ class AgentRuntime {
 		const poolerRestarted = this.databasePoolerRestarts.pending();
 		const databaseReplication = this.databaseReplication.reports();
 		const promotionResults = this.databaseReplication.pendingPromotionResults();
-		const memberReports = this.desired ? await this.databaseDurability.memberReports(this.desired) : [];
+		const durabilityReports = this.desired ? await this.databaseDurability.memberReports(this.desired) : [];
+		// The W11 member machine is the authority for role/generation once it has run; the W10
+		// durability probes fill the first heartbeat before its first pass.
+		const memberReports = [
+			...new Map([...durabilityReports, ...this.databaseMember.reports()].map((report) => [report.databaseId, report])).values(),
+		];
+		const memberEvents = this.databaseMember.pendingEvents();
 		const syncResults = this.databaseDurability.pendingSyncResults();
 		const switchoverResults = this.databaseDurability.pendingSwitchoverResults();
 		const rewindResults = this.databaseReplication.pendingRewindResults();
@@ -1801,7 +1824,7 @@ class AgentRuntime {
 			actualStateVersion: this.actualStateVersion,
 			status: requestedStatus === 'draining' ? 'draining' : this.caddyOk ? 'online' : 'offline',
 			caddyOk: this.caddyOk,
-			capabilities: advertisedCapabilities(undefined, undefined, this.nodeCa.available()),
+			capabilities: advertisedCapabilities(undefined, undefined, this.nodeCa.available(), this.databaseMember.selfFencing),
 			// The same value on every ingress when distribution is healthy (HA-PLAN H20, W7). Null
 			// with the flag off, where Caddy issues per node.
 			certificateFingerprint: this.certificateDelivery.fingerprint(),
@@ -1827,6 +1850,7 @@ class AgentRuntime {
 			...(databaseReplication.length > 0 ? { databaseReplication } : {}),
 			...(promotionResults.length > 0 ? { databaseReplicaPromotionResults: promotionResults } : {}),
 			...(memberReports.length > 0 ? { databaseMembers: memberReports } : {}),
+			...(memberEvents.length > 0 ? { databaseMemberEvents: memberEvents } : {}),
 			...(syncResults.length > 0 ? { databaseSyncResults: syncResults } : {}),
 			...(switchoverResults.length > 0 ? { databaseSwitchoverResults: switchoverResults } : {}),
 			...(rewindResults.length > 0 ? { databaseReplicaRewindResults: rewindResults } : {}),
@@ -1888,6 +1912,7 @@ class AgentRuntime {
 		this.databasePoolerRestarts.acknowledge(poolerRestarted);
 		this.databaseReplication.acknowledgePromotions(promotionResults);
 		this.databaseReplication.acknowledgeRewinds(rewindResults.map((result) => result.replicaId));
+		this.databaseMember.acknowledgeEvents(memberEvents.length);
 		await this.nodeUpdate.acknowledge(nodeUpdateResult);
 		// The control plane accepted a heartbeat from this binary: stand the rollback guard down.
 		await this.nodeUpdate.confirmHealthy(this.shutdownController.signal);
@@ -2399,6 +2424,7 @@ export function advertisedCapabilities(
 	pyodideDir: string = process.env.YOAL_PYODIDE_CACHE_DIR ?? `${WORKERD_INSTALL_DIR}/${WORKERD_PINNED_VERSION}/pyodide`,
 	nodeBinary: string = process.env.YOAL_NODE_PATH ?? '/usr/local/bin/node',
 	nodeCaAvailable: boolean = Bun.which('openssl') !== null,
+	selfFencing: boolean = false,
 ): string[] {
 	let python = false;
 	try {
@@ -2421,6 +2447,9 @@ export function advertisedCapabilities(
 	capabilities.push(INGRESS_SET_CAPABILITY);
 	// W9: holds the control address list in `control`, persists the epoch and refuses a lower one.
 	capabilities.push(HA_EPOCH_CAPABILITY);
+	// W11: advertise self-fencing only when this process really has an arbiter transport and a peer
+	// channel. Report-only builds must not claim it, or the control plane would arm `auto` (F1).
+	if (selfFencing) capabilities.push(DB_MEMBER_SELF_FENCING_CAPABILITY);
 	return capabilities;
 }
 

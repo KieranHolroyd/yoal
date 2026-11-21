@@ -37,7 +37,7 @@ const core: Core = createCore({
 const principal = buildPrincipal({ kind: 'user', userId: 'user_1', orgId: 'org_1', role: 'owner', platformAdmin: true });
 
 const node = core.nodes.join({ token: core.nodes.createJoinToken(principal, 'data').token, name: 'data' });
-opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member"]', 'online', 'a', node.nodeId]);
+opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member","db-member-self-fencing"]', 'online', 'a', node.nodeId]);
 const database = core.databases.create(principal, { name: 'main', placement: node.nodeId });
 const project = await core.projects.create(principal, {
 	name: 'App',
@@ -61,7 +61,7 @@ function reset(): void {
 	opened.sqlite.run('DELETE FROM database_replicas');
 	for (const id of extraNodes) opened.sqlite.run('DELETE FROM nodes WHERE id = ?', [id]);
 	extraNodes.length = 0;
-	opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member"]', 'online', 'a', node.nodeId]);
+	opened.sqlite.run('UPDATE nodes SET capabilities_json = ?, status = ?, zone = ? WHERE id = ?', ['["db-member","db-member-self-fencing"]', 'online', 'a', node.nodeId]);
 	opened.sqlite.run(
 		`UPDATE databases SET engine_name = 'postgres', durability = 'async', durability_effective = 'async',
 		 accept_data_loss = 0, failover_mode = 'manual', sync_state = 'steady', last_failover_drill_at = NULL,
@@ -76,7 +76,7 @@ function addDataNode(zone: string, capable = true): string {
 	opened.sqlite.run('UPDATE nodes SET zone = ?, status = ?, capabilities_json = ? WHERE id = ?', [
 		zone,
 		'online',
-		capable ? '["db-member"]' : '[]',
+		capable ? '["db-member","db-member-self-fencing"]' : '[]',
 		joined.nodeId,
 	]);
 	extraNodes.push(joined.nodeId);
@@ -156,6 +156,10 @@ function fullyEligible(): void {
 	);
 	addDrill({ durability: 'sync', timeToWritableMs: 21_000, lostCommits: 0 });
 	setFeature('DB_AUTO_PROMOTE', true);
+	// `active` is the controller's predicate (F2): the controller must be enabled and a handler
+	// installed, exactly as the W11 install path would do after proving self-fencing.
+	core.cluster.update(principal, { failover: { enabled: true } });
+	core.failover.registerDatabaseHandler({ run: () => ({ status: 'done' }) });
 }
 
 afterAll(() => {
@@ -231,18 +235,32 @@ describe('database failover policy', () => {
 			expect(refusalCodes()).toContain(code);
 		});
 
-	test('a fully eligible policy is active and still leaves arming to lane A', async () => {
+	test('a fully eligible policy is active and arming records it', async () => {
 		fullyEligible();
 		const view = core.failoverPolicies.view(principal, 'main');
 		expect(view.refusals).toEqual([]);
 		expect(view.active).toBe(true);
+		expect(view.controllerEnabled).toBe(true);
+		expect(view.controllerInstalled).toBe(true);
+		expect(view.selfFencing).toBe(true);
 		expect(view.lastDrill?.durability).toBe('sync');
 		expect(view.lastDrill?.drillDatabaseId).toBe('db_disposable');
 		expect(view.lastFailoverDrillAt).toBe(new Date(clock).toISOString());
-		await expect(core.failoverPolicies.arm(principal, 'main', { confirm: true, acceptDataLoss: false })).rejects.toMatchObject({
-			code: 'conflict',
-			message: expect.stringContaining('not implemented'),
-		});
+		const armed = await core.failoverPolicies.arm(principal, 'main', { confirm: true, acceptDataLoss: false });
+		expect(armed.failoverMode).toBe('auto');
+		expect(armed.autoArmedAt).toBe(new Date(clock).toISOString());
+		expect(armed.armedEvidence).toMatchObject({ drillId: view.evidence.drillId, dataNodeCount: 3, autoPromoteEnabled: true });
+	});
+
+	test('active is false while the failover controller is disabled (F2)', async () => {
+		fullyEligible();
+		core.cluster.update(principal, { failover: { enabled: false } });
+		const view = core.failoverPolicies.view(principal, 'main');
+		expect(view.refusals).toEqual([]);
+		expect(view.controllerEnabled).toBe(false);
+		expect(view.active).toBe(false);
+		// The per-database policy is still armed; only the controller is off.
+		expect(view.failoverMode).toBe('auto');
 	});
 
 	test('a running latest attempt does not hide a fresh passed drill', () => {
@@ -271,18 +289,17 @@ describe('database failover policy', () => {
 		});
 	});
 
-	test('arming, disarming and drilling fail loudly until lane A implements them', async () => {
+	test('arming, disarming and drilling refuse honestly', async () => {
 		// DB_AUTO_PROMOTE is off, so arming is refused at the first gate.
 		await expect(core.failoverPolicies.arm(principal, 'main', { confirm: true, acceptDataLoss: false })).rejects.toMatchObject({
 			code: 'unavailable',
 		});
-		await expect(core.failoverPolicies.disarm(principal, 'main')).rejects.toMatchObject({
-			code: 'conflict',
-			message: expect.stringContaining('not implemented'),
-		});
+		// Disarming is always safe and immediate.
+		const disarmed = await core.failoverPolicies.disarm(principal, 'main');
+		expect(disarmed.failoverMode).toBe('manual');
+		// A drill needs the replica machine, which is off by default.
 		await expect(core.failoverPolicies.drill(principal, 'main', { confirm: true })).rejects.toMatchObject({
-			code: 'conflict',
-			message: expect.stringContaining('not implemented'),
+			code: 'unavailable',
 		});
 	});
 });
