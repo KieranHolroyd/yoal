@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import { readFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 /**
  * Keeps the provisioning templates honest (HA-PLAN H27, W14): they must render as valid
@@ -81,15 +83,39 @@ function parse(kind: keyof typeof templates): { text: string; config: CloudConfi
 	return { text, config, script };
 }
 
-/** Flags on `set --` lines (the argument lists the scripts pass on), comments excluded. */
-function flagsPassed(script: string): string[] {
+/**
+ * Every flag that can reach the installer or node.sh: flags on `set --` lines and their
+ * continuation lines (the argument lists the scripts build), and flags on any line that runs
+ * `yoal-install.sh` or `yoal-node.sh` directly. Comments excluded.
+ */
+export function flagsPassed(script: string): string[] {
 	const flags = new Set<string>();
+	let continued = false;
 	for (const raw of script.split('\n')) {
-		const line = raw.replace(/#.*$/, '');
-		if (!/\bset -- /.test(line) && !/^\s+--/.test(line)) continue;
-		for (const match of line.matchAll(/(?:^|\s)(--[a-z][a-z0-9-]*)/g)) flags.add(match[1]!);
+		const line = raw.replace(/(^|\s)#.*$/, '');
+		const builds = /\bset -- /.test(line) || continued;
+		continued = builds && /\\\s*$/.test(line);
+		// `sh <path>/yoal-install.sh ...`: only what follows the script is passed to it.
+		const run = /\bsh\s+\S*(?:yoal-install|yoal-node)\.sh\b(.*)$/.exec(line);
+		const args = builds ? line : run ? run[1]! : null;
+		if (args === null) continue;
+		for (const match of args.matchAll(/(?:^|\s)(--[a-z][a-z0-9-]*)/g)) flags.add(match[1]!);
 	}
 	return [...flags].sort();
+}
+
+/**
+ * Assignments to a `*_TOKEN`, `*_KEY` or `*_SECRET` name whose value is a literal: anything but
+ * empty, a `${template_variable}`, or a shell `$VARIABLE` reference.
+ */
+export function literalSecretAssignments(text: string): string[] {
+	const found: string[] = [];
+	for (const match of text.matchAll(/(?<=^|[\s"';])([A-Z][A-Z0-9_]*(?:TOKEN|KEY|SECRET))=('[^']*'|"[^"]*"|[^\s'"]*)/g)) {
+		const value = match[2]!.replace(/^(['"])(.*)\1$/, '$2');
+		if (value === '' || /^\$\{[a-z_][a-z0-9_]*\}$/.test(value) || /^\$\{?[A-Za-z_][A-Za-z0-9_]*\}?$/.test(value)) continue;
+		found.push(match[0]);
+	}
+	return found;
 }
 
 function usageFlags(text: string): Set<string> {
@@ -168,18 +194,85 @@ describe('cloud-init templates', () => {
 		expect(first).toContain('TODO(installer): --object-store azure://');
 	});
 
+	test('the flag scanner sees flags on lines that run the installer, not only set -- lines', () => {
+		expect(flagsPassed('YOAL_CHANNEL="$CHANNEL" sh /root/yoal-install.sh "$@" --profile ha')).toEqual(['--profile']);
+		expect(flagsPassed('sh /root/yoal-node.sh "$@" --zone b')).toEqual(['--zone']);
+		expect(flagsPassed('set -- --yes --a "$A" \\\n  --b "$B"\n  --not-continued x')).toEqual(['--a', '--b', '--yes']);
+		expect(flagsPassed('# sh /root/yoal-install.sh --commented')).toEqual([]);
+		// Downloading the script is not running it.
+		expect(flagsPassed('curl -fsS --max-time 10 "$URL" -o /root/yoal-node.sh')).toEqual([]);
+	});
+
+	test('the secret scanner catches literal *_TOKEN, *_KEY and *_SECRET assignments', () => {
+		expect(literalSecretAssignments("CF_TOKEN=abc123\nR2_SECRET_ACCESS_KEY='s3cr3t'\nX_SECRET=\"v\"")).toEqual([
+			'CF_TOKEN=abc123',
+			"R2_SECRET_ACCESS_KEY='s3cr3t'",
+			'X_SECRET="v"',
+		]);
+		expect(literalSecretAssignments("JOIN_TOKEN='${join_token}'\nJOIN_TOKEN=''\nA_KEY=$B\nTOKEN_FILE=/etc/x\ngrep -v '^JOIN_TOKEN=' f")).toEqual([]);
+		expect(literalSecretAssignments('echo "JOIN_TOKEN=leaked" >> f')).toEqual(['JOIN_TOKEN=leaked']);
+	});
+
 	test('no secret is baked into a template', () => {
 		for (const { file } of Object.values(templates)) {
 			const text = read(file);
 			expect(text).not.toContain(SAMPLE_TOKEN);
-			// Secret-bearing values only ever arrive as variables.
 			expect(text).not.toMatch(/--token\s+[A-Za-z0-9_]{16,}/);
-			expect(text).not.toMatch(/(?:R2_SECRET_ACCESS_KEY|YOAL_AZURE_ACCOUNT_KEY|YOAL_AZURE_SAS_TOKEN)=/);
+			expect(literalSecretAssignments(text)).toEqual([]);
 		}
-		// The rendered join token appears once (provision.env) and the script clears it afterwards.
-		const { text, script } = parse('join');
+		// The rendered join token appears once (provision.env); the script blanks it after the join.
+		const { text } = parse('join');
 		expect(text.split(SAMPLE_TOKEN).length - 1).toBe(1);
-		expect(script).toContain("JOIN_TOKEN=''");
+	});
+
+	describe('joining machine, run against a stub node.sh', () => {
+		/** Runs the rendered join script with its absolute paths moved into a temp dir. */
+		function runJoin(nodeStatus: number) {
+			const dir = mkdtempSync(join(tmpdir(), 'yoal-join-'));
+			const { config, script } = parse('join');
+			const env = config.write_files.find((file) => file.path === '/etc/yoal-provision/provision.env')!.content;
+			writeFileSync(join(dir, 'provision.env'), env);
+			writeFileSync(join(dir, 'hosts'), '127.0.0.1 localhost\n');
+			mkdirSync(join(dir, 'bin'));
+			// curl writes a node.sh that records /etc/hosts as node.sh saw it, then exits with nodeStatus.
+			writeFileSync(
+				join(dir, 'bin', 'curl'),
+				`#!/bin/sh\nwhile [ "$#" -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\n` +
+					`printf 'cp "%s/hosts" "%s/hosts-during"\\nexit %s\\n' "${dir}" "${dir}" ${nodeStatus} > "$out"\n`,
+				{ mode: 0o755 },
+			);
+			const local = script
+				.replaceAll('/etc/yoal-provision/provision.env', join(dir, 'provision.env'))
+				.replaceAll('/etc/hosts', join(dir, 'hosts'))
+				.replaceAll('/root/yoal-node.sh', join(dir, 'yoal-node.sh'));
+			const result = Bun.spawnSync({
+				cmd: ['sh', '-c', local],
+				env: { PATH: `${join(dir, 'bin')}:${process.env.PATH}` },
+				stdout: 'pipe',
+				stderr: 'pipe',
+			});
+			const out = {
+				code: result.exitCode,
+				during: readFileSync(join(dir, 'hosts-during'), 'utf8'),
+				after: readFileSync(join(dir, 'hosts'), 'utf8'),
+				env: readFileSync(join(dir, 'provision.env'), 'utf8'),
+				stderr: new TextDecoder().decode(result.stderr),
+			};
+			rmSync(dir, { recursive: true, force: true });
+			return out;
+		}
+
+		for (const status of [0, 3]) {
+			test(`node.sh exit ${status}: the control-plane pin exists only during the join, and the token is blanked`, () => {
+				const run = runJoin(status);
+				expect(run.code, run.stderr).toBe(status);
+				expect(run.during).toContain('10.40.1.10 control.example.org');
+				// After a promotion the agent must follow DNS, not a pinned address.
+				expect(run.after).toBe('127.0.0.1 localhost\n');
+				expect(run.env).toContain("JOIN_TOKEN=''\n");
+				expect(run.env).not.toContain(SAMPLE_TOKEN);
+			});
+		}
 	});
 
 	test('every Terraform module passes exactly the template variables', () => {

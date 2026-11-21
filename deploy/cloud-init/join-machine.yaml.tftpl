@@ -42,10 +42,19 @@ write_files:
         exit 0
       fi
 
-      # Optional: reach the control plane on its private address (TLS still checks the name).
+      # Optional: reach the control plane on its private address for the join only (TLS still
+      # checks the name). The pin is removed on every exit path: afterwards the agent must follow
+      # DNS, or it would keep dialling this node after a control-plane promotion.
+      PIN='# yoal-provision-join'
+      unpin() {
+        grep -v " $PIN\$" /etc/hosts > /etc/hosts.yoal-tmp || true
+        cat /etc/hosts.yoal-tmp > /etc/hosts
+        rm -f /etc/hosts.yoal-tmp
+      }
+      trap unpin EXIT
       host=$(echo "$CONTROL_ORIGIN" | sed -e 's#^https://##' -e 's#[:/].*$##')
-      if [ -n "$CONTROL_ADDRESS" ] && ! grep -q " $host\$" /etc/hosts; then
-        echo "$CONTROL_ADDRESS $host" >> /etc/hosts
+      if [ -n "$CONTROL_ADDRESS" ]; then
+        echo "$CONTROL_ADDRESS $host $PIN" >> /etc/hosts
       fi
 
       # The control plane may still be installing: wait for /install/node.sh to answer.
@@ -64,7 +73,10 @@ write_files:
       sh /root/yoal-node.sh "$@" || status=$?
 
       # The token is single-use: drop this copy whether or not the join worked.
-      sed -i "s/^JOIN_TOKEN=.*/JOIN_TOKEN=''/" /etc/yoal-provision/provision.env
+      grep -v '^JOIN_TOKEN=' /etc/yoal-provision/provision.env > /etc/yoal-provision/provision.env.tmp || true
+      echo "JOIN_TOKEN=''" >> /etc/yoal-provision/provision.env.tmp
+      cat /etc/yoal-provision/provision.env.tmp > /etc/yoal-provision/provision.env
+      rm -f /etc/yoal-provision/provision.env.tmp
       [ "$status" -eq 0 ] || { log "node.sh failed ($status); create a new token and rerun it by hand"; exit "$status"; }
 
       log "joined as $NODE_NAME. Set its zone ($ZONE) and roles ($ROLES) under Nodes > Edit node."
