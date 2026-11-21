@@ -161,14 +161,14 @@ describe('cloud-init templates', () => {
 
 	test('first machine: every installer flag it passes is in USAGE.txt', () => {
 		const passed = flagsPassed(parse('first').script);
-		expect(passed).toEqual(['--acme-email', '--admin-email', '--canary', '--cloudflare-token-file', '--content-domain', '--platform-host', '--skip-dns-check', '--yes']);
+		expect(passed).toEqual(['--acme-email', '--admin-email', '--canary', '--cloudflare-token-file', '--content-domain', '--platform-host', '--skip-dns-check', '--yes', '--zone']);
 		const documented = usageFlags(usage);
 		expect(passed.filter((flag) => !documented.has(flag))).toEqual([]);
 	});
 
 	test('joining machine: every node.sh flag it passes is one node.sh accepts', () => {
 		const passed = flagsPassed(parse('join').script);
-		expect(passed).toEqual(['--endpoint', '--name', '--token']);
+		expect(passed).toEqual(['--endpoint', '--name', '--roles', '--token-file', '--zone']);
 		const accepted = nodeScriptFlags(nodeScript);
 		expect(accepted.size).toBeGreaterThanOrEqual(3);
 		expect(passed.filter((flag) => !accepted.has(flag))).toEqual([]);
@@ -176,22 +176,22 @@ describe('cloud-init templates', () => {
 		expect(parse('join').script).toContain('"$CONTROL_ORIGIN/install/node.sh"');
 	});
 
-	test('section 8 flags the installer lacks are marked TODO, and still lacking', () => {
+	test('section 8 installer flags exist (Wave 5 lane B); the templates pass --zone and --roles, and the token on stdin', () => {
 		const documented = usageFlags(usage);
 		const first = read(templates.first.file);
 		const join = read(templates.join.file);
-		for (const flag of ['--profile', '--zone', '--roles']) {
-			// If this fails, the installer gained the flag: pass it from the template and drop the TODO.
-			expect(documented.has(flag)).toBe(false);
-			expect(first).toContain(`TODO(installer): ${flag} `);
-		}
-		for (const flag of ['--zone', '--roles']) {
-			expect(nodeScriptFlags(nodeScript).has(flag)).toBe(false);
-			expect(join).toContain(`TODO(installer): ${flag} `);
-		}
-		// --object-store exists but only takes local|r2; azure:// is section 8's shape.
-		expect(usage).toContain('--object-store local|r2 ');
-		expect(first).toContain('TODO(installer): --object-store azure://');
+		for (const flag of ['--profile', '--zone', '--object-store', '--object-store-credentials-file', '--roles']) expect(documented.has(flag)).toBe(true);
+		expect(usage).toContain('--object-store azure://<container>|gcs://<bucket>|s3://<bucket>');
+		for (const flag of ['--zone', '--roles', '--token-file']) expect(nodeScriptFlags(nodeScript).has(flag)).toBe(true);
+		expect(first).not.toContain('TODO(installer)');
+		expect(join).not.toContain('TODO(installer)');
+		// What the modules still lack is theirs, not the installer's.
+		expect(first).toContain('TODO(terraform): --profile ha ');
+		expect(first).toContain('TODO(terraform): --object-store azure://');
+		expect(parse('join').script).toContain('| sh /root/yoal-node.sh "$@"');
+		expect(parse('join').script).not.toContain('--token "$JOIN_TOKEN"');
+		// A token must allow the roles the join asks for, so the README creates them with roles.
+		expect(read('../README.md')).toContain('yoal nodes enrol --name node-b --roles ');
 	});
 
 	test('the flag scanner sees flags on lines that run the installer, not only set -- lines', () => {

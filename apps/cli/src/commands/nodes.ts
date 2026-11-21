@@ -35,8 +35,48 @@ const flags: FlagSpec = {
 	zone: { type: 'string' },
 	region: { type: 'string' },
 	force: { type: 'boolean' },
+	name: { type: 'string' },
+	roles: { type: 'string' },
 	help: { type: 'boolean', short: 'h' },
 };
+
+const NODE_ROLES = ['ingress', 'control', 'compute', 'data', 'build'];
+
+const enrolUsage = `Usage: yoal nodes enrol [--name <name>] [--roles <role,...>] [--json]
+
+Create a single-use join token (one hour) and print the node.sh line for the new machine (platform
+admin). --roles lists the roles a join with this token may take: ingress, control, compute, data,
+build. node.sh --roles may ask for a subset, never more. Without --roles the token allows none and
+the node joins with the default roles (compute, data).`;
+
+/** The node.sh line a token is for; the token goes in a file, never on the command line. */
+export function enrolCommandLine(origin: string, name: string | null, roles: string[]): string {
+	return `curl -fsSL ${origin.replace(/\/+$/, '')}/install/node.sh -o node.sh && sudo sh node.sh --token-file <file> --name ${name ?? '<name>'}${roles.length > 0 ? ` --roles ${roles.join(',')}` : ''}`;
+}
+
+/** `yoal nodes enrol` (HA Wave 5): a join token that carries the roles it allows. */
+async function enrolCommand(args: ParsedArgs): Promise<void> {
+	if (args.positionals.length > 1) throw new UsageError(enrolUsage);
+	const raw = args.string('roles');
+	const roles = raw === undefined ? [] : [...new Set(raw.split(',').map((role) => role.trim()).filter(Boolean))];
+	if (raw !== undefined && (roles.length === 0 || roles.some((role) => !NODE_ROLES.includes(role))))
+		throw new UsageError(`--roles must be a comma-separated list of ${NODE_ROLES.join(', ')}.`);
+	const name = args.string('name') ?? null;
+	const client = await authenticatedClient();
+	const result = await client.createJoinToken({ ...(name ? { name } : {}), ...(roles.length > 0 ? { roles } : {}) });
+	if (args.boolean('json')) {
+		printJson(result);
+		return;
+	}
+	console.log(
+		[
+			`Join token (single use, until ${result.expiresAt}): ${result.token}`,
+			`Allowed roles: ${result.roles.length > 0 ? result.roles.join(', ') : 'none (the node joins as compute, data)'}`,
+			'Save the token to a file on the new machine, then run:',
+			`  ${enrolCommandLine(client.baseUrl, name, roles)}`,
+		].join('\n'),
+	);
+}
 
 const usage = `Usage: yoal nodes <action> [options]
 
@@ -52,6 +92,8 @@ Actions:
                                      A region change is refused while the node holds database
                                      members or spread: region copies, or a region promotion is
                                      open; --force overrides that (platform admin, audited)
+  enrol [--name <name>] [--roles <role,...>]
+                                     A single-use join token, and the node.sh line to run with it
   update <node>                      Install the control plane's release on one node (id or name)
   rollout plan [options]             Show the waves a fleet update would run now
   rollout start [options] [--yes] [--wait]
@@ -87,6 +129,7 @@ export async function nodesCommand(argv: string[]): Promise<void> {
 		return;
 	}
 	const action = requirePositional(args, 0, 'action');
+	if (action === 'enrol' || action === 'enroll') return enrolCommand(args);
 	const client = await authenticatedClient();
 	if (action === 'list' || action === 'ls') return listNodes(client, args);
 	if (action === 'set') return setNode(client, args);

@@ -637,6 +637,8 @@ export const nodeJoinTokens = sqliteTable(
 		usedAt: integer('used_at'),
 		usedByNodeId: text('used_by_node_id'),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
+		/** JSON array of the roles a join with this token may request (0135); null allows none. */
+		rolesJson: text('roles_json'),
 	},
 	(t) => [uniqueIndex('node_join_tokens_hash_idx').on(t.tokenHash)],
 );
@@ -3479,7 +3481,7 @@ export const regionPromotions = sqliteTable(
 		leaseExpiresAt: integer('lease_expires_at'),
 		attempt: integer('attempt').notNull().default(1),
 		acceptDataLoss: integer('accept_data_loss', { mode: 'boolean' }).notNull(),
-		/** Confirmed while the old region still held a valid lease (0134); every step honours it. */
+		/** Confirmed while the old region still held a valid lease (0136); every step honours it. */
 		breakGlass: integer('break_glass', { mode: 'boolean' }).notNull().default(false),
 		reason: text('reason').notNull(),
 		confirmedBy: text('confirmed_by').notNull(),

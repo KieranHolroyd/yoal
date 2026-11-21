@@ -7,6 +7,7 @@
  * the same check. Presigned object-store PUTs are sent with the returned headers
  * only (they are authenticated by the signature in the URL).
  */
+import type { HaChecksReport, HaDrillAllView, HaDrillRunView, HaDrillScenarioView, HaInitApplyView, HaInitPlanView } from './ha-checks.ts';
 import { platformOrigin } from './config.ts';
 import { ApiError, CliError } from './errors.ts';
 import type {
@@ -620,12 +621,60 @@ export class ApiClient {
 	}
 
 	/** Start a drill; without `node` the control plane picks an eligible node at random. */
-	async startDrill(input: { node?: string; durationSeconds?: number; includeControlNode?: boolean }): Promise<DrillView> {
+	async startDrill(input: { node?: string; durationSeconds?: number; includeControlNode?: boolean; confirm?: string }): Promise<DrillView> {
 		return (await this.request('POST', '/api/v1/ha/drills', { body: input })) as DrillView;
 	}
 
 	async cancelDrill(id: string): Promise<DrillView> {
 		return (await this.request('POST', `/api/v1/ha/drills/${encodeURIComponent(id)}/cancel`, { body: {} })) as DrillView;
+	}
+
+	/** `yoal ha preflight`: every HA check against a profile (the arbiter is probed first). */
+	async getHaPreflight(query: { profile?: string; steering?: string; certificates?: string } = {}): Promise<{ report: HaChecksReport; raw: unknown }> {
+		const params = new URLSearchParams(Object.entries(query).filter((entry): entry is [string, string] => Boolean(entry[1])));
+		const raw = await this.request('GET', `/api/v1/ha/preflight${params.size > 0 ? `?${params}` : ''}`);
+		return { report: raw as HaChecksReport, raw };
+	}
+
+	/** `yoal doctor`: the running install and every node, in the same check shape. */
+	async getHaDoctor(): Promise<{ report: HaChecksReport; raw: unknown }> {
+		const raw = await this.request('GET', '/api/v1/ha/doctor');
+		return { report: raw as HaChecksReport, raw };
+	}
+
+	/** `yoal ha init` without applying: the plan, what differs and why apply would refuse. */
+	async planHaInit(input: { profile: string; answers: Record<string, string> }): Promise<{ view: HaInitPlanView; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/ha/init', { body: { ...input, apply: false } });
+		return { view: raw as HaInitPlanView, raw };
+	}
+
+	/** Apply an HA profile: one audited cluster-config change (platform admin session). */
+	async applyHaInit(input: { profile: string; answers: Record<string, string> }): Promise<{ view: HaInitApplyView; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/ha/init', { body: { ...input, apply: true } });
+		return { view: raw as HaInitApplyView, raw };
+	}
+
+	async getDrillCatalogue(): Promise<{ scenarios: HaDrillScenarioView[]; raw: unknown }> {
+		const raw = await this.request('GET', '/api/v1/ha/drills/catalogue');
+		return { scenarios: (raw as { scenarios: HaDrillScenarioView[] }).scenarios, raw };
+	}
+
+	async runHaDrill(input: { scenario: string; resource: string; confirm?: string | true; durationSeconds?: number; drillDatabase?: string; includeControlNode?: boolean }): Promise<HaDrillRunView> {
+		return (await this.request('POST', '/api/v1/ha/drills/run', { body: input })) as HaDrillRunView;
+	}
+
+	async runAllHaDrills(input: { targets: Array<{ kind: string; resource: string; drillDatabase?: string }>; confirm?: true }): Promise<{ view: HaDrillAllView; raw: unknown }> {
+		const raw = await this.request('POST', '/api/v1/ha/drills/all', { body: input, timeoutMs: 600_000 });
+		return { view: raw as HaDrillAllView, raw };
+	}
+
+	async listHaDrillRuns(limit = 20): Promise<{ runs: HaDrillRunView[]; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/ha/drills/runs?limit=${limit}`);
+		return { runs: (raw as { runs: HaDrillRunView[] }).runs, raw };
+	}
+
+	async getHaDrillRun(id: string): Promise<HaDrillRunView> {
+		return (await this.request('GET', `/api/v1/ha/drills/runs/${encodeURIComponent(id)}`)) as HaDrillRunView;
 	}
 
 	/** A control-plane standby promotion (W9): a CAS; a stale expectedEpoch is a 409. */
@@ -724,6 +773,12 @@ export class ApiClient {
 	// ---------------------------------------------------------------- fleet node updates (D217)
 
 	/** Enrolled nodes (platform admin): id, name, agent version and status. */
+	/** A single-use join token; `roles` are the roles a join with it may request (HA Wave 5). */
+	async createJoinToken(input: { name?: string; roles?: string[] }): Promise<{ token: string; expiresAt: string; roles: string[] }> {
+		const raw = (await this.request('POST', '/api/v1/nodes/join-token', { body: input })) as { token: string; expiresAt: string; roles?: string[] };
+		return { token: raw.token, expiresAt: raw.expiresAt, roles: raw.roles ?? [] };
+	}
+
 	async listNodes(): Promise<{ nodes: NodeSummary[]; raw: unknown }> {
 		const raw = await this.request('GET', '/api/v1/nodes');
 		const record = asRecord(unwrap(raw)) ?? {};

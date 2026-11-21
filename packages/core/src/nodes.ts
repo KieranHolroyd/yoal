@@ -376,8 +376,16 @@ export class NodeService {
 	}
 
 	/** Single-use join token, valid for one hour. Returned in clear exactly once. */
-	createJoinToken(principal: Principal, nodeName?: string): { token: string; expiresAt: string } {
+	/**
+	 * `roles` are the roles a join with this token may ask for (HA Wave 5): `node.sh --roles` may
+	 * request a subset and is refused for more. Without them the token allows none and the node joins
+	 * with the defaults its mode implies, so a leaked token cannot make a node an ingress.
+	 */
+	createJoinToken(principal: Principal, nodeName?: string, options: { roles?: NodeRole[] } = {}): { token: string; expiresAt: string; roles: NodeRole[] } {
 		this.assertPlatformAdmin(principal);
+		const roles = options.roles === undefined ? [] : [...new Set(options.roles)];
+		if (roles.some((role) => !nodeRoleSchema.safeParse(role).success))
+			throw new ValidationError('Invalid roles: use ingress, control, compute, data or build.');
 		const token = randomToken(32);
 		const now = this.ctx.now();
 		const expiresAt = now + JOIN_TTL_MS;
@@ -390,16 +398,17 @@ export class NodeService {
 				createdBy: principal.userId,
 				expiresAt,
 				createdAt: now,
+				rolesJson: roles.length > 0 ? JSON.stringify(roles) : null,
 			})
 			.run();
 		this.ctx.audit.record({
 			principal,
 			action: 'node.join_token',
 			resource: 'node',
-			args: { nodeName },
+			args: { nodeName, ...(roles.length > 0 ? { roles } : {}) },
 			result: 'ok',
 		});
-		return { token, expiresAt: new Date(expiresAt).toISOString() };
+		return { token, expiresAt: new Date(expiresAt).toISOString(), roles };
 	}
 
 	/**
@@ -413,6 +422,10 @@ export class NodeService {
 		version?: string;
 		networkMode?: 'yoal' | 'external';
 		wireguardPublicKey?: string;
+		/** `node.sh --zone` / `install.sh --zone` (HA Wave 5); absent is `default`. */
+		zone?: string;
+		/** `node.sh --roles` (HA Wave 5); absent keeps the roles the node's mode implies. */
+		roles?: NodeRole[];
 	}): {
 		nodeId: string;
 		token: string;
@@ -424,12 +437,25 @@ export class NodeService {
 		assertJoinTokenUnused(this.ctx, input);
 		const tokenHash = sha256Hex(input.token);
 		const join = this.ctx.sqlite
-			.query<{ id: string; expiresAt: number; usedAt: number | null }, [string]>(
-				'SELECT id, expires_at AS expiresAt, used_at AS usedAt FROM node_join_tokens WHERE token_hash = ?',
+			.query<{ id: string; expiresAt: number; usedAt: number | null; rolesJson: string | null }, [string]>(
+				'SELECT id, expires_at AS expiresAt, used_at AS usedAt, roles_json AS rolesJson FROM node_join_tokens WHERE token_hash = ?',
 			)
 			.get(tokenHash);
 		if (!join || join.usedAt || join.expiresAt < this.ctx.now())
 			throw new UnauthorizedError('Invalid or expired join token.');
+		// The token says which roles a join may take; asking for more is refused before anything is spent.
+		if (input.roles !== undefined && input.roles.every((role) => nodeRoleSchema.safeParse(role).success)) {
+			const allowed = parseJson<string[]>(join.rolesJson, []);
+			const extra = [...new Set(input.roles)].filter((role) => !allowed.includes(role));
+			if (extra.length > 0)
+				throw new CoreError(
+					'forbidden',
+					allowed.length === 0
+						? `This join token allows no roles, so it cannot request ${extra.join(', ')}. Create one that does: yoal nodes enrol --roles ${input.roles.join(',')}.`
+						: `This join token allows ${allowed.join(', ')}; it does not allow ${extra.join(', ')}. Create one that does: yoal nodes enrol --roles ${input.roles.join(',')}.`,
+					403,
+				);
+		}
 		const edgeCount = this.ctx.sqlite.query<{ n: number }, []>("SELECT count(*) AS n FROM nodes WHERE mode = 'edge'").get();
 		const mode: 'edge' | 'worker' = (edgeCount?.n ?? 0) === 0 ? 'edge' : 'worker';
 		const nodeId = newId('nod_');
@@ -448,6 +474,22 @@ export class NodeService {
 				.all()
 				.map((row) => row.address),
 		);
+		const zone = input.zone === undefined ? null : nodeZoneSchema.safeParse(input.zone);
+		if (zone && !zone.success) throw new ValidationError(`Invalid zone "${input.zone}": ${zone.error.issues[0]?.message ?? 'not a zone name'}.`);
+		const roles =
+			input.roles === undefined
+				? null
+				: input.roles.length > 0 && input.roles.every((role) => nodeRoleSchema.safeParse(role).success)
+					? { success: true as const, data: input.roles }
+					: null;
+		if (input.roles !== undefined && !roles) throw new ValidationError('Invalid roles: use ingress, control, compute, data or build.');
+		// A zone belongs to one region: a new node in a zone other nodes use joins their region.
+		const zoneRegion = zone
+			? (this.ctx.sqlite
+					.query<{ region: string }, [string]>('SELECT DISTINCT region FROM nodes WHERE zone = ?')
+					.all(zone.data)
+					.map((row) => row.region)[0] ?? 'default')
+			: 'default';
 		const privateAddress = managed ? allocateOverlayAddress(this.ctx.cluster.get().overlay.cidr, used) : null;
 		if (managed && !privateAddress)
 			throw new ConflictError('The overlay CIDR has no free address. Widen it before adding another node.');
@@ -480,13 +522,15 @@ export class NodeService {
 					managed ? listenPort : null,
 				],
 			);
+			if (zone) this.ctx.sqlite.run('UPDATE nodes SET zone = ?, region = ? WHERE id = ?', [zone.data, zoneRegion, nodeId]);
+			if (roles) this.ctx.sqlite.run('UPDATE nodes SET roles_json = ? WHERE id = ?', [JSON.stringify([...new Set(roles.data)]), nodeId]);
 			this.ctx.sqlite.run('UPDATE node_join_tokens SET used_at = ?, used_by_node_id = ? WHERE id = ?', [now, nodeId, join.id]);
 		})();
 		this.ctx.audit.record({
 			action: 'node.join',
 			resource: 'node',
 			resourceId: nodeId,
-			args: { name: input.name, mode },
+			args: { name: input.name, mode, ...(zone ? { zone: zone.data } : {}), ...(roles ? { roles: roles.data } : {}) },
 			result: 'ok',
 		});
 		this.bump();
@@ -512,10 +556,16 @@ export class NodeService {
 		return row;
 	}
 
-	heartbeat(token: string, input: Heartbeat): { ok: true; desiredStateVersion: number } {
+	/**
+	 * `agentTimeMs` is the agent's clock when it sent the heartbeat (the `x-yoal-agent-time` header,
+	 * HA Wave 5): the `clocks` preflight check compares it with this control plane's. Optional: an
+	 * older agent does not send it.
+	 */
+	heartbeat(token: string, input: Heartbeat, agentTimeMs?: number): { ok: true; desiredStateVersion: number } {
 		const node = this.authenticate(token);
 		if (node.id !== input.nodeId) throw new UnauthorizedError('Node id does not match token');
 		const now = this.ctx.now();
+		if (agentTimeMs !== undefined) this.ctx.haDoctor.recordClock(node.id, agentTimeMs, now);
 		this.storeCertificate(node.id, input.nodeCertificate, now);
 		// A node that advertises `endpoints-gateway` sends its CSR here; only the public request
 		// travels and the install CA signs it (HA-PLAN H24 "Trust").

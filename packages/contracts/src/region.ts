@@ -452,7 +452,7 @@ export const regionPromotionViewSchema = z.object({
 	acceptDataLoss: z.literal(true),
 	/**
 	 * The operator broke glass: the old region still held a valid lease when it was confirmed. Stored
-	 * on the record (migration 0134) so every database step, on any runner, applies the same rule.
+	 * on the record (migration 0136) so every database step, on any runner, applies the same rule.
 	 */
 	breakGlass: z.boolean().default(false),
 	reason: z.string().max(500),

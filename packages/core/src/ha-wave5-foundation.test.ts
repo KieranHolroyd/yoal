@@ -175,15 +175,9 @@ describe('REGIONS on', () => {
 });
 
 describe('lane stubs', () => {
-	test('lane B services refuse honestly; lane A\'s region services are built', async () => {
-		const notBuilt = { code: 'not_built', status: 501 };
+	test('both lanes are built: region services answer (lane B: ha-w5-commands.test.ts)', async () => {
 		expect(core.regions.view(principal)).toMatchObject({ enabled: false, regions: [{ name: 'default' }] });
 		await expect(core.regions.promote(principal, 'ukwest', {})).rejects.toMatchObject({ code: 'validation', message: expect.stringContaining('YOAL_FEATURE_REGIONS') });
-		expect(() => core.haInit.plan(principal, { profile: 'ha' })).toThrow(expect.objectContaining(notBuilt));
-		await expect(core.haInit.apply(principal, { profile: 'ha', apply: true })).rejects.toMatchObject(notBuilt);
-		expect(() => core.haDoctor.doctor(principal)).toThrow(expect.objectContaining(notBuilt));
-		await expect(core.haDrills.run(principal, { scenario: 'zone-offline', resource: 'uksouth-1' })).rejects.toMatchObject(notBuilt);
-		await expect(core.haDrills.runAll(principal, {})).rejects.toMatchObject(notBuilt);
 		expect(core.haDrills.catalogue(principal).scenarios).toBe(HA_DRILL_CATALOGUE);
 	});
 

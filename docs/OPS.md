@@ -829,8 +829,8 @@ in Email → Mail server.
 
 The `ha` profile is an assertion that nothing the request path or a failover needs lives on one
 node (HA-PLAN H28). It is off by default, and turning it on is refusal-first. The same data is on
-**Settings → High availability** and `GET /api/v1/ha/preflight`; W14 adds `yoal ha init|preflight`
-on top of these.
+**Settings → High availability** and `GET /api/v1/ha/profile`. `yoal ha init|preflight` (W14,
+§3.11) are the guided path on top of these.
 
 1. **External platform object store.** `YOAL_OBJECT_STORE` must not be `local`. Set `r2` (or
    another external S3 store) and its `R2_*` keys in `/etc/yoal/yoal.env`, then restart the control
@@ -955,7 +955,72 @@ before it expires (`yoal ha ca` shows the date; it is valid for 10 years). `yoal
 A container on another node than its database loses its URL until it is redeployed, which places it
 next to the database; same-node apps return to the database's own port, which restarts each once.
 
-### 3.11 Regions and region promotion (HA-PLAN H26, W13)
+
+### 3.11 Turning HA on and off: `ha init`, preflight, doctor, drills (W14)
+
+The five commands of HA-PLAN §8. Every check has one shape everywhere (`HaCheck`: id, status, the
+evidence, the exact fix), in the CLI, `GET /api/v1/ha/preflight`, `GET /api/v1/ha/doctor` and MCP
+`get_ha_checks`.
+
+**Install.** First machine: `install.sh --profile ha --zone <z> --object-store azure://<container>`
+(or `s3://`, `gcs://`). `--profile` writes the profile's `YOAL_FEATURE_*` lines into
+`/etc/yoal/yoal.env` (the same lines `yoal ha init` prints; there is no other flag store).
+`--object-store` keys come only from the environment or `--object-store-credentials-file`; Azure and
+GCS also write their `OBJECT_STORE_*` flag. Other machines: `node.sh --token-file <f|-> --zone <z>
+--roles ingress,compute,data,control`; the zone and roles go with the join (a zone other nodes use
+keeps their region).
+
+**Turn it on.**
+
+1. `yoal ha init --profile ha [--steering external-lb]`. Read the plan. If it lists `yoal.env` lines
+   to change, put them in `yoal.env` on **every** control-plane host and restart each control plane.
+   `flags-consistent` compares the hosts: each standby reports its running flags through its agent
+   (local `/readyz`, socket only), and a host that does not report yet is a warning.
+2. Re-run. It refuses, with every reason, until the flags match and every check the profile requires
+   is `pass` or `warn`. A `skip` on a required check also refuses: an unmeasured clock, an unprobed
+   arbiter or an unmeasured link is not a pass.
+3. Apply (a platform admin signed in to the dashboard; an API key gets 403). One cluster-config write
+   sets `ha.profile`, `ha.applied`, `steering`, `failover.enabled: true` and `replicas.spread: zone`,
+   audited `ha.init`. `ha.applied` keeps each setting's value from before the first profile.
+
+**Turn it off.** `yoal ha init --profile single`. It is refused while `ha-dependents` fails: a sync or
+armed database, a gateway attachment, an enrolled control standby or a node outside region
+`default`; each refusal carries its own way back. A steering driver that writes nothing at a
+provider (`external-lb`) does not block it, because the same write puts `direct` back; one that does
+(`vip`, `dns-failover`, `webhook`, and anything stacked) blocks until you set `direct` and withdraw
+the keepalived VIP or DNS records by hand. The `=0` lines are printed only once `ha-dependents`
+passes. Set them (keep any flag you had before
+`ha init`; flags in env cannot tell who set them), restart, then apply: only the recorded settings
+are restored.
+
+**Checks that read state you can fix outside Yoal.**
+
+| Check | Evidence | Fix |
+|---|---|---|
+| `clocks` | each heartbeat carries `x-yoal-agent-time`; skew includes transit. Warn > 2.5 s, fail > 5 s (the lease tolerance) | NTP on the node (`timedatectl set-ntp true`) |
+| `overlay-links` | WireGuard handshake age (≤ 180 s) on the managed overlay; `node_links` samples (≤ 5 min) elsewhere | open UDP 51820 / the path; `yoal fleet links` |
+| `arbiter-conditional-writes` | the W3 probe against the platform store, under `yoal/ha/preflight/`, cached 60 s | a store that honours `If-None-Match`/`If-Match` |
+| `backups` | last `ok` backup to a non-local target within 48 h, or PITR `ok` | a backup target, then `yoal db backup <db>` |
+| `headroom` | the scheduler's capacity: lose the largest node (fail), the largest zone (warn) | more capacity |
+
+**Doctor.** `yoal doctor` = the running profile's checks (HA-only ones skipped on `single`) plus, per
+node: heartbeat age, Caddy applied (`status` offline while heartbeating), desired-state drift
+(> 120 s behind), agent version against the control plane's, data disk (warn 85 %, fail 95 %). Exit 1
+on any fail.
+
+**Drills.** `yoal ha drill <scenario> --resource <id>`; `yoal ha drill catalogue` lists them. Rules:
+the resource is always named; a destructive scenario needs its name typed back (`--confirm`); a
+resource below the scenario's `minHaLevel`, or below its own declared level, is refused; lab-only
+scenarios (fault verbs, `zone-offline`, `control-plane-failover`, `region-failover`) are refused with
+the reason. `node-offline`/`ingress-offline` run the D235 drill on the named node (the typed name is
+the control-node opt-in); `database-failover` runs the W11 drill on the named disposable copy;
+`stale-generation-promote` passes only if a promotion at a wrong generation is refused with
+`precondition_failed`; `release-readiness-fail`/`release-command-fail` are recorded `skipped` (no
+fleet path yet). Every run is an `ha_drills` row (0134; a handed-off one points at its D235/W11 row
+in `record_id`), audited `ha.drill`. `yoal ha drill --all --database main:main-copy --node … --yes`
+runs only fleet, non-destructive, untyped scenarios against what you name, one at a time.
+
+### 3.12 Regions and region promotion (HA-PLAN H26, W13)
 
 `YOAL_FEATURE_REGIONS=1` (off by default; set it on every control-plane host). A region groups zones
 (`nodes.region`, migration 0132; every existing node is in `default`). Rules the control plane
@@ -1003,7 +1068,7 @@ online ingress node there. `yoal ha region` shows all three.
    renewing a lease on behalf of an offline primary, or of a database an open promotion moves, so a
    lost region's leases lapse within one TTL. Wait, or, **only once A is known to be stopped**
    (instances off, or its network cut at the provider), add `--break-glass`. It is stored on the
-   record (`region_promotions.break_glass`, migration 0134) and in the audit row. Each database step
+   record (`region_promotions.break_glass`, migration 0136) and in the audit row. Each database step
    re-checks its lease at its planned generation on whichever runner reaches it, and stops the run if
    a lease went live again, unless break glass is recorded. An open sync-set change is a blocker;
    a standby replica outside the synchronous set is shown as committed-data loss.

@@ -39,6 +39,16 @@ describe('agent control heartbeat report (W9-SPEC §4.6)', () => {
 		expect(calls).toEqual(['http://localhost/readyz']);
 	});
 
+	test('forwards the host\'s running flags, and drops a malformed set without dropping the report', async () => {
+		const flags = { REGIONS: false, STEERING: true };
+		const { fetchImpl } = responds(body({ featureFlags: flags }));
+		expect(await readControlReport('http://localhost/readyz', { fetchImpl })).toMatchObject({ role: 'standby', featureFlags: flags });
+		const bad = responds(body({ featureFlags: { REGIONS: 'yes' } }));
+		const report = await readControlReport('http://localhost/readyz', { fetchImpl: bad.fetchImpl });
+		expect(report).toMatchObject({ role: 'standby', epoch: 7 });
+		expect(report).not.toHaveProperty('featureFlags');
+	});
+
 	test('a 503 standby document is still reported, so a joining or behind node is visible', async () => {
 		const { fetchImpl } = responds(
 			body({ ok: false, role: 'standby-behind', canPromote: false, replication: { restored: true, lagSeconds: 12 } }),
