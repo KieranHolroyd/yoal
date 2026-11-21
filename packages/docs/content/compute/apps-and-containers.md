@@ -486,12 +486,17 @@ databases:
 | `backups` | Checks where the database's backups go: `target` must be the backup target your organisation uses, and `immutable: true` needs object lock or an immutability policy on it. Nothing is changed | |
 | `standbyRegion` | A region that holds an async replica | `YOAL_FEATURE_REGIONS` |
 
-Each key goes through the same check as the dashboard and the CLI. When a check refuses, the plan fails and lists every refusal with its path, so a file never half-applies. Flags are set in the control plane's environment (see [configuration](/self-hosting/configuration#feature-flags)).
+Each key goes through the same service as the dashboard and the CLI. The plan runs each service's checks without changing anything, and when one refuses, the plan fails and lists every refusal with its path. For a database that includes the feature flags, PITR's requirements, room, disks and memory quota for every new replica together, the durability and arming checks, and whether the database is moving or failing over. Flags are set in the control plane's environment (see [configuration](/self-hosting/configuration#feature-flags)).
+
+Apply runs every check again, first for the whole plan and then in each step before it writes. Two checks can still refuse at the moment a step runs, if something changed after the plan: a durability change writes the arbiter lease, and arming evaluates the failover policy again. The plan warns about both. A database step writes in order (standby region, PITR, replicas, durability, then failover), so if one of those is refused then, the writes before it stay. For a project, the memory quota and port checks of the saved workload settings also run at apply.
+
+AI agents (MCP) cannot change `durability` or `failover` through a blueprint; apply those from the dashboard or the CLI.
 
 Some keys depend on a change that has to settle first, and the plan says which:
 
 - `durability: sync` picks a replica that is already streaming. It cannot be set in the apply that creates the database or adds its replicas: apply once without it, wait until `yoal db replica list <name>` shows the replicas streaming, then add it and apply again.
-- `failover: auto` needs a passed failover drill on that database, so it cannot be set in the apply that creates the database. It also cannot be set in the apply that changes `durability`. The plan shows every unmet arming check by its code, for example `[no-self-fencing-path]`.
+- `failover: auto` needs a passed failover drill on that database, so it cannot be set in the apply that creates the database. It also cannot be set in the apply that changes `durability` or adds replicas. The plan shows every unmet arming check by its code, for example `[no-self-fencing-path]`.
+- `failover: manual` disarms and clears `acceptDataLoss`, so the next `failover: auto` on an async database must set `acceptDataLoss: true` again. To clear `acceptDataLoss` on an armed database, set `failover: manual` and apply, then set `failover: auto` without it.
 
 Removing a key from the file stops managing it and keeps its current value, and prune never touches these keys. A blueprint never removes a replica: asking for fewer replicas than the database has fails the plan, so remove one with `yoal db replica remove` first.
 

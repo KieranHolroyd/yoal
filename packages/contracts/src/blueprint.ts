@@ -171,8 +171,8 @@ export const blueprintProjectSchema = z
 		secrets: z.array(blueprintSecretNameSchema).max(128).optional(),
 		/*
 		 * HA keys (HA-PLAN §8, H25): the workload's release-phase fields, reused from
-		 * `release-phase.ts`. Schema only in Wave 5's foundation; plan/apply is lane C, and each one
-		 * needs `RELEASE_PHASE` when applied.
+		 * `release-phase.ts`. Planned in the plan's HA section (`projects.<slug>.ha`) and saved by one
+		 * `setSpec`; each needs `RELEASE_PHASE`, and the plan refuses it while the flag is off.
 		 */
 		/** Gates traffic; `healthPath` stays liveness. */
 		readinessPath: readinessPathSchema.optional(),
@@ -230,8 +230,9 @@ export const blueprintDatabaseSchema = z
 		extensions: z.array(databaseExtensionSchema).max(databaseExtensionAllowlist.length).optional(),
 		pooler: z.boolean().optional(),
 		/*
-		 * HA keys (HA-PLAN §8, H22–H26). Schema only in Wave 5's foundation; plan/apply is lane C.
-		 * Each is managed only when present. PostgreSQL only.
+		 * HA keys (HA-PLAN §8, H22–H26), planned in the plan's HA section (`databases.<name>.ha`)
+		 * through the database, replica, durability and failover-policy services. Each is managed only
+		 * when present. PostgreSQL only.
 		 */
 		/** Read replicas to keep, placed by `spread`. */
 		replicas: z.number().int().min(0).max(5).optional(),
@@ -239,8 +240,11 @@ export const blueprintDatabaseSchema = z
 		durability: z.enum(databaseDurabilities).optional(),
 		/**
 		 * `auto` arms member-driven failover (W11) through the same arming path as
-		 * `yoal db failover <name> --arm`, never by writing the policy directly, so every refusal
-		 * (no passed drill, no self-fencing, …) fails the plan. `manual` disarms.
+		 * `yoal db failover <name> --arm`, never by writing the policy directly. The plan evaluates
+		 * the arming policy (no passed drill, no self-fencing, …) and fails on any refusal; `arm`
+		 * evaluates it again when the step runs, so a change in between can still refuse it then.
+		 * Refused in a plan that also changes durability or adds replicas, and for AI agents (MCP).
+		 * `manual` disarms, which also clears `acceptDataLoss`.
 		 */
 		failover: z.enum(databaseFailoverModes).optional(),
 		/**
@@ -373,8 +377,9 @@ export function attachmentTarget(attachment: BlueprintAttachment): { type: 'data
 // -------------------------------------------------------------------- cluster (HA-PLAN §8)
 
 /**
- * `cluster:` — assertions about the fleet, checked by `plan`; nothing is provisioned (H27). Schema
- * only in Wave 5's foundation; lane C checks `requires` against live nodes and shows the diff.
+ * `cluster:` — assertions about the fleet, checked by `plan`; nothing is provisioned (H27).
+ * `requires` is checked against the online nodes (`cluster.requires`, always up to date when met);
+ * `steering` is a cluster setting change (`cluster.steering`), both in the plan's HA section.
  */
 export const blueprintClusterSchema = z.strictObject({
 	/** The plan fails unless the fleet has at least this many of each. */
@@ -404,8 +409,8 @@ export type BlueprintCluster = z.infer<typeof blueprintClusterSchema>;
 /**
  * Every HA key (HA-PLAN §8) set in a document, as paths (`cluster`, `projects.web.rollout`,
  * `databases.main.standbyRegion`). Empty for a file that uses none, which is every file written
- * before Wave 5. Lane C's plan/apply reads them; until it lands, plan refuses a document that
- * sets any (`packages/core/src/blueprints-ha.ts`).
+ * before Wave 5. A plan has an HA section only when this is non-empty
+ * (`packages/core/src/blueprints-ha.ts`), so such files plan exactly as before.
  */
 export function blueprintHaKeys(doc: Pick<Blueprint, 'projects' | 'databases'> & { cluster?: BlueprintCluster }): string[] {
 	const keys: string[] = [];
