@@ -101,6 +101,10 @@ jobs:
         run: bun tests/ha/sim/w9/run.ts --runs 5000
       - name: W9 model unit tests
         run: bun test tests/ha/sim/w9
+      - name: W11 automatic-failover and fence-notice model (Revision 4, 5000 runs)
+        run: bun tests/ha/sim/w11/run.ts --runs 5000
+      - name: W11 model unit tests
+        run: bun test tests/ha/sim/w11
 
   ha-integration:
     name: ha-integration (nested-container lab)

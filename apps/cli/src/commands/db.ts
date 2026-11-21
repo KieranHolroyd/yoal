@@ -19,6 +19,7 @@ import { credentialsCommand, credentialsUsage, isCredentialVerb } from './db-cre
 import { pitrBackupCommand, pitrCommand, restoreToCommand } from './db-pitr.ts';
 import { replicaCommand } from './db-replicas.ts';
 import { durabilityCommand, switchoverCommand } from './db-durability.ts';
+import { failoverCommand } from './db-failover.ts';
 import { confirmOrRefuse } from './run-operation.ts';
 
 /** Managed databases (docs/DATABASES.md). Every check lives on the server; this is a thin client. */
@@ -56,6 +57,8 @@ Commands:
   durability <name>            Requested durability, the effective mode and any open sync change;
                                --sync/--async/--timeout/--on-sync-loss (see \`yoal db durability -h\`)
   switchover <name> <replica>  Planned switchover to a replica (checkpoint, stop writes, LSN check)
+  failover <name>              Per-database automatic failover: policy, --arm/--disarm/--drill
+                               (see \`yoal db failover -h\`)
 
 Create options:
   -p, --project <slug>         Attach to this project right away (placed on its node)
@@ -209,6 +212,7 @@ const subcommands: Record<string, (argv: string[]) => Promise<void>> = {
 	replicas: replicaCommand,
 	durability: durabilityCommand,
 	switchover: switchoverCommand,
+	failover: failoverCommand,
 	restart: restartDatabase,
 	rotate: rotateCredentials,
 	upgrade: upgradeDatabase,

@@ -55,6 +55,7 @@ import { NodeUpdateRunner } from './node-update.ts';
 import { DatabasePoolerRestartRunner } from './database-pooler-restarts.ts';
 import { DatabaseReplicationRunner } from './database-replication.ts';
 import { DatabaseDurabilityRunner } from './database-durability.ts';
+import { DatabaseMemberRunner, memberOperations, reportOnlyPeerTransport } from './database-member.ts';
 import { ReplicaLinkForwarder } from './replica-links.ts';
 import { DatabaseRotationRunner } from './database-rotations.ts';
 import { DATABASE_STATS_INTERVAL_MS, DatabaseStatsSampler } from './database-stats.ts';
@@ -184,6 +185,11 @@ class AgentRuntime {
 	private readonly databaseReplication: DatabaseReplicationRunner;
 	/** W10: sync set, switchover drain/resume, rewind and member probes. */
 	private readonly databaseDurability: DatabaseDurabilityRunner;
+	/**
+	 * W11: the database member machine. It is report-only until this node has a direct arbiter
+	 * transport and a peer channel; with `arbiter: null` it never fences or promotes (LANE-A-HANDOFF).
+	 */
+	private readonly databaseMember: DatabaseMemberRunner;
 	/** Unix sockets the replica containers stream through (C7). */
 	private readonly replicaLinks: ReplicaLinkForwarder;
 	private readonly storageAdmin: StorageReconciler;
@@ -422,6 +428,15 @@ class AgentRuntime {
 			nodeId: config.nodeId,
 			helper: this.helper,
 			log,
+		});
+		this.databaseMember = new DatabaseMemberRunner({
+			nodeId: config.nodeId,
+			helper: memberOperations(this.helper),
+			// The foundation gives agents no direct arbiter transport or peer channel yet. Reporting
+			// still works; automatic fencing/promotion stays disabled rather than guessed.
+			arbiter: null,
+			peer: reportOnlyPeerTransport(),
+			log: (level, message) => log(level, message),
 		});
 		// Must equal the helper's YOAL_HELPER_REPLICATION_DIR (the installer uses /var/lib/yoal/agent).
 		this.replicaLinks = new ReplicaLinkForwarder({
@@ -1565,6 +1580,7 @@ class AgentRuntime {
 			if (!state) continue;
 			try {
 				await this.databaseDurability.runOnce(state, this.shutdownController.signal);
+				await this.databaseMember.runOnce(state, this.shutdownController.signal);
 			} catch (error) {
 				log('warn', `Database durability task failed: ${errorText(error)}`);
 			}
@@ -1704,7 +1720,12 @@ class AgentRuntime {
 		const poolerRestarted = this.databasePoolerRestarts.pending();
 		const databaseReplication = this.databaseReplication.reports();
 		const promotionResults = this.databaseReplication.pendingPromotionResults();
-		const memberReports = this.desired ? await this.databaseDurability.memberReports(this.desired) : [];
+		const durabilityReports = this.desired ? await this.databaseDurability.memberReports(this.desired) : [];
+		// The W11 member machine is the authority for role/generation once it has run; the W10
+		// durability probes fill the first heartbeat before its first pass.
+		const memberReports = [
+			...new Map([...durabilityReports, ...this.databaseMember.reports()].map((report) => [report.databaseId, report])).values(),
+		];
 		const syncResults = this.databaseDurability.pendingSyncResults();
 		const switchoverResults = this.databaseDurability.pendingSwitchoverResults();
 		const rewindResults = this.databaseReplication.pendingRewindResults();

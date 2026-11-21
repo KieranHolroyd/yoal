@@ -453,6 +453,47 @@ export interface DatabaseFailoverView {
 	finishedAt: string | null;
 }
 
+/** Mirrors `FailoverArmRefusal` in @yoal/contracts (HA-PLAN W11). */
+export interface FailoverArmRefusalView {
+	code: string;
+	message: string;
+	detail: Record<string, unknown>;
+}
+
+/** Mirrors `DatabaseFailoverDrill` in @yoal/contracts (HA-PLAN W11 §12). */
+export interface DatabaseFailoverDrill {
+	id: string;
+	databaseId: string;
+	drillDatabaseId: string | null;
+	status: 'running' | 'passed' | 'failed';
+	durability: 'async' | 'sync';
+	startedAt: string;
+	finishedAt: string | null;
+	timeToWritableMs: number | null;
+	lostCommits: number | null;
+	generation: number;
+	fromNodeId: string | null;
+	toNodeId: string | null;
+	arbiterTested: boolean;
+	arbiterTestedAt: string | null;
+	evidence: Record<string, unknown>;
+	message: string | null;
+}
+
+/** Mirrors `DatabaseFailoverPolicyView` in @yoal/contracts (HA-PLAN W11 §3). */
+export interface DatabaseFailoverPolicyView {
+	databaseId: string;
+	failoverMode: 'manual' | 'auto';
+	acceptDataLoss: boolean;
+	autoArmedAt: string | null;
+	lastFailoverDrillAt: string | null;
+	lastDrill: DatabaseFailoverDrill | null;
+	evidence: Record<string, unknown>;
+	armedEvidence: Record<string, unknown> | null;
+	active: boolean;
+	refusals: FailoverArmRefusalView[];
+}
+
 /** Mirrors `databasePitrStatusSchema` in @yoal/contracts (docs/PITR.md). Credential-free. */
 export interface DatabasePitrView {
 	databaseId: string;

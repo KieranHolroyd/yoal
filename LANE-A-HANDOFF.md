@@ -1,86 +1,75 @@
-# Lane A handoff — W9 control-plane standby and arbiter
+# Lane A handoff — W11 automatic database failover
 
-Worktree: `/Users/kieranholroyd/.t3/worktrees/private-cloud-deploys/t3-w3-a-control-standby`
-Branch: `ha/w3-a-control-standby` (base `main`, no merge performed)
-Implementation commits: `924a4b46` (machine), `f305bf26` (review blockers 1–3), then the review-fix commit on top
-Spec: `docs/build-plan/W9-SPEC.md` Revision 1 (not changed)
+Worktree: `/Users/kieranholroyd/.t3/worktrees/private-cloud-deploys/t3-w4-a-auto-failover`
+Branch: `ha/w4-a-auto-failover` (base `main`, no merge performed)
+Spec: `docs/build-plan/W11-SPEC.md` **Revision 4** (not changed)
+Model: `docs/build-plan/W11-MODEL.md`, `tests/ha/sim/w11/` (not changed)
+Migration: **none added** — `0131` was not needed (see §3).
 
-## 0. Independent-review fixes (second pass)
+## 1. What is implemented
 
-`REVIEW-FINDINGS.md` blockers 1–3 were already fixed by `f305bf26`; this pass closes the rest:
+| Area | Where | Notes |
+|---|---|---|
+| Shared W11 machine | `packages/contracts/src/database-failover-machine.ts` (+ `.test.ts`) | One reading of §4 candidate rules, §1.8/§4 fence notice, §5 promotion body/re-arm, §6 consumer selection, §7 reader reconciliation, §8 old primary, §9 measurement. No I/O; the arbiter clock is an input. |
+| Arming / disarming / drill | `packages/core/src/database-failover-policy-service.ts` (+ `.test.ts`) | Real writes and audits. Every §3 refusal is enforced (`#evaluate`); `arm` evaluates with the requested async acknowledgement, records `autoArmedAt` + evidence across `generation`; `disarm` is immediate and never fences; `drill` starts the real promotion path (`promotion_source='drill'`) and records the measured time to writable, lost commits and arbiter evidence on completion. |
+| Drill linkage | `packages/core/src/database-replica-service.ts` | The drill id rides the existing `database_failovers.evidence_json` (no migration). `promote()` takes `{source, drillId}` and writes `promotion_source`; terminal failovers call `completeDrill`. A drill over 30 s or unmeasured is recorded **failed**, so it cannot arm. |
+| Per-database auto gate | `failover-service.ts` + `autoActiveForRow` | Even with `DB_AUTO_PROMOTE` and the handler installed, a `manual` database is a manual promotion. The live half only disables auto when effective durability stops meeting §1.3 (W11-MODEL assumption 9). |
+| Node member machine | `apps/agent/src/database-member.ts` (+ `.test.ts`) | Candidate acquisition (stream-down debounce, arbiter-clock expiry, eligibility/named sync member, keep-alive block), the Revision 4 notice waiver, CAS `generation + 1`, `pg_ctl promote` (`replicaPromote`), clear sync, report generation/LSN; primary lease renewal and fencing with the notice sent concurrently under a 2 s bound; CAS-lost re-read; expired-lease fence (no resurrection). Fixed helper verbs only (`memberStatus`, `fenceWorkload`, `replicaPromote`, `syncConfigure`). |
+| Control-plane reader | `database-member-service.ts` | `reconcilePromotions()` runs from `tick` regardless of flags: moves the row/endpoints/PITR stanza, inserts a reconciled failover, re-attaches the old primary as a replica, never lowers a generation, alerts on a same-generation tie and on an invalid/ineligible promotion. `consumerTarget()` is the same §6 selection over the heartbeat cache. |
+| Desired state | `membersDesired()` | An armed database carries `failover {mode, acceptDataLoss, autoArmedAt}`; a manual database (the default) omits it, so the flag-off golden is byte-identical. `databaseMemberSchema` gained an additive `workloadId` so the machine can call the helper verbs. |
+| Surfaces | `GET/POST /api/v1/databases/:name/failover`, `yoal db failover`, `yoal ha db arm|disarm|drill` | One audited server path; every refusal is shown verbatim. |
+| CI | `.github/workflows/ha.yml` | `ha-sim` now runs the W11 model (`--runs 5000`) and its unit tests. |
 
-| # | Fix |
-|---|---|
-| 4 | `ControlLease.operatorTakeOver()` applies the same expiry + 40 s unchanged-object gate as an automatic takeover; `--break-glass` is the explicit §18.5 path and is still a CAS. `expectedEpoch` is compared with the record read for that CAS. |
-| 5 | Automatic takeover is gated on enrolment evidence, not the static role hint; an enrolled node whose hint still says `primary` can win a later term. |
-| 6 | `yoal ha control enrol --open <file> --code <code>` unseals, verifies the master-key fingerprint and config digest, writes `master.key` 0400, merges `yoal.env` 0600 and writes `ha-control-enrolment.json` 0600. Promotion is refused without the record. |
-| 7 | `--out` writes `{ bundle, certificate }`; the activation code is printed only. The standby `--open` accepts the wrapped file. |
-| 8 | The co-located agent reads its own `/readyz` (`YOAL_CONTROL_LOCAL_URL`, or `controlUrl/readyz` through `YOAL_CONTROL_SOCKET`) and reports `control` in the heartbeat, so status shows standbys. |
-| 9 | `ControlLeaseStatus.reachable` distinguishes a failed read from a graceful role; a standby with an unreachable arbiter becomes `unavailable` after 30 s, and the error timer resets only on a successful read. |
-| 10 | `YOAL_CONTROL_ADDRESSES` is `nodeId=url` pairs; desired state binds by node id, so holder-first reordering cannot swap URLs. |
-| 11 | Bootstrap and takeover use `max(observed, durable) + 1`; the epoch file is written as `max(onDisk, epoch)` and the runtime starts from the durable baseline. |
-| 12 | `/readyz` sets `ok` from the final status line, so a 503 body never says `ok: true`. |
-| 13 | `--expect-epoch` checks the just-read lease record (new `operatorTakeOver`), not the cached epoch. |
-| 14 | An unknown `YOAL_CONTROL_ROLE` is a configuration error; only `primary`/`standby` are accepted. |
-| 16 | The standby test asserts the lease body still names the primary at the same epoch, not just `200`. |
+Audit actions: `database.failover.arm`, `.disarm`, `.drill.start`, `.drill.complete`, `.reconciled`, `.invalid`.
 
-New tests cover each fix, including a 5,000-schedule W9 run and the flag-off desired-state golden.
-
-## 1. Verified
+## 2. Verified
 
 | Command | Result |
 |---|---|
-| `bun run check` | every workspace package exited 0; `iam lint` baseline unchanged. One pre-existing Svelte warning in `settings/registry/+page.svelte`. |
-| `bun test` | **6493 pass, 74 skip, 0 fail** (6567 tests, 594 files, 192 s). |
-| `bun test tests/ha/sim/w9` | 16 pass, 0 fail. |
-| `bun tests/ha/sim/w9/run.ts --runs 5000` | 5,000 schedules, 0 violating runs, ~8 s; all families including `control-outage`, `stale-leader`, `sync-change`. |
-| Focused W9 tests (12 files) | lease, standby, service, config, desired-state control, enrolment, CLI standby enrolment, agent report, arbiter and contracts pass. |
-| `bun test packages/core/src/desired-state/golden.test.ts` | pass; flag-off desired state is byte-identical (single-node gate's static half). |
-| `bun run check:migrations` | ok, 126 migrations; **no 0127 added**. |
-| CI | `.github/workflows/ha.yml` `ha-sim` now runs the W9 model (`--runs 5000`) and its unit tests. |
+| `bun run check` | every workspace package 0; `iam lint` baseline unchanged; the one pre-existing Svelte registry warning remains. |
+| `bun test` | **6844 pass, 74 skip, 0 fail** (6918 tests, 614 files, ~200 s). |
+| `bun test tests/ha` | **136 pass, 0 fail**. |
+| `bun tests/ha/sim/w11/run.ts --runs 5000` | 5,000 schedules, **0 violations**, 3.35 s. I3/I11/I12/I13 zero; judged time-to-writable median 18.48 s, worst 30.00 s; 80 notice-less slower paths (median 30.78, worst 33.09), all alerted as §9/§11 allow. |
+| `bun tests/ha/sim/w9/run.ts --runs 5000` | 0 violating runs (regression unchanged). |
+| `bun run check:migrations` | ok; **no 0131**. |
+| `packages/contracts/src/database-failover-machine.test.ts` | 28 tests: every candidate refusal, notice valid/stale/bad-epoch/forged, both waivers and the non-waivers, CAS body, reader apply/ignore/refuse/gap/two-primary, consumer fail-closed, old-primary fence. |
+| `packages/core/src/database-failover-policy-service.test.ts` | 13 tests: flag off, all gates, async acknowledgement, sync refusal of `acceptDataLoss`, named drill, audit, disarm, drill start/failure/slow/unmeasured. |
+| `packages/core/src/database-member-reader.test.ts` | 10 tests: desired-state policy omission/presence, consumer selection/no-answer/tie/stale, reader reconcile/never-lower/two-primary/invalid/no-row. |
+| `apps/agent/src/database-member.test.ts` | 14 tests: candidate/promotion, keep-alive block, Revision-4 notice, stale/bad-epoch/forged, live stream, CAS loss and lost response, no-arbiter/report-only, fence notice fan-out/miss, healthy primary, arbiter outage alone, outage + silent member, helper mapping. |
+| `packages/core/src/desired-state/golden.test.ts` | pass; flag-off desired state unchanged. |
+| `packages/core/src/failover-service.test.ts` | pass, including a new manual-database-is-not-auto test. |
 
-The one full-suite first-run failure was `apps/cli/src/commands/email.test.ts` under parallel load; it passed alone (15/15) and on the full rerun (0 failures). Not related to this lane.
+## 3. Not verified, and why
 
-## 2. Not verified, and why
+- **Lab: kill the primary's node, 20 repetitions per §7.2** — needs the Docker/VMs and the owner fleet; not run here. The model and the unit machines are the evidence available in this tree.
+- **A real end-to-end automatic promotion on two hosts** — blocked by §4, not by the machine logic.
+- **24 h soak** — needs the lab and a day.
+- **Drill against a genuinely disposable database** — the contract/drill path promotes the named database (`drillDatabaseId = databaseId`); creating a disposable copy is not in this lane. The drill records the real measurement and does not fake a pass.
+- **Consumer forwarding** — the selection logic is tested, but the agent forwarder still uses the desired-state upstream (re-pointed in place, no restart). See §4.3.
+- **W11 report fields on the control plane** — the agent now reports `arbiterReachable`/`leaseExpiresAt`/`primaryKeepAliveAt`; `database_member_status` has no columns for them, and the reader does not need them. Persisting them would need a migration; I judged that not needed for the exit.
 
-- **Single-node gate** (`tests/ha/scenarios/single-node-gate.ts`) — needs the Docker lab; not runnable in this environment. Its flag-off desired-state assertion is covered by the golden test; the deploy/scale/redeploy half is for the integrator.
-- **24 h control-plane outage soak (I11)** — needs the lab and a day. The deterministic `control-outage` family (500 runs) and the agent cached-state/rotation tests are the evidence available here.
-- **Real S3/R2, Azure and GCS conditional writes** — the arbiter adapter and CAS mapping are unit-tested against the in-memory store; the backend conformance suites from the foundation were not re-run against live emulators.
-- **Real restore/follow of the control SQLite replica** — this lane consumes `<dataDir>/ha-control-replica.json`; the Litestream restore/follow automation is not in this tree. Without that file a standby stays `joining` and `canPromote:false`.
-- **End-to-end promotion on two hosts** — no owner fleet, DNS or keys were touched, per the brief.
-- **Mixed-version agent** — the gate unit test covers stripping `control`/`platformUpstreams`; no old agent binary was run.
-- **Dashboard enrolment UI** — owner-gated; the CLI/API ceremony is implemented and audited.
-- **Standby status in the primary's `/api/v1/ha/status` from a separate host** — the agent now reports `control` from its local `/readyz`, but the two-host end-to-end path (socket/loopback URL, heartbeat, status row) needs the fleet lab. The parser and mapping are unit-tested.
+## 4. Deviations and open questions
 
-## 3. Deviations
+1. **No migration 0131.** Arming uses the 0129 columns, drills use 0130, and the drill/failover link uses the existing `evidence_json`. Persisting the three W11 heartbeat fields would be the only candidate for 0131; deferred because nothing reads them yet.
+2. **The node machine is wired report-only in production.** `apps/agent/src/main.ts` constructs `DatabaseMemberRunner` with `arbiter: null` and `reportOnlyPeerTransport()`. The foundation gives an agent **no direct arbiter transport or credentials** and **no cross-node member RPC**; desired state must not carry secrets. The machine therefore reports role/generation honestly and never claims to fence. `selfFencing()` refuses unless `YOAL_DB_MEMBER_SELF_FENCING=1` is set *and* an arbiter exists — the operator assertion that every data node really has the W11 transport. **This is the one design question for the integrator: how each node gets least-privilege conditional-write access to the arbiter (and an mTLS peer channel) without putting a secret in desired state.** Until that is answered, `DB_AUTO_PROMOTE` cannot safely be turned on outside the lab, even though arming is implemented.
+3. **Consumer discovery is not in the forwarder yet.** `selectConsumerTarget` and `consumerTarget` implement §6 exactly, and the control-plane cache is tested (including fail-closed on two primaries). The agent `ServiceForwarder` still has one upstream per endpoint and is re-pointed by desired state without a restart. Polling members over mTLS needs a cross-node member-probe surface the foundation does not have (the only probe is the local helper verb); that is the second open question, not a spec change.
+4. **`databaseMemberSchema.workloadId` is additive.** It is required for the machine to call `fenceWorkload`/`replicaPromote` on the right workload; an older agent ignores it. The flag-off golden is unaffected because `databaseMembers` is omitted while `SYNC_REPLICA` is off.
+5. **Live auto policy is the model's conservative half.** `autoActiveForRow` checks `failoverMode` plus effective durability, not every arming refusal on every tick. Re-checking a 30-day drill or data-node count each tick would silently turn a live `auto` into manual; W11-MODEL assumption 9 only disables on durability. The full refusal set is enforced at arming.
+6. **A drill over the bound or unmeasured is `failed`, not `passed`.** The foundation contract already rejects a passed drill >30 s or a measured `null`; the service records the same. This is a deliberate reading of §12 ("records the measured time to writable"), not a contract change.
+7. **`oldPrimaryAction` is shared**, so the reader and the agent classify a stale primary the same way. The agent fences; the rewind/rebuild itself reuses W10's `databaseReplicaRewinds` (or a purge when the capabilities are absent).
 
-1. **No migration 0127.** Not needed: `0125` already provides `nodes.ha_epoch` and `control_state`; the per-host enrolment/epoch/replica records are 0600 files (`ha-control-enrolment.json`, `ha-control-epoch.json`, `ha-control-replica.json`), not schema.
-2. **`/api/v1/ha/status` is additive, not replaced.** It keeps the failover document and adds `controlPlane` only while the flag is on. Promotion/enrolment use new routes `/api/v1/ha/control/promote` and `/api/v1/ha/control/enrol`. No existing CLI/dashboard caller breaks.
-3. **`ControlLease.probe()` added** (additive to `ha-lease.ts`): a read that does not change the role, used so a fenced node cannot mistake an unreachable arbiter for a stable holder and rejoin.
-4. **Fenced rejoin follows W9-SPEC §4.3** (automatic after 5 s with another holder reachable and replay current), which is looser than CLUSTERING §6.3's "does not resume automatically". Safety is unchanged: rejoin is standby-only and a new term still needs a fresh 40 s-quiet CAS. This is a **tension between the two documents**, not a change to W9-SPEC. The integrator should confirm the reading.
-5. **Platform upstream peers use `<overlay>:8080` plain HTTP.** Caddy has no per-upstream TLS transport, so mixing a local unix socket with HTTPS peers in one `lb_policy first` list would break the fallback. The node's own socket is first; peers are reached over the overlay's plain ingress listener, which is the existing W6 relay convention. An agent/ingress without an overlay address gets only its own socket.
-6. **Agent control addresses are declared per node.** `YOAL_CONTROL_ADDRESSES` is now `nodeId=url` pairs and desired state binds by node id, falling back to the platform origin. The tree still has no per-node direct listener (the control plane listens on a unix socket behind the ingress), so the contract's list is usually one origin until the operator declares `nodeId=url`.
-7. **Operator promotion has an explicit `--break-glass`.** The ordinary `yoal ha control promote` uses expiry + the 40 s quiet window; `--break-glass` is the audited §18.5 recovery path and still CASes at the read ETag. This matches CLUSTERING §6.5/§18.5 and does not change W9-SPEC.
-8. **The co-located agent reports `control` only when it has a local path.** `YOAL_CONTROL_LOCAL_URL` (or `controlUrl/readyz` through `YOAL_CONTROL_SOCKET`) is read; a worker never reports another node's role. An agent without either omits `control`, as before.
-9. **Enrolment second factor = the session's step-up class (`strong`).** The API refuses API keys/MCP tokens with no step-up state. The certificate is signed by the install CA, so `ENDPOINTS_GATEWAY` must be on; otherwise enrolment refuses with a named prerequisite instead of issuing an unsigned certificate.
-10. **`control_state` is written only by a serving primary.** A standby must not write its followed SQLite; its live status is served from memory by its own API.
-11. **Agent capability `ha-epoch` is now advertised.** The gate strips `control` and `ingress.platformUpstreams` from older agents, so their strict schemas do not see unknown fields.
+No spec change is requested. Items 2 and 3 are implementation blockers, not spec ambiguities.
 
-No spec change is requested. The one open reading is network topology for direct control addresses (item 6).
+## 5. Files of record
 
-## 4. Files of record
-
-- Lease/store: `packages/core/src/ha-control-arbiter.ts`, `packages/core/src/ha-lease.ts` (`operatorTakeOver`, `reachable`, `durableEpoch`).
-- Machine: `packages/core/src/control-standby.ts`; service wiring `control-plane-service.ts`.
-- Enrolment: `packages/core/src/control-enrolment.ts`; CLI standby half `apps/cli/src/control-enrol.ts`; runbook `docs/HA-CONTROL-STANDBY.md`.
-- Agent: `apps/agent/src/control-endpoints.ts`, `control-report.ts`, `main.ts`; Caddy `apps/agent/src/caddy-config.ts`.
-- Contracts: `packages/contracts/src/{control-plane,agent,ingress,failover}.ts`.
-- Desired state: `packages/core/src/desired-state/control.ts`, `ingress.ts`, `capability-gate.ts`.
-- HTTP: `apps/control-plane/src/{hooks.server.ts,routes/readyz/+server.ts,routes/api/v1/ha/...}`.
-- CLI: `apps/cli/src/{commands/ha.ts,ha.ts,api.ts,main.ts,control-enrol.ts}`.
+- Machine: `packages/contracts/src/database-failover-machine.ts`; contracts `database-member.ts`.
+- Policy/drill: `packages/core/src/database-failover-policy-service.ts`; `database-replica-service.ts` (`promote` source, drill completion, `selfFencing`, `reattachForReader`).
+- Reader/desired state: `packages/core/src/database-member-service.ts` (`reconcilePromotions`, `consumerTarget`, `membersDesired`).
+- Controller gate: `packages/core/src/failover-service.ts`; `packages/core/src/config.ts` (`dbMemberSelfFencing`).
+- Agent: `apps/agent/src/database-member.ts`, `apps/agent/src/main.ts`.
+- Surfaces: `apps/control-plane/src/routes/api/v1/databases/[name]/failover/+server.ts`, `apps/cli/src/commands/{db,db-failover,ha}.ts`, `apps/cli/src/api.ts`.
 - CI: `.github/workflows/ha.yml`.
 
-## 5. Final SHA
+## 6. Final SHA
 
-The handoff file is committed on top of the review fixes; `git rev-parse HEAD` in the worktree is
-authoritative.
+`git rev-parse HEAD` in the worktree is authoritative; the handoff file is committed on top of the implementation.

@@ -12,6 +12,7 @@ export * from './cluster.ts';
 export * from './control-plane.ts';
 export * from './database-member.ts';
 export * from './database-failover-policy.ts';
+export * from './database-failover-machine.ts';
 export * from './slo.ts';
 export * from './cluster-config.ts';
 export * from './scheduling.ts';

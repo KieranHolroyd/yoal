@@ -813,7 +813,14 @@ export class FailoverService {
 			}
 			if (!lost || event?.status === 'manual') continue;
 			const choice = this.#promotionChoice(byDatabase.get(database.id) ?? [], facts, config);
-			const automatic = config.failover.enabled && this.#handler !== null;
+			// W11: automatic promotion is per database and defaults to manual. A database that is
+			// not armed, or whose effective durability no longer meets §1.3, is a manual promotion
+			// even when the controller and the global flag are on. Arming enforced every §3 gate.
+			const automatic = config.failover.enabled && this.#handler !== null && this.ctx.failoverPolicies.autoActiveForRow(database);
+			const policyReason =
+				database.failoverMode === 'auto' && !automatic
+					? 'Automatic failover is disabled: the database is not armed or its durability no longer meets the policy.'
+					: null;
 			const silent = `${database.name}: its primary ${sourceReason(primary, database.nodeId, 'failover')}`;
 			if (!choice.replica) {
 				const reason = `${silent} No replica can be promoted: ${choice.refusals.map((r) => `${this.#nodeName(facts, r.nodeId)}: ${r.reason}`).join('; ') || choice.reason}`;
@@ -842,7 +849,7 @@ export class FailoverService {
 			const generation = Math.max(0, ...(byDatabase.get(database.id) ?? []).map((r) => r.primaryGeneration)) + 1;
 			if (!automatic) {
 				const reason =
-					`${silent} Promote the replica on ${this.#nodeName(facts, candidate.nodeId)} by hand ` +
+					`${silent} ${policyReason ?? ''} Promote the replica on ${this.#nodeName(facts, candidate.nodeId)} by hand ` +
 					(config.failover.enabled ? '(no automatic promotion path is installed).' : '(automatic failover is off).');
 				this.#fenced(fence, () => {
 					if (event) this.#finish(fence, event, 'cancelled', now, 'Superseded: a replica is now eligible.');

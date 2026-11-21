@@ -231,7 +231,7 @@ describe('database failover policy', () => {
 			expect(refusalCodes()).toContain(code);
 		});
 
-	test('a fully eligible policy is active and still leaves arming to lane A', async () => {
+	test('a fully eligible policy is active and arming records it', async () => {
 		fullyEligible();
 		const view = core.failoverPolicies.view(principal, 'main');
 		expect(view.refusals).toEqual([]);
@@ -239,10 +239,10 @@ describe('database failover policy', () => {
 		expect(view.lastDrill?.durability).toBe('sync');
 		expect(view.lastDrill?.drillDatabaseId).toBe('db_disposable');
 		expect(view.lastFailoverDrillAt).toBe(new Date(clock).toISOString());
-		await expect(core.failoverPolicies.arm(principal, 'main', { confirm: true, acceptDataLoss: false })).rejects.toMatchObject({
-			code: 'conflict',
-			message: expect.stringContaining('not implemented'),
-		});
+		const armed = await core.failoverPolicies.arm(principal, 'main', { confirm: true, acceptDataLoss: false });
+		expect(armed.failoverMode).toBe('auto');
+		expect(armed.autoArmedAt).toBe(new Date(clock).toISOString());
+		expect(armed.armedEvidence).toMatchObject({ drillId: view.evidence.drillId, dataNodeCount: 3, autoPromoteEnabled: true });
 	});
 
 	test('a running latest attempt does not hide a fresh passed drill', () => {
@@ -271,18 +271,17 @@ describe('database failover policy', () => {
 		});
 	});
 
-	test('arming, disarming and drilling fail loudly until lane A implements them', async () => {
+	test('arming, disarming and drilling refuse honestly', async () => {
 		// DB_AUTO_PROMOTE is off, so arming is refused at the first gate.
 		await expect(core.failoverPolicies.arm(principal, 'main', { confirm: true, acceptDataLoss: false })).rejects.toMatchObject({
 			code: 'unavailable',
 		});
-		await expect(core.failoverPolicies.disarm(principal, 'main')).rejects.toMatchObject({
-			code: 'conflict',
-			message: expect.stringContaining('not implemented'),
-		});
+		// Disarming is always safe and immediate.
+		const disarmed = await core.failoverPolicies.disarm(principal, 'main');
+		expect(disarmed.failoverMode).toBe('manual');
+		// A drill needs the replica machine, which is off by default.
 		await expect(core.failoverPolicies.drill(principal, 'main', { confirm: true })).rejects.toMatchObject({
-			code: 'conflict',
-			message: expect.stringContaining('not implemented'),
+			code: 'unavailable',
 		});
 	});
 });

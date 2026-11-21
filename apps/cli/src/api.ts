@@ -11,6 +11,8 @@ import { platformOrigin } from './config.ts';
 import { ApiError, CliError } from './errors.ts';
 import type {
 	DatabaseDurabilityStatus,
+	DatabaseFailoverDrill,
+	DatabaseFailoverPolicyView,
 	DatabaseFailoverView,
 	DatabaseReplicaView,
 	DatabaseSwitchoverView,
@@ -1554,6 +1556,35 @@ export class ApiClient {
 			{ body: { confirm: true, acceptDataLoss: input.acceptDataLoss }, headers: { 'if-match': String(input.ifMatch) } },
 		);
 		return { failover: asRecord(raw)?.failover as unknown as DatabaseFailoverView, raw };
+	}
+
+	async databaseFailover(name: string): Promise<{ failover: DatabaseFailoverPolicyView; raw: unknown }> {
+		const raw = await this.request('GET', `/api/v1/databases/${encodeURIComponent(name)}/failover`);
+		return { failover: asRecord(raw)?.failover as unknown as DatabaseFailoverPolicyView, raw };
+	}
+
+	async armDatabaseFailover(
+		name: string,
+		input: { acceptDataLoss: boolean; drillId?: string },
+	): Promise<{ failover: DatabaseFailoverPolicyView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/databases/${encodeURIComponent(name)}/failover`, {
+			body: { action: 'arm', arm: { confirm: true, ...input } },
+		});
+		return { failover: asRecord(raw)?.failover as unknown as DatabaseFailoverPolicyView, raw };
+	}
+
+	async disarmDatabaseFailover(name: string): Promise<{ failover: DatabaseFailoverPolicyView; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/databases/${encodeURIComponent(name)}/failover`, {
+			body: { action: 'disarm' },
+		});
+		return { failover: asRecord(raw)?.failover as unknown as DatabaseFailoverPolicyView, raw };
+	}
+
+	async drillDatabaseFailover(name: string, note?: string): Promise<{ drill: DatabaseFailoverDrill; raw: unknown }> {
+		const raw = await this.request('POST', `/api/v1/databases/${encodeURIComponent(name)}/failover`, {
+			body: { action: 'drill', drill: { confirm: true, ...(note ? { note } : {}) } },
+		});
+		return { drill: asRecord(raw)?.drill as unknown as DatabaseFailoverDrill, raw };
 	}
 
 	// ---------------------------------------------------------------- point-in-time recovery (docs/PITR.md)

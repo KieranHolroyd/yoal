@@ -484,6 +484,11 @@ describe('database primaries', () => {
 				ownerSecret: 'x',
 				monitorSecret: 'y',
 				createdBy: 'user_1',
+				// W11: automatic promotion is per database; the handler tests arm it explicitly.
+				failoverMode: 'auto',
+				durability: 'async',
+				durabilityEffective: 'async',
+				acceptDataLoss: true,
 			})
 			.run();
 		h.core.ctx.db
@@ -519,6 +524,17 @@ describe('database primaries', () => {
 		await h.core.failover.tick();
 		expect(h.events('database')).toMatchObject([{ status: 'blocked' }]);
 		expect(h.core.failover.status(principal).databases[0]!.refusals[0]).toContain('pending');
+	});
+
+	test('a manual database is not promoted automatically even with a handler', async () => {
+		const h = harness(['w1', 'w2'], { enabled: true });
+		database(h);
+		h.sqlite.run("UPDATE databases SET failover_mode = 'manual' WHERE id = 'db_1'");
+		h.core.failover.registerDatabaseHandler({ run: () => ({ status: 'done' }) });
+		h.advance(120_000);
+		h.heartbeat('w1');
+		expect((await h.core.failover.tick()).databases.manual).toBe(1);
+		expect(h.events('database')).toMatchObject([{ status: 'manual', stage: 'decide' }]);
 	});
 
 	test('a registered handler runs fence, promote, repoint and heal under the lease', async () => {

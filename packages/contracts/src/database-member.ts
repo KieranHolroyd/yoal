@@ -190,6 +190,12 @@ export const databaseMemberSchema = z.object({
 	role: z.enum(['primary', 'replica']),
 	/** The physical slot a replica streams under; the sync setting names it. */
 	slot: z.string().max(100).nullable().default(null),
+	/**
+	 * The workload id on this node (`<databaseId>` for a primary, `db_<replicaId>` for a replica).
+	 * W11's member machine fences/promotes through the helper's fixed verbs and needs the id; older
+	 * agents ignore the additive field.
+	 */
+	workloadId: z.string().max(100).nullable().default(null),
 });
 
 export type DatabaseMember = z.infer<typeof databaseMemberSchema>;

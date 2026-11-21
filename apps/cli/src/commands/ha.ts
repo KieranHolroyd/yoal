@@ -6,6 +6,7 @@ import { UsageError } from '../errors.ts';
 import { formatControlStatus, formatHaStatus } from '../ha.ts';
 import { printJson } from '../output.ts';
 import { authenticatedClient } from './common.ts';
+import { failoverCommand } from './db-failover.ts';
 
 const flags: FlagSpec = {
 	json: { type: 'boolean' },
@@ -48,6 +49,10 @@ Actions:
       master.key 0400 and the allowlisted yoal.env 0600, and write the enrolment record 0600.
       Promotion is refused on a host without that record.
 
+  db arm|disarm|drill <database> [--json]
+      Automatic database failover (W11): arm after the policy and a passed drill, disarm now, or run
+      a measured drill. Same path as \`yoal db failover\`.
+
 Options:
   --events <n>       Recent events to list (default 10, at most 50)
   --expect-epoch <n> Refuse the promotion when the lease is not at this epoch
@@ -64,6 +69,12 @@ Options:
   --json             Print the raw response`;
 
 export async function haCommand(argv: string[]): Promise<void> {
+	// W11-SPEC §12 names `yoal ha db arm <database>`; it is the same audited path as `yoal db failover`.
+	if (argv[0] === 'db') {
+		const [verb, ...rest] = argv.slice(1);
+		if (verb === 'arm' || verb === 'disarm' || verb === 'drill') return failoverCommand([...rest, `--${verb}`]);
+		throw new UsageError('Usage: yoal ha db <arm|disarm|drill> <database> [options]');
+	}
 	const args = parseArgs(argv, flags);
 	if (args.boolean('help') || args.positionals.length === 0) {
 		console.log(usage);

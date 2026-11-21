@@ -107,6 +107,12 @@ export interface CoreConfig {
 	platformUpstream?: string;
 	/** This control node's identity in the lease; `YOAL_NODE_ID` or the host name when unset. */
 	controlNodeId?: string;
+	/**
+	 * Set only when every data node runs the W11 member machine with a direct arbiter transport and
+	 * a peer channel, so a database primary really fences itself before its TTL. Automatic
+	 * promotion refuses to install without it (HA-PLAN F1).
+	 */
+	dbMemberSelfFencing?: boolean;
 	/** `YOAL_CONTROL_ROLE=standby` marks an enrolled warm standby; absent means primary-capable. */
 	controlRole?: 'primary' | 'standby';
 	/**
@@ -259,6 +265,8 @@ export function coreConfigFromEnv(
 					: undefined)),
 		platformUpstream: overrides.platformUpstream ?? (env.YOAL_PLATFORM_UPSTREAM?.trim() || undefined),
 		controlNodeId: overrides.controlNodeId ?? (env.YOAL_NODE_ID?.trim() || undefined),
+		dbMemberSelfFencing:
+			overrides.dbMemberSelfFencing ?? (env.YOAL_DB_MEMBER_SELF_FENCING === '1' || env.YOAL_DB_MEMBER_SELF_FENCING === 'true'),
 		controlRole: overrides.controlRole ?? parseControlRole(env.YOAL_CONTROL_ROLE),
 		controlAddresses: overrides.controlAddresses ?? parseControlAddresses(env.YOAL_CONTROL_ADDRESSES),
 		controlConfigDigest: overrides.controlConfigDigest ?? (env.YOAL_CONTROL_CONFIG_DIGEST?.trim() || undefined),

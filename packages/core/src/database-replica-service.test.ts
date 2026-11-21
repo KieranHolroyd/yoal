@@ -383,14 +383,14 @@ describe('automatic promotion guard (HA-PLAN F1)', () => {
 		expect(registered).toHaveLength(0);
 	});
 
-	test('the flag alone does not install the handler while self-fencing is inactive', () => {
+	test('the flag alone does not install without a conditional arbiter', () => {
 		const { registered, failover } = recorder();
 		expect(core.databaseReplicas.selfFencing().active).toBe(false);
 		const result = withAutoPromote(true, () => core.databaseReplicas.installAutoPromotion(failover));
+		// This core's store is not a conditional arbiter, so self-fencing cannot be claimed.
 		expect(result.installed).toBe(false);
-		expect(result.reason).toContain('self-fencing');
+		expect(result.reason).toContain('arbiter');
 		expect(registered).toHaveLength(0);
-		// And the real controller reports no automatic path.
 		withAutoPromote(true, () => core.databaseReplicas.installAutoPromotion());
 		expect(core.failover.status(owner).databaseHandler).toBe(false);
 	});
@@ -404,5 +404,22 @@ describe('automatic promotion guard (HA-PLAN F1)', () => {
 		const result = withAutoPromote(true, () => core.databaseReplicas.installAutoPromotion(on.failover, active));
 		expect(result).toMatchObject({ installed: true, reason: null });
 		expect(on.registered).toHaveLength(1);
+	});
+
+	test('real self-fencing needs the flag, an arbiter and the explicit node-machine assertion', () => {
+		const config = core.ctx.config as { dbMemberSelfFencing?: boolean };
+		const previousArbiter = core.ctx.arbiter;
+		const previous = config.dbMemberSelfFencing;
+		try {
+			core.ctx.arbiter = {} as never;
+			config.dbMemberSelfFencing = false;
+			expect(withAutoPromote(true, () => core.databaseReplicas.selfFencing())).toMatchObject({ active: false });
+			config.dbMemberSelfFencing = true;
+			expect(withAutoPromote(true, () => core.databaseReplicas.selfFencing())).toMatchObject({ active: true, reason: '' });
+			expect(withAutoPromote(false, () => core.databaseReplicas.selfFencing()).active).toBe(false);
+		} finally {
+			core.ctx.arbiter = previousArbiter;
+			config.dbMemberSelfFencing = previous;
+		}
 	});
 });

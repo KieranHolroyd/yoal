@@ -260,7 +260,7 @@ export class DatabaseReplicaService {
 		databaseName: string,
 		replicaId: string,
 		raw: DatabaseReplicaPromote,
-		options: { ifMatch?: number | null } = {},
+		options: { ifMatch?: number | null; source?: 'manual' | 'auto' | 'drill'; drillId?: string } = {},
 	): Promise<DatabaseFailoverView> {
 		const input = databaseReplicaPromoteSchema.parse(raw);
 		const database = this.ctx.databases.requireRow(principal, databaseName);
@@ -277,7 +277,7 @@ export class DatabaseReplicaService {
 			.where(and(eq(databaseReplicas.id, replicaId), eq(databaseReplicas.databaseId, database.id)))
 			.get();
 		if (!row || row.removingAt) throw new NotFoundError('Database replica');
-		return this.promoteRow(principal, database, row, input);
+		return this.promoteRow(principal, database, row, input, options);
 	}
 
 	/** The async half of `promote`: the lease read is the gate, the row is the display cache. */
@@ -286,6 +286,7 @@ export class DatabaseReplicaService {
 		database: DatabaseRow,
 		row: ReplicaRow,
 		input: DatabaseReplicaPromote,
+		options: { source?: 'manual' | 'auto' | 'drill'; drillId?: string } = {},
 	): Promise<DatabaseFailoverView> {
 		// I12 / acquireRefusal: read the lease, not the cached row. A change makes the database
 		// non-promotable for everyone; an expired or foreign-held lease cannot be acquired.
@@ -297,9 +298,15 @@ export class DatabaseReplicaService {
 				`Promoting this replica may lose recent commits: ${risks.join('; ')}. Pass acceptDataLoss: true to promote anyway.`,
 			);
 		const failover = this.begin(database, row, {
-			reason: `Manual promotion by ${principal.userId ?? principal.kind}${risks.length ? ` (accepted: ${risks.join('; ')})` : ''}.`,
+			reason:
+				options.source === 'drill'
+					? `Failover drill started by ${principal.userId ?? principal.kind}.`
+					: `Manual promotion by ${principal.userId ?? principal.kind}${risks.length ? ` (accepted: ${risks.join('; ')})` : ''}.`,
 			automatic: false,
+			source: options.source ?? 'manual',
+			drillId: options.drillId,
 		});
+
 		this.ctx.audit.record({
 			principal,
 			action: 'database.failover.promote',
@@ -335,18 +342,31 @@ export class DatabaseReplicaService {
 	}
 
 	/**
-	 * Whether a database primary stops itself when it can no longer prove it holds its lease
-	 * (HA-PLAN H22, I13; CLUSTERING §9.3). Not built: today the only fence is "leave the old node's
-	 * desired state", which a node cut off from the control plane never receives, so its apps keep
-	 * writing. W11 replaces this with a real check (member logic on every data node, a tested
-	 * arbiter). Until then automatic promotion can produce two primaries.
+	 * W11: database primaries now fence themselves. The node member machine
+	 * (`apps/agent/src/database-member.ts`) watches the lease, sends a fence notice, and stops
+	 * Postgres (or sets it read-only) before serving a stale generation. The control plane can only
+	 * claim this when it has an arbiter to read and the global flag is on; without an arbiter a
+	 * `sync` lease already fails closed and nothing may promote automatically.
 	 */
 	selfFencing(): DatabaseSelfFencing {
-		return {
-			active: false,
-			reason:
-				'Database self-fencing is not built (docs/HA-PLAN.md H22): a primary cut off from the control plane would keep accepting writes, so automatic promotion stays off. Promote by hand instead.',
-		};
+		if (!featureEnabled(this.ctx.config, 'DB_AUTO_PROMOTE'))
+			return {
+				active: false,
+				reason: 'YOAL_FEATURE_DB_AUTO_PROMOTE is off, so no automatic promotion path is installed.',
+			};
+		if (!this.ctx.arbiter)
+			return {
+				active: false,
+				reason:
+					'No arbiter with conditional writes is configured, so a member cannot prove the lease or fence safely.',
+			};
+		if (!this.ctx.config.dbMemberSelfFencing)
+			return {
+				active: false,
+				reason:
+					'No data node has reported a W11 self-fencing member machine (direct arbiter transport and peer channel); set YOAL_DB_MEMBER_SELF_FENCING only after the lab proves it.',
+			};
+		return { active: true, reason: '' };
 	}
 
 	/**
@@ -971,6 +991,13 @@ export class DatabaseReplicaService {
 				.set({ status: 'completed', finishedAt: now })
 				.where(eq(databaseFailovers.id, failover.id))
 				.run();
+			const drillId = this.drillId(failover);
+			if (drillId)
+				this.ctx.failoverPolicies.completeDrill(drillId, {
+					passed: true,
+					writableAt: failover.promotedAt ?? now,
+					message: null,
+				});
 			const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
 			this.ctx.audit.record({
 				...(database ? { orgId: database.orgId } : {}),
@@ -1361,7 +1388,11 @@ export class DatabaseReplicaService {
 	}
 
 	/** Record the failover and fence the old primary (it leaves its node's desired state). */
-	private begin(database: DatabaseRow, replica: ReplicaRow, options: { reason: string; automatic: boolean }): FailoverRow {
+	private begin(
+		database: DatabaseRow,
+		replica: ReplicaRow,
+		options: { reason: string; automatic: boolean; source?: 'manual' | 'auto' | 'drill'; drillId?: string },
+	): FailoverRow {
 		if (this.activeFailover(database.id)) throw new ConflictError(`"${database.name}" is already failing over.`);
 		if (replica.nodeId === database.nodeId) throw new ValidationError('A same-node replica cannot be promoted.');
 		const now = this.ctx.now();
@@ -1381,6 +1412,9 @@ export class DatabaseReplicaService {
 				reason: options.reason.slice(0, 500),
 				startedAt: now,
 				replicaId: replica.id,
+				// The drill link travels in the existing evidence column, so no migration is needed.
+				promotionSource: options.source ?? 'manual',
+				evidenceJson: options.drillId ? JSON.stringify({ drillId: options.drillId }) : '{}',
 				...(reachable ? {} : { fencedAt: now }),
 			})
 			.run();
@@ -1534,6 +1568,11 @@ export class DatabaseReplicaService {
 		this.ctx.projects.bump(database.orgId);
 	}
 
+	/** Re-attach an old primary as a replica after a promotion the reader reconciled (W11-SPEC §8). */
+	reattachForReader(databaseId: string, fromNodeId: string, fromDiskId: string | null): void {
+		this.reattachOldPrimary(databaseId, fromNodeId, fromDiskId);
+	}
+
 	private failFailover(failover: FailoverRow, message: string): void {
 		const now = this.ctx.now();
 		// A promotion that already happened must never put the old primary back: the replica is a
@@ -1551,6 +1590,13 @@ export class DatabaseReplicaService {
 			})
 			.where(eq(databaseFailovers.id, failover.id))
 			.run();
+		const drillId = this.drillId(failover);
+		if (drillId)
+			this.ctx.failoverPolicies.completeDrill(drillId, {
+				passed: false,
+				writableAt: null,
+				message,
+			});
 		const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
 		this.ctx.audit.record({
 			...(database ? { orgId: database.orgId } : {}),
@@ -1563,6 +1609,12 @@ export class DatabaseReplicaService {
 		});
 		// Un-fenced only when nothing was promoted; a promoted old primary must stay stopped/read-only.
 		if (!promoted) this.ctx.projects.bump();
+	}
+
+	/** The drill that started a promotion, from the existing evidence column (no migration). */
+	private drillId(failover: Pick<FailoverRow, 'evidenceJson'>): string | null {
+		const evidence = parseJson<{ drillId?: unknown }>(failover.evidenceJson, {});
+		return typeof evidence.drillId === 'string' ? evidence.drillId : null;
 	}
 
 	private activeFailover(databaseId: string): FailoverRow | undefined {
