@@ -502,6 +502,10 @@ export const databaseFailovers = sqliteTable(
 		replicaId: text('replica_id'),
 		/** `failover` for an unplanned promotion, `switchover` for a planned one (0128). */
 		kind: text('kind', { enum: ['failover', 'switchover'] }).notNull().default('failover'),
+		/** How the promotion started: manual, W11 automatic, or a drill (0129). */
+		promotionSource: text('promotion_source', { enum: ['manual', 'auto', 'drill'] }).notNull().default('manual'),
+		/** Evidence the promotion relied on, as JSON (0129). */
+		evidenceJson: text('evidence_json').notNull().default('{}'),
 		/** The primary's LSN after writes stopped (planned switchover, 0128). */
 		drainLsn: text('drain_lsn'),
 		/** `drain` | `resume` | `promote`, for the switchover surface (0128). */
@@ -1304,6 +1308,16 @@ export const databases = sqliteTable(
 		/** The lease ETag/expiry the control plane last read, handed to the primary's node as its token (0128). */
 		syncLeaseEtag: text('sync_lease_etag'),
 		syncLeaseExpiresAt: integer('sync_lease_expires_at'),
+		/** W11 automatic failover policy: `manual` until an operator arms it (0129). */
+		failoverMode: text('failover_mode', { enum: ['manual', 'auto'] }).notNull().default('manual'),
+		/** Async only: the operator accepted possible commit loss on an automatic promotion (0129). */
+		acceptDataLoss: integer('accept_data_loss', { mode: 'boolean' }).notNull().default(false),
+		/** When an operator last armed automatic failover (0129). */
+		autoArmedAt: integer('auto_armed_at'),
+		/** The passed drill arming reads; null until a drill passes (0129). */
+		lastFailoverDrillAt: integer('last_failover_drill_at'),
+		/** Eligibility evidence captured at arming, as JSON (0129). */
+		failoverEvidenceJson: text('failover_evidence_json').notNull().default('{}'),
 		/** Set while a pooler-only restart is waiting for the node to acknowledge it. */
 		poolerRestartRequestedAt: integer('pooler_restart_requested_at'),
 		status: text('status', { enum: ['pending', 'starting', 'running', 'failed', 'stopped'] })
@@ -3337,4 +3351,60 @@ export const controlState = sqliteTable(
 		updatedAt: integer('updated_at').notNull(),
 	},
 	(t) => [index('control_state_role_idx').on(t.role, t.epoch)],
+);
+
+/** One failover drill: a real promotion on a disposable database (HA-PLAN W11 §12, Wave 4). */
+export const databaseFailoverDrills = sqliteTable(
+	'database_failover_drills',
+	{
+		id: text('id').primaryKey(),
+		databaseId: text('database_id').notNull(),
+		status: text('status', { enum: ['running', 'passed', 'failed'] }).notNull().default('running'),
+		fromNodeId: text('from_node_id'),
+		toNodeId: text('to_node_id'),
+		generation: integer('generation').notNull().default(0),
+		startedAt: integer('started_at').notNull(),
+		finishedAt: integer('finished_at'),
+		/** From the primary's last successful lease renew to the new primary accepting a write. */
+		timeToWritableMs: integer('time_to_writable_ms'),
+		/** Acknowledged commits lost; a `sync` drill must record 0 (I13). */
+		lostCommits: integer('lost_commits'),
+		arbiterTested: integer('arbiter_tested', { mode: 'boolean' }).notNull().default(false),
+		arbiterTestedAt: integer('arbiter_tested_at'),
+		evidenceJson: text('evidence_json').notNull().default('{}'),
+		message: text('message'),
+		createdBy: text('created_by').notNull(),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+	},
+	(t) => [
+		index('database_failover_drills_database_idx').on(t.databaseId, t.startedAt),
+		index('database_failover_drills_status_idx').on(t.status, t.finishedAt),
+	],
+);
+
+/** W15 SLO objects per project (HA-PLAN W15, Wave 4 foundation). */
+export const sloObjects = sqliteTable(
+	'slo_objects',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		projectId: text('project_id').notNull(),
+		name: text('name').notNull(),
+		description: text('description'),
+		/** The signal the evaluator measures, e.g. `http_availability`; never a query string. */
+		indicator: text('indicator').notNull(),
+		/** Success ratio in (0,1); the error budget is `1 - target`. */
+		target: real('target').notNull(),
+		windowSeconds: integer('window_seconds').notNull(),
+		/** Multi-window burn policy as JSON (`SloBurnAlert[]`). */
+		burnAlertsJson: text('burn_alerts_json').notNull().default('[]'),
+		enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+		createdBy: text('created_by').notNull(),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+	},
+	(t) => [
+		uniqueIndex('slo_objects_project_name_idx').on(t.projectId, t.name),
+		index('slo_objects_org_idx').on(t.orgId),
+	],
 );

@@ -308,7 +308,7 @@ describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () =
 			 VALUES ('bt_local', 'org_1', 'local-main', 'local', '/var/lib/yoal/backups', 1, 1)`,
 		);
 
-		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql', '0123_ingress_drift.sql', '0124_shared_certificates.sql', '0125_control_epoch.sql', '0126_replica_durability.sql', '0127_replica_rewind.sql', '0128_sync_switchover_rewind.sql']);
+		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql', '0123_ingress_drift.sql', '0124_shared_certificates.sql', '0125_control_epoch.sql', '0126_replica_durability.sql', '0127_replica_rewind.sql', '0128_sync_switchover_rewind.sql', '0129_db_failover_policy.sql', '0130_drills_slo.sql']);
 
 		const rows = sqlite
 			.query<{ id: string; kind: string; store_kind: string | null; store_options_json: string; object_lock: number; immutable_retention_days: number | null; secret_sealed: string | null }, []>(
@@ -380,6 +380,61 @@ describe('node_ca_certificates (reviewer item 9)', () => {
 		issue('aa04', 'nod_2', 'k1');
 		sqlite.run("UPDATE node_ca_certificates SET revoked_at = 5 WHERE serial = 'aa01'");
 		issue('aa05', 'nod_1', 'k1');
+		sqlite.close();
+	});
+});
+
+describe('HA Wave 4 migrations 0129–0130 (docs/build-plan/HA-WAVE-4.md)', () => {
+	const tables = (sqlite: Database) =>
+		new Set(sqlite.query<{ name: string }, []>("SELECT name FROM sqlite_master WHERE type = 'table'").all().map((row) => row.name));
+	const columns = (sqlite: Database, table: string) =>
+		sqlite.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map((row) => row.name);
+
+	test('are additive: manual failover, drill evidence and SLO objects', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		migrate(sqlite);
+		expect(columns(sqlite, 'databases')).toEqual(
+			expect.arrayContaining(['failover_mode', 'accept_data_loss', 'auto_armed_at', 'last_failover_drill_at', 'failover_evidence_json']),
+		);
+		expect(columns(sqlite, 'database_failovers')).toEqual(expect.arrayContaining(['promotion_source', 'evidence_json']));
+		expect(tables(sqlite).has('database_failover_drills')).toBe(true);
+		expect(tables(sqlite).has('slo_objects')).toBe(true);
+
+		sqlite.run(
+			`INSERT INTO databases (id, org_id, name, version, node_id, host_port, memory_mb, owner_secret, monitor_secret, created_by, created_at, updated_at)
+			 VALUES ('db_1', 'org_1', 'main', '16', 'nod_1', 5432, 256, 'owner', 'monitor', 'user_1', 1, 1)`,
+		);
+		expect(
+			sqlite
+				.query<{ failover_mode: string; accept_data_loss: number; auto_armed_at: number | null; failover_evidence_json: string }, []>(
+					"SELECT failover_mode, accept_data_loss, auto_armed_at, failover_evidence_json FROM databases WHERE id = 'db_1'",
+				)
+				.get(),
+		).toEqual({ failover_mode: 'manual', accept_data_loss: 0, auto_armed_at: null, failover_evidence_json: '{}' });
+		expect(() => sqlite.run("UPDATE databases SET failover_mode = 'sometimes' WHERE id = 'db_1'")).toThrow();
+
+		sqlite.run(
+			`INSERT INTO database_failover_drills (id, database_id, status, started_at, created_by, created_at)
+			 VALUES ('drl_1', 'db_1', 'passed', 1, 'user_1', 1)`,
+		);
+		expect(
+			sqlite
+				.query<{ status: string; arbiter_tested: number; time_to_writable_ms: number | null }, []>(
+					"SELECT status, arbiter_tested, time_to_writable_ms FROM database_failover_drills WHERE id = 'drl_1'",
+				)
+				.get(),
+		).toEqual({ status: 'passed', arbiter_tested: 0, time_to_writable_ms: null });
+		expect(() => sqlite.run("UPDATE database_failover_drills SET status = 'unknown' WHERE id = 'drl_1'")).toThrow();
+
+		const insertSlo = (id: string, name: string, target: number) =>
+			sqlite.run(
+				`INSERT INTO slo_objects (id, org_id, project_id, name, indicator, target, window_seconds, created_by, created_at, updated_at)
+				 VALUES (?, 'org_1', 'prj_1', ?, 'http_availability', ?, 2592000, 'user_1', 1, 1)`,
+				[id, name, target],
+			);
+		insertSlo('slo_1', 'availability', 0.999);
+		expect(() => insertSlo('slo_2', 'availability', 0.99)).toThrow();
+		expect(() => insertSlo('slo_3', 'no-budget', 1)).toThrow();
 		sqlite.close();
 	});
 });

@@ -47,7 +47,9 @@ describe('feature registry', () => {
 			'CONTROL_STANDBY',
 			'SYNC_REPLICA',
 			'PITR_REWIND',
-			'STEERING'
+			'STEERING',
+			'SLO_OBJECTS',
+			'EXTERNAL_PROBER'
 		]);
 		for (const name of FEATURE_FLAG_NAMES) {
 			expect(FEATURE_FLAGS[name].name).toBe(name);
@@ -76,6 +78,17 @@ describe('feature registry', () => {
 		expect(FEATURE_FLAGS.SYNC_REPLICA.description).toContain('H23');
 	});
 
+	test('HA Wave 4 flags are opt-in and cite W15 (HA-WAVE-4.md)', () => {
+		for (const name of ['SLO_OBJECTS', 'EXTERNAL_PROBER'] as const) {
+			expect(FEATURE_FLAGS[name].default).toBe(false);
+			expect(DEFAULT_FEATURES[name]).toBe(false);
+			expect(OPT_IN_FEATURES.has(name)).toBe(true);
+			expect(FEATURE_FLAGS[name].description).toContain('W15');
+		}
+		expect(parseFeatureFlags({}).SLO_OBJECTS).toBe(false);
+		expect(parseFeatureFlags({}).EXTERNAL_PROBER).toBe(false);
+	});
+
 	test('HA Wave 2 flags are opt-in and cite their H-section (HA-WAVE-2.md)', () => {
 		expect(FEATURE_FLAGS.INGRESS_SET.default).toBe(false);
 		expect(FEATURE_FLAGS.SHARED_CERTIFICATES.default).toBe(false);
@@ -97,7 +110,9 @@ describe('feature registry', () => {
 			'STEERING',
 			'CONTROL_STANDBY',
 			'SYNC_REPLICA',
-			'PITR_REWIND'
+			'PITR_REWIND',
+			'SLO_OBJECTS',
+			'EXTERNAL_PROBER'
 		]);
 		expect(FEATURE_FLAGS.ENDPOINTS_GATEWAY.description).toContain('H24');
 		expect(FEATURE_FLAGS.RELEASE_PHASE.description).toContain('H25');

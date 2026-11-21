@@ -71,6 +71,9 @@ import type { TelemetrySpoolGapService } from './telemetry-spool-gaps.ts';
 import type { CertificateService, IngressSetService, SteeringService } from './ingress-service.ts';
 import type { ControlPlaneService } from './control-plane-service.ts';
 import type { DatabaseMemberService } from './database-member-service.ts';
+import type { DatabaseFailoverPolicyService } from './database-failover-policy-service.ts';
+import type { SloService } from './slo-service.ts';
+import type { ExternalProberService } from './external-prober-service.ts';
 import type { IamService } from './iam/service.ts';
 import type { GovernanceService } from './iam/governance.ts';
 import type { AuthPolicyService } from './iam/auth-policy.ts';
@@ -207,6 +210,12 @@ export interface CoreContext {
 	controlPlane: ControlPlaneService;
 	/** Database members, durability and the sync set (HA-PLAN H21–H23, Wave 3). */
 	databaseMembers: DatabaseMemberService;
+	/** Per-database automatic failover policy and drills (HA-PLAN W11, Wave 4). */
+	failoverPolicies: DatabaseFailoverPolicyService;
+	/** SLO objects, error budgets and burn alerts (HA-PLAN W15, Wave 4). */
+	slos: SloService;
+	/** The external prober's report sink (HA-PLAN W15, Wave 4). */
+	externalProber: ExternalProberService;
 	/** Fleet scheduling: utilisation, rebalance and workload moves (CLUSTERING §3.10). */
 	scheduling: SchedulingService;
 	/** Fleet node updates in waves (CLUSTERING §3.11, D217). */

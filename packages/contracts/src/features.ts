@@ -285,6 +285,22 @@ export const FEATURE_FLAGS = {
 		default: false,
 		area: 'networking',
 		description: 'Steering drivers (external-lb, dns-failover, vip, webhook) decide which ingress nodes receive traffic (HA-PLAN H18).'
+	},
+	SLO_OBJECTS: {
+		name: 'SLO_OBJECTS',
+		// HA Wave 4, W15. Opt-in: SLO objects, error budgets and burn alerts have no tuned defaults
+		// yet, and a false target would page on day one. Off until lane B's evaluation is proven.
+		default: false,
+		area: 'platform',
+		description: 'Service-level objectives per project with error budgets and burn alerts (HA-PLAN W15).'
+	},
+	EXTERNAL_PROBER: {
+		name: 'EXTERNAL_PROBER',
+		// HA Wave 4, W15. Opt-in: a prober outside the fleet starts reporting targets it is
+		// registered for. Nothing listens while it is off.
+		default: false,
+		area: 'platform',
+		description: 'Accept reports from an external prober used to observe the fleet from outside it (HA-PLAN W15).'
 	}
 } as const satisfies Record<string, FeatureFlagDefinition>;
 
@@ -299,6 +315,8 @@ export type FeatureName = keyof typeof FEATURE_FLAGS;
  * - `RELEASE_PHASE`: changes how every deploy rolls; off until W5 passes its lab scenario (H25).
  * - `OBJECT_STORE_AZURE`, `OBJECT_STORE_GCS`: new backends; off until each passes the
  *   object-store conformance suite (W3).
+ * - `SLO_OBJECTS`, `EXTERNAL_PROBER`: W15's evaluation and outside-in prober are not tuned or
+ *   proven until lane B passes its lab; off until then (docs/build-plan/HA-WAVE-4.md).
  */
 export const OPT_IN_FEATURES: ReadonlySet<FeatureName> = new Set<FeatureName>([
 	'DB_AUTO_PROMOTE',
@@ -311,7 +329,9 @@ export const OPT_IN_FEATURES: ReadonlySet<FeatureName> = new Set<FeatureName>([
 	'STEERING',
 	'CONTROL_STANDBY',
 	'SYNC_REPLICA',
-	'PITR_REWIND'
+	'PITR_REWIND',
+	'SLO_OBJECTS',
+	'EXTERNAL_PROBER'
 ]);
 
 export type FeatureFlags = {

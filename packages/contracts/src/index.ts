@@ -11,6 +11,8 @@ export * from './features.ts';
 export * from './cluster.ts';
 export * from './control-plane.ts';
 export * from './database-member.ts';
+export * from './database-failover-policy.ts';
+export * from './slo.ts';
 export * from './cluster-config.ts';
 export * from './scheduling.ts';
 export * from './scaling.ts';

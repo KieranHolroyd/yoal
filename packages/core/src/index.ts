@@ -48,6 +48,9 @@ import { TelemetrySpoolGapService } from './telemetry-spool-gaps.ts';
 import { CertificateService, IngressSetService, SteeringService } from './ingress-service.ts';
 import { ControlPlaneService } from './control-plane-service.ts';
 import { DatabaseMemberService } from './database-member-service.ts';
+import { DatabaseFailoverPolicyService } from './database-failover-policy-service.ts';
+import { SloService } from './slo-service.ts';
+import { ExternalProberService } from './external-prober-service.ts';
 import { createDnsFailoverDriver } from './steering/dns-failover/core.ts';
 import { createVipDriverFromCore } from './steering/vip/core.ts';
 import { createWebhookDriverFromCore } from './steering/webhook/core.ts';
@@ -358,6 +361,12 @@ export interface Core {
 	certificates: CertificateService;
 	controlPlane: ControlPlaneService;
 	databaseMembers: DatabaseMemberService;
+	/** Per-database automatic failover policy and drills (HA-PLAN W11, Wave 4). */
+	failoverPolicies: DatabaseFailoverPolicyService;
+	/** SLO objects, error budgets and burn alerts (HA-PLAN W15, Wave 4). */
+	slos: SloService;
+	/** The external prober's report sink (HA-PLAN W15, Wave 4). */
+	externalProber: ExternalProberService;
 	/** Identity and access management (IAM.md I1). */
 	iam: IamService;
 	/** Guardrails and just-in-time access (IAM.md I11/I22, §9.2–§9.4). */
@@ -533,6 +542,9 @@ export function createCore(options: CoreOptions): Core {
 	ctx.certificates = new CertificateService(ctx);
 	ctx.controlPlane = new ControlPlaneService(ctx);
 	ctx.databaseMembers = new DatabaseMemberService(ctx);
+	ctx.failoverPolicies = new DatabaseFailoverPolicyService(ctx);
+	ctx.slos = new SloService(ctx);
+	ctx.externalProber = new ExternalProberService(ctx);
 	// Flow definitions register once every service exists, so their steps can call any of them.
 	ctx.flows.register(ctx.moves.databaseMoveFlow());
 	ctx.flows.register(ctx.nodeRollouts.rolloutFlow());
@@ -624,6 +636,9 @@ export function createCore(options: CoreOptions): Core {
 		certificates: ctx.certificates,
 		controlPlane: ctx.controlPlane,
 		databaseMembers: ctx.databaseMembers,
+		failoverPolicies: ctx.failoverPolicies,
+		slos: ctx.slos,
+		externalProber: ctx.externalProber,
 		iam: ctx.iam,
 		governance: ctx.governance,
 		authPolicy: ctx.authPolicy,

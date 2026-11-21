@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { databaseFailoverModes } from './database-failover-policy.ts';
 
 /**
  * Database members, durability and the synchronous set (HA-PLAN H21–H23, Wave 3 opening). The
@@ -216,6 +217,14 @@ export const databaseMemberReportSchema = z.object({
 	/** The lease's effective durability, as this member last read it. */
 	durabilityEffective: z.enum(databaseDurabilities).default('async'),
 	syncState: z.enum(syncStates).default('steady'),
+	/**
+	 * W11 detection evidence: whether this member can reach the arbiter, the arbiter lease expiry it
+	 * last read, and when it last saw the primary's keep-alive. Optional so a report from a Wave 3
+	 * agent parses unchanged; W11-SPEC §4 treats an absent value as "not reported", never as true.
+	 */
+	arbiterReachable: z.boolean().optional(),
+	leaseExpiresAt: z.string().datetime().nullable().optional(),
+	primaryKeepAliveAt: z.string().datetime().nullable().optional(),
 	observedAt: z.string().datetime(),
 });
 
@@ -238,6 +247,15 @@ export const databaseMemberProbeSchema = z.object({
 
 export type DatabaseMemberProbe = z.infer<typeof databaseMemberProbeSchema>;
 
+/** W11's policy for one database, as desired state tells its members (W11-SPEC §3). */
+export const databaseFailoverDesiredSchema = z.object({
+	mode: z.enum(databaseFailoverModes).default('manual'),
+	/** Async only: the operator accepted that an automatic promotion may lose commits. */
+	acceptDataLoss: z.boolean().default(false),
+	autoArmedAt: z.string().datetime().nullable().default(null),
+});
+export type DatabaseFailoverDesired = z.infer<typeof databaseFailoverDesiredSchema>;
+
 /** The desired-state entry per database that has replicas (lane B renders it). */
 export const databaseMembersDesiredSchema = z.object({
 	databaseId: z.string().min(1).max(64),
@@ -257,6 +275,11 @@ export const databaseMembersDesiredSchema = z.object({
 	/** `on_sync_loss` policy, so the primary's node can act within `sync_timeout` while I11 holds. */
 	syncTimeoutSeconds: z.number().int().min(0).max(300).default(30),
 	onSyncLoss: z.enum(syncLossPolicies).default('downgrade'),
+	/**
+	 * W11 policy. Optional and omitted while `DB_AUTO_PROMOTE` is off (and always for a manual
+	 * database), so a flag-off payload stays byte-identical.
+	 */
+	failover: databaseFailoverDesiredSchema.optional(),
 });
 
 export type DatabaseMembersDesired = z.infer<typeof databaseMembersDesiredSchema>;

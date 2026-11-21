@@ -28,7 +28,7 @@ Wave 4 is the second safety-critical wave. It opens with a spec and a model, not
 
 | Plan | Worktree | Branch | Migration reservation |
 |---|---|---|---|
-| Opening: foundation PR 4 | agent worktree | `ha/w4-foundation` | `0129_db_failover_policy.sql`, `0130_drills_slo.sql` |
+| Opening: foundation PR 4 | `ha/w4-foundation` | `ha/w4-foundation` | **`0129_db_failover_policy.sql`, `0130_drills_slo.sql` used** |
 | A — W11 automatic database failover (single author, §6.4) | agent worktree | `ha/w4-a-auto-failover` | `0131` spare |
 | B — W15 observability and SLOs | agent worktree | `ha/w4-b-observability` | `0132` spare |
 | Prosecutors ×3 (after A) | read-only | — | — |
