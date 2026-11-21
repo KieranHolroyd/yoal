@@ -731,9 +731,13 @@ export class ApiClient {
 	}
 
 	/** Change a node's placement settings (zone, region, roles, labels), `PATCH /api/v1/nodes/:id`. */
-	async updateNodeSettings(nodeId: string, body: { zone?: string; region?: string }): Promise<{ node: NodeSummary; raw: unknown }> {
-		const raw = await this.request('PATCH', `/api/v1/nodes/${encodeURIComponent(nodeId)}`, { body });
-		return { node: unwrap(raw) as NodeSummary, raw };
+	async updateNodeSettings(
+		nodeId: string,
+		body: { zone?: string; region?: string },
+		options: { force?: boolean } = {},
+	): Promise<{ node: NodeSummary & { warnings?: string[] }; raw: unknown }> {
+		const raw = await this.request('PATCH', `/api/v1/nodes/${encodeURIComponent(nodeId)}${options.force ? '?force=1' : ''}`, { body });
+		return { node: unwrap(raw) as NodeSummary & { warnings?: string[] }, raw };
 	}
 
 	/** Install the control plane's signed release on one node (D99). Needs a dashboard session. */

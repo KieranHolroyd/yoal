@@ -278,12 +278,25 @@ export function regionChecks(ctx: CoreContext, profile: HaProfile): HaCheck[] {
 		.all()) {
 		const there = replicas.filter((row) => row.database_id === database.id && regionOfId.get(row.node_id) === database.standby_region);
 		const subject = { kind: 'database' as const, id: database.id, name: database.name };
+		// After a region promotion the region it left becomes the standby region (W13 review): say so,
+		// because the fix is to rebuild a replica there once it is back, not to undo anything.
+		const moved = ctx.sqlite
+			.query<{ finished_at: number | null }, [string, string]>(
+				`SELECT s.finished_at FROM region_promotion_steps s JOIN region_promotions p ON p.id = s.promotion_id
+				  WHERE s.kind = 'database' AND s.resource_id = ? AND s.status = 'done' AND p.from_region = ?
+				  ORDER BY s.finished_at DESC LIMIT 1`,
+			)
+			.get(database.id, database.standby_region);
 		if (there.length === 0)
 			checks.push({
 				id: 'regions',
 				title: `${database.name} has no replica in its standby region`,
 				status: 'fail',
-				evidence: [`Standby region ${database.standby_region} holds no live replica of ${database.name}, so a region promotion would leave it behind.`],
+				evidence: [
+					moved
+						? `A region promotion moved it away from ${database.standby_region}${moved.finished_at ? ` at ${new Date(moved.finished_at).toISOString()}` : ''}; that region is now its standby and holds no live replica. Rebuild one there once the region is back.`
+						: `Standby region ${database.standby_region} holds no live replica of ${database.name}, so a region promotion would leave it behind.`,
+				],
 				fix: { kind: 'command', value: `yoal db replicas add ${database.name} --node <data node in ${database.standby_region}>` },
 				subject,
 			});

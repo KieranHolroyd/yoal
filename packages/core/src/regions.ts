@@ -1,5 +1,7 @@
 import {
 	DEFAULT_REGION,
+	effectiveDurability,
+	type DatabaseLease,
 	autoPromotionAllowedAcrossRegion,
 	placementSpread,
 	regionOf,
@@ -73,6 +75,64 @@ export function syncTargetRefusal(
 	target: { name: string; region?: string | null },
 ): string | null {
 	return syncRegionRefusal({ nodeName: primary.name, region: primary.region }, { nodeName: target.name, region: target.region })?.message ?? null;
+}
+
+// ------------------------------------------------------------------ region promotion lease gate
+
+/** What one database's lease says about promoting `candidate` in a region promotion. */
+export interface RegionLeaseGate {
+	/**
+	 * The lease is live: held by a node other than the candidate and not expired at the arbiter's
+	 * clock, so the old primary may still be serving writes. Refused unless break glass.
+	 */
+	live: string | null;
+	/** Never promotable, break glass or not: the W10 path itself would refuse it. */
+	blocker: string | null;
+	/** The candidate is not in a `sync` lease's synchronous set: acknowledged commits may be lost. */
+	syncSetLoss: string | null;
+}
+
+/**
+ * The region promotion's live-lease gate for one database (W13 review). Pure.
+ * - **live**: `holderNodeId !== candidate` and `expiresAt` is after the arbiter's clock
+ *   (`serverDate`, else this process's). An unreadable arbiter counts as live: the old region may
+ *   be serving and nothing proves otherwise.
+ * - **blocker**: an open sync-set change (non-promotable, W9-SPEC §5.5), a lease past the planned
+ *   generation (someone else acted), or a `sync` database with no lease at all.
+ * - **syncSetLoss**: a `sync` lease that does not name the candidate. Reported on its own: a region
+ *   promotion always accepts losing the replica's lag, and H26 keeps `sync` inside a region, so a
+ *   standby region's replica is never in the set.
+ */
+export function regionLeaseGate(input: {
+	record: { lease: DatabaseLease; serverDate?: number | null } | null;
+	error?: string | null;
+	durability: 'async' | 'sync';
+	candidateNodeId: string;
+	expectedGeneration: number;
+	now: number;
+	nodeName: (id: string) => string;
+}): RegionLeaseGate {
+	const gate: RegionLeaseGate = { live: null, blocker: null, syncSetLoss: null };
+	if (input.error) {
+		gate.live = `the lease could not be read (${input.error}), so the old primary may still hold it`;
+		return gate;
+	}
+	const lease = input.record?.lease;
+	if (!lease) {
+		if (input.durability === 'sync') gate.blocker = 'there is no database lease, so a synchronous database cannot prove which replica may take over';
+		return gate;
+	}
+	if (lease.syncState !== 'steady')
+		gate.blocker = 'a sync-set change is open on the lease, so no replica may be promoted until it closes or falls back';
+	else if (lease.generation > input.expectedGeneration)
+		gate.blocker = `the lease is at generation ${lease.generation}, past the planned ${input.expectedGeneration}: someone else acted`;
+	const clock = input.record?.serverDate ?? input.now;
+	const expiresAt = Date.parse(lease.expiresAt);
+	if (lease.holderNodeId !== input.candidateNodeId && (!Number.isFinite(expiresAt) || expiresAt > clock))
+		gate.live = `the lease is held by ${input.nodeName(lease.holderNodeId)} at generation ${lease.generation} until ${lease.expiresAt}`;
+	if (effectiveDurability(lease) === 'sync' && !lease.sync.includes(input.candidateNodeId))
+		gate.syncSetLoss = `${input.nodeName(input.candidateNodeId)} is not in the synchronous set${lease.sync.length ? ` (${lease.sync.map(input.nodeName).join(', ')})` : ''}, so commits acknowledged after its replay position are lost`;
+	return gate;
 }
 
 // ------------------------------------------------------------------ standby region

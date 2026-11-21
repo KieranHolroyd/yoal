@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { hostname } from 'node:os';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import {
@@ -27,7 +28,7 @@ import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import { compareLsn } from './database-replicas.ts';
 import { buildSystemPrincipal } from './iam/system.ts';
-import { maxPlannedLag, pickStandbyNode, regionPlanHash, regionSteeringSet, type StandbyCandidate } from './regions.ts';
+import { maxPlannedLag, pickStandbyNode, regionLeaseGate, regionPlanHash, regionSteeringSet, type StandbyCandidate } from './regions.ts';
 import { newId, parseJson } from './util.ts';
 
 /**
@@ -60,14 +61,19 @@ import { newId, parseJson } from './util.ts';
  */
 export class RegionService {
 	/** This process's runner identity for the promotion lease (no randomness: seeded fixtures). */
-	readonly #runnerId: string;
+	readonly #fixedRunnerId: string | null;
 	#running = false;
 
 	constructor(
 		private readonly ctx: CoreContext,
 		options: { runnerId?: string } = {},
 	) {
-		this.#runnerId = options.runnerId ?? `${hostname().slice(0, 40)}:${process.pid}`;
+		this.#fixedRunnerId = options.runnerId ?? null;
+	}
+
+	/** This process's runner identity: fixed in tests, else `regionRunnerId()` (lazy, so seeded fixtures draw nothing). */
+	get #runnerId(): string {
+		return this.#fixedRunnerId ?? regionRunnerId();
 	}
 
 	enabled(): boolean {
@@ -242,48 +248,58 @@ export class RegionService {
 		const now = this.ctx.now();
 		const id = newId('rgp_');
 		const epoch = control.fencedGeneration ?? controlPlanned.expectedGeneration;
-		this.ctx.sqlite.transaction(() => {
-			this.ctx.db
-				.insert(regionPromotions)
-				.values({
-					id,
-					toRegion: target,
-					fromRegion: plan.fromRegion,
-					stage: 'databases',
-					planHash: plan.planHash,
-					runnerId: this.#runnerId,
-					leaseExpiresAt: now + REGION_PROMOTION_RUNNER_LEASE_SECONDS * 1000,
-					attempt: 1,
-					acceptDataLoss: true,
-					reason: input.reason!,
-					confirmedBy: principal.userId,
-					confirmedAt: now,
-					startedAt: now,
-				})
-				.run();
-			for (const step of plan.steps)
+		// A second confirm that raced this one: the control step is idempotent, the record is not.
+		const raced = () => new ConflictError(`A promotion to region "${target}" was confirmed at the same time and is running; follow it with yoal ha region.`);
+		if (this.#openPromotion()) throw raced();
+		try {
+			this.ctx.sqlite.transaction(() => {
 				this.ctx.db
-					.insert(regionPromotionSteps)
+					.insert(regionPromotions)
 					.values({
-						promotionId: id,
-						position: step.position,
-						step: step.step,
-						kind: step.kind,
-						resourceId: step.resourceId,
-						name: step.name,
-						targetNodeId: step.targetNodeId,
-						// Steering is fenced by the new control epoch (contract): only its holder writes.
-						expectedGeneration: step.kind === 'steering' ? epoch : step.expectedGeneration,
-						fencedGeneration: step.kind === 'control-plane' ? control.fencedGeneration : null,
-						status: step.kind === 'control-plane' ? control.status : step.status,
-						lagBytes: step.lagBytes,
-						lagSeconds: step.lagSeconds,
-						startedAt: step.kind === 'control-plane' ? now : null,
-						finishedAt: step.kind === 'control-plane' || step.status === 'skipped' ? now : null,
-						message: step.kind === 'control-plane' ? control.message : step.message,
+						id,
+						toRegion: target,
+						fromRegion: plan.fromRegion,
+						stage: 'databases',
+						planHash: plan.planHash,
+						runnerId: this.#runnerId,
+						leaseExpiresAt: now + REGION_PROMOTION_RUNNER_LEASE_SECONDS * 1000,
+						attempt: 1,
+						acceptDataLoss: true,
+						breakGlass: input.breakGlass,
+						reason: input.reason!,
+						confirmedBy: principal.userId,
+						confirmedAt: now,
+						startedAt: now,
 					})
 					.run();
-		})();
+				for (const step of plan.steps)
+					this.ctx.db
+						.insert(regionPromotionSteps)
+						.values({
+							promotionId: id,
+							position: step.position,
+							step: step.step,
+							kind: step.kind,
+							resourceId: step.resourceId,
+							name: step.name,
+							targetNodeId: step.targetNodeId,
+							// Steering is fenced by the new control epoch (contract): only its holder writes.
+							expectedGeneration: step.kind === 'steering' ? epoch : step.expectedGeneration,
+							fencedGeneration: step.kind === 'control-plane' ? control.fencedGeneration : null,
+							status: step.kind === 'control-plane' ? control.status : step.status,
+							lagBytes: step.lagBytes,
+							lagSeconds: step.lagSeconds,
+							startedAt: step.kind === 'control-plane' ? now : null,
+							finishedAt: step.kind === 'control-plane' || step.status === 'skipped' ? now : null,
+							message: step.kind === 'control-plane' ? control.message : step.message,
+						})
+						.run();
+			})();
+		} catch (error) {
+			// `region_promotions_open_idx`: at most one open promotion.
+			if (error instanceof Error && /UNIQUE constraint failed/.test(error.message)) throw raced();
+			throw error;
+		}
 		this.ctx.audit.record({
 			principal,
 			action: 'ha.region.promote',
@@ -295,6 +311,7 @@ export class RegionService {
 				planHash: plan.planHash,
 				breakGlass: input.breakGlass,
 				liveLeases: plan.liveLeases,
+				syncSetLoss: plan.syncSetLoss,
 				maxLagSeconds: plan.maxLagSeconds,
 				reason: input.reason,
 				controlEpoch: epoch,
@@ -320,11 +337,12 @@ export class RegionService {
 
 	// ------------------------------------------------------------------ plan
 
-	async #plan(target: string): Promise<RegionPromotionPlan & { blockers: string[]; liveLeases: string[] }> {
+	async #plan(target: string): Promise<RegionPromotionPlan & { blockers: string[]; liveLeases: string[]; syncSetLoss: string[] }> {
 		const rows = this.#nodes();
 		const byId = new Map(rows.map((row) => [row.id, row]));
 		const blockers: string[] = [];
 		const liveLeases: string[] = [];
+		const syncSetLoss: string[] = [];
 		const steps: RegionPromotionStepView[] = [];
 
 		// Control plane: this node must be in the target region; its epoch is the fence.
@@ -381,11 +399,12 @@ export class RegionService {
 				continue;
 			}
 			steps.push(this.#step({ ...base, targetNodeId: replica.nodeId, lagBytes: replica.lagBytes, lagSeconds: replica.lagSeconds }));
-			// The database lease is the fence: still valid means the old primary may be serving.
-			const strict = await this.ctx.databaseMembers.promotionRefusal(database, replica.nodeId, false);
-			const forced = strict ? await this.ctx.databaseMembers.promotionRefusal(database, replica.nodeId, true) : null;
-			if (forced) blockers.push(`${database.name}: ${forced}`);
-			else if (strict) liveLeases.push(`${database.name}: ${strict}`);
+			// The database lease is the fence: held by anyone but the candidate and unexpired at the
+			// arbiter's clock means the old primary may still be serving writes.
+			const gate = await this.#leaseGate(database, replica.nodeId, database.primaryGeneration);
+			if (gate.blocker) blockers.push(`${database.name}: ${gate.blocker}`);
+			if (gate.live) liveLeases.push(`${database.name}: ${gate.live}`);
+			if (gate.syncSetLoss) syncSetLoss.push(`${database.name}: ${gate.syncSetLoss}`);
 		}
 
 		// Steering last, fenced by the new control epoch.
@@ -416,7 +435,23 @@ export class RegionService {
 			maxLagSeconds: maxPlannedLag(steps),
 			blockers,
 			liveLeases,
+			syncSetLoss,
 		};
+	}
+
+	/** The live-lease gate for one database at the arbiter's clock (`regionLeaseGate`). */
+	async #leaseGate(database: typeof databases.$inferSelect, candidateNodeId: string, expectedGeneration: number) {
+		const read = await this.ctx.databaseMembers.readLease(database.id);
+		const names = new Map(this.#nodes().map((row) => [row.id, row.name]));
+		return regionLeaseGate({
+			record: read.record,
+			error: read.error,
+			durability: database.durability,
+			candidateNodeId,
+			expectedGeneration,
+			now: this.ctx.now(),
+			nodeName: (id) => names.get(id) ?? id,
+		});
 	}
 
 	#step(input: Partial<RegionPromotionStepView> & Pick<RegionPromotionStepView, 'position' | 'step' | 'kind' | 'resourceId' | 'name' | 'expectedGeneration'>): RegionPromotionStepView {
@@ -485,6 +520,14 @@ export class RegionService {
 				this.#renewLease(id);
 				if (outcome.status === 'running') return;
 				this.#finishStep(id, next.position, outcome.status, outcome.fencedGeneration ?? null, outcome.message);
+				// The region it left becomes its standby region, so a promotion back plans it first and
+				// the preflight asks for a replica there.
+				if (next.kind === 'database' && outcome.status === 'done')
+					this.ctx.db
+						.update(databases)
+						.set({ standbyRegion: promotion.fromRegion, updatedAt: this.ctx.now() })
+						.where(eq(databases.id, next.resourceId))
+						.run();
 				if (outcome.status === 'failed') {
 					this.#finish(id, 'failed', `${next.name}: ${outcome.message}`);
 					return;
@@ -539,6 +582,15 @@ export class RegionService {
 			.where(and(eq(databaseReplicas.databaseId, database.id), eq(databaseReplicas.nodeId, step.targetNodeId ?? ''), isNull(databaseReplicas.removingAt)))
 			.get();
 		if (!replica) return { status: 'failed', message: 'The planned replica is gone.' };
+		// W13 review: re-check the lease at this step's generation, on whichever runner gets here. A
+		// lease that went live since the confirmation stops the run unless break glass is recorded.
+		const gate = await this.#leaseGate(database, replica.nodeId, step.expectedGeneration);
+		if (gate.blocker) return { status: 'failed', message: `${gate.blocker}; nothing was promoted.` };
+		if (gate.live && !promotion.breakGlass)
+			return {
+				status: 'failed',
+				message: `${gate.live}; the old region may be serving again, so nothing was promoted. Start a new promotion once it is stopped (with break glass if it must go now).`,
+			};
 		this.#markRunning(promotion.id, step.position);
 		try {
 			await this.ctx.databaseReplicas.promoteForRegion(principal ?? buildSystemPrincipal('system:failover', database.orgId), {
@@ -684,6 +736,7 @@ export class RegionService {
 			leaseExpiresAt: iso(row.leaseExpiresAt),
 			attempt: row.attempt,
 			acceptDataLoss: true,
+			breakGlass: row.breakGlass,
 			reason: row.reason,
 			confirmedBy: row.confirmedBy,
 			confirmedAt: new Date(row.confirmedAt).toISOString(),
@@ -736,4 +789,17 @@ export class RegionService {
 		if (!this.ctx.platformIam.canAdminister(principal))
 			throw new CoreError('forbidden', 'A region promotion needs a platform admin signed in to the dashboard or the CLI; MCP cannot run it.', 403);
 	}
+}
+
+let bootNonce: string | null = null;
+
+/**
+ * The runner identity of this process: host, pid and a nonce drawn once per process start, so a
+ * restarted control plane (same host, a recycled pid) never mistakes an old lease for its own.
+ * Drawn on first use, so a process that never runs a promotion (and the seeded golden fixtures)
+ * draws nothing.
+ */
+export function regionRunnerId(): string {
+	bootNonce ??= randomBytes(6).toString('hex');
+	return `${hostname().slice(0, 40)}:${process.pid}:${bootNonce}`;
 }

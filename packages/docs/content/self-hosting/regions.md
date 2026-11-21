@@ -28,6 +28,8 @@ yoal nodes list
 
 In the dashboard, open **Nodes**, choose **Edit node** and set **Zone** and **Region**. The **Region** field appears once regions are on. Over REST, send `PATCH /api/v1/nodes/:id` with `{"zone": "ukwest-1", "region": "ukwest"}`. A change that would put one zone in two regions is refused and names the node in the way. To move a whole zone, give its nodes a new zone name in the new region.
 
+A region change is refused while the node holds a database primary or replica, or a copy of an app placed with `spread: region`, and while a region promotion is open: moving the node would move those across regions. Move them first. A platform admin can override this with `yoal nodes set --force` (`PATCH /api/v1/nodes/:id?force=1`); the change is audited with what it affected, and the command prints it.
+
 `yoal nodes set` and the REST call need a platform admin signed in to the dashboard. With the default bindings, the CLI's API key gets `403`; use **Nodes** in the dashboard instead.
 
 ## Spread copies across regions
@@ -94,7 +96,16 @@ yoal ha region promote ukwest --confirm ukwest --plan-hash <hash> \
   --accept-data-loss --reason "uksouth unreachable since 09:40"
 ```
 
-If any generation moved since the plan, the hash no longer matches and the promotion is refused: show the plan again. While the old region still holds a valid lease, either its control-plane lease or a database lease, the promotion is refused. Wait for the leases to expire, or add `--break-glass` once you know the old region is stopped. Break glass is recorded in the audit log.
+If any generation moved since the plan, the hash no longer matches and the promotion is refused: show the plan again.
+
+A lease is still held when it names a node other than the one being promoted and has not expired by the arbiter's clock: the old primary may still be serving writes. While the old region holds its control-plane lease or any database lease, the promotion is refused. When a region is really lost its leases expire within seconds, because nothing renews them; Yoal also stops renewing a lease on behalf of a primary whose node is offline or whose database a promotion is moving. Wait for the leases to expire, or add `--break-glass` once you know the old region is stopped. Break glass is stored on the promotion and recorded in the audit log.
+
+Each database is checked again when its turn comes, whichever control plane runs it. If its old primary holds a valid lease again, the promotion stops at that database and promotes nothing more, unless you broke glass. Two other things are reported in the plan on their own lines:
+
+- **A sync-set change is open** on a database's lease: it cannot be promoted until the change closes or falls back, break glass or not.
+- **A synchronous database's replica is not in its synchronous set.** That is always the case for a standby region, because `sync` stays inside a region. Commits acknowledged after the replica's position are lost; that is the data loss you accept.
+
+When a database's promotion finishes, the region it left becomes its standby region, so a promotion back plans it first. The HA preflight then asks for a replica in that region: rebuild one once the region is back with `yoal db replicas add`.
 
 The command returns once the control plane is promoted and the first database has started. The rest continues on its own as each database finishes; follow it with `yoal ha region` or on **Settings → High availability**. A step that fails stops the promotion and names the step and the reason; nothing is rolled back. Fix the cause and run `yoal ha region promote ukwest` again for a new plan: finished steps are not repeated, because each database is already in the region.
 

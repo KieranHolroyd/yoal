@@ -998,19 +998,29 @@ online ingress node there. `yoal ha region` shows all three.
    `yoal ha region promote <B> --confirm <B> --plan-hash <hash> --accept-data-loss --reason "<why>"`.
    Needs a platform admin, by default a dashboard session (`POST /api/v1/ha/regions/<B>/promote`);
    audited as `ha.region.promote`. A moved generation returns 412: show the plan again.
-4. If A still holds a valid control-plane or database lease, the promotion is refused (409). Wait
-   for expiry, or, **only once A is known to be stopped** (instances off, or its network cut at the
-   provider), add `--break-glass`. The audit row records `breakGlass: true`.
+4. If A still holds a valid control-plane or database lease (holder is not the node being promoted,
+   not expired at the arbiter's clock), the promotion is refused (409). The control plane stops
+   renewing a lease on behalf of an offline primary, or of a database an open promotion moves, so a
+   lost region's leases lapse within one TTL. Wait, or, **only once A is known to be stopped**
+   (instances off, or its network cut at the provider), add `--break-glass`. It is stored on the
+   record (`region_promotions.break_glass`, migration 0134) and in the audit row. Each database step
+   re-checks its lease at its planned generation on whichever runner reaches it, and stops the run if
+   a lease went live again, unless break glass is recorded. An open sync-set change is a blocker;
+   a standby replica outside the synchronous set is shown as committed-data loss.
+   Node region changes are refused while a node holds database members or `spread: region` copies,
+   or while a promotion is open (`--force`, admin, audited).
 5. Order: this standby promotes itself (W9 CAS at the planned epoch); the record
    (`region_promotions`, `region_promotion_steps`) is written under the new epoch; each database is
    promoted through the W10 path at its planned generation, standby-region databases first, one at
    a time; then steering moves the active region. The 5 s control-plane tick advances it as each
    database finishes. Follow it with `yoal ha region` or Settings → High availability → Regions.
-6. A failed step stops the run (`stage: failed`, `error: <step>: <reason>`); nothing is rolled
+6. A promoted database's `standby_region` becomes A, so a promotion back plans it first and the
+   `regions` preflight asks for a replica in A.
+7. A failed step stops the run (`stage: failed`, `error: <step>: <reason>`); nothing is rolled
    back. Fix the cause, show a new plan and confirm it: databases already promoted are no longer in
    it. A crashed runner is taken over by another control plane once its 60 s runner lease expires
    (`attempt` increments); each step is idempotent at its fenced generation.
-7. After: point DNS or balancers that Yoal does not drive at B's ingress (the steering step's
+8. After: point DNS or balancers that Yoal does not drive at B's ingress (the steering step's
    message lists them for `direct`); when A returns, do not re-add it as primary. Its old database
    primaries are fenced by generation; rebuild them as replicas (`yoal db replicas add`).
 

@@ -144,7 +144,9 @@ describe('REGIONS on', () => {
 			expect.objectContaining({ message: expect.stringContaining('a zone belongs to exactly one region') }),
 		);
 		core.nodes.update(principal, join2.nodeId, { zone: 'ukwest-1', region: 'ukwest' });
-		core.nodes.update(principal, join1.nodeId, { region: 'uksouth' });
+		// a1 holds the database "main": its region only changes when a platform admin forces it (W13 review).
+		expect(() => core.nodes.update(principal, join1.nodeId, { region: 'uksouth' })).toThrow(/holds database members \(main\)/);
+		core.nodes.update(principal, join1.nodeId, { region: 'uksouth' }, { force: true });
 		expect(() => core.nodes.update(principal, join1.nodeId, { zone: 'ukwest-1' })).toThrow(
 			expect.objectContaining({ message: expect.stringContaining('Zone "ukwest-1" is in region "ukwest"') }),
 		);

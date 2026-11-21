@@ -98,6 +98,8 @@ export interface RegionPromotionPlanView {
 	maxLagSeconds: number | null;
 	blockers?: string[];
 	liveLeases?: string[];
+	/** Sync databases whose standby-region replica is not in the synchronous set. */
+	syncSetLoss?: string[];
 }
 
 /** Mirrors `RegionPromotionView`. */
@@ -111,6 +113,8 @@ export interface RegionPromotionView {
 	runnerId: string | null;
 	leaseExpiresAt: string | null;
 	attempt: number;
+	/** Confirmed while the old region still held a valid lease. */
+	breakGlass?: boolean;
 	reason: string;
 	confirmedBy: string;
 	confirmedAt: string;
@@ -189,14 +193,17 @@ export function formatRegionPlan(plan: RegionPromotionPlanView): string {
 		`Plan hash: ${plan.planHash}`,
 	];
 	for (const blocker of plan.blockers ?? []) lines.push(`Blocked: ${blocker}`);
+	for (const loss of plan.syncSetLoss ?? []) lines.push(`Synchronous commits at risk: ${loss}`);
 	for (const live of plan.liveLeases ?? []) lines.push(`Still held by ${plan.fromRegion}: ${live}`);
+	if ((plan.liveLeases ?? []).length > 0)
+		lines.push('A live lease refuses the promotion. Wait until it expires, or add --break-glass only once that region is known to be stopped.');
 	return lines.join('\n');
 }
 
 /** One stored promotion. */
 export function formatRegionPromotion(view: RegionPromotionView): string {
 	const lines = [
-		`${view.id}: ${view.fromRegion} → ${view.toRegion}, ${view.stage} (attempt ${view.attempt}, confirmed by ${view.confirmedBy} at ${formatTime(view.confirmedAt)})`,
+		`${view.id}: ${view.fromRegion} → ${view.toRegion}, ${view.stage} (attempt ${view.attempt}, confirmed by ${view.confirmedBy} at ${formatTime(view.confirmedAt)}${view.breakGlass ? ', break glass' : ''})`,
 		`Reason: ${view.reason}`,
 		stepRows(view.steps),
 	];

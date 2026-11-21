@@ -407,7 +407,7 @@ describe('W13 rework', () => {
 		core.databaseReplicas.add(admin, 'orders', { node: a1.nodeId });
 		opened.sqlite.run("UPDATE database_replicas SET status = 'streaming', replay_lsn = '0/6000000' WHERE node_id = ?", [a1.nodeId]);
 		const backPlan = (await back.promote(admin, 'uksouth', {})) as RegionPromotionPlan;
-		expect(backPlan.steps.find((step) => step.kind === 'database')).toMatchObject({ name: 'orders', status: 'pending' });
+		expect(backPlan.steps.filter((step) => step.kind === 'database' && step.status === 'pending').map((step) => step.name)).toEqual(['orders']);
 	});
 
 	test('a region change on a node holding database members or region-spread copies is refused unless forced', async () => {
@@ -439,7 +439,7 @@ describe('W13 rework', () => {
 			previewAccess: 'platform',
 		});
 		opened.sqlite.run(
-			"INSERT INTO workloads (id, org_id, project_id, deployment_id, node_id, runtime, status, spec_json, memory_mb) VALUES ('wl_spread', 'org_1', ?, 'dep_x', ?, 'process', 'running', '{}', 64)",
+			"INSERT INTO workloads (id, org_id, project_id, deployment_id, node_id, runtime, status, spec_json, memory_mb, created_at, updated_at) VALUES ('wl_spread', 'org_1', ?, 'dep_x', ?, 'process', 'running', '{}', 64, 1, 1)",
 			[project.id, b2.nodeId],
 		);
 		opened.sqlite.run(

@@ -34,6 +34,7 @@ const flags: FlagSpec = {
 	limit: { type: 'string' },
 	zone: { type: 'string' },
 	region: { type: 'string' },
+	force: { type: 'boolean' },
 	help: { type: 'boolean', short: 'h' },
 };
 
@@ -45,9 +46,12 @@ can plan and read, and gets 403 for the rest.
 
 Actions:
   list [--json]                      Every node with its status, zone, region and roles
-  set <node> [--zone <zone>] [--region <region>]
+  set <node> [--zone <zone>] [--region <region>] [--force]
                                      Change a node's zone or region. A zone belongs to exactly one
-                                     region; a region other than default needs YOAL_FEATURE_REGIONS
+                                     region; a region other than default needs YOAL_FEATURE_REGIONS.
+                                     A region change is refused while the node holds database
+                                     members or spread: region copies, or a region promotion is
+                                     open; --force overrides that (platform admin, audited)
   update <node>                      Install the control plane's release on one node (id or name)
   rollout plan [options]             Show the waves a fleet update would run now
   rollout start [options] [--yes] [--wait]
@@ -114,11 +118,16 @@ async function setNode(client: ApiClient, args: ParsedArgs): Promise<void> {
 	if (zone === undefined && region === undefined) throw new UsageError('Pass --zone, --region or both.');
 	const { nodes } = await client.listNodes();
 	const node = resolveNode(nodes, ref);
-	const { node: updated, raw } = await client.updateNodeSettings(node.id, {
-		...(zone !== undefined ? { zone } : {}),
-		...(region !== undefined ? { region } : {}),
-	});
+	const { node: updated, raw } = await client.updateNodeSettings(
+		node.id,
+		{
+			...(zone !== undefined ? { zone } : {}),
+			...(region !== undefined ? { region } : {}),
+		},
+		{ force: args.boolean('force') },
+	);
 	if (args.boolean('json')) return printJson(raw);
+	for (const warning of updated.warnings ?? []) console.error(`Warning: ${warning}`);
 	console.log(`${updated.name ?? node.name}: zone ${updated.zone ?? zone ?? '-'}, region ${updated.region ?? region ?? 'default'}.`);
 }
 

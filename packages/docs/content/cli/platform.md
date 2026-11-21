@@ -100,7 +100,7 @@ Without `--confirm`, prints the plan and changes nothing: the control plane, eac
 | `--plan-hash <hash>` | The hash the plan printed. A plan whose generations moved since is refused. |
 | `--accept-data-loss` | Required: writes after the last replicated one are lost. |
 | `--reason <text>` | Required: recorded in the audit log. |
-| `--break-glass` | Promote although the old region still holds a valid lease. Only once that region is known to be stopped. Audited. |
+| `--break-glass` | Promote although the old region still holds a valid lease (one that names another node and has not expired). Only once that region is known to be stopped. Stored on the promotion, so later database steps honour it too; audited. |
 
 The command exits 1 if the promotion failed. Running it again with the same hash resumes an open promotion.
 
@@ -223,10 +223,10 @@ Every node with its status, zone, region, roles and agent version.
 ### nodes set
 
 ```sh
-yoal nodes set <node> [--zone <zone>] [--region <region>] [--json]
+yoal nodes set <node> [--zone <zone>] [--region <region>] [--force] [--json]
 ```
 
-Changes a node's zone, region or both. A zone belongs to exactly one region, so a change that would put one zone in two regions is refused. A region other than `default` needs regions on; see [regions and disaster recovery](/self-hosting/regions#put-nodes-in-regions). Needs a platform admin signed in to the dashboard.
+Changes a node's zone, region or both. A zone belongs to exactly one region, so a change that would put one zone in two regions is refused. A region change is also refused while the node holds database primaries or replicas or `spread: region` copies, or while a region promotion is open; `--force` overrides that, is audited, and prints what it affected. A region other than `default` needs regions on; see [regions and disaster recovery](/self-hosting/regions#put-nodes-in-regions). Needs a platform admin signed in to the dashboard.
 
 ```sh
 yoal nodes set dr-1 --zone ukwest-1 --region ukwest

@@ -49,6 +49,7 @@ import {
 	parseLsn,
 	renewedLease,
 	syncLossDecision,
+	type DatabaseLeaseRecord,
 	type DatabaseLeaseStore,
 	type SyncMemberView,
 } from './database-sync.ts';
@@ -781,15 +782,16 @@ export class DatabaseMemberService {
 	): Promise<string | null> {
 		// F1: a post-boot capability downgrade (or a controller installed without the flag/handler)
 		// must refuse before the lease is even read.
-		if (!this.ctx.failoverPolicies.autoActiveForRow(database))
-			return 'automatic failover is no longer eligible (policy, controller or node self-fencing changed)';
-		// HA-PLAN H26: a replica outside the primary's region is never promoted automatically.
+		// HA-PLAN H26: a replica outside the primary's region is never promoted automatically,
+		// whatever the policy says, so this is checked first.
 		const candidateNode = this.#node(candidateNodeId);
 		const crossRegion = crossRegionPromotionRefusal(this.#node(database.nodeId) ?? {}, {
 			name: candidateNode?.name ?? candidateNodeId,
 			region: candidateNode?.region,
 		});
 		if (crossRegion) return crossRegion;
+		if (!this.ctx.failoverPolicies.autoActiveForRow(database))
+			return 'automatic failover is no longer eligible (policy, controller or node self-fencing changed)';
 		const store = this.#store();
 		if (!store) return 'no arbiter with conditional writes is configured';
 		let record;
@@ -1785,6 +1787,21 @@ export class DatabaseMemberService {
 		});
 	}
 
+	/**
+	 * The database lease as the arbiter holds it now, with the arbiter's clock, for the region
+	 * promotion's live-lease gate (HA-PLAN H26). `record` is null when there is no arbiter or no
+	 * lease; `error` says the arbiter could not be read.
+	 */
+	async readLease(databaseId: string): Promise<{ record: DatabaseLeaseRecord | null; error: string | null }> {
+		const store = this.#store();
+		if (!store) return { record: null, error: null };
+		try {
+			return { record: await store.read(databaseId), error: null };
+		} catch (error) {
+			return { record: null, error: errorText(error) };
+		}
+	}
+
 	#store(): DatabaseLeaseStore | null {
 		return this.ctx.arbiter ? new ObjectStoreDatabaseLeaseStore(this.ctx.arbiter) : null;
 	}
@@ -1794,6 +1811,11 @@ export class DatabaseMemberService {
 		// Review blocker 9: once every data node advertises the real member machine, the primary's
 		// node renews its own lease; the control plane must not race it.
 		if (this.#nodeRenewalAvailable(database)) return false;
+		// HA-PLAN H26 (W13 review): renewing on the holder's behalf is only honest while its node is
+		// online. A silent holder's lease must lapse, and so must the lease of a database an open
+		// region promotion is moving, or the promotion's live-lease gate would refuse for ever.
+		if (this.#node(database.nodeId)?.status !== 'online') return false;
+		if (this.#regionPromotionMoving(database.id)) return false;
 		const store = this.#store();
 		if (!store) return false;
 		try {
@@ -1821,6 +1843,18 @@ export class DatabaseMemberService {
 			// The arbiter is unreachable: the holder cannot prove the lease, and the next tick retries.
 			return false;
 		}
+	}
+
+	/** True while an open region promotion has an unfinished step for this database. */
+	#regionPromotionMoving(databaseId: string): boolean {
+		return Boolean(
+			this.ctx.sqlite
+				.query(
+					`SELECT 1 FROM region_promotion_steps s JOIN region_promotions p ON p.id = s.promotion_id
+					  WHERE p.finished_at IS NULL AND s.kind = 'database' AND s.resource_id = ? AND s.status IN ('pending', 'running') LIMIT 1`,
+				)
+				.get(databaseId),
+		);
 	}
 
 	/** Retry a promotion's lease take that failed after the database was already re-pointed. */

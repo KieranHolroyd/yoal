@@ -238,17 +238,14 @@ describe('the §8 blueprint', () => {
 
 	test('with every flag on, a fresh fleet plans the steps that cannot apply in one run as refusals', async () => {
 		setFlags(true);
+		// Lane A built regions: the standby region now plans (the fleet has a data node there).
 		expect(await problems(section8)).toEqual([
-			'databases.main.standbyRegion: blueprint.databases.standbyRegion is not built yet (HA-PLAN W13, Wave 5 lane A); regions are enabled but only node regions are stored.',
 			expect.stringMatching(/^databases\.main\.durability: durability: sync picks a replica that is already streaming, and this plan creates the database\./),
 			expect.stringMatching(/^databases\.main\.failover: failover: auto is refused \[no-drill\]/),
 		]);
-		// spread: region is the same not-built refusal, for apps and databases.
+		// spread: region is built (lane A): no not-built refusal, for apps or databases.
 		const regional = section8NoStandby.replace('placement: { spread: zone }', 'placement: { spread: region }').replace('durability: sync', 'durability: async').replace('spread: zone\n    pitr', 'spread: region\n    pitr');
-		expect((await problems(regional)).filter((line) => line.includes('not built'))).toEqual([
-			'projects.lynxnet.placement: blueprint.projects.placement.spread is not built yet (HA-PLAN W13, Wave 5 lane A); regions are enabled but only node regions are stored.',
-			'databases.main.spread: blueprint.databases.spread is not built yet (HA-PLAN W13, Wave 5 lane A); regions are enabled but only node regions are stored.',
-		]);
+		expect((await problems(regional)).filter((line) => line.includes('not built'))).toEqual([]);
 	});
 
 	test('on a fleet where main already serves, it plans an HA section and applies', async () => {
