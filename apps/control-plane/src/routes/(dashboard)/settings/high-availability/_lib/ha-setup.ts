@@ -12,7 +12,9 @@ import {
 	type HaDrillScenario,
 	type HaInitAnswers,
 	type HaInitPlanView,
-	type HaProfile
+	type HaProfile,
+	type RegionPromotionView,
+	type RegionsView
 } from '@yoal/contracts';
 
 /**
@@ -512,6 +514,8 @@ export interface StatusCardsInput {
 	}>;
 	failover: DatabaseFailoverFacts;
 	regionsFlag: boolean;
+	/** `core.regions.view` from the page load (`GET /api/v1/ha/regions`'s body); null while `REGIONS` is off. */
+	regions: RegionsView | null;
 	recentDrills: Array<{
 		id: string;
 		at: number | string;
@@ -519,6 +523,58 @@ export interface StatusCardsInput {
 		status: string;
 		detail: string | null;
 	}>;
+}
+
+// ------------------------------------------------------------------ regions
+
+/** What the Regions status card shows. Read-only: promoting a region is `yoal ha region promote`. */
+export type RegionsCardState =
+	| { kind: 'off'; reason: string }
+	| { kind: 'loading' }
+	| { kind: 'error'; message: string }
+	| {
+			kind: 'ready';
+			view: RegionsView;
+			/** The running promotion, else the last finished one, with each step's fence. */
+			promotion: RegionPromotionView | null;
+			promotionRunning: boolean;
+			/** Conflicts, a promotion or notes to show below the cards. */
+			hasDetail: boolean;
+	  };
+
+/**
+ * The Regions card from the running control plane's `REGIONS` flag and `GET /api/v1/ha/regions`.
+ * With the flag off (or the route reporting `enabled: false`) regions are not available yet, and
+ * the card says why; an error from the route is shown as the server sent it.
+ */
+export function regionsCard(input: {
+	flag: boolean;
+	view: RegionsView | null | undefined;
+	error?: unknown;
+}): RegionsCardState {
+	if (!input.flag || input.view?.enabled === false)
+		return {
+			kind: 'off',
+			reason: `Not available yet: regions are off on this control plane. ${profileLabel['ha-dr']} needs YOAL_FEATURE_REGIONS=1.`
+		};
+	if (input.error)
+		return {
+			kind: 'error',
+			message:
+				input.error instanceof Error && input.error.message
+					? input.error.message
+					: 'Could not load regions.'
+		};
+	if (!input.view) return { kind: 'loading' };
+	const view = input.view;
+	const promotion = view.active ?? view.recent[0] ?? null;
+	return {
+		kind: 'ready',
+		view,
+		promotion,
+		promotionRunning: view.active !== null,
+		hasDetail: promotion !== null || view.conflicts.length > 0 || view.notes.length > 0
+	};
 }
 
 // ------------------------------------------------------------------ admin actions

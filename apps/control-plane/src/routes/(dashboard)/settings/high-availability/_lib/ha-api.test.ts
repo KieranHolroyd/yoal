@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import * as z from 'zod';
 import { haDrillRunRequestSchema, haInitRequestSchema } from '@yoal/contracts';
-import { migrationPlan } from './ha-fixtures.js';
+import { migrationPlan, regions } from './ha-fixtures.js';
 import { migrationApplyProjects } from './ha-setup.js';
 
 /**
@@ -142,18 +142,36 @@ describe('drills', () => {
 		expect(refused.message).toContain('platform admin');
 	});
 
-	test('a 501 reads as not available yet; a 404 does only for the regions route', async () => {
+	test('a 501 reads as not available yet; a 404 is a real not-found, regions included', async () => {
 		answer = () => new HttpError(501, 'not_built');
 		expect(await api.loadDrillCatalogue().catch((caught) => caught)).toBeInstanceOf(
 			api.NotAvailableError
 		);
 		answer = () => new HttpError(404, 'Not Found');
-		expect(await api.loadRegions().catch((caught) => caught)).toBeInstanceOf(
-			api.NotAvailableError
-		);
-		expect(await api.listDrillRuns().catch((caught) => caught)).not.toBeInstanceOf(
-			api.NotAvailableError
-		);
+		for (const load of [api.loadRegions, api.listDrillRuns]) {
+			const caught = await load().catch((error) => error);
+			expect(caught).not.toBeInstanceOf(api.NotAvailableError);
+			expect(caught.message).toBe('Not Found');
+		}
+	});
+});
+
+describe('regions', () => {
+	test("reads lane A's GET /api/v1/ha/regions and nothing else (read-only)", async () => {
+		answer = () => regions;
+		expect(await api.loadRegions()).toEqual(regions);
+		expect(calls.map((call) => `${call.method} ${call.url}`)).toEqual(['GET /api/v1/ha/regions']);
+	});
+
+	test('the route lane A added is on this control plane', () => {
+		const apiRoot = join(import.meta.dir, '../../../../api/v1/ha/regions');
+		const source = readFileSync(join(apiRoot, '+server.ts'), 'utf8');
+		expect(source).toContain('export const GET');
+		expect(source).toContain('core.regions.view(principal)');
+		// The page never promotes: the fetch module calls no promote route.
+		const fetchModule = readFileSync(join(import.meta.dir, 'ha-api.ts'), 'utf8');
+		expect(fetchModule).not.toMatch(/'\/api\/v1\/ha\/regions\/[^']*promote/);
+		expect(fetchModule).not.toMatch(/`\/api\/v1\/ha\/regions\/[^`]*promote/);
 	});
 });
 
@@ -180,7 +198,15 @@ describe('admin actions', () => {
 		expect(migrateSchema.parse(calls[1]!.body)).toEqual({ apply: true, projects: ['shop'] });
 	});
 
-	test('apply never sends an empty list, which the server reads as every app', async () => {
+	test('a 422 from apply keeps the server message for the page to show', async () => {
+		answer = () =>
+			new HttpError(422, 'Name at least one app to move, or leave the list out to move every app.');
+		const caught = await api.applyMigration(['shop']).catch((error) => error);
+		expect(caught.status).toBe(422);
+		expect(caught.message).toContain('Name at least one app');
+	});
+
+	test('apply never sends an empty list, which the server refuses', async () => {
 		const none = { ...migrationPlan, projects: [] };
 		await expect(api.applyMigration(migrationApplyProjects(none))).rejects.toThrow('No app');
 		expect(calls).toEqual([]);

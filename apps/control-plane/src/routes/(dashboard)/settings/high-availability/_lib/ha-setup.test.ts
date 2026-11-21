@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import { HA_DRILL_CATALOGUE, haDrillScenario, type HaCheck } from '@yoal/contracts';
-import { caStatus, failingChecks, migrationPlan, passingChecks, planView } from './ha-fixtures.js';
+import { caStatus, failingChecks, migrationPlan, passingChecks, planView, regions } from './ha-fixtures.js';
 import {
 	CA_ROTATE_CONFIRM,
 	MIGRATE_CONFIRM,
@@ -15,6 +15,7 @@ import {
 	groupChecks,
 	migrationApplyProjects,
 	migrationGate,
+	regionsCard,
 	setupSteps,
 	type DatabaseFailoverFacts
 } from './ha-setup.js';
@@ -468,5 +469,74 @@ describe('admin actions', () => {
 			migrationGate({ ...migrationPlan, gateway: false }, { isAdmin: true, typed: MIGRATE_CONFIRM })
 				.enabled
 		).toBe(false);
+	});
+});
+
+describe('regions card', () => {
+	const promotion = {
+		id: 'rp_1',
+		toRegion: 'ukwest',
+		fromRegion: 'uksouth',
+		stage: 'databases' as const,
+		planHash: 'a'.repeat(64),
+		steps: [],
+		runnerId: null,
+		leaseExpiresAt: null,
+		attempt: 1,
+		acceptDataLoss: true as const,
+		breakGlass: false,
+		reason: 'uksouth lost',
+		confirmedBy: 'admin@example.test',
+		confirmedAt: '2026-11-21T10:00:00.000Z',
+		startedAt: '2026-11-21T10:00:00.000Z',
+		finishedAt: null,
+		error: null
+	};
+
+	test('REGIONS off reads as not available yet, with the reason', () => {
+		const off = regionsCard({ flag: false, view: null });
+		expect(off.kind).toBe('off');
+		expect(off.kind === 'off' && off.reason).toContain('Not available yet');
+		expect(off.kind === 'off' && off.reason).toContain('YOAL_FEATURE_REGIONS=1');
+		// The route says so too, even if the page flag disagrees.
+		expect(regionsCard({ flag: true, view: { ...regions, enabled: false } }).kind).toBe('off');
+	});
+
+	test('the route answer renders; no promotion means no detail', () => {
+		const state = regionsCard({ flag: true, view: regions });
+		expect(state).toEqual({
+			kind: 'ready',
+			view: regions,
+			promotion: null,
+			promotionRunning: false,
+			hasDetail: false
+		});
+	});
+
+	test('the running promotion wins over the last one, and shows as detail', () => {
+		const finished = { ...promotion, id: 'rp_0', stage: 'completed' as const, finishedAt: '2026-11-20T10:00:00.000Z' };
+		const running = regionsCard({ flag: true, view: { ...regions, active: promotion, recent: [finished] } });
+		expect(running.kind === 'ready' && running.promotion?.id).toBe('rp_1');
+		expect(running.kind === 'ready' && running.promotionRunning).toBe(true);
+		const last = regionsCard({ flag: true, view: { ...regions, recent: [finished] } });
+		expect(last.kind === 'ready' && last.promotion?.id).toBe('rp_0');
+		expect(last.kind === 'ready' && last.promotionRunning).toBe(false);
+		expect(last.kind === 'ready' && last.hasDetail).toBe(true);
+	});
+
+	test('conflicts and notes show as detail', () => {
+		const conflict = { zone: 'z1', regions: ['a', 'b'], nodes: ['edge-a'] };
+		const withConflict = regionsCard({ flag: true, view: { ...regions, conflicts: [conflict] } });
+		expect(withConflict.kind === 'ready' && withConflict.hasDetail).toBe(true);
+		const withNote = regionsCard({ flag: true, view: { ...regions, notes: ['note'] } });
+		expect(withNote.kind === 'ready' && withNote.hasDetail).toBe(true);
+	});
+
+	test('an error from the route is shown as the server sent it; no data yet is loading', () => {
+		expect(regionsCard({ flag: true, view: null, error: new Error('Forbidden') })).toEqual({
+			kind: 'error',
+			message: 'Forbidden'
+		});
+		expect(regionsCard({ flag: true, view: undefined })).toEqual({ kind: 'loading' });
 	});
 });

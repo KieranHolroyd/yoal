@@ -32,11 +32,14 @@ import type { AttachmentMigrationResponse, CaStatusResponse } from './ha-types.j
  * - `GET /drills/runs?limit=`: `{ runs: HaDrillRunView[] }`, newest first.
  * - `GET /ca`, `POST /ca/rotate` (platform admin; 409 while a node is on the previous CA).
  * - `GET /attachments/migrate` (dry run), `POST /attachments/migrate` `{ apply: true, projects }`
- *   (platform admin). The server reads an absent or empty `projects` as every app, so apply always
- *   sends the slugs of the dry run the admin confirmed, and never an empty list.
- * - `GET /regions`: `RegionsView`. Wave 5 lane A owns it; until that route exists it answers 404,
- *   which reads as "not available yet". Every other route here is on main, so a 404 from it is a
- *   real "not found" (an unknown node, say) and shows the server's message.
+ *   (platform admin). The server reads an absent `projects` as every app and refuses an empty list
+ *   (422), so apply always sends the slugs of the dry run the admin confirmed, and never an empty
+ *   list; a 422 that still comes back is shown with the server's message.
+ * - `GET /regions`: `RegionsView` (lane A, W13), read-only; it answers `enabled: false` while
+ *   `REGIONS` is off. Promotion is `POST /regions/:region/promote`, which this page never calls.
+ *
+ * Every route here exists, so a 404 is a real "not found" (an unknown node, say) and shows the
+ * server's message; only a 501 (a service that is not built) reads as "not available yet".
  *
  * **Development preview.** In `vite dev`, adding `?ha-fixtures` (or `?ha-fixtures=ready`, `=flags`)
  * to the page URL answers every call from `ha-fixtures.ts`, so each step can be seen without a
@@ -56,7 +59,7 @@ export const haKeys = {
 	migration: ['ha-setup', 'migration'] as const
 };
 
-/** The route is not on this control plane yet (lane A's regions), or the service behind it is not built (501). */
+/** The service behind the route is not built on this control plane (501). */
 export class NotAvailableError extends HttpError {
 	constructor(status: number, message: string) {
 		super(status, message);
@@ -66,12 +69,9 @@ export class NotAvailableError extends HttpError {
 
 interface CallInit extends RequestInit {
 	fallback: string;
-	/** A 404 means the route itself is missing (not built yet), not a missing resource. */
-	routeMayBeMissing?: boolean;
 }
 
-async function call<T>(url: string, init: CallInit): Promise<T> {
-	const { routeMayBeMissing = false, ...rest } = init;
+async function call<T>(url: string, rest: CallInit): Promise<T> {
 	try {
 		return await fetchJson<T>(url, {
 			cache: 'no-store',
@@ -79,10 +79,7 @@ async function call<T>(url: string, init: CallInit): Promise<T> {
 			headers: rest.body ? { 'content-type': 'application/json' } : undefined
 		});
 	} catch (error) {
-		if (
-			error instanceof HttpError &&
-			(error.status === 501 || (routeMayBeMissing && error.status === 404))
-		)
+		if (error instanceof HttpError && error.status === 501)
 			throw new NotAvailableError(
 				error.status,
 				`Not available on this control plane yet (${error.status}).`
@@ -213,8 +210,7 @@ export async function loadRegions(signal?: AbortSignal): Promise<RegionsView> {
 	if (import.meta.env.DEV && fixtureMode()) return (await fixtures()).regions;
 	return call<RegionsView>('/api/v1/ha/regions', {
 		signal,
-		fallback: 'Could not load regions',
-		routeMayBeMissing: true
+		fallback: 'Could not load regions'
 	});
 }
 
@@ -246,7 +242,7 @@ export async function loadMigrationPlan(
 
 /**
  * Move the apps the confirmed dry run listed as `will-move`, and only those: `projects` is the
- * slugs from that plan. Refuses an empty list, which the server would read as every app.
+ * slugs from that plan. Refuses an empty list here; the server refuses one too (422).
  */
 export async function applyMigration(projects: readonly string[]): Promise<AttachmentMigrationResponse> {
 	if (projects.length === 0) throw new Error('No app to move: run the dry run again.');

@@ -22,7 +22,6 @@
 	import DisasterDrill from './_DisasterDrill.svelte';
 	import DrillCatalogue from './_DrillCatalogue.svelte';
 	import GuidedSetup from './_GuidedSetup.svelte';
-	import Regions from './_Regions.svelte';
 	import StatusCards from './_StatusCards.svelte';
 	import { databaseFailoverState, type StatusCardsInput } from './_lib/ha-setup.js';
 	import SettingsHeader from '../_lib/SettingsHeader.svelte';
@@ -102,6 +101,7 @@
 		}),
 		failover: data.databaseFailover,
 		regionsFlag: !!data.flags.REGIONS,
+		regions: data.regions,
 		recentDrills: [
 			...data.drills.recent.map((drill) => ({
 				id: drill.id,
@@ -476,10 +476,6 @@
 	<DisasterDrill initial={data.drills} />
 
 	<AdminActions isAdmin={data.canEditPolicies} />
-
-	{#if data.regions}
-		<Regions initial={data.regions} />
-	{/if}
 
 	<Panel title="Failover history" icon={HistoryIcon} description="Every action the controller decided on, newest first. The epoch is the lease it acted under." count={failover.recent.length} flush>
 		{#if failover.recent.length === 0}

@@ -6,18 +6,36 @@
 	import { Badge } from '#lib/components/ui/badge/index.js';
 	import Panel from '../../_lib/Panel.svelte';
 	import { formatRelative } from '../../_lib/format.js';
+	import Regions from './_Regions.svelte';
 	import { NotAvailableError, haKeys, listDrillRuns, loadRegions } from './_lib/ha-api.js';
-	import { databaseFailoverState, profileLabel, type StatusCardsInput } from './_lib/ha-setup.js';
+	import {
+		databaseFailoverState,
+		profileLabel,
+		regionsCard,
+		type StatusCardsInput
+	} from './_lib/ha-setup.js';
 
 	/** One card per part of the HA stack, each saying what is in force now (not what is configured). */
 	let { input }: { input: StatusCardsInput } = $props();
 
+	// Lane A's `GET /api/v1/ha/regions` (W13), seeded from the page load; faster while a promotion runs.
 	const regions = createQuery(() => ({
 		queryKey: haKeys.regions,
 		queryFn: ({ signal }) => loadRegions(signal),
 		enabled: browser && input.regionsFlag,
+		initialData: input.regions ?? undefined,
+		refetchInterval: (query: { state: { data?: { active: unknown } } }) =>
+			query.state.data?.active ? 5_000 : 30_000,
+		staleTime: 2_000,
 		retry: (count: number, error: Error) => !(error instanceof NotAvailableError) && count < 1
 	}));
+	const regionState = $derived(
+		regionsCard({
+			flag: input.regionsFlag,
+			view: regions.data ?? input.regions,
+			error: regions.isError ? regions.error : null
+		})
+	);
 	const runs = createQuery(() => ({
 		queryKey: haKeys.drillRuns,
 		queryFn: ({ signal }) => listDrillRuns(signal),
@@ -161,27 +179,22 @@
 
 		<div class="rounded-lg border p-3" data-card="regions">
 			<p class="text-xs text-muted-foreground">Regions</p>
-			{#if !input.regionsFlag}
+			{#if regionState.kind === 'off'}
 				<p class="mt-1 text-sm font-medium">One region</p>
-				<p class="mt-1 text-xs text-muted-foreground">
-					Regions are off. {profileLabel['ha-dr']} needs <code class="font-mono">YOAL_FEATURE_REGIONS=1</code>.
-				</p>
-			{:else if regions.isError}
-				<p class="mt-1 text-xs text-muted-foreground">
-					{regions.error instanceof NotAvailableError
-						? 'Region status is not available on this control plane yet.'
-						: errorText(regions.error)}
-				</p>
-			{:else if !regions.data}
+				<p class="mt-1 text-xs text-muted-foreground">{regionState.reason}</p>
+			{:else if regionState.kind === 'error'}
+				<p class="mt-1 text-xs text-destructive">{regionState.message}</p>
+			{:else if regionState.kind === 'loading'}
 				<p class="mt-1 text-xs text-muted-foreground">Loading…</p>
 			{:else}
 				<ul class="mt-1 space-y-0.5 text-xs">
-					{#each regions.data.regions as region (region.name)}
+					{#each regionState.view.regions as region (region.name)}
 						<li>
 							<span class="font-mono font-medium">{region.name}</span>
-							{#if region.primary}<Badge variant="success" class="ml-1">primary</Badge>{/if}
+							{#if region.primary}<Badge variant="success" class="ml-1">control plane</Badge>{/if}
 							<span class="text-muted-foreground">
-								{region.nodes.filter((node) => node.online).length}/{region.nodes.length} nodes online,
+								{region.nodes.filter((node) => node.online).length}/{region.nodes.length} nodes online
+								({region.nodes.map((node) => node.name).join(', ')}),
 								{region.zones.length} zone{region.zones.length === 1 ? '' : 's'},
 								{region.databases.primaries} primar{region.databases.primaries === 1 ? 'y' : 'ies'}, {region
 									.databases.standbys} standby
@@ -189,12 +202,16 @@
 						</li>
 					{/each}
 				</ul>
-				{#if regions.data.active}<p class="mt-1 text-xs text-warning">
-						A region promotion is running: {regions.data.active.stage}.
+				{#if regionState.view.conflicts.length}<p class="mt-1 text-xs text-destructive">
+						{regionState.view.conflicts.length} zone{regionState.view.conflicts.length === 1 ? ' names' : 's name'} two regions; see below.
+					</p>{/if}
+				{#if regionState.promotionRunning && regionState.promotion}<p class="mt-1 text-xs text-warning">
+						A region promotion is running ({regionState.promotion.fromRegion} → {regionState.promotion
+							.toRegion}): {regionState.promotion.stage}.
 					</p>{/if}
 				<p class="mt-1 text-xs text-muted-foreground">
 					Read-only here. Promote a region with <code class="font-mono">yoal ha region promote</code
-					>.
+					> on the control plane in the surviving region.
 				</p>
 			{/if}
 		</div>
@@ -221,4 +238,12 @@
 			{/if}
 		</div>
 	</div>
+
+	{#if regionState.kind === 'ready' && regionState.hasDetail}
+		<Regions
+			view={regionState.view}
+			promotion={regionState.promotion}
+			running={regionState.promotionRunning}
+		/>
+	{/if}
 </Panel>
