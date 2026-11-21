@@ -242,6 +242,43 @@ export class HaDoctorService {
 	}
 
 	/**
+	 * Whether the selected steering driver, or one stacked on it, writes state at a provider (a
+	 * keepalived VIP, DNS records, a webhook target) that turning it off would leave behind. A driver
+	 * this build cannot load counts as writing: never assume nothing was written.
+	 */
+	steeringWrites(): boolean {
+		const { driver, stacked } = this.ctx.cluster.get().steering;
+		return [driver, ...stacked]
+			.filter((kind) => kind !== 'direct')
+			.some((kind) => {
+				try {
+					return this.ctx.steering.driver(kind).capabilities.writes;
+				} catch {
+					return true;
+				}
+			});
+	}
+
+	/** `ha-dependents`, with the steering entry's fix saying what a writing driver leaves behind. */
+	#dependentChecks(): HaCheck[] {
+		const checks = haDependentChecks(this.haDependents());
+		if (!this.steeringWrites()) return checks;
+		const { driver, stacked } = this.ctx.cluster.get().steering;
+		const writers = [driver, ...stacked].filter((kind) => kind !== 'direct').join(' and ');
+		return checks.map((check) =>
+			check.id === 'ha-dependents' && check.subject?.kind === 'platform'
+				? {
+						...check,
+						fix: {
+							kind: 'manual' as const,
+							value: `Set steering to direct, then withdraw what ${writers} put at the provider by hand (keepalived VIP, DNS records, webhook target): Settings → High availability → Steering, or cluster_config steering.driver = direct.`,
+						},
+					}
+				: check,
+		);
+	}
+
+	/**
 	 * Everything that still depends on an HA feature, in `haDependentKinds` order: what
 	 * `--profile single` must refuse on. Internal facts; no permission check.
 	 */
@@ -321,7 +358,7 @@ export class HaDoctorService {
 			if (!findings.some((check) => check.id === id))
 				checks.push({ id, title: TITLES[id], status: 'pass', evidence: ['Checked: nothing to report.'], fix: null, subject: null });
 		checks.push(this.#flagsConsistent());
-		checks.push(...haDependentChecks(this.haDependents()));
+		checks.push(...this.#dependentChecks());
 		// Display order is `haCheckIds`; entries of one id keep their order.
 		const order = new Map(haCheckIds.map((id, index) => [id, index]));
 		return checks

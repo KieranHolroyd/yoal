@@ -985,8 +985,11 @@ keeps their region).
 
 **Turn it off.** `yoal ha init --profile single`. It is refused while `ha-dependents` fails: a sync or
 armed database, a gateway attachment, an enrolled control standby or a node outside region
-`default`; each refusal carries its own way back. A non-direct steering driver does not block it,
-because the same write puts `direct` back. Set the printed `=0` lines (keep any flag you had before
+`default`; each refusal carries its own way back. A steering driver that writes nothing at a
+provider (`external-lb`) does not block it, because the same write puts `direct` back; one that does
+(`vip`, `dns-failover`, `webhook`, and anything stacked) blocks until you set `direct` and withdraw
+the keepalived VIP or DNS records by hand. The `=0` lines are printed only once `ha-dependents`
+passes. Set them (keep any flag you had before
 `ha init`; flags in env cannot tell who set them), restart, then apply: only the recorded settings
 are restored.
 

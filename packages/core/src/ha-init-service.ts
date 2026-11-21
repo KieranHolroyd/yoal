@@ -49,11 +49,34 @@ export class HaInitService {
 		if (!parsed.success) throw new ValidationError('Invalid ha init request.', parsed.error.issues);
 		const { profile, answers } = parsed.data;
 		const config = this.ctx.cluster.get();
-		const plan = haInitPlan(profile, answers, this.#facts(config));
+		let plan = haInitPlan(profile, answers, this.#facts(config));
+		const preflight = this.ctx.haDoctor.preflight(principal, profile, { answers });
+		// `single` puts steering back to direct in the same write, so a steering dependent strands
+		// nothing, unless the driver wrote state at a provider: that is withdrawn by hand first.
+		const steeringWrites = this.ctx.haDoctor.steeringWrites();
+		const excused = (check: (typeof preflight.checks)[number]) =>
+			profile === 'single' &&
+			!steeringWrites &&
+			check.id === 'ha-dependents' &&
+			check.subject?.kind === 'platform' &&
+			(plan.cluster.steering?.driver ?? config.steering.driver) === 'direct' &&
+			(plan.cluster.steering?.stacked ?? config.steering.stacked).length === 0;
+		const dependentsBlock = profile === 'single' && preflight.checks.some((check) => check.id === 'ha-dependents' && check.status === 'fail' && !excused(check));
+		if (profile === 'single') {
+			const notes = [...plan.notes];
+			if (config.steering.driver !== 'direct' || config.steering.stacked.length > 0)
+				notes.push(
+					'Steering back to direct does not remove what a driver put at the provider (a keepalived VIP, DNS records, a balancer pool or webhook target): withdraw it by hand.',
+				);
+			// The =0 lines come last: turning a flag off while something still depends on it strands it.
+			if (dependentsBlock) {
+				notes.push('The YOAL_FEATURE_*=0 lines are shown once nothing depends on an HA feature; clear each refusal below first.');
+				plan = { ...plan, flags: [], envLines: [], notes };
+			} else plan = { ...plan, notes };
+		}
 
 		const flagsToChange = plan.flags.filter((flag) => featureEnabled(this.ctx.config, flag.name as FeatureName) !== flag.value);
 		const settingsToChange = plan.settings.filter((setting) => !same(valueAt(config, setting.path), setting.value));
-		const preflight = this.ctx.haDoctor.preflight(principal, profile, { answers });
 
 		const blockers: string[] = [];
 		for (const id of plan.unanswered) blockers.push(`Answer the ${id} question (--${id === 'standbyRegion' ? 'standby-region' : id}).`);
@@ -61,10 +84,6 @@ export class HaInitService {
 			blockers.push(
 				`Set ${flagsToChange.map((flag) => flag.env).join(', ')} in yoal.env on every control-plane host, then restart each control plane.`,
 			);
-		const restoresDirect =
-			profile === 'single' &&
-			(plan.cluster.steering?.driver ?? config.steering.driver) === 'direct' &&
-			(plan.cluster.steering?.stacked ?? config.steering.stacked).length === 0;
 		for (const id of plan.preflight) {
 			const entries = preflight.checks.filter((check) => check.id === id);
 			if (entries.length === 0) {
@@ -73,7 +92,7 @@ export class HaInitService {
 			}
 			for (const check of entries) {
 				if (check.status === 'pass' || check.status === 'warn') continue;
-				if (restoresDirect && check.id === 'ha-dependents' && check.subject?.kind === 'platform') continue;
+				if (excused(check)) continue;
 				const why = check.status === 'skip' ? `not checked: ${check.evidence[0] ?? 'no reason given'}` : (check.fix?.value ?? check.evidence[0] ?? '');
 				blockers.push(`${check.title}: ${why}`);
 			}

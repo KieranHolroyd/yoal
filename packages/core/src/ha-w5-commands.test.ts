@@ -315,9 +315,14 @@ describe('ha init', () => {
 		expect(core.cluster.get().steering).toMatchObject({ driver: 'external-lb', stacked: ['dns-failover'] });
 		expect(core.cluster.get().ha.applied?.flags).toContain('REGIONS');
 		setFlags(HA_INIT_FLAGS, false);
-		// A node still in a named region strands nothing only once it is back in `default`.
-		expect(core.haInit.plan(admin, { profile: 'single' }).blockers).toEqual([expect.stringContaining('"region": "default"')]);
+		// A node still in a named region strands nothing only once it is back in `default`; and the
+		// stacked dns-failover wrote DNS records, so steering is withdrawn by hand first.
+		expect(core.haInit.plan(admin, { profile: 'single' }).blockers).toEqual([
+			expect.stringContaining('"region": "default"'),
+			expect.stringContaining('withdraw what external-lb and dns-failover put at the provider'),
+		]);
 		sqlite.run("UPDATE nodes SET region = 'default' WHERE id = ?", [ids.a3!]);
+		core.cluster.update(admin, { steering: { driver: 'direct', stacked: [] } });
 		await core.haInit.apply(admin, { profile: 'single', apply: true });
 		expect(core.cluster.get()).toEqual(before);
 	});
@@ -528,5 +533,47 @@ describe('drill review fixes', () => {
 		const run = await core.haDrills.run(admin, { scenario: 'stale-generation-promote', resource: 'main' });
 		expect(run.resource.id).toBe(mine.id);
 		expect(calls).toEqual([{ name: 'main', ifMatch: -1, org: 'org_1' }]);
+	});
+});
+
+describe('single: ordering and provider state (review 6)', () => {
+	async function applied(driver: 'external-lb' | 'dns-failover') {
+		const built = await fleet('ha');
+		built.setFlags(HA_FLAGS, true);
+		await built.core.ctx.haDoctor.probeArbiter();
+		if (driver === 'dns-failover') {
+			// dns-failover's own preflight needs a provider; this test is about the way back only.
+			built.core.ctx.cluster.update(admin, {
+				ha: { profile: 'ha', applied: { profile: 'ha', flags: [...HA_FLAGS], settings: [{ path: 'steering.driver', previous: 'direct' }] } },
+				steering: { driver: 'dns-failover' },
+			});
+		} else await built.core.haInit.apply(admin, { profile: 'ha', apply: true, answers: { steering: driver } });
+		return built;
+	}
+
+	test('the =0 lines appear only once nothing depends on an HA feature', async () => {
+		const { core, ids } = await applied('external-lb');
+		const db = core.databases.create(admin, { name: 'main', placement: ids.a1! });
+		core.ctx.sqlite.run("UPDATE databases SET durability = 'sync' WHERE id = ?", [db.id]);
+		const blocked = core.haInit.plan(admin, { profile: 'single' });
+		expect(blocked.blockers.join(' ')).toContain('yoal db durability main --async');
+		expect(blocked.blockers.join(' ')).not.toContain('=0');
+		expect(blocked.flagsToChange).toEqual([]);
+		expect(blocked.plan.envLines.some((line) => line.endsWith('=0'))).toBe(false);
+		expect(blocked.plan.notes.join(' ')).toContain('once nothing depends on an HA feature');
+		core.ctx.sqlite.run("UPDATE databases SET durability = 'async' WHERE id = ?", [db.id]);
+		const ready = core.haInit.plan(admin, { profile: 'single' });
+		expect(ready.blockers[0]).toContain('YOAL_FEATURE_ENDPOINTS_GATEWAY=0');
+		expect(ready.plan.notes.join(' ')).toContain('provider');
+	});
+
+	test('a driver that writes provider state stays a blocker, with the way to withdraw it', async () => {
+		const { core, setFlags } = await applied('dns-failover');
+		setFlags(HA_FLAGS, false);
+		const plan = core.haInit.plan(admin, { profile: 'single' });
+		expect(plan.ready).toBe(false);
+		expect(plan.blockers.join(' ')).toMatch(/steering to direct, then withdraw.*DNS records/);
+		const check = core.haDoctor.preflight(admin, 'single').checks.find((item) => item.id === 'ha-dependents' && item.subject?.kind === 'platform');
+		expect(check?.fix?.value).toMatch(/withdraw what dns-failover put at the provider/);
 	});
 });
