@@ -225,9 +225,9 @@ describe('W11 automatic promotion (W11-SPEC §4-§5)', () => {
 	});
 });
 
-describe('W11 Revision 3: the fence notice', () => {
-	test('the canonical two-fault case with the notice delivered is within the bound at ordinary seeds', () => {
-		for (const seed of [9, 15, 33]) {
+describe('W11 Revision 4: the fence notice also waives the stream-down debounce', () => {
+	test('the canonical two-fault case with the notice delivered is within the bound, including seed 3752', () => {
+		for (const seed of [9, 15, 33, 3541, 3752]) {
 			const result = new W11World({ seed, scenario: failsafeMinimalBound(), trace: true }).run();
 			expect(result.violations).toEqual([]);
 			expect(result.stats.promotions).toBe(1);
@@ -237,26 +237,25 @@ describe('W11 Revision 3: the fence notice', () => {
 			expect(result.failoverLatenciesMs[0] as number).toBeLessThanOrEqual(30_000);
 			const trace = result.trace.map((e) => e.text).join('\n');
 			expect(trace).toContain('received fence notice for generation 1');
-			expect(trace).toContain('permits acquisition despite the keep-alive');
+			expect(trace).toContain('waives the stream-down debounce');
 		}
 	});
 
-	test('the remaining Rev-3 counterexample: with the notice delivered, the tail still exceeds 30 s', () => {
-		const result = new W11World({ seed: 3752, scenario: failsafeMinimalBound(), trace: true }).run();
-		expect(result.stats.promotions).toBe(1);
-		expect(result.stats.fenceNoticePromotions).toBe(1);
-		expect(result.stats.fenceNoticeSlowPath).toBe(0);
-		expect(result.violations).toHaveLength(1);
-		expect(result.violations[0]?.kind).toBe('time-to-writable-exceeded');
-		expect(result.failoverLatenciesMs[0] as number).toBeGreaterThan(30_000);
-		const trace = result.trace.map((e) => e.text).join('\n');
-		expect(trace).toContain('received fence notice for generation 1');
-		expect(trace).toContain('permits acquisition despite the keep-alive');
-		expect(trace).toContain('candidate at generation 2');
-		expect(trace).toContain('time to writable');
-	});
+	test('the fixed canonical schedule over seeds 1-5,000 has no failover over 30 s', () => {
+		const over: number[] = [];
+		let worst = 0;
+		for (let seed = 1; seed <= 5_000; seed++) {
+			const result = new W11World({ seed, scenario: failsafeMinimalBound() }).run();
+			expect(result.violations.map((v) => v.kind)).toEqual([]);
+			const latency = result.failoverLatenciesMs[0] as number;
+			if (latency > 30_000) over.push(seed);
+			if (latency > worst) worst = latency;
+		}
+		expect(over).toEqual([]);
+		expect(worst).toBeLessThanOrEqual(30_000);
+	}, 30_000);
 
-	test('without delivery the one-TTL block holds; the slower path is reported and alerted, not a bound violation', () => {
+	test('without delivery the one-TTL block and the debounce hold; the slower path is reported and alerted, not a bound violation', () => {
 		const result = new W11World({ seed: 3541, scenario: failsafeNoticeLost(), trace: true }).run();
 		expect(result.violations).toEqual([]);
 		expect(result.stats.promotions).toBe(1);
@@ -279,14 +278,14 @@ describe('W11 Revision 3: the fence notice', () => {
 		expect(result.stats.fenceNoticePromotions).toBe(1);
 	});
 
-	test('a delayed notice is used when it arrives before the promotion', () => {
+	test('a delayed notice (within the 2 s send window) is used when it arrives', () => {
 		const result = new W11World({ seed: 15, scenario: failsafeNoticeDelayed(), trace: true }).run();
 		expect(result.violations).toEqual([]);
 		expect(result.stats.fenceNoticesDelivered).toBeGreaterThanOrEqual(1);
 		expect(result.stats.fenceNoticePromotions).toBe(1);
 	});
 
-	test('a stale notice is stored but never authorises the generation; the block holds', () => {
+	test('a stale notice is stored but never authorises the generation; the block and debounce hold', () => {
 		const result = new W11World({ seed: 3752, scenario: failsafeNoticeStale(), trace: true }).run();
 		expect(result.violations).toEqual([]);
 		expect(result.stats.fenceNoticeStaleIgnored).toBeGreaterThanOrEqual(1);

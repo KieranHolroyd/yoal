@@ -1548,14 +1548,27 @@ export class W11World {
 			}
 			if (fault?.mode === 'delay') {
 				const delay = Math.max(1, fault.value);
-				this.#log(primary.id, `fence notice to ${peer.id} delayed ${(delay / 1000).toFixed(1)} s`);
-				this.#timer(this.T + delay, () => {
-					if (!primary.alive) {
-						this.stats.fenceNoticesFailed++;
-						return;
-					}
-					send(make(), ' (delayed)');
-				});
+				const notice = make();
+				this.#log(primary.id, `fence notice to ${peer.id} sent; delivery delayed ${(delay / 1000).toFixed(1)} s`);
+				this.stats.fenceNoticesSent++;
+				this.#call(
+					primary.id,
+					peer.id,
+					() => {
+						// The primary's send is immediate (within §5.0's 2 s); the network holds the
+						// delivery. The member's notice is installed when the delayed delivery lands.
+						this.#timer(delay, () => this.#receiveFenceNotice(peer, notice));
+						return true;
+					},
+					(err) => {
+						if (err) {
+							this.stats.fenceNoticesFailed++;
+							this.#log(primary.id, `fence notice to ${peer.id} not delivered (${err}) (delayed)`);
+						} else {
+							this.#log(primary.id, `fence notice to ${peer.id} sent (delivery delayed)`);
+						}
+					},
+				);
 				continue;
 			}
 			if (fault?.mode === 'duplicate') {
@@ -1680,10 +1693,14 @@ export class W11World {
 			if (lease.generation > this.#maxGenerationSeen) this.#maxGenerationSeen = lease.generation;
 			if (this.mutant !== 'ignore-eligibility' && lease.syncState !== 'steady') return;
 			if ((date ?? this.T) < lease.expiresAt) return;
-			if (member.streamDownSince === null || this.T - member.streamDownSince < SPEC.db.streamDownMs) return;
+			if (member.streamDownSince === null) return;
+			const fenceNotice = this.#fenceNoticeFor(member, lease);
+			// W11 Revision 4: a valid notice satisfies the §4.1 debounce, because it proves the
+			// stream ended because the holder fenced. It does not waive "the stream is down": the
+			// receiver must still have observed not streaming. Without a notice the 5 s applies.
+			if (!fenceNotice && this.T - member.streamDownSince < SPEC.db.streamDownMs) return;
 			if (!this.#autoAllows(member, lease)) return;
 			if (this.mutant !== 'ignore-eligibility' && !this.#eligible(member, lease)) return;
-			const fenceNotice = this.#fenceNoticeFor(member, lease);
 			const answeredRecently = this.T - member.lastAnsweredToPrimary < SPEC.db.ttlMs;
 			if (
 				this.mutant !== 'ignore-keepalive' &&
@@ -1694,13 +1711,12 @@ export class W11World {
 				return;
 			if (
 				fenceNotice &&
-				answeredRecently &&
 				this.mutant !== 'ignore-keepalive' &&
 				this.mutant !== 'cas-same-generation'
 			)
 				this.#log(
 					member.id,
-					`fence notice for generation ${lease.generation} permits acquisition despite the keep-alive`,
+					`fence notice for generation ${lease.generation} waives the stream-down debounce${answeredRecently ? ' and the keep-alive block' : ''}`,
 				);
 			if (member.candidateBusy) return;
 			member.candidateBusy = true;

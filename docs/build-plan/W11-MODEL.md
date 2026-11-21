@@ -1,23 +1,23 @@
 # W11 model — automatic database failover, the arming policy, and the fence notice
 
-Step 2 of HA-PLAN §6.4, written from [`W11-SPEC.md`](./W11-SPEC.md) **Revision 3** alone. The
+Step 2 of HA-PLAN §6.4, written from [`W11-SPEC.md`](./W11-SPEC.md) **Revision 4** alone. The
 member machine it extends is W9-SPEC §5; the only code reused is the simulator's event-queue/RNG
 style in `tests/ha/sim/`. The production implementation of automatic failover was not read.
 
-**Result: the Revision 3 fence notice fixes the Revision 2 counterexample when it is delivered. No
-I3, I11, I12 or I13 violation in 5,000 schedules. One Revision 3 counterexample remains:** even with
-the notice delivered, §4.1's 5 s stream-down debounce starts when the primary fences, after the
-lease has expired; the allowed `pg_ctl promote` budget (≤ 5 s) then pushes the canonical two-fault
-case over 30 s. The 5,000-schedule family run stays at or under the bound (**worst 30.00 s**), but
-the fixed canonical schedule over seeds 1–5,000 fails **20 times**, with a worst of **33.46 s**.
+**Result: no counterexample.** Revision 4's fence notice fixes both Revision 2's one-TTL block and
+Revision 3's remaining stream-down tail. A valid notice waives the §4.1 5 s debounce (and the §4.4
+keep-alive block); the fixed canonical two-fault schedule over seeds 1–5,000 has **0 seeds over
+30 s**, with a worst of **28.123 s**. Without a delivered notice the block and the debounce hold,
+and the run is reported as an allowed slower path with an alert, not a bound violation. I3, I11,
+I12 and I13 are zero across 5,000 schedules.
 
 | | |
 |---|---|
 | Model | `tests/ha/sim/w11/` (`spec.ts`, `policy.ts`, `model.ts`, `schedules.ts`, `run.ts`, `w11.test.ts`) |
 | Command | `bun tests/ha/sim/w11/run.ts --runs 5000` |
-| Runtime | 5,000 schedules in **2.8 s** (~0.56 ms/schedule); 44 unit tests in ~0.3 s |
-| Exit code | `0` for the 5,000 family run; the fixed canonical probe and the seed-3752 scenario exit `1` |
-| Spec status | **blocked on the §4.1 debounce vs §9 budget in the notice path**; the spec was not patched |
+| Runtime | 5,000 schedules in **2.6 s** (~0.52 ms/schedule); 44 unit tests in ~1.5 s |
+| Exit code | `0`; 0 violating runs |
+| Spec status | **clean under Revision 4** for the checked invariants and the notice path |
 
 ---
 
@@ -28,7 +28,7 @@ A deterministic discrete-event world with:
 - **one arbiter** — a linearizable object store with conditional `PUT` (`If-Match`), one database
   lease, and an arbiter clock that is authoritative for expiry (W9-SPEC assumption 2);
 - **three database members** `p a b`, the W9-SPEC §5 member machine plus the W11-SPEC §4–§5
-  automatic-promotion path and the Revision 3 fence notice (§1.8, §5.0);
+  automatic-promotion path and the Revision 3–4 fence notice (§1.8, §5.0);
 - **one consumer** that polls every member's role/generation every 1–2 s and forwards only to a
   `primary` at the highest generation (W11-SPEC §6); a same-generation tie fails closed;
 - **one control-plane reader** with an availability flag. It never decides and never writes a
@@ -56,7 +56,7 @@ The checker runs after every event:
 | **I13** | at every promotion from a lease whose effective durability is `sync`, the promoted member's history contains every commit acknowledged under `sync`; at the end of the run the final primary does too; an ack is not issued by an old primary while a higher-generation primary exists without the commit. |
 | **I11** | schedule expectations: a control-plane outage must not stop traffic or a failover and the row never lowers; an arbiter outage alone must not fail over or stop a healthy primary; a forbidden window contains no promotion. |
 | **New / bound** | time to writable, per failover, from the lost primary's **last applied successful lease write** (renew or the acquire CAS) to the new primary's `PRIMARY` state: ≤ 30 s each; the median over all judged samples ≤ 25 s. |
-| **notice** | a member that holds a notice for the generation it is acquiring from is the §4.4 exception; a member without one keeps the one-TTL block. A notice for another generation, epoch or sender is never used. A fenced primary that cannot deliver its notice is a reported slower path, not a bound failure. |
+| **notice** | a valid notice for the generation being acquired from waives the §4.1 5 s debounce and the §4.4 one-TTL block. It does **not** waive "the stream is down": the receiver must still have observed not streaming. A notice for another generation, epoch or sender is never used. A fenced primary that cannot deliver its notice is a reported slower path, not a bound failure. |
 | **policy** | an automatic promotion with `auto` refused is `promotion-not-armed`; a refused schedule that promotes is `promotion-when-forbidden`. |
 | **support** | generations never decrease; a holder change is exactly +1; a member that answered a keep-alive within one TTL does not acquire unless it holds a valid notice. |
 
@@ -97,7 +97,7 @@ generation, etag, send time and apply time), `fenceTimer`. Schedule hooks: `kill
 The lease's `syncState` (`'steady' | 'changing'`) is the authority; the local change fields are the
 primary's progress through it.
 
-### Fence notice (Revision 3)
+### Fence notice (Revisions 3–4)
 
 `FenceNotice { generation, epoch, from, at }`. The sender is the primary's member id; `generation` is
 the lease generation it held; `epoch` is the sender's authenticated database term. The model treats
@@ -108,8 +108,12 @@ epoch; a control-plane epoch is not used by the member machine (H22). A notice i
 2. `from === lease.holderNodeId` (the authenticated sender held that generation);
 3. `epoch === generation` (not a bad-epoch forgery).
 
-The receiver stores a cross-generation notice (so a stale/future delivery is observable) but the
-candidate check above never authorises it. A duplicate is idempotent.
+A valid notice waives **both** the §4.4 one-TTL keep-alive block and the §4.1 5 s stream-down
+debounce (Revision 4). It does not waive the requirement that the receiver has observed the stream
+not streaming: the notice proves the stream ended because the holder fenced, not that the member
+may promote with a live stream. The receiver stores a cross-generation notice (so a stale/future
+delivery is observable) but the candidate check above never authorises it. A duplicate is
+idempotent.
 
 ### Commit / write
 
@@ -184,8 +188,9 @@ function, so the refusal table is exercised directly in `w11.test.ts`:
 
 A member in `streaming` becomes a `candidate` only when **all** hold:
 
-1. its own stream has been down for `STREAM_DOWN_MS` (5 s) — the model tracks `streamDownSince`
-   from the first tick that cannot prove a live primary stream;
+1. its own stream is down — the receiver has observed not streaming. The §4.1 5 s debounce applies
+   **unless** the member holds a valid Revision 4 fence notice for the lease generation; the notice
+   satisfies the debounce because it proves the stream ended because the holder fenced;
 2. the lease has expired by the arbiter's clock (`read.date >= lease.expiresAt`) and the member can
    reach the arbiter;
 3. `auto` is enabled for the lease's effective durability (the arming decision plus the live
@@ -193,12 +198,12 @@ A member in `streaming` becomes a `candidate` only when **all** hold:
 4. it is eligible: for an effective `sync` lease it is named in the lease's `sync` set; for an
    effective `async` lease `acceptDataLoss` is set;
 5. no other member has answered the primary's keep-alive within one TTL **from this member's own
-   point of view** (`T - lastAnsweredToPrimary >= 15 s`) — **or** it holds a valid Revision 3
-   fence notice for the lease generation (§1.8/§4.4), in which case the one-TTL block is skipped;
+   point of view** (`T - lastAnsweredToPrimary >= 15 s`) — **or** it holds a valid fence notice for
+   the lease generation (§1.8/§4.4), in which case the one-TTL block is skipped;
 6. it is not already busy with a CAS.
 
-The notice does **not** skip condition 1. That is deliberate, and it is the source of the remaining
-counterexample in §8.
+A valid notice therefore removes both settling waits; an invalid, stale, bad-epoch, forged or absent
+notice removes neither.
 
 ### Promotion (W11-SPEC §5.0–§5.3)
 
@@ -231,8 +236,9 @@ it, and checks:
 
 1. sets `state = 'fencing'`, so every write and agent call is already refused;
 2. records the failover baseline and marks it `fenced` (a fence decision, not a crash/freeze);
-3. **sends `fencing {generation, epoch}` to every peer** with the model's normal RPC path, so a
-   partition, freeze, crash, refused edge or delay affects it exactly as it affects a keep-alive;
+3. **sends `fencing {generation, epoch}` to every peer immediately** (the model's send is at the
+   decision, well within §5.0's 2 s), over the normal RPC path, so a partition, freeze, crash,
+   refused edge or delay affects it exactly as it affects a keep-alive;
 4. schedules the `fencing → fenced` transition (50–300 ms) after the send attempt. Postgres stops
    after the attempt; delivery is best effort.
 
@@ -243,8 +249,8 @@ Delivery is best effort and the schedule can perturb it per target:
 
 | Mode | Effect |
 |---|---|
-| `drop` | the notice is not sent; the member has none; the one-TTL block applies |
-| `delay` | the send is deferred by `value` ms; the member may already have promoted via the TTL |
+| `drop` | the notice is not sent; the member has none; the one-TTL block and the 5 s debounce apply |
+| `delay` | the send is immediate; the network holds the delivery by `value` ms (≤ 2 s in the families). The member may already have promoted via the TTL/debounce |
 | `duplicate` | the notice is sent twice; the receiver's map is idempotent |
 | `stale` | the notice names `generation - 1`; it is stored but never authorises the current lease |
 | `bad-epoch` | the notice names the current generation with `epoch - 1`; the receiver rejects it |
@@ -274,8 +280,8 @@ A primary renews every 5 s. A renewal is proved at its **send** time; `lastLease
 the arbiter's **apply** time. A primary may serve while the proof is younger than one TTL, **or**
 while the arbiter is unreachable **and** every member answered its keep-alive within one TTL. The
 failsafe is why an arbiter outage alone does not stop a healthy primary; the keep-alive gate is why
-a member that answered cannot promote while the primary may still be serving. The Revision 3 notice
-is the only exception to that gate.
+a member that answered cannot promote while the primary may still be serving. The Revision 3–4
+notice is the only exception to that gate, and (Revision 4) the only exception to the §4.1 debounce.
 
 A fence is recorded (`fenceEvents`) and, unless it is superseded by a higher generation, marks the
 last applied lease write as the time-to-writable baseline. The baseline carries the lost
@@ -327,17 +333,18 @@ winner re-arm the lease, so the sync CAS is the node's, not a control-plane writ
   effective `async` lease is an async failover and is exempt (assumption 10).
 - **Time to writable.** On every promotion, if a lost primary's baseline exists, `promotion time −
   lastLeaseApply` is recorded. If the baseline is a **fence** and the promoter does **not** hold a
-  valid notice for the lost generation, the one-TTL block is expected; a latency > 30 s is the
-  spec's allowed **slower path** (stats, `slowPathLatenciesMs`, alert) rather than a bound
-  violation. If the notice was held, or the loss was a crash/freeze, > 30,000 ms is
+  valid notice for the lost generation, the one-TTL block and the 5 s debounce are expected; a
+  latency > 30 s is the spec's allowed **slower path** (stats, `slowPathLatenciesMs`, alert) rather
+  than a bound violation. If the notice was held, or the loss was a crash/freeze, > 30,000 ms is
   `bound/time-to-writable-exceeded`. The runner checks the median over all judged samples
   ≤ 25,000 ms. A sample is not judged when the schedule marks `expect.ttf: false` (an arbiter
   outage for every member, or a primary that kept serving through the failsafe and only fences
   after the outage): §10 says no promotion is possible while the arbiter is away.
-- **Notice.** A candidate that answered a keep-alive within one TTL and does not hold a valid
-  notice must not CAS. A notice is valid only for the generation being acquired from, from the
-  lease's holder, with a matching epoch. A notice for another generation is stored and counted but
-  never authorises.
+- **Notice.** A candidate that answered a keep-alive within one TTL or whose stream has not been
+  down for 5 s must not CAS unless it holds a valid notice for the generation being acquired from,
+  from the lease's holder, with a matching epoch. A notice for another generation is stored and
+  counted but never authorises. A notice never authorises a live stream: the receiver must have
+  observed not streaming.
 - **I11.** Each schedule may attach `failover`, `noPrimary`, `requireAcks`, `primaryStays`,
   `controlDown` and `autoRefused` expectations. `finalize()` counts acknowledged writes in the
   windows, finds the first promotion after the loss, checks the row generation, and forbids a fence
@@ -366,7 +373,7 @@ The I3 checker is also exercised directly: `forcePrimaryForTest('a', 1)` +
 
 ## 5. Assumptions
 
-These are the model's reading of W11-SPEC Revision 3. A different reading changes the result.
+These are the model's reading of W11-SPEC Revision 4. A different reading changes the result.
 
 1. **The arbiter is linearizable** and its conditional write is atomic (W9-SPEC assumption 1). No
    stale reads, no lost update.
@@ -414,13 +421,16 @@ These are the model's reading of W11-SPEC Revision 3. A different reading change
     has a generation but no separate database epoch; the model carries both fields and requires
     both to name the generation being acquired from. A control-plane epoch is not consulted
     (H22). The receiver stores cross-generation notices but the candidate check is the authority.
-17. **The notice does not bypass §4.1's 5 s stream-down debounce.** §4.4 says "without waiting out
-    the keep-alive TTL"; it does not repeal §4.1. This is deliberate and is the remaining
-    counterexample in §8.
+17. **A valid notice waives both settling waits, not the stream-down fact.** Revision 4 says the
+    notice satisfies the §4.1 debounce; it does not say a member may promote with a live stream.
+    The model therefore requires the receiver to have observed not streaming and waives only the
+    5 s duration and the §4.4 TTL block. This is the conservative reading; it already meets the
+    bound (fixed canonical worst 28.123 s).
 18. **The notice is best effort.** Lost, delayed, duplicated, stale and bad-epoch deliveries are
-    schedules. A lost notice falls back to the TTL rule and is reported with an alert, as §9
-    requires. A notice is not a lease write and cannot itself authorise a promotion without an
-    expired lease.
+    schedules. The primary's send is immediate at the fence decision (within §5.0's 2 s); a
+    `delay` fault holds the network delivery, not the primary's send. A lost notice falls back to
+    the TTL/debounce rules and is reported with an alert, as §9 requires. A notice is not a lease
+    write and cannot itself authorise a promotion without an expired lease.
 19. **A primary that keeps serving through the failsafe is not a failover.** For the clean
     `failsafe-keepalive` family the primary serves for the whole arbiter outage; a post-return
     fence is a recovery, not the §9 clock. The model marks that schedule `ttf: false` and does not
@@ -439,7 +449,7 @@ data, printed by `--scenario`/`--trace`.
 | `power-off` | the primary is powered off at 4–12 s; sync or async; one promotion, TTF |
 | `freeze` | the primary process freezes 22–50 s; the lease expires by the arbiter clock; a successor promotes; the stale leader resumes |
 | `partition-arbiter-ok` | the primary loses both replicas but keeps the arbiter; it renews, no failover, traffic continues |
-| `partition-isolated` | the primary loses the arbiter and both replicas; it fences; an eligible replica with arbiter access promotes; the notice attempt cannot reach anyone, so the TTL block is already satisfied by the lease expiry (TTF 18–25 s) |
+| `partition-isolated` | the primary loses the arbiter and both replicas; it fences; an eligible replica with arbiter access promotes; the notice attempt cannot reach anyone, so the TTL block and the debounce are already satisfied by the lease expiry (TTF 18–25 s) |
 | `arbiter-outage` | all members lose the arbiter 15–32 s; variant A keeps the primary via the failsafe, variant B also loses a member (fence, no promotion while the arbiter is away) |
 | `two-candidates` | async + `acceptDataLoss`; the primary is isolated from the arbiter and both replicas; both candidates race the CAS; one wins, the loser re-follows |
 | `stale-leader` | the primary freezes 25–50 s, a successor promotes, then the stale leader resumes and fences; its gen-1 notice is cross-generation to the gen-2 members and is ignored |
@@ -448,7 +458,7 @@ data, printed by `--scenario`/`--trace`.
 | `failsafe-keepalive` | the primary answers keep-alives while its own stream is down. Variant A keeps serving with all peers answering (no failover, `ttf: false` for the post-outage recovery). Variant B is the canonical two-fault mixed case; 35 % of those runs drop the eligible member's notice |
 | `control-down` | the control plane is down for 50–100 s and the primary is killed 3 s later; failover and traffic continue; the row never falls (I11) |
 | `refusal` | one of the eleven refusal rules or `manual`; the primary is killed; no automatic promotion |
-| `fence-notice` | the canonical two-fault case with the notice delivered (50 %) or dropped, delayed, duplicated, stale or bad-epoch (the remaining 50 %); the notice is sent to the eligible member `a` |
+| `fence-notice` | the canonical two-fault case with the notice delivered (50 %) or dropped, delayed (≤ 2 s), duplicated, stale or bad-epoch (the remaining 50 %); the notice is sent to the eligible member `a` |
 | `mixed` | 2–4 of the above; invariants always run; the TTF is not judged (a global arbiter outage can be inside the mix) |
 
 Fixed scenarios (the report's names): `w11-power-off-sync`, `w11-power-off-async`, `w11-freeze`,
@@ -465,8 +475,7 @@ Fixed scenarios (the report's names): `w11-power-off-sync`, `w11-power-off-async
 
 ### The 5,000-schedule family run
 
-`bun tests/ha/sim/w11/run.ts --runs 5000`, 5,000 schedules over 14 families, **2.8 s**, exit **0**
-(the sampled families do not hit the canonical tail; the targeted probe in §8 does):
+`bun tests/ha/sim/w11/run.ts --runs 5000`, 5,000 schedules over 14 families, **2.6 s**, exit **0**:
 
 | Family | Runs | Promotions | Acks | Losses | Fences | Candidates | Lost CAS | Control promos | Strict ms (total / max) | Median TTF | Worst TTF | Notice delivered | Notice missed | Slow path | Slow med | Slow worst | Violations |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|
@@ -474,44 +483,42 @@ Fixed scenarios (the report's names): `w11-power-off-sync`, `w11-power-off-async
 | `freeze` | 358 | 358 | 31,629 | 358 | 358 | 386 | 28 | 0 | 0 / 0 | 18.47 | 22.00 | 716 | 0 | 0 | — | — | none |
 | `partition-arbiter-ok` | 358 | 0 | 35,304 | 0 | 0 | 0 | 0 | 0 | 0 / 0 | — | — | 0 | 0 | 0 | — | — | none |
 | `partition-isolated` | 357 | 357 | 39,579 | 357 | 357 | 390 | 33 | 0 | 490 / 282 | 18.36 | 25.06 | 0 | 354 | 0 | — | — | none |
-| `arbiter-outage` | 357 | 177 | 32,318 | 177 | 177 | 202 | 25 | 0 | 0 / 0 | — | — | 181 | 0 | 0 | — | — | none |
+| `arbiter-outage` | 357 | 177 | 32,353 | 177 | 177 | 203 | 26 | 0 | 0 / 0 | — | — | 181 | 0 | 0 | — | — | none |
 | `two-candidates` | 357 | 357 | 35,587 | 357 | 357 | 426 | 69 | 0 | 1,059 / 487 | 18.05 | 20.99 | 0 | 351 | 0 | — | — | none |
 | `stale-leader` | 357 | 357 | 34,204 | 357 | 357 | 385 | 28 | 0 | 0 / 0 | 18.33 | 21.08 | 714 | 0 | 0 | — | — | none |
-| `clock-step` | 357 | 194 | 42,561 | 194 | 194 | 202 | 8 | 0 | 369 / 194 | 18.72 | 29.79 | 73 | 173 | 6 | 30.61 | 32.02 | none |
+| `clock-step` | 357 | 194 | 42,726 | 194 | 194 | 206 | 12 | 0 | 369 / 194 | 18.44 | 29.79 | 73 | 167 | 6 | 30.61 | 32.02 | none |
 | `sync-named-dead` | 357 | 177 | 19,367 | 357 | 0 | 177 | 0 | 0 | 0 / 0 | 18.61 | 25.30 | 0 | 0 | 0 | — | — | none |
-| `failsafe-keepalive` | 357 | 119 | 36,386 | 120 | 120 | 119 | 0 | 0 | 0 / 0 | 25.43 | 29.90 | 80 | 44 | 24 | 30.74 | 32.16 | none |
+| `failsafe-keepalive` | 357 | 120 | 37,008 | 120 | 120 | 121 | 1 | 0 | 0 / 0 | 19.85 | 29.90 | 80 | 44 | 24 | 30.74 | 32.16 | none |
 | `control-down` | 357 | 357 | 42,206 | 357 | 0 | 390 | 33 | 357 | 0 / 0 | 18.36 | 21.19 | 0 | 0 | 0 | — | — | none |
 | `refusal` | 357 | 0 | 3,631 | 357 | 0 | 0 | 0 | 0 | 0 / 0 | — | — | 0 | 0 | 0 | — | — | none |
-| `fence-notice` | 357 | 357 | 44,175 | 357 | 357 | 357 | 0 | 0 | 0 / 0 | 25.09 | **30.00** | 312 | 104 | 50 | 30.78 | 33.09 | none |
-| `mixed` | 357 | 170 | 45,556 | 177 | 115 | 181 | 11 | 32 | 0 / 0 | — | — | 154 | 0 | 0 | — | — | none |
-| **total** | **5,000** | **3,337** | **479,626** | **3,882** | **2,392** | **3,602** | **265** | **389** | **1,918 / 487** | **18.72** | **30.00** | **2,230** | **1,026** | **80** | **30.78** | **33.09** | **0 runs** |
+| `fence-notice` | 357 | 357 | 46,187 | 357 | 357 | 357 | 0 | 0 | 0 / 0 | 19.63 | **30.00** | 312 | 104 | 50 | 30.78 | 33.09 | none |
+| `mixed` | 357 | 171 | 45,677 | 179 | 116 | 183 | 12 | 32 | 0 / 0 | — | — | 156 | 0 | 0 | — | — | none |
+| **total** | **5,000** | **3,339** | **482,581** | **3,884** | **2,393** | **3,611** | **272** | **389** | **1,918 / 487** | **18.48** | **30.00** | **2,232** | **1,020** | **80** | **30.78** | **33.09** | **0 runs** |
 
 - **I3, I11, I12 and I13: zero violations** in all 5,000 schedules.
-- **The New bound: zero violations in the sampled families**, but the `fence-notice` family's worst
-  is exactly 30.00 s and the targeted canonical probe below is over the bound 20 times. The
-  overall median is **18.72 s** (inside 25 s).
-- **Without a delivered notice**: 80 promotions take the allowed slower path, median **30.78 s**,
-  worst **33.09 s**, each with an alert (`fenceNoticeAlerts`). They are not counted as bound
-  violations, exactly as §9/§11 permit.
-- **`fence-notice`** is the direct Rev 3 family: 312 notices delivered to the eligible member, 104
-  promotions without one (the drop/stale/bad-epoch/delayed-past-the-block modes), 50 slower-path
-  samples, judged worst **30.00 s**. The delivered half is within the bound in the sampled
-  timings; the tail is the counterexample.
-- **`failsafe-keepalive`** mixes the clean no-failover variant with the canonical two-fault mixed
-  variant: 80 delivered notices, 44 misses, 24 allowed slower paths (median 30.74, worst 32.16);
+- **The New bound: zero violating runs.** The judged median is **18.48 s**; the judged worst is
+  **30.00 s** (the `fence-notice` family, at the bound; no sample exceeds 30,000 ms).
+- **With a delivered notice:** the `fence-notice` family's median is **19.63 s** (down from 25.09 in
+  Rev 3), and its worst is 30.00 s. The `failsafe-keepalive` judged median is **19.85 s** (down from
+  25.43), worst 29.90. The `clock-step` judged worst is 29.79.
+- **Without a delivered notice:** 80 promotions take the allowed slower path, median **30.78 s**,
+  worst **33.09 s**, each with an alert. They are not counted as bound violations, exactly as
+  §9/§11 permit. `fence-notice` contributes 50, `failsafe-keepalive` 24, `clock-step` 6.
+- **`fence-notice`** is the direct Rev 4 family: 312 notices delivered to the eligible member, 104
+  promotions without one (drop/stale/bad-epoch/delayed-past-the-window), 50 slower-path samples.
+  The delivered half is within the bound.
+- **`failsafe-keepalive`**: 80 delivered, 44 misses, 24 slower paths (median 30.74, worst 32.16);
   the judged worst is 29.90. The clean variant is `ttf: false` (the primary kept serving).
-- **`clock-step`** has 73 delivered, 173 misses (mostly an isolated primary that cannot reach any
-  member), 6 allowed slower paths (median 30.61, worst 32.02), and a judged worst of 29.79.
 - **`partition-isolated`** and `two-candidates` have zero delivered notices (the primary is
   partitioned from both members), 354/351 misses, and **no slow path**: the members' last answers
-  aged from the fault, so the one-TTL block is satisfied by the time the lease expires.
+  aged from the fault, so the TTL block and the debounce are satisfied by the lease expiry.
 - **`arbiter-outage`**: 181 delivered notices; variant A keeps the primary, variant B fences and no
   promotion happens inside the outage. The post-outage recoveries are not judged (`ttfExempt`).
 - **`control-down`**: 357 promotions and 42,206 acks while the control plane was down; the row
   reconciled and never fell. **`refusal`**: 0 promotions in 357 runs.
 - **`sync-named-dead`**: 177 promotions, all in the variants where the lease names the promoter at
   the acquired generation or the async path is accepted; the unnamed member never promoted; I13
-  zero. The old variant-0 kill was moved 4 s later so the `b → a` close is not racing the kill.
+  zero. The variant-0 kill is 10 s after the member death so the `b → a` close does not race it.
 - **Strict overlap** (two primaries at different generations) totals 1,918 ms, worst 487 ms in
   `two-candidates`; no acknowledged write was lost (I13's ack check would have fired).
 
@@ -523,77 +530,50 @@ seeds 1–5,000, with the notice delivered:
 | | |
 |---|---|
 | judged samples | 5,000 |
-| over 30 s | **20** |
+| over 30 s | **0** |
 | slow path | 0 (the notice was delivered) |
-| worst | **33.46 s** (seed 3752) |
-| without the notice (drop) | seed 3541: **38.43 s**, reported as a slower path with an alert, **no bound violation** |
+| worst | **28.123 s** (seed 3071) |
+| seed 3752 (the Rev-3 counterexample) | **23.79 s** (Rev 3: 33.46 s) |
+| without the notice (drop), seed 3541 | **38.43 s**, reported as a slower path with an alert, **no bound violation** |
 
-The delivered fixed probe is the remaining counterexample. The 5,000 family run does not hit the
-tail because its fault times are randomised; the fixed schedule at `t = 6 s` does.
+The delivered canonical is clean across the whole seed range. The 5,000 family run's
+`fence-notice` worst is exactly 30.00 s because one randomised phase sits at the bound; no sample
+exceeds it.
 
 ---
 
-## 8. Counterexample: the notice removes the TTL block but not §4.1's debounce
+## 8. Counterexamples: none under Revision 4
 
-### 8.1 The Revision 2 counterexample is fixed when the notice is delivered
+### 8.1 What Revision 4 fixed
 
-The Revision 2 trace (primary loses the arbiter and `b`, keeps serving through the failsafe, fences
-at ~21 s) went from **38.43 s** to **28.56 s** at the same seed (3541) once the notice was
-delivered: the eligible member `a` receives the notice at the fence and no longer waits one TTL
-after its last answer. Over the ordinary seeds 9/15/33 the delivered canonical is 24.62–26.60 s.
-This is the Rev 3 improvement working.
+Revision 2's counterexample was the §4.4 one-TTL keep-alive block (38.43 s). Revision 3's notice
+fixed the block when delivered but left the §4.1 5 s stream-down debounce: at seed 3752 the fixed
+canonical was **33.46 s** even with the notice delivered, because the primary kept the WAL stream
+to `a` up until it fenced, so the debounce started after the lease expiry. Revision 4 makes a valid
+notice satisfy the debounce as well. The same seed is now **23.79 s**; the fixed canonical over
+seeds 1–5,000 has **0 seeds over 30 s**, worst **28.123 s** (seed 3071).
 
-### 8.2 The remaining Rev 3 counterexample
-
-`w11-failsafe-minimal` at **seed 3752** (two faults, the notice delivered):
+The trace now shows the notice doing both jobs:
 
 ```
-  0.000s p      initial lease at generation 1, sync {a}; last successful lease write
-  6.000s net    p↛arb and p↛b (two faults)
-  6.005s p      renew failed: partitioned; failsafe is active
- 21.388s p      cannot prove the lease: b has now been silent one TTL; fencing
- 21.479s a      received fence notice for generation 1 from p
- 21.531s p      fence notice to a delivered
- 22.311s a      WAL receiver down (the 5 s §4.1 debounce starts at the detection tick)
- 28.401s a      candidate at generation 2; the notice permits the keep-alive exception
- 28.489s a      won the CAS at generation 2; pg_ctl promote (4971 ms)
- 33.460s a      PRIMARY at generation 2
- 33.460s !      bound/time-to-writable-exceeded: 33.5 s from p's last successful renew (worst 30 s)
+ 21.388s p   cannot prove the lease (b silent one TTL); fencing
+ 21.479s a   received fence notice for generation 1
+ 22.311s a   WAL receiver down
+ 22.390s a   candidate at generation 2   ← the notice waived the 5 s debounce
+ 22.480s a   won the CAS; pg_ctl promote (1306 ms)
+ 23.786s a   PRIMARY at generation 2
+ 23.786s a   time to writable 23.79 s from p's last lease renew
 ```
 
-**The decomposition:**
+### 8.2 Without delivery the block and the debounce hold
 
-| Interval | Value | Source |
-|---|---|---|
-| last lease write (0) → lease expiry | 15.0 s | W9 §3 `DB_TTL` |
-| lease expiry → primary fence | 6.4 s | H21 failsafe: `b` last answered at ~6 s, so the primary may serve until ~21 s |
-| fence → notice received by `a` | 0.09 s | Revision 3 §1.8 delivery |
-| notice → WAL receiver detects not streaming | 0.9 s | 1 s member tick |
-| detection → §4.1 5 s debounce satisfied | 5.0 s | **Revision 3 §4.1, still in force** |
-| debounce → candidate CAS | ~0.1 s | detection tick + arbiter RPC |
-| CAS → writable | 4.97 s | W11 §5.3 `pg_ctl promote` (allowed ≤ 5 s) |
-| **total** | **33.46 s** | §9 says worst ≤ 30 s |
+`w11-failsafe-notice-lost` at seed 3541 is **38.43 s**, with `fenceNoticeMisses=1`,
+`fenceNoticeAlerts=1`, `slowPathLatenciesMs`, and **no** `time-to-writable-exceeded`. The 5,000 run's
+80 slower paths (median 30.78, worst 33.09) are the same path, exactly as §9/§11 permit. A stale,
+bad-epoch, forged or duplicate-only-with-the-wrong-generation notice does not waive either wait.
 
-The notice fixes the keep-alive wait (the Revision 2 15 s block), but the member's own WAL stream
-was **not** down before the fence: the primary was still shipping WAL to `a` while it served through
-the failsafe. §4.1 starts the 5 s debounce when the receiver notices the stream stopped, which is at
-the fence (plus one 1 s tick). The candidate can therefore not be a target at the lease expiry
-(15 s) or at the notice (21 s); the earliest is ~26–28 s, and the allowed 5 s promote takes it over
-30. The 5,000 family run's `fence-notice` worst is exactly **30.00 s**; the fixed `t = 6 s` schedule
-fails **20/5,000** seeds, worst **33.46 s**.
-
-This is a **spec defect**, not a code defect: §9's claim "with a fence notice the eligible member may
-acquire at the expiry instead of one TTL later, so the worst case stays ≤ 29 s" assumes the
-stream-down debounce is already satisfied at the expiry, but in this fault the primary keeps the
-stream up until it fences. The model was not patched to hide it. The owner needs to decide the
-resolution (for example: let the notice also satisfy or restart the stream-down debounce; start the
-debounce at the lease expiry or at the primary's last renew; reduce the promote budget; or change
-the bound).
-
-**Without a delivered notice the block holds and is reported, not silently violated.** The fixed
-`w11-failsafe-notice-lost` at seed 3541 is **38.43 s**, counted as `slowPathLatenciesMs` with
-`fenceNoticeMisses=1`, `fenceNoticeAlerts=1`, and **no** `time-to-writable-exceeded`. The 5,000 run's
-80 slow paths (median 30.78, worst 33.09) are the same path, exactly as §9/§11 permit.
+**No counterexample was found under Revision 4.** The fixed canonical and the 5,000-schedule run
+have no I3/I11/I12/I13 violation and no judged sample over 30 s.
 
 ---
 
@@ -610,6 +590,9 @@ the bound).
   `from === lease.holderNodeId`, the generation, and the epoch; the model does not model mTLS,
   signatures or a control-plane epoch. A forged notice from another member is rejected by the
   `from` check; a stale/future one is stored but never authorises.
+- **The 2 s send deadline as a delivered guarantee.** The model sends at the fence decision
+  (0 s); a `delay` fault holds the network delivery (≤ 2 s in the families), not the primary's
+  send. A network that delays the notice beyond the window falls back to the TTL/debounce path.
 - **`on_sync_loss: block`** is implemented but not exercised by the default families.
 - **A genuinely two-member fleet.** `dataNodes: 2` is a policy refusal; the simulation still has
   three members so that a mutant can promote and be caught.
@@ -636,19 +619,20 @@ the bound).
 ## 10. Reproduce
 
 ```sh
-# the full run: 5,000 schedules, ~2.8 s, exit 0 (the sampled families miss the canonical tail)
+# the full run: 5,000 schedules, ~2.6 s, exit 0
 bun tests/ha/sim/w11/run.ts --runs 5000
 
 # one family, or one seed with its trace
 bun tests/ha/sim/w11/run.ts --runs 500 --family fence-notice
 bun tests/ha/sim/w11/run.ts --runs 1 --seed 3752 --family fence-notice --trace
 
-# the canonical two-fault case, with the notice delivered (seed 3752 is the counterexample)
-bun tests/ha/sim/w11/run.ts --scenario w11-failsafe-minimal --seed 15 --trace      # 25.35 s
-bun tests/ha/sim/w11/run.ts --scenario w11-failsafe-minimal --seed 3541 --trace    # 28.56 s
-bun tests/ha/sim/w11/run.ts --scenario w11-failsafe-minimal --seed 3752 --trace    # 33.46 s
+# the canonical two-fault case, with the notice delivered
+bun tests/ha/sim/w11/run.ts --scenario w11-failsafe-minimal --seed 15 --trace      # 18.47 s
+bun tests/ha/sim/w11/run.ts --scenario w11-failsafe-minimal --seed 3541 --trace    # 25.42 s
+bun tests/ha/sim/w11/run.ts --scenario w11-failsafe-minimal --seed 3752 --trace    # 23.79 s
+# seeds 1-5000: 0 over 30 s, worst 28.123 s (seed 3071); the unit test runs the loop
 
-# without delivery: the one-TTL block holds; reported as a slower path with an alert
+# without delivery: the one-TTL block and the debounce hold; reported as a slower path with an alert
 bun tests/ha/sim/w11/run.ts --scenario w11-failsafe-notice-lost --seed 3541 --trace  # 38.43 s
 bun tests/ha/sim/w11/run.ts --scenario w11-failsafe-notice-stale --seed 3752 --trace # 35.05 s
 

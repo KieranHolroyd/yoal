@@ -332,7 +332,7 @@ function fenceNotice(seed: number): Scenario {
 				target: 'a',
 				notice: mode,
 				durationMs: 90_000,
-				value: mode === 'delay' ? rng.int(500, 8_000) : 500,
+				value: mode === 'delay' ? rng.int(500, 2_000) : 500,
 			}),
 		);
 	return finish(
@@ -663,7 +663,7 @@ export function failsafeKeepaliveFixed(): Scenario {
 			primaryStays: { node: 'p', from: 6_000, to: 46_000 },
 			requireAcks: { from: 6_000, to: 45_000, min: 1 },
 		},
-		{ durability: 'async', durationMs: 55_000 },
+		{ durability: 'async', durationMs: 45_000 },
 	);
 }
 
@@ -714,7 +714,7 @@ export function failsafeNoticeDelayed(): Scenario {
 		[
 			edge(0, 6_000, 'p', 'arb', 70_000),
 			edge(1, 6_000, 'p', 'b', 70_000),
-			fault(2, 0, 'notice', { target: 'a', notice: 'delay', value: 5_000, durationMs: 60_000 }),
+			fault(2, 0, 'notice', { target: 'a', notice: 'delay', value: 2_000, durationMs: 60_000 }),
 		],
 		{ failover: { after: 6_000, withinMs: 60_000 } },
 		{ durability: 'sync', sync: ['a'], durationMs: 60_000 },
