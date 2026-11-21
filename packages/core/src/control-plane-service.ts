@@ -312,7 +312,8 @@ export class ControlPlaneService {
 		this.#assertPlatformAdmin(principal);
 		if (!this.#runtime) throw new CoreError('conflict', 'Control-plane standby is not running on this node.', 409);
 		const result = await this.#runtime.promoteNow(expectedEpoch, options);
-		if (result.role !== 'primary')
+		// A refusal while already primary (a stale --expect-epoch) must be a 409, not a 200.
+		if (result.reason?.startsWith('promotion refused') || result.role !== 'primary')
 			throw new CoreError('conflict', `Promotion refused: ${result.reason}`, 409);
 		this.ctx.audit.record({
 			principal,
@@ -382,7 +383,6 @@ export class ControlPlaneService {
 				? ({ restored: true, lagSeconds: 0, position: 'primary' } satisfies ControlReplicaState)
 				: await readControlReplicaStatus(
 						this.ctx.config.controlReplicaStatusPath ?? join(this.ctx.config.dataDir, REPLICA_FILE),
-						enrolment?.replica,
 					);
 		const actualKey = masterKeyFingerprint(this.ctx.config.masterKey);
 		const actualConfig = controlConfigDigest(process.env);

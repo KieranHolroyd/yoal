@@ -1,4 +1,4 @@
-import { mkdir, readFile, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, writeFile, chmod } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { parseArgs, requirePositional, type FlagSpec } from '../args.ts';
 import { installControlEnrolment, parseSealedControlBundle } from '../control-enrol.ts';
@@ -135,6 +135,8 @@ async function controlCommand(args: ReturnType<typeof parseArgs>): Promise<void>
 			// The activation code is shown once on stdout; it must never sit next to the sealed bundle.
 			const material = { bundle: result.bundle, certificate: result.certificate };
 			await writeFile(out, `${JSON.stringify(material, null, 2)}\n`, { mode: 0o600 });
+			// `mode` only applies to a new file; tighten an existing one too.
+			await chmod(out, 0o600).catch(() => undefined);
 		}
 		if (args.boolean('json')) {
 			printJson(raw);
