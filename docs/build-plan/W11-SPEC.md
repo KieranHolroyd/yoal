@@ -1,6 +1,6 @@
 # W11 spec — automatic database failover
 
-Status: **approved 2026-11-21 (Revision 3)** (owner delegated the decisions; they are in §1). This is step 1 of
+Status: **approved 2026-11-21 (Revision 4)** (owner delegated the decisions; they are in §1). This is step 1 of
 HA-PLAN §6.4 for W11. It extends [W9-SPEC.md](./W9-SPEC.md) §5 (the database member machine, which is
 implemented) with the policy that decides *when* a replica may promote automatically. Nothing in W11
 is implemented before the model in step 2 is clean.
@@ -22,12 +22,14 @@ is implemented before the model in step 2 is clean.
 6. **Consumers fail closed**: poll members every 1–2 s for role/generation, forward only to a
    `primary` at the highest generation; if none answers, refuse writes.
 7. **The old primary never resumes.** It is fenced, then rewinds or rebuilds as a replica.
-8. **Fence notice (model Revision 3).** A primary that decides to fence sends an authenticated
+8. **Fence notice (model Revisions 3–4).** A primary that decides to fence sends an authenticated
    `fencing {generation, epoch}` notice to every reachable member before it stops writes. A member
    that receives the notice for the generation it is considering may acquire once the lease has
    expired, without waiting out the keep-alive TTL. A member that did not receive it keeps the
    one-TTL block. This preserves the safety rule (the notice is the primary promising to stop) and
-   removes the extra TTL from the M4 bound when the primary can reach the candidate.
+   removes the extra TTL from the M4 bound when the primary can reach the candidate. Revision 4:
+   a valid notice also satisfies the §4.1 stream-down debounce, because the notice proves the
+   stream ended because the holder fenced, not because of an ambiguous WAL hiccup.
 
 ## 2. Invariants
 
@@ -61,6 +63,9 @@ Arming is an audited operator action. Turning `auto` off is immediate.
 A replica becomes a candidate only when **all** hold:
 
 1. **Its own stream is down**: the WAL receiver reports not streaming for `STREAM_DOWN_MS` (5 s).
+   A valid fence notice for this generation satisfies this debounce: the notice is positive proof
+   that the holder is stopping, so a stream that went down because it fenced needs no settling
+   time. Without a notice the debounce applies.
 2. **The primary lease has expired by the arbiter's clock** (not the replica's), and the replica can
    reach the arbiter.
 3. **It is eligible** (I12 for sync; any replica for async with `acceptDataLoss`).
@@ -74,8 +79,9 @@ A replica becomes a candidate only when **all** hold:
 ## 5. Promotion
 
 0. **Fencing primary.** Before it stops, the old primary stops serving agents and writes, then sends
-   `fencing {generation, epoch}` to every reachable member. It stops Postgres only after the notice
-   attempt (delivery is best effort; the lease and keep-alive rules remain the authority).
+   `fencing {generation, epoch}` to every reachable member within 2 s of deciding. It stops Postgres
+   only after the notice attempt (delivery is best effort; the lease and keep-alive rules remain the
+   authority). A delivered notice waives the §4.1 debounce; a lost notice keeps it.
 1. Candidate CASes the lease at `generation + 1` with `sync: []`, `syncState: 'changing'`, holder =
    itself, `expiresAt = arbiter now + 15 s`.
 2. Losing the CAS means another member won: re-follow and do not promote.
@@ -123,8 +129,8 @@ guessing.
 The clock starts at the primary's last successful lease renew; a primary that stops renewing at t=0
 is a candidate's target by t≤15 s, writable by t≤22 s, and discoverable by t≤24 s. The canonical
 two-fault case (primary cannot renew and one member is silent) has the primary fence at ~21 s; with
-a fence notice the eligible member may acquire at the expiry instead of one TTL later, so the worst
-case stays ≤ 29 s. Without a delivered notice the one-TTL rule applies and the case may exceed 30 s;
+a fence notice the eligible member may acquire at the expiry instead of one TTL later, and the
+notice also satisfies the stream-down debounce, so the worst case stays ≤ 29 s. Without a delivered notice the one-TTL rule applies and the case may exceed 30 s;
 that is a safer-but-slower path, and the alert must say the notice was not delivered.
 
 ## 10. Failure matrix
@@ -152,8 +158,9 @@ The model is written from this spec only and checks:
   step, stale leader, two candidates, arbiter outage alone;
 - refusal of `auto` on two data nodes, no drill, async without acceptDataLoss;
 - no failover and no stop on an arbiter outage alone;
-- fence-notice delivery: with a notice the two-fault case stays within the bound; without it the
-  one-TTL block holds (and the run is allowed to be slower, with the alert).
+- fence-notice delivery: with a notice the two-fault case stays within the bound (the notice also
+  waives the stream-down debounce); without it the one-TTL block and the debounce hold (and the run
+  is allowed to be slower, with the alert).
 
 ## 12. Arming and drills
 
