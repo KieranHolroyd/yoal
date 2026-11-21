@@ -58,9 +58,23 @@ terraform apply                       # 1. network, balancer, bucket, Key Vault,
    /etc/yoal/setup-token`), create a platform admin API key.
 5. **Ingress settings.** `terraform output -json ingress_settings` is the
    `PATCH /api/v1/cluster/config` body for this balancer. **Hetzner:** apply it, then
-   `terraform apply -var proxy_protocol=true` (Yoal accepts header-less connections from a trusted
-   address, so this order never breaks traffic; the reverse order does).
-6. **Join tokens**, one per node, within the hour before the next step:
+   `terraform apply -var proxy_protocol=true` **straight away**. Yoal accepts header-less
+   connections from a trusted address, so this order never breaks traffic (the reverse order
+   does), but until the balancer sends PROXY headers Yoal believes a client-sent
+   `X-Forwarded-For` through it, so Access rules can be bypassed in that window.
+6. **Put the first machine on the overlay.** The installer enrols it as the edge with host
+   networking and no `wg0`; joining nodes only peer with nodes that have an overlay endpoint
+   and the `ingress` role. Adopt it onto the managed overlay with its private address as the
+   WireGuard endpoint (port 51820 is added):
+   ```sh
+   NODE_A=$(curl -sS "https://control.example.org/api/v1/nodes" -H "Authorization: Bearer $YOAL_KEY" \
+     | python3 -c 'import json,sys; print([n["id"] for n in json.load(sys.stdin)["nodes"] if n["mode"] == "edge"][0])')
+   curl -sS -X POST "https://control.example.org/api/v1/nodes/$NODE_A/overlay" \
+     -H "Authorization: Bearer $YOAL_KEY" -H 'Content-Type: application/json' \
+     -d '{"endpoint":"10.40.1.10"}'   # node-a's private_ip
+   ```
+   This needs a platform admin key, which exists only after setup, so cloud-init cannot do it.
+7. **Join tokens**, one per node, within the hour before the next step:
    ```sh
    for n in node-b node-c node-d; do
      curl -sS -X POST "https://control.example.org/api/v1/nodes/join-token" \
@@ -69,10 +83,12 @@ terraform apply                       # 1. network, balancer, bucket, Key Vault,
    ```
    Put them in `join_tokens = { node-b = "…", … }` in a git-ignored `tokens.auto.tfvars`, then
    `terraform apply -var create_join_nodes=true`. A node without a token boots and prints the
-   `node.sh` line to run by hand.
-7. **Zones and roles.** Set each node's zone and roles under **Nodes → Edit node** (the outputs
-   and `/var/log/yoal-provision.log` name the intended ones). Then `yoal ha status`.
-8. **Platform store (optional).** `terraform output platform_store_env` gives the non-secret lines
+   `node.sh` line to run by hand. Each joining machine pins the platform host to node-a's
+   private address in `/etc/hosts` for the join only, and removes the pin afterwards.
+8. **Zones and roles.** Set each node's zone and roles under **Nodes → Edit node**, or with
+   `PATCH /api/v1/nodes/<id>` and `{"zone":"uksouth-2","roles":["ingress","compute","data"]}`
+   (the outputs and `/var/log/yoal-provision.log` name the intended ones). Then `yoal ha status`.
+9. **Platform store (optional).** `terraform output platform_store_env` gives the non-secret lines
    for `/etc/yoal/yoal.env`; add `YOAL_AZURE_SAS_TOKEN` (or `YOAL_AZURE_ACCOUNT_KEY`) yourself and
    restart `yoal-control-plane`. AWS: the same with the `R2_*` keys and an IAM user's key.
    Hetzner: create the bucket in Object Storage by hand (the `hcloud` provider has no resource).
@@ -93,9 +109,14 @@ installer gains it, so the template gets wired.
 | `--object-store azure://<container>` (and `s3://`, `gcs://`) | `install.sh` | `--object-store local\|r2` only. Azure/GCS are env-only (`YOAL_OBJECT_STORE`, `YOAL_AZURE_*`, `YOAL_GCS_*`, behind `OBJECT_STORE_*` flags) |
 | `--domain` | `install.sh` | The real flag is `--platform-host` (the templates use it) |
 
-Also missing for a hands-off run: managed-identity auth in Yoal's Azure store and instance-profile
-auth in its S3 store (the modules create the scoped identities, nothing consumes them yet); a
-`node.sh` way to pass the token other than `--token` on the command line.
+Also missing for a hands-off run: a `node.sh` way to pass the token other than `--token` on the
+command line, and an installer or join option that puts the first machine on the overlay (step 6).
+
+**HA-PLAN §10 "Arbiter credentials" is not reached today.** The modules create an arbiter identity
+scoped to blob reads, writes and deletes under `yoal/ha/` (Azure: a custom role with only those
+four data actions plus an attribute condition; AWS: an IAM role limited to the prefix). Nothing
+uses it: Yoal's Azure store signs only with an account key or a SAS, and its S3 store only with
+static keys, so whatever key you give Yoal in step 9 covers the whole container or bucket.
 
 ## Not verified
 

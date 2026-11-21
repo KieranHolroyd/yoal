@@ -392,13 +392,34 @@ resource "azurerm_role_assignment" "control_blob" {
 }
 
 # HA-PLAN section 10, "Arbiter credentials": every data node holds them, so they grant nothing
-# but reads and writes under the yoal/ha/ prefix. An attribute-based condition limits the role.
+# but lease reads and writes under yoal/ha/. A custom role carries only the four blob data actions
+# (no container delete or management actions), and an attribute-based condition limits them to
+# the prefix. Not reached today: Yoal's Azure store signs only with an account key or a SAS, so
+# nothing uses this identity yet (README.md).
+resource "azurerm_role_definition" "arbiter" {
+  name        = "${var.name}-yoal-arbiter-${random_string.suffix.result}"
+  scope       = azurerm_resource_group.yoal.id
+  description = "Yoal arbiter: read, write and delete blobs (condition: under yoal/ha/ only)."
+
+  permissions {
+    actions = []
+    data_actions = [
+      "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read",
+      "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/write",
+      "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/add/action",
+      "Microsoft.Storage/storageAccounts/blobServices/containers/blobs/delete",
+    ]
+  }
+
+  assignable_scopes = [azurerm_resource_group.yoal.id]
+}
+
 resource "azurerm_role_assignment" "arbiter_blob" {
-  scope                = azurerm_storage_container.platform.id
-  role_definition_name = "Storage Blob Data Contributor"
-  principal_id         = azurerm_user_assigned_identity.arbiter.principal_id
-  condition_version    = "2.0"
-  condition            = <<-EOT
+  scope              = azurerm_storage_container.platform.id
+  role_definition_id = azurerm_role_definition.arbiter.role_definition_resource_id
+  principal_id       = azurerm_user_assigned_identity.arbiter.principal_id
+  condition_version  = "2.0"
+  condition          = <<-EOT
     (
       (
         !(ActionMatches{'Microsoft.Storage/storageAccounts/blobServices/containers/blobs/read'})

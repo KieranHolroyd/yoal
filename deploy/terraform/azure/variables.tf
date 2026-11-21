@@ -233,22 +233,24 @@ variable "health_port" {
 }
 
 variable "probe_interval_seconds" {
-  description = "Probe interval. 5 s with 2 failures removes a failing ingress in about 10 s."
+  description = "Probe interval. Azure's minimum is 5 s."
   type        = number
   default     = 5
   validation {
-    condition     = var.probe_interval_seconds >= 5 && var.probe_interval_seconds <= 7
-    error_message = "Azure's minimum is 5 s; above 7 s, two failures no longer fit the 15 s bound."
+    condition     = var.probe_interval_seconds >= 5
+    error_message = "Azure's minimum probe interval is 5 s."
   }
 }
 
+# Azure has no probe timeout setting. The bound below counts one more interval as the timeout,
+# the longest a probe to a node that stopped answering can take before the next one is due.
 variable "probe_threshold" {
   description = "Consecutive failed probes before Azure stops sending new connections."
   type        = number
   default     = 2
   validation {
-    condition     = var.probe_threshold >= 1 && var.probe_threshold * var.probe_interval_seconds <= 15
-    error_message = "probe_threshold x probe_interval_seconds must stay within the 15 s bound."
+    condition     = var.probe_threshold >= 1 && var.probe_interval_seconds * var.probe_threshold + var.probe_interval_seconds <= 15
+    error_message = "interval x failures + timeout (one interval on Azure) must stay within the 15 s bound: 5 s x 2 + 5 s = 15 s."
   }
 }
 

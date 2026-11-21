@@ -248,9 +248,17 @@ variable "health_timeout_seconds" {
 }
 
 variable "health_retries" {
-  description = "Failed checks before a target is unhealthy. Hetzner's minimum, 1, is what S9 measured."
+  description = "Retries after a failed check before a target is unhealthy. Hetzner's minimum, 1, is what S9 measured."
   type        = number
   default     = 1
+  validation {
+    # A failed check plus `retries` more: (retries + 1) failures. 3 s x 2 + 1 s = 7 s.
+    condition = (
+      var.health_retries >= 1 && var.health_interval_seconds >= 3 && var.health_timeout_seconds >= 1 &&
+      var.health_interval_seconds * (var.health_retries + 1) + var.health_timeout_seconds <= 15
+    )
+    error_message = "interval x (retries + 1) + timeout must stay within the 15 s bound (Hetzner minimums: interval 3, timeout 1, retries 1)."
+  }
 }
 
 variable "labels" {

@@ -26,8 +26,8 @@ Probe the plain port. It needs no TLS, no SNI and no PROXY header. A probe on 44
 
 | `ingress` settings | Yoal reads the client address from | Use when |
 |---|---|---|
-| `proxyProtocol: "v2"` (or `"v1"`), `trustedProxies: [<balancer>]` | the PROXY header, accepted only from `trustedProxies` | The balancer passes TCP through but replaces the source address (Hetzner, HAProxy `mode tcp`) |
-| `proxyProtocol: "off"`, `trustedProxies: [<balancer>]` | `X-Forwarded-For`, believed only from `trustedProxies` | The balancer ends HTTP itself (HAProxy `mode http`, Cloudflare) |
+| `proxyProtocol: "v2"` (or `"v1"`), `trustedProxies: [<balancer>]` | the PROXY header, accepted only from `trustedProxies` | The balancer replaces the source address and can send a PROXY header (Hetzner, HAProxy in either mode) |
+| `proxyProtocol: "off"`, `trustedProxies: [<balancer>]` | `X-Forwarded-For`, believed only from `trustedProxies` | The balancer ends HTTP itself and cannot send a PROXY header (Cloudflare) |
 | both unset | the connection's source address | The balancer keeps the client's source address (Azure Load Balancer, AWS NLB instance targets, a floating IP) |
 
 `trustedProxies` lists the addresses that **send** the header, not the probe sources. Keep it as narrow as the balancers themselves: a header from any other source is read and ignored.
@@ -55,7 +55,7 @@ curl -X PATCH https://control.example.com/api/v1/cluster/config \
 | Azure Load Balancer | HTTP 8099 | 5 s, 2 | No | About 10 s | Not yet tested |
 | AWS NLB | HTTP 8099 | 5 s, 2 | No (instance targets) | About 10–12 s | Not yet tested |
 | Hetzner Load Balancer | HTTP 8099 | 3 s, 1 retry, 1 s timeout | Yes | 4.6–7.9 s for a dead server | Tested (S9) |
-| HAProxy | HTTP 8099 | 5 s, 2 (`fall 2`) | Yes, or `mode http` | 9–14 s | Tested (S9) |
+| HAProxy | HTTP 8099 | 5 s, 2 (`fall 2`) | Yes (`v2`), in both modes | 9–14 s | Tested (S9) |
 | Cloudflare proxied DNS | Yoal probes 443 | 45 s hold-down | No | About a minute | Not yet tested |
 | Cloudflare Load Balancing | HTTP 8099 | Your plan's shortest | No | Depends on plan | Not yet tested |
 | Azure Traffic Manager | HTTP 80, through the regional balancer | 10 s, 1 | No | Minutes, by DNS TTL | Not yet tested |
@@ -141,7 +141,7 @@ Not yet tested.
 The Hetzner Load Balancer reaches the nodes over a private network and replaces the source address, so use PROXY protocol. Health probes and proxied connections both come from the balancer's private address, and probes carry no PROXY header.
 
 - Attach the balancer to the nodes' private network at a fixed address, and add targets with `use_private_ip`.
-- Services: `tcp` 443 → 443 and 80 → 80, with `proxyprotocol` on and `least_connections`.
+- Services: `tcp` 443 → 443 and 80 → 80, with `proxyprotocol` on and `least_connections`. Only the 443 service was tested; PROXY protocol on port 80 is not yet tested.
 - Health check: `http`, port 8099, path `/.well-known/yoal/health`, status `200`, interval 3 seconds, timeout 1 second, retries 1. These are the lowest values Hetzner's API accepts.
 - Yoal: `"proxyProtocol": "v2"`, `"trustedProxies": ["<balancer private address>/32"]`.
 
@@ -167,7 +167,10 @@ resource "hcloud_load_balancer_service" "https" {
 }
 ```
 
-Set the Yoal settings **before** you turn `proxyprotocol` on. Yoal accepts connections without the header from a trusted address, so the order never breaks traffic; the other order makes Caddy read the header as a broken TLS handshake.
+Set the Yoal settings **before** you turn `proxyprotocol` on. Yoal accepts connections without the header from a trusted address, so this order never breaks traffic; the other order makes Caddy read the header as a broken TLS handshake.
+
+> [!WARNING]
+> Between the two steps, Yoal trusts the balancer's address but the balancer sends no PROXY header, so Yoal believes an `X-Forwarded-For` header a client sends through it. Access rules can be bypassed in that window. Run the two steps back to back.
 
 Tested (S9), on an LB11 with three Debian 13 servers: a powered-off server was out of rotation in 4.6–7.9 seconds and a crashed Caddy in at most 4.7 seconds; a drained node finished with 0 failed requests in 10 of 10 runs; the client address was correct and forged headers were ignored in every case. Use the `tcp` service: Hetzner's `http` service returned a `502` at a reload in 3 of 7 runs and puts its own address in the connection's source.
 

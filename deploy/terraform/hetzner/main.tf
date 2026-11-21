@@ -176,7 +176,8 @@ resource "hcloud_load_balancer_target" "ingress" {
 }
 
 # TCP pass-through on 443 and 80: TLS ends on the ingress. Probes hit the plain health port
-# without a PROXY header (S9 saw them come from the balancer's private address).
+# without a PROXY header (S9 saw them come from the balancer's private address). S9 measured the
+# 443 service only; PROXY protocol on the port-80 service is not yet tested.
 resource "hcloud_load_balancer_service" "web" {
   for_each         = toset(["443", "80"])
   load_balancer_id = hcloud_load_balancer.yoal.id

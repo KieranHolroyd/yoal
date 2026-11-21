@@ -222,8 +222,8 @@ variable "unhealthy_threshold" {
   type        = number
   default     = 2
   validation {
-    condition     = var.unhealthy_threshold >= 2 && var.unhealthy_threshold * var.health_interval_seconds <= 15
-    error_message = "unhealthy_threshold x health_interval_seconds must stay within the 15 s bound (NLB minimum threshold is 2)."
+    condition     = var.unhealthy_threshold >= 2 && var.unhealthy_threshold * var.health_interval_seconds + var.health_timeout_seconds <= 15
+    error_message = "interval x unhealthy_threshold + timeout must stay within the 15 s bound: 5 s x 2 + 2 s = 12 s (NLB minimum threshold is 2)."
   }
 }
 
