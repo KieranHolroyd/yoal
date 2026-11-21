@@ -12,7 +12,7 @@ import { CoreError, ValidationError } from './errors.ts';
  * - `ProjectService.create` and `update` (`project.placementSpec.spread`; REST, MCP, dashboard,
  *   config import);
  * - `assertReleasePhaseSpec` (`workload.placement.spread`; every `setSpec` and deploy plan).
- * Blueprint HA keys are refused whole until lane C (`blueprints-ha.ts`).
+ * Blueprint plans call it for `spread` and `standbyRegion` before apply does (`blueprints-ha.ts`).
  *
  * With the flag **off**, a write that changes a region value is a `ValidationError` naming the
  * field and the flag; re-sending the stored value is allowed. With the flag **on**, a node region
