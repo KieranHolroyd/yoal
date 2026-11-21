@@ -113,6 +113,7 @@ export const SECTIONS: DocsSection[] = [
 			'self-hosting/configuration',
 			'self-hosting/nodes-and-fleet',
 			'self-hosting/clustering',
+			'self-hosting/load-balancers',
 			'self-hosting/platform-backups',
 			'self-hosting/upgrades',
 			'self-hosting/quotas-and-limits',

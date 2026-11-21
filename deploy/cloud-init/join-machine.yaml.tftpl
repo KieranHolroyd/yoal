@@ -1,0 +1,85 @@
+#cloud-config
+# Yoal: a joining machine. HA-PLAN H27 and section 8, step 2.
+#
+# Rendered by Terraform's templatefile() (deploy/terraform/*). It runs the same one line that
+# Nodes > Enroll node prints, `curl <control>/install/node.sh | sh -s -- --token ... --name ...`,
+# with the flags node.sh has today. It adds no code path to Yoal.
+#
+# The join token is a template variable, never a literal here. It is single-use and expires an
+# hour after it is created, so create it just before `terraform apply` creates this machine.
+# The script deletes its own copy after the join. An empty token skips the join and says how to
+# run it by hand.
+#
+# Template variables (all strings): control_origin, control_address, node_name, join_token,
+# endpoint, wait_minutes, zone, roles.
+
+write_files:
+  - path: /etc/yoal-provision/provision.env
+    owner: root:root
+    permissions: '0600'
+    content: |
+      CONTROL_ORIGIN='${control_origin}'
+      CONTROL_ADDRESS='${control_address}'
+      NODE_NAME='${node_name}'
+      JOIN_TOKEN='${join_token}'
+      ENDPOINT='${endpoint}'
+      WAIT_MINUTES='${wait_minutes}'
+      ZONE='${zone}'
+      ROLES='${roles}'
+  - path: /usr/local/sbin/yoal-provision-join
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/bin/sh
+      # Joins this machine to an existing Yoal control plane through /install/node.sh.
+      set -eu
+      . /etc/yoal-provision/provision.env
+      log() { echo "yoal-provision: $*"; }
+
+      if [ -z "$JOIN_TOKEN" ]; then
+        log "no join token. Create one under Nodes > Enroll node, then run:"
+        log "  curl -fsSL $CONTROL_ORIGIN/install/node.sh | sudo sh -s -- --token <token> --name $NODE_NAME --endpoint $ENDPOINT"
+        exit 0
+      fi
+
+      # Optional: reach the control plane on its private address for the join only (TLS still
+      # checks the name). The pin is removed on every exit path: afterwards the agent must follow
+      # DNS, or it would keep dialling this node after a control-plane promotion.
+      PIN='# yoal-provision-join'
+      unpin() {
+        grep -v " $PIN\$" /etc/hosts > /etc/hosts.yoal-tmp || true
+        cat /etc/hosts.yoal-tmp > /etc/hosts
+        rm -f /etc/hosts.yoal-tmp
+      }
+      trap unpin EXIT
+      host=$(echo "$CONTROL_ORIGIN" | sed -e 's#^https://##' -e 's#[:/].*$##')
+      if [ -n "$CONTROL_ADDRESS" ]; then
+        echo "$CONTROL_ADDRESS $host $PIN" >> /etc/hosts
+      fi
+
+      # The control plane may still be installing: wait for /install/node.sh to answer.
+      deadline=$(( $(date +%s) + WAIT_MINUTES * 60 ))
+      until curl -fsS --max-time 10 "$CONTROL_ORIGIN/install/node.sh" -o /root/yoal-node.sh; do
+        [ "$(date +%s)" -lt "$deadline" ] || { log "$CONTROL_ORIGIN/install/node.sh did not answer in $WAIT_MINUTES min"; exit 1; }
+        log "control plane not reachable yet; retrying in 20 s"
+        sleep 20
+      done
+
+      # TODO(installer): --zone <zone>. node.sh has no zone flag; set it under Nodes > Edit node.
+      # TODO(installer): --roles <list>. node.sh has no roles flag; set them under Nodes > Edit node.
+      set -- --token "$JOIN_TOKEN" --name "$NODE_NAME"
+      [ -z "$ENDPOINT" ] || set -- "$@" --endpoint "$ENDPOINT"
+      status=0
+      sh /root/yoal-node.sh "$@" || status=$?
+
+      # The token is single-use: drop this copy whether or not the join worked.
+      grep -v '^JOIN_TOKEN=' /etc/yoal-provision/provision.env > /etc/yoal-provision/provision.env.tmp || true
+      echo "JOIN_TOKEN=''" >> /etc/yoal-provision/provision.env.tmp
+      cat /etc/yoal-provision/provision.env.tmp > /etc/yoal-provision/provision.env
+      rm -f /etc/yoal-provision/provision.env.tmp
+      [ "$status" -eq 0 ] || { log "node.sh failed ($status); create a new token and rerun it by hand"; exit "$status"; }
+
+      log "joined as $NODE_NAME. Set its zone ($ZONE) and roles ($ROLES) under Nodes > Edit node."
+
+runcmd:
+  - [sh, -c, '/usr/local/sbin/yoal-provision-join 2>&1 | tee -a /var/log/yoal-provision.log']

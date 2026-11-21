@@ -1,0 +1,109 @@
+#cloud-config
+# Yoal: the first machine (control plane and first ingress). HA-PLAN H27 and section 8, step 1.
+#
+# Rendered by Terraform's templatefile() (deploy/terraform/*). It only runs the public installer
+# with flags the installer already has (scripts/install/USAGE.txt). It adds no code path to Yoal.
+#
+# No secret is in this file or its rendered output. The one secret the first machine needs is the
+# Cloudflare DNS-01 token (HTTPS for sites, and the https control URL joining nodes need). The
+# script reads it from an Azure Key Vault secret through the VM's managed identity, or waits for
+# an operator to copy it to /etc/caddy/cloudflare.token over SSH.
+#
+# Template variables (all strings): install_url, channel, platform_host, content_domain,
+# acme_email, admin_email, skip_dns_check, features, key_vault_secret_uri, identity_client_id,
+# token_wait_minutes, zone, roles.
+
+write_files:
+  - path: /etc/yoal-provision/provision.env
+    owner: root:root
+    permissions: '0600'
+    content: |
+      INSTALL_URL='${install_url}'
+      CHANNEL='${channel}'
+      PLATFORM_HOST='${platform_host}'
+      CONTENT_DOMAIN='${content_domain}'
+      ACME_EMAIL='${acme_email}'
+      ADMIN_EMAIL='${admin_email}'
+      SKIP_DNS_CHECK='${skip_dns_check}'
+      FEATURES='${features}'
+      KEY_VAULT_SECRET_URI='${key_vault_secret_uri}'
+      IDENTITY_CLIENT_ID='${identity_client_id}'
+      TOKEN_WAIT_MINUTES='${token_wait_minutes}'
+      ZONE='${zone}'
+      ROLES='${roles}'
+  - path: /usr/local/sbin/yoal-provision-first
+    owner: root:root
+    permissions: '0700'
+    content: |
+      #!/bin/sh
+      # Installs the Yoal control plane with the real installer flags. Safe to rerun.
+      set -eu
+      . /etc/yoal-provision/provision.env
+      log() { echo "yoal-provision: $*"; }
+
+      TOKEN_FILE=/etc/caddy/cloudflare.token
+      mkdir -p /etc/caddy
+      chmod 0755 /etc/caddy
+
+      # 1. The Cloudflare DNS-01 token. Never written into user data.
+      if [ ! -s "$TOKEN_FILE" ] && [ -n "$KEY_VAULT_SECRET_URI" ]; then
+        log "reading the Cloudflare DNS token from Key Vault"
+        deadline=$(( $(date +%s) + TOKEN_WAIT_MINUTES * 60 ))
+        while [ ! -s "$TOKEN_FILE" ]; do
+          imds="http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https%3A%2F%2Fvault.azure.net"
+          [ -z "$IDENTITY_CLIENT_ID" ] || imds="$imds&client_id=$IDENTITY_CLIENT_ID"
+          access=$(curl -fsS -H Metadata:true "$imds" 2>/dev/null \
+            | python3 -c 'import json,sys; print(json.load(sys.stdin)["access_token"])' 2>/dev/null || true)
+          if [ -n "$access" ]; then
+            umask 077
+            curl -fsS -H "Authorization: Bearer $access" "$KEY_VAULT_SECRET_URI?api-version=7.4" 2>/dev/null \
+              | python3 -c 'import json,sys; print(json.load(sys.stdin)["value"])' > "$TOKEN_FILE.tmp" 2>/dev/null \
+              && [ -s "$TOKEN_FILE.tmp" ] && mv "$TOKEN_FILE.tmp" "$TOKEN_FILE" || rm -f "$TOKEN_FILE.tmp"
+          fi
+          [ -s "$TOKEN_FILE" ] && break
+          [ "$(date +%s)" -lt "$deadline" ] || break
+          log "secret not readable yet; set it with: az keyvault secret set --id $KEY_VAULT_SECRET_URI ..."
+          sleep 20
+        done
+      fi
+      if [ ! -s "$TOKEN_FILE" ]; then
+        log "waiting up to $TOKEN_WAIT_MINUTES min for $TOKEN_FILE (copy a Cloudflare Zone > DNS > Edit token there)"
+        deadline=$(( $(date +%s) + TOKEN_WAIT_MINUTES * 60 ))
+        while [ ! -s "$TOKEN_FILE" ] && [ "$(date +%s)" -lt "$deadline" ]; do sleep 10; done
+      fi
+      [ -s "$TOKEN_FILE" ] || { log "no Cloudflare DNS token; rerun /usr/local/sbin/yoal-provision-first once it is in place"; exit 1; }
+      chmod 0600 "$TOKEN_FILE"
+
+      # 2. The installer, with flags it has today (scripts/install/USAGE.txt).
+      set -- --yes --platform-host "$PLATFORM_HOST" --content-domain "$CONTENT_DOMAIN" \
+        --acme-email "$ACME_EMAIL" --cloudflare-token-file "$TOKEN_FILE"
+      [ -z "$ADMIN_EMAIL" ] || set -- "$@" --admin-email "$ADMIN_EMAIL"
+      [ "$SKIP_DNS_CHECK" != "true" ] || set -- "$@" --skip-dns-check
+      [ "$CHANNEL" != "canary" ] || set -- "$@" --canary
+      # TODO(installer): --profile ha (HA-PLAN section 8). Not an installer flag; after setup, run
+      #   `yoal ha init --profile ha` (Wave 5 lane B) or set the flags below.
+      # TODO(installer): --zone <zone>. Not an installer flag; set the zone under Nodes > Edit node.
+      # TODO(installer): --roles <list>. Not an installer flag; set roles under Nodes > Edit node.
+      # TODO(installer): --object-store azure://<container> (also s3://, gcs://). The installer
+      #   takes local|r2 only; switch the platform store in /etc/yoal/yoal.env after install.
+      curl -fsSL "$INSTALL_URL" -o /root/yoal-install.sh
+      YOAL_CHANNEL="$CHANNEL" sh /root/yoal-install.sh "$@"
+
+      # The agent reads the token as the yoal user through the caddy group.
+      chown root:caddy "$TOKEN_FILE" 2>/dev/null || true
+      chmod 0640 "$TOKEN_FILE"
+
+      # 3. Opt-in feature flags, the operator's choice. Empty by default: nothing changes.
+      if [ -n "$FEATURES" ]; then
+        for flag in $(echo "$FEATURES" | tr ',' ' '); do
+          case "$flag" in *[!A-Z0-9_]*|'') log "skipping invalid flag name: $flag"; continue ;; esac
+          grep -q "^YOAL_FEATURE_$flag=" /etc/yoal/yoal.env || echo "YOAL_FEATURE_$flag=1" >> /etc/yoal/yoal.env
+        done
+        systemctl restart yoal-control-plane.service
+      fi
+
+      log "done. Open https://$PLATFORM_HOST to finish setup (setup token: sudo cat /etc/yoal/setup-token)."
+      log "then set this node's zone ($ZONE) and roles ($ROLES) under Nodes > Edit node."
+
+runcmd:
+  - [sh, -c, '/usr/local/sbin/yoal-provision-first 2>&1 | tee -a /var/log/yoal-provision.log']
