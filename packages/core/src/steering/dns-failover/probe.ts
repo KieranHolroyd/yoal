@@ -1,11 +1,13 @@
 import { isIP } from 'node:net';
+import { ingressHealthWords } from '@yoal/contracts';
 import type { DnsFailoverNode, ProbeObservation } from './health.ts';
 
 /**
  * Ingress probing for `dns-failover` (CLUSTERING §7.2 step 1).
  *
  * `GET https://<address>/.well-known/yoal/health` with the probed node's SNI and `Host`, 3 s
- * timeout, `200` and `status: "ok"` is success. The request goes to the origin address, not
+ * timeout, `200` with the one-word answer `ok` is success (the route answers a 16-byte padded word,
+ * never JSON: HA-PLAN §10). The request goes to the origin address, not
  * through Cloudflare, so the probe tests the node that would answer after a DNS change. A
  * draining node answers 503, which is a failed probe here: that is how lame duck leaves rotation.
  */
@@ -47,8 +49,8 @@ export function httpIngressProber(options: HttpIngressProberOptions): IngressPro
 							...(scheme === 'https' ? { tls: { serverName: options.host } } : {}),
 						};
 						const response = await fetchImpl(url, init);
-						const body = (await response.json().catch(() => null)) as { status?: string } | null;
-						const ok = response.status === 200 && body?.status === 'ok';
+						const body = await response.text().catch(() => '');
+						const ok = response.status === 200 && body.trim() === ingressHealthWords.ok;
 						return {
 							nodeId: node.id,
 							observerId: options.observerId,
