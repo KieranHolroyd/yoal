@@ -152,8 +152,32 @@ const steering = z.object({
  */
 export const haProfiles = ['single', 'ha', 'ha-dr'] as const;
 export type HaProfile = (typeof haProfiles)[number];
+
+/**
+ * What `yoal ha init` itself set (HA Wave 5), so `--profile single` reverses exactly that: the flags
+ * the applied profile turns on, and each cluster setting it changed with the value it had before
+ * the first profile. A setting the operator had already set (say `failover.enabled`) is not listed,
+ * so `single` never touches it. Written only by `ha init`'s apply, in the same
+ * `ClusterConfigService.update` as `profile`; `single` clears it. Null on every install that never
+ * ran `ha init`.
+ */
+export const haProfileAppliedSchema = z.object({
+	profile: z.enum(['ha', 'ha-dr']),
+	flags: z.array(z.string().min(1).max(64)).max(32),
+	settings: z
+		.array(
+			z.object({
+				path: z.string().min(1).max(100),
+				previous: z.union([z.string().max(100), z.number(), z.boolean(), z.array(z.string().max(100)).max(8)]),
+			}),
+		)
+		.max(32),
+});
+export type HaProfileApplied = z.infer<typeof haProfileAppliedSchema>;
+
 const ha = z.object({
 	profile: z.enum(haProfiles).default('single'),
+	applied: haProfileAppliedSchema.nullable().default(null),
 });
 
 export const clusterConfigSchema = z.object({

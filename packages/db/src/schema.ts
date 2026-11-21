@@ -37,6 +37,8 @@ export const nodes = sqliteTable(
 		canBuild: integer('can_build', { mode: 'boolean' }).notNull().default(false),
 		/** Failure domain: nodes in one zone share power, uplink and provider fate (CLUSTERING §3.2). */
 		zone: text('zone').notNull().default('default'),
+		/** The region the zone belongs to (HA-PLAN H26, 0132); `default` is the implicit one. */
+		region: text('region').notNull().default('default'),
 		/** Operator-set roles; NULL keeps the derivation from mode/can_build for older rows. */
 		rolesJson: text('roles_json'),
 		/** Operator labels for placement constraints (`owner=media`); never `yoal.io/*`. */
@@ -1318,6 +1320,8 @@ export const databases = sqliteTable(
 		lastFailoverDrillAt: integer('last_failover_drill_at'),
 		/** Eligibility evidence captured at arming, as JSON (0129). */
 		failoverEvidenceJson: text('failover_evidence_json').notNull().default('{}'),
+		/** The region holding an async standby replica that never auto-promotes (HA-PLAN H26, 0132). */
+		standbyRegion: text('standby_region'),
 		/** Set while a pooler-only restart is waiting for the node to acknowledge it. */
 		poolerRestartRequestedAt: integer('pooler_restart_requested_at'),
 		status: text('status', { enum: ['pending', 'starting', 'running', 'failed', 'stopped'] })
@@ -3349,6 +3353,8 @@ export const controlState = sqliteTable(
 		canPromote: integer('can_promote', { mode: 'boolean' }).notNull().default(false),
 		replicationLagSeconds: integer('replication_lag_seconds'),
 		updatedAt: integer('updated_at').notNull(),
+		/** The host's running feature flags from its control report, as JSON (HA Wave 5, 0132). */
+		featureFlagsJson: text('feature_flags_json'),
 	},
 	(t) => [index('control_state_role_idx').on(t.role, t.epoch)],
 );
@@ -3440,5 +3446,61 @@ export const sloObjects = sqliteTable(
 	(t) => [
 		uniqueIndex('slo_objects_project_name_idx').on(t.projectId, t.name),
 		index('slo_objects_org_idx').on(t.orgId),
+	],
+);
+
+/** `yoal ha region promote` (HA-PLAN H26, W13; 0132). Stored only once confirmed. */
+export const regionPromotions = sqliteTable(
+	'region_promotions',
+	{
+		id: text('id').primaryKey(),
+		toRegion: text('to_region').notNull(),
+		fromRegion: text('from_region').notNull(),
+		stage: text('stage', { enum: ['control-plane', 'databases', 'steering', 'completed', 'failed', 'cancelled'] })
+			.notNull()
+			.default('control-plane'),
+		/** The hash of the plan the operator confirmed. */
+		planHash: text('plan_hash').notNull(),
+		/** The runner lease: one control plane at a time; another resumes only after it expires. */
+		runnerId: text('runner_id'),
+		leaseExpiresAt: integer('lease_expires_at'),
+		attempt: integer('attempt').notNull().default(1),
+		acceptDataLoss: integer('accept_data_loss', { mode: 'boolean' }).notNull(),
+		reason: text('reason').notNull(),
+		confirmedBy: text('confirmed_by').notNull(),
+		confirmedAt: integer('confirmed_at').notNull(),
+		startedAt: integer('started_at').notNull(),
+		/** Set by every terminal stage and only by one; at most one row has it null. */
+		finishedAt: integer('finished_at'),
+		error: text('error'),
+	},
+	(t) => [index('region_promotions_started_idx').on(t.startedAt)],
+);
+
+/** One step and resource of a region promotion, with its own fence (0132). */
+export const regionPromotionSteps = sqliteTable(
+	'region_promotion_steps',
+	{
+		promotionId: text('promotion_id').notNull(),
+		position: integer('position').notNull(),
+		step: text('step', { enum: ['control-plane', 'databases', 'steering'] }).notNull(),
+		kind: text('kind', { enum: ['control-plane', 'database', 'steering'] }).notNull(),
+		resourceId: text('resource_id').notNull(),
+		name: text('name').notNull(),
+		targetNodeId: text('target_node_id'),
+		/** The control epoch (control and steering steps) or the database lease generation. */
+		expectedGeneration: integer('expected_generation').notNull(),
+		/** What the step wrote; strictly greater. Null until done, and always for steering. */
+		fencedGeneration: integer('fenced_generation'),
+		status: text('status', { enum: ['pending', 'running', 'done', 'skipped', 'failed'] }).notNull().default('pending'),
+		lagBytes: integer('lag_bytes'),
+		lagSeconds: real('lag_seconds'),
+		startedAt: integer('started_at'),
+		finishedAt: integer('finished_at'),
+		message: text('message'),
+	},
+	(t) => [
+		primaryKey({ columns: [t.promotionId, t.position] }),
+		uniqueIndex('region_promotion_steps_resource_idx').on(t.promotionId, t.kind, t.resourceId),
 	],
 );

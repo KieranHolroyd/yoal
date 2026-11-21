@@ -49,7 +49,8 @@ describe('feature registry', () => {
 			'PITR_REWIND',
 			'STEERING',
 			'SLO_OBJECTS',
-			'EXTERNAL_PROBER'
+			'EXTERNAL_PROBER',
+			'REGIONS'
 		]);
 		for (const name of FEATURE_FLAG_NAMES) {
 			expect(FEATURE_FLAGS[name].name).toBe(name);
@@ -89,6 +90,15 @@ describe('feature registry', () => {
 		expect(parseFeatureFlags({}).EXTERNAL_PROBER).toBe(false);
 	});
 
+	test('the HA Wave 5 flag is opt-in and cites H26 (HA-WAVE-5.md)', () => {
+		expect(FEATURE_FLAGS.REGIONS.default).toBe(false);
+		expect(DEFAULT_FEATURES.REGIONS).toBe(false);
+		expect(OPT_IN_FEATURES.has('REGIONS')).toBe(true);
+		expect(FEATURE_FLAGS.REGIONS.description).toContain('H26');
+		expect(parseFeatureFlags({}).REGIONS).toBe(false);
+		expect(parseFeatureFlags({ YOAL_FEATURE_REGIONS: '1' }).REGIONS).toBe(true);
+	});
+
 	test('HA Wave 2 flags are opt-in and cite their H-section (HA-WAVE-2.md)', () => {
 		expect(FEATURE_FLAGS.INGRESS_SET.default).toBe(false);
 		expect(FEATURE_FLAGS.SHARED_CERTIFICATES.default).toBe(false);
@@ -112,7 +122,8 @@ describe('feature registry', () => {
 			'SYNC_REPLICA',
 			'PITR_REWIND',
 			'SLO_OBJECTS',
-			'EXTERNAL_PROBER'
+			'EXTERNAL_PROBER',
+			'REGIONS'
 		]);
 		expect(FEATURE_FLAGS.ENDPOINTS_GATEWAY.description).toContain('H24');
 		expect(FEATURE_FLAGS.RELEASE_PHASE.description).toContain('H25');

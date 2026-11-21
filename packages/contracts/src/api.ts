@@ -161,6 +161,11 @@ export const nodeUpdateSchema = z
 		buildDir: nodeStoragePathSchema.nullable().optional(),
 		/** Failure domain (CLUSTERING §3.2). */
 		zone: nodeZoneSchema.optional(),
+		/**
+		 * The region the node's zone belongs to (HA-PLAN H26); every node in one zone names the same
+		 * region. Refused while `REGIONS` is off unless it is the node's current region.
+		 */
+		region: nodeZoneSchema.optional(),
 		/** What this node may run; removing a role in use is refused. */
 		roles: z.array(nodeRoleSchema).min(1).max(5).optional(),
 		/** Operator placement labels; `yoal.io/*` is reserved. */

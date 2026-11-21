@@ -308,7 +308,7 @@ describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () =
 			 VALUES ('bt_local', 'org_1', 'local-main', 'local', '/var/lib/yoal/backups', 1, 1)`,
 		);
 
-		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql', '0123_ingress_drift.sql', '0124_shared_certificates.sql', '0125_control_epoch.sql', '0126_replica_durability.sql', '0127_replica_rewind.sql', '0128_sync_switchover_rewind.sql', '0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql']);
+		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql', '0123_ingress_drift.sql', '0124_shared_certificates.sql', '0125_control_epoch.sql', '0126_replica_durability.sql', '0127_replica_rewind.sql', '0128_sync_switchover_rewind.sql', '0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql']);
 
 		const rows = sqlite
 			.query<{ id: string; kind: string; store_kind: string | null; store_options_json: string; object_lock: number; immutable_retention_days: number | null; secret_sealed: string | null }, []>(
@@ -455,7 +455,7 @@ describe('HA Wave 4 migrations 0129–0130 (docs/build-plan/HA-WAVE-4.md)', () =
 			 VALUES ('dbf_old', 'db_old', 'nod_1', 'nod_2', 1, 'completed', 1)`,
 		);
 
-		expect(migrate(sqlite)).toEqual(['0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql']);
+		expect(migrate(sqlite)).toEqual(['0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql']);
 
 		expect(
 			sqlite
@@ -493,6 +493,135 @@ describe('HA Wave 4 migrations 0129–0130 (docs/build-plan/HA-WAVE-4.md)', () =
 		expect(() => sqlite.run("UPDATE database_failover_drills SET lost_commits = -1 WHERE id = 'drl_old'")).toThrow();
 		expect(() => sqlite.run("UPDATE database_failover_drills SET durability = 'sync-ish' WHERE id = 'drl_old'")).toThrow();
 		expect(() => sqlite.run("UPDATE database_failover_drills SET generation = -1 WHERE id = 'drl_old'")).toThrow();
+		sqlite.close();
+	});
+});
+
+describe('HA Wave 5 migration 0132 (docs/build-plan/HA-WAVE-5.md)', () => {
+	const columns = (sqlite: Database, table: string) =>
+		sqlite.query<{ name: string }, []>(`PRAGMA table_info(${table})`).all().map((row) => row.name);
+	const insertNode = (sqlite: Database, id: string) =>
+		sqlite.run(
+			`INSERT INTO nodes (id, name, mode, status, token_hash, created_at, updated_at) VALUES (?, ?, 'worker', 'online', 'hash', 1, 1)`,
+			[id, id],
+		);
+	const insertDatabase = (sqlite: Database, id: string) =>
+		sqlite.run(
+			`INSERT INTO databases (id, org_id, name, version, node_id, host_port, memory_mb, owner_secret, monitor_secret, created_by, created_at, updated_at)
+			 VALUES (?, 'org_1', ?, '16', 'nod_1', 5432, 256, 'owner', 'monitor', 'user_1', 1, 1)`,
+			[id, id],
+		);
+	const insert = (sqlite: Database, table: string, row: Record<string, unknown>) =>
+		sqlite.run(
+			`INSERT INTO ${table} (${Object.keys(row).join(', ')}) VALUES (${Object.keys(row).map(() => '?').join(', ')})`,
+			Object.values(row) as never[],
+		);
+	const promotion = (sqlite: Database, id: string, fields: Record<string, unknown> = {}) =>
+		insert(sqlite, 'region_promotions', {
+			id,
+			to_region: 'ukwest',
+			from_region: 'uksouth',
+			plan_hash: 'a'.repeat(64),
+			accept_data_loss: 1,
+			reason: 'uksouth is down',
+			confirmed_by: 'user_1',
+			confirmed_at: 1,
+			started_at: 1,
+			...fields,
+		});
+	const step = (sqlite: Database, promotionId: string, position: number, fields: Record<string, unknown> = {}) =>
+		insert(sqlite, 'region_promotion_steps', {
+			promotion_id: promotionId,
+			position,
+			step: 'databases',
+			kind: 'database',
+			resource_id: `db_${position}`,
+			name: `db-${position}`,
+			expected_generation: 7,
+			...fields,
+		});
+
+	test('is the reserved file, right after 0131', () => {
+		const ids = migrations.map((migration) => migration.id);
+		expect(ids.indexOf('0132_regions.sql')).toBe(ids.indexOf('0131_node_drills.sql') + 1);
+	});
+
+	test('applies on a fresh database', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		migrate(sqlite);
+		expect(columns(sqlite, 'nodes')).toContain('region');
+		expect(columns(sqlite, 'databases')).toContain('standby_region');
+		expect(columns(sqlite, 'control_state')).toContain('feature_flags_json');
+		insertNode(sqlite, 'nod_1');
+		insertDatabase(sqlite, 'db_1');
+		expect(sqlite.query<{ region: string }, []>("SELECT region FROM nodes WHERE id = 'nod_1'").get()).toEqual({ region: 'default' });
+		expect(sqlite.query<{ standby_region: string | null }, []>("SELECT standby_region FROM databases WHERE id = 'db_1'").get()).toEqual({
+			standby_region: null,
+		});
+
+		promotion(sqlite, 'rgp_1');
+		expect(
+			sqlite.query<{ stage: string; attempt: number; runner_id: string | null }, []>("SELECT stage, attempt, runner_id FROM region_promotions WHERE id = 'rgp_1'").get(),
+		).toEqual({ stage: 'control-plane', attempt: 1, runner_id: null });
+		// Stored only once confirmed, with data loss accepted.
+		expect(() => promotion(sqlite, 'rgp_x', { accept_data_loss: 0 })).toThrow();
+		expect(() => promotion(sqlite, 'rgp_y', { confirmed_at: null })).toThrow();
+		// One open promotion at a time.
+		expect(() => promotion(sqlite, 'rgp_2')).toThrow();
+		// A terminal stage sets finished_at, and only a terminal stage does.
+		expect(() => sqlite.run("UPDATE region_promotions SET stage = 'completed' WHERE id = 'rgp_1'")).toThrow();
+		expect(() => sqlite.run("UPDATE region_promotions SET finished_at = 5 WHERE id = 'rgp_1'")).toThrow();
+		expect(() => sqlite.run("UPDATE region_promotions SET stage = 'fencing' WHERE id = 'rgp_1'")).toThrow();
+
+		// Each step carries its own fence, which only moves forward; one row per resource.
+		step(sqlite, 'rgp_1', 0, { step: 'control-plane', kind: 'control-plane', resource_id: 'control-plane', expected_generation: 3, fenced_generation: 4, status: 'done' });
+		step(sqlite, 'rgp_1', 1);
+		step(sqlite, 'rgp_1', 2, { step: 'steering', kind: 'steering', resource_id: 'dns-failover', expected_generation: 4 });
+		expect(() => sqlite.run("UPDATE region_promotion_steps SET fenced_generation = 7 WHERE promotion_id = 'rgp_1' AND position = 1")).toThrow();
+		sqlite.run("UPDATE region_promotion_steps SET fenced_generation = 8, status = 'done' WHERE promotion_id = 'rgp_1' AND position = 1");
+		expect(() => step(sqlite, 'rgp_1', 3, { resource_id: 'db_1' })).toThrow();
+		expect(() => step(sqlite, 'rgp_1', 4, { status: 'sideways' })).toThrow();
+
+		// The runner lease: a takeover is a conditional update on the old holder.
+		sqlite.run("UPDATE region_promotions SET runner_id = 'cp-b', lease_expires_at = 100 WHERE id = 'rgp_1'");
+		const takeover = sqlite.run(
+			"UPDATE region_promotions SET runner_id = 'cp-c', lease_expires_at = 200, attempt = attempt + 1 WHERE id = 'rgp_1' AND runner_id = 'cp-b' AND lease_expires_at <= 150",
+		);
+		expect(takeover.changes).toBe(1);
+
+		sqlite.run("UPDATE region_promotions SET stage = 'completed', finished_at = 3 WHERE id = 'rgp_1'");
+		promotion(sqlite, 'rgp_2');
+		sqlite.close();
+	});
+
+	test('upgrades a populated 0131 database: every node is in the default region, no database has a standby region', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		sqlite.run('CREATE TABLE yoal_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+		for (const migration of migrations) {
+			if (Number(migration.id.slice(0, 4)) > 131) continue;
+			sqlite.run(migration.sql);
+			sqlite.run('INSERT INTO yoal_migrations (id, applied_at) VALUES (?, ?)', [migration.id, 1]);
+		}
+		insertNode(sqlite, 'nod_1');
+		insertNode(sqlite, 'nod_2');
+		sqlite.run("UPDATE nodes SET zone = 'uksouth-1' WHERE id = 'nod_2'");
+		insertDatabase(sqlite, 'db_old');
+		sqlite.run("INSERT INTO control_state (node_id, role, epoch, updated_at) VALUES ('nod_1', 'primary', 2, 1)");
+		const before = sqlite.query<Record<string, unknown>, []>('SELECT * FROM nodes ORDER BY id').all();
+		const databaseBefore = sqlite.query<Record<string, unknown>, []>('SELECT * FROM databases').all();
+		const controlBefore = sqlite.query<Record<string, unknown>, []>('SELECT * FROM control_state').all();
+
+		expect(migrate(sqlite)).toEqual(['0132_regions.sql']);
+
+		const after = sqlite.query<Record<string, unknown>, []>('SELECT * FROM nodes ORDER BY id').all();
+		expect(after).toEqual(before.map((row) => ({ ...row, region: 'default' })));
+		expect(sqlite.query<Record<string, unknown>, []>('SELECT * FROM databases').all()).toEqual(
+			databaseBefore.map((row) => ({ ...row, standby_region: null })),
+		);
+		expect(sqlite.query<Record<string, unknown>, []>('SELECT * FROM control_state').all()).toEqual(
+			controlBefore.map((row) => ({ ...row, feature_flags_json: null })),
+		);
+		expect(sqlite.query<{ count: number }, []>('SELECT count(*) AS count FROM region_promotions').get()).toEqual({ count: 0 });
 		sqlite.close();
 	});
 });

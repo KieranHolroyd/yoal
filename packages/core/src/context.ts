@@ -68,6 +68,10 @@ import type { ReleaseCommandScheduler } from './release-commands.ts';
 import type { RelocationService } from './relocation-service.ts';
 import type { ClusterConfigService } from './cluster-config-service.ts';
 import type { HaService } from './ha-service.ts';
+import type { RegionService } from './region-service.ts';
+import type { HaInitService } from './ha-init-service.ts';
+import type { HaDoctorService } from './ha-doctor.ts';
+import type { HaDrillRunner } from './ha-drill-runner.ts';
 import type { TelemetrySpoolGapService } from './telemetry-spool-gaps.ts';
 import type { CertificateService, IngressSetService, SteeringService } from './ingress-service.ts';
 import type { ControlPlaneService } from './control-plane-service.ts';
@@ -201,6 +205,14 @@ export interface CoreContext {
 	cluster: ClusterConfigService;
 	/** The HA profile and movable platform dependencies (HA-PLAN H27/H28, W12). */
 	ha: HaService;
+	/** Regions and the region promotion (HA-PLAN H26, W13; Wave 5 lane A). */
+	regions: RegionService;
+	/** `yoal ha init` (HA-PLAN H27, W14; Wave 5 lane B). */
+	haInit: HaInitService;
+	/** `yoal ha preflight` and `yoal doctor` (HA-PLAN H27, W14; Wave 5 lane B). */
+	haDoctor: HaDoctorService;
+	/** The drill catalogue runner, `yoal ha drill` (HA-PLAN H27, W14; Wave 5 lane B). */
+	haDrills: HaDrillRunner;
 	/** Bounded telemetry spool gaps reported by agents (HA-PLAN H28, W12). */
 	telemetrySpool: TelemetrySpoolGapService;
 	/** The nodes that serve the edge payload (HA-PLAN H17). */

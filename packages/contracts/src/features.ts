@@ -301,6 +301,15 @@ export const FEATURE_FLAGS = {
 		default: false,
 		area: 'platform',
 		description: 'Accept reports from an external prober used to observe the fleet from outside it (HA-PLAN W15).'
+	},
+	REGIONS: {
+		name: 'REGIONS',
+		// HA Wave 5, W13. Opt-in: a node region, `spread: region`, database standby regions and the
+		// fenced region promotion. Control-plane placement and promotion only; no agent capability.
+		default: false,
+		area: 'platform',
+		description:
+			'Regions group zones: a node region, spread: region, a database standby region that never auto-promotes, and the fenced, human-confirmed region promotion (HA-PLAN H26). Once a region value is stored, downgrading the control plane is unsupported until it is put back.'
 	}
 } as const satisfies Record<string, FeatureFlagDefinition>;
 
@@ -317,6 +326,8 @@ export type FeatureName = keyof typeof FEATURE_FLAGS;
  *   object-store conformance suite (W3).
  * - `SLO_OBJECTS`, `EXTERNAL_PROBER`: W15's evaluation and outside-in prober are not tuned or
  *   proven until lane B passes its lab; off until then (docs/build-plan/HA-WAVE-4.md).
+ * - `REGIONS`: region promotion moves writes across regions with RPO = lag; off until W13 passes
+ *   its weekly cloud drill (HA-PLAN H26, docs/build-plan/HA-WAVE-5.md).
  */
 export const OPT_IN_FEATURES: ReadonlySet<FeatureName> = new Set<FeatureName>([
 	'DB_AUTO_PROMOTE',
@@ -331,7 +342,8 @@ export const OPT_IN_FEATURES: ReadonlySet<FeatureName> = new Set<FeatureName>([
 	'SYNC_REPLICA',
 	'PITR_REWIND',
 	'SLO_OBJECTS',
-	'EXTERNAL_PROBER'
+	'EXTERNAL_PROBER',
+	'REGIONS'
 ]);
 
 export type FeatureFlags = {

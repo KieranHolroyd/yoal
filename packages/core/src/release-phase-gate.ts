@@ -1,6 +1,7 @@
 import { releasePhaseSpecIssues, type WorkloadSpec } from '@yoal/contracts';
 import { featureEnabled, type CoreConfig } from './config.ts';
 import { ValidationError } from './errors.ts';
+import { assertRegionWrites } from './region-gate.ts';
 
 /**
  * Refuse a workload spec that sets release-phase fields (`release`, `readinessPath`,
@@ -18,4 +19,6 @@ export function assertReleasePhaseSpec(
 ): void {
 	const [issue] = releasePhaseSpecIssues(spec, { RELEASE_PHASE: featureEnabled(config, 'RELEASE_PHASE') }, current);
 	if (issue) throw new ValidationError(issue.message);
+	// `placement.spread: region` also needs REGIONS (HA-PLAN H26).
+	assertRegionWrites(config, [{ field: 'workload.placement.spread', value: spec.placement?.spread, current: current?.placement?.spread }]);
 }

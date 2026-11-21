@@ -19,6 +19,18 @@ import {
 } from './object-storage.ts';
 import { itemStatuses, operationStatuses } from './operations.ts';
 import { SLUG_PATTERN } from './slugs.ts';
+import { steeringDriverKinds } from './ingress.ts';
+import { databaseFailoverModes } from './database-failover-policy.ts';
+import { databaseDurabilities } from './database-member.ts';
+import { replicaSpreads } from './replica.ts';
+import { nodeRegionSchema, regionSpreadSyncRefusal } from './region.ts';
+import {
+	drainSecondsSchema,
+	readinessPathSchema,
+	releaseCommandSpecSchema,
+	rolloutSpecSchema,
+	workloadPlacementSpecSchema,
+} from './release-phase.ts';
 
 /**
  * Blueprints, version 1 (plan 11, docs/OPERATIONS.md §12): one declarative file describes a
@@ -129,8 +141,13 @@ export const blueprintProjectSchema = z
 		name: z.string().trim().min(1).max(120).optional(),
 		/** Fixed for the project's life. */
 		runtime: z.enum(blueprintProjectRuntimes).default('static'),
-		/** `edge`, `auto` or a node id. */
-		placement: z.string().min(1).max(64).optional(),
+		/**
+		 * `edge`, `auto` or a node id; or, new in HA-PLAN §8, `{ spread: node | zone | region }`. The
+		 * object form maps to the workload's `placement.spread` (`workloadPlacementSpecSchema`),
+		 * gated by `RELEASE_PHASE` and, for `region`, `REGIONS`, exactly as `setSpec` gates it today;
+		 * it never touches the project's `placementSpec`. The string form is unchanged.
+		 */
+		placement: z.union([z.string().min(1).max(64), workloadPlacementSpecSchema]).optional(),
 		access: z
 			.strictObject({
 				production: accessSchema.optional(),
@@ -152,9 +169,24 @@ export const blueprintProjectSchema = z
 		env: z.record(blueprintEnvNameSchema, z.string().max(16_384)).optional(),
 		/** Secret references the workload receives as env vars. The whole set is replaced when present. */
 		secrets: z.array(blueprintSecretNameSchema).max(128).optional(),
+		/*
+		 * HA keys (HA-PLAN §8, H25): the workload's release-phase fields, reused from
+		 * `release-phase.ts`. Schema only in Wave 5's foundation; plan/apply is lane C, and each one
+		 * needs `RELEASE_PHASE` when applied.
+		 */
+		/** Gates traffic; `healthPath` stays liveness. */
+		readinessPath: readinessPathSchema.optional(),
+		/** Run once per release before the first copy rolls. */
+		release: releaseCommandSpecSchema.optional(),
+		/** Canary, soak and surge. */
+		rollout: rolloutSpecSchema.optional(),
+		/** Seconds a copy keeps serving after it leaves the upstream lists. */
+		drainSeconds: drainSecondsSchema.optional(),
 	})
 	.superRefine((project, ctx) => {
-		const workload = (['command', 'image', 'port', 'healthPath', 'memoryMb', 'cpus', 'replicas', 'env', 'secrets'] as const).filter(
+		const workload = (
+			['command', 'image', 'port', 'healthPath', 'memoryMb', 'cpus', 'replicas', 'env', 'secrets', 'readinessPath', 'release', 'rollout', 'drainSeconds'] as const
+		).filter(
 			(field) => project[field] !== undefined,
 		);
 		if ((project.runtime === 'static' || project.runtime === 'function') && workload.length > 0)
@@ -167,6 +199,8 @@ export const blueprintProjectSchema = z
 							? 'Static projects have no workload settings.'
 							: 'Function settings come from the function bundle, not the blueprint.',
 				});
+		if (typeof project.placement === 'object' && (project.runtime === 'static' || project.runtime === 'function'))
+			ctx.addIssue({ code: 'custom', path: ['placement'], message: 'Only app projects take a spread.' });
 		if (project.image !== undefined && project.runtime !== 'container')
 			ctx.addIssue({ code: 'custom', path: ['image'], message: 'Only container projects take an image.' });
 		if (project.secrets && new Set(project.secrets).size !== project.secrets.length)
@@ -195,9 +229,59 @@ export const blueprintDatabaseSchema = z
 		/** Added on apply; removing one from the file never drops it from the database. */
 		extensions: z.array(databaseExtensionSchema).max(databaseExtensionAllowlist.length).optional(),
 		pooler: z.boolean().optional(),
+		/*
+		 * HA keys (HA-PLAN §8, H22–H26). Schema only in Wave 5's foundation; plan/apply is lane C.
+		 * Each is managed only when present. PostgreSQL only.
+		 */
+		/** Read replicas to keep, placed by `spread`. */
+		replicas: z.number().int().min(0).max(5).optional(),
+		/** `sync` keeps one recorded synchronous replica (H23); needs `SYNC_REPLICA` and a replica. */
+		durability: z.enum(databaseDurabilities).optional(),
+		/**
+		 * `auto` arms member-driven failover (W11) through the same arming path as
+		 * `yoal db failover <name> --arm`, never by writing the policy directly, so every refusal
+		 * (no passed drill, no self-fencing, …) fails the plan. `manual` disarms.
+		 */
+		failover: z.enum(databaseFailoverModes).optional(),
+		/**
+		 * With `failover: auto` on an async database: accept that an automatic promotion may lose
+		 * recent commits, exactly as `--arm --accept-data-loss` does. Refused on a sync database.
+		 */
+		acceptDataLoss: z.boolean().optional(),
+		/** Never two replicas on one node, zone or region; `region` needs `REGIONS`. */
+		spread: z.enum(replicaSpreads).optional(),
+		/** Point-in-time recovery (docs/PITR.md). */
+		pitr: z.boolean().optional(),
+		backups: z
+			.strictObject({
+				/** A backup target's name (Settings → Backups). */
+				target: z.string().trim().min(1).max(64).optional(),
+				/** Object lock or an immutable container on the target, so a backup cannot be altered. */
+				immutable: z.boolean().optional(),
+			})
+			.optional(),
+		/** A region holding an async replica that never auto-promotes (H26); needs `REGIONS`. */
+		standbyRegion: nodeRegionSchema.optional(),
 	})
 	.superRefine((input, ctx) => {
 		const info = databaseEngineRegistry[input.engine];
+		for (const field of ['replicas', 'durability', 'failover', 'acceptDataLoss', 'spread', 'pitr', 'standbyRegion'] as const)
+			if (input[field] !== undefined && input.engine !== 'postgres')
+				ctx.addIssue({ code: 'custom', path: [field], message: `${info.label} has no ${field} setting; it is PostgreSQL only.` });
+		if (input.durability === 'sync' && input.replicas === 0)
+			ctx.addIssue({ code: 'custom', path: ['durability'], message: 'durability: sync needs at least one replica.' });
+		if (input.failover === 'auto' && input.replicas === 0)
+			ctx.addIssue({ code: 'custom', path: ['failover'], message: 'failover: auto needs at least one replica to promote.' });
+		if (input.acceptDataLoss !== undefined && input.failover !== 'auto')
+			ctx.addIssue({ code: 'custom', path: ['acceptDataLoss'], message: 'acceptDataLoss is used only with failover: auto.' });
+		if (input.acceptDataLoss && input.durability === 'sync')
+			ctx.addIssue({
+				code: 'custom',
+				path: ['acceptDataLoss'],
+				message: 'A sync database loses no acknowledged commit on failover; acceptDataLoss is refused for it.',
+			});
+		const crossRegion = regionSpreadSyncRefusal(input.spread, input.durability);
+		if (crossRegion) ctx.addIssue({ code: 'custom', path: ['spread'], message: crossRegion.message });
 		if (input.version && !info.versions.includes(input.version))
 			ctx.addIssue({ code: 'custom', path: ['version'], message: `${info.label} versions: ${info.versions.join(', ')}.` });
 		if (input.memoryMb !== undefined && input.memoryMb < info.minMemoryMb)
@@ -286,6 +370,57 @@ export function attachmentTarget(attachment: BlueprintAttachment): { type: 'data
 	return { type: 'broker', name: attachment.broker ?? '' };
 }
 
+// -------------------------------------------------------------------- cluster (HA-PLAN §8)
+
+/**
+ * `cluster:` — assertions about the fleet, checked by `plan`; nothing is provisioned (H27). Schema
+ * only in Wave 5's foundation; lane C checks `requires` against live nodes and shows the diff.
+ */
+export const blueprintClusterSchema = z.strictObject({
+	/** The plan fails unless the fleet has at least this many of each. */
+	requires: z
+		.strictObject({
+			zones: z.number().int().min(1).max(64).optional(),
+			ingressNodes: z.number().int().min(1).max(256).optional(),
+			dataNodes: z.number().int().min(1).max(256).optional(),
+		})
+		.optional(),
+	/**
+	 * The cluster's steering (`cluster_config.steering`, H18) and the ingress drain (H19). `ha init`
+	 * writes the same settings; both go through `ClusterConfigService.update`, so the last write
+	 * wins, and each plan shows its diff against the live value first.
+	 */
+	steering: z
+		.strictObject({
+			driver: z.enum(steeringDriverKinds),
+			stacked: z.array(z.enum(steeringDriverKinds)).max(4).optional(),
+			/** `ingress.drainSeconds`: how long a leaving ingress answers 503 first. */
+			drainSeconds: z.number().int().min(0).max(120).optional(),
+		})
+		.optional(),
+});
+export type BlueprintCluster = z.infer<typeof blueprintClusterSchema>;
+
+/**
+ * Every HA key (HA-PLAN §8) set in a document, as paths (`cluster`, `projects.web.rollout`,
+ * `databases.main.standbyRegion`). Empty for a file that uses none, which is every file written
+ * before Wave 5. Lane C's plan/apply reads them; until it lands, plan refuses a document that
+ * sets any (`packages/core/src/blueprints-ha.ts`).
+ */
+export function blueprintHaKeys(doc: Pick<Blueprint, 'projects' | 'databases'> & { cluster?: BlueprintCluster }): string[] {
+	const keys: string[] = [];
+	if (doc.cluster !== undefined) keys.push('cluster');
+	for (const [slug, project] of Object.entries(doc.projects)) {
+		if (typeof project.placement === 'object') keys.push(`projects.${slug}.placement`);
+		for (const field of ['readinessPath', 'release', 'rollout', 'drainSeconds'] as const)
+			if (project[field] !== undefined) keys.push(`projects.${slug}.${field}`);
+	}
+	for (const [name, database] of Object.entries(doc.databases))
+		for (const field of ['replicas', 'durability', 'failover', 'acceptDataLoss', 'spread', 'pitr', 'backups', 'standbyRegion'] as const)
+			if (database[field] !== undefined) keys.push(`databases.${name}.${field}`);
+	return keys;
+}
+
 // -------------------------------------------------------------------- document
 
 /**
@@ -296,6 +431,8 @@ export const blueprintSchema = z
 	.strictObject({
 		apiVersion: blueprintApiVersionSchema,
 		name: blueprintStackNameSchema,
+		/** HA-PLAN §8: fleet assertions and steering. Optional; absent changes nothing. */
+		cluster: blueprintClusterSchema.optional(),
 		projects: z.record(blueprintProjectSlugSchema, blueprintProjectSchema).default({}),
 		databases: z.record(databaseNameSchema, blueprintDatabaseSchema).default({}),
 		storage: z.record(storageNameSchema, blueprintStorageSchema).default({}),

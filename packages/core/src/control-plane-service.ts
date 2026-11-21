@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm';
 import { controlState, migrations, nodes } from '@yoal/db';
 import type { ControlLease as ControlLeaseView, ControlReport, ControlStatus, Principal } from '@yoal/contracts';
 import { featureEnabled } from './config.ts';
+import { parseJson } from './util.ts';
 import { ControlLease } from './ha-lease.ts';
 import { ArbiterUnavailableError, arbiterStore } from './ha-control-arbiter.ts';
 import {
@@ -241,6 +242,7 @@ export class ControlPlaneService {
 				canPromote: report.canPromote,
 				replicationLagSeconds: report.replicationLagSeconds,
 				updatedAt: now,
+				featureFlagsJson: report.featureFlags ? JSON.stringify(report.featureFlags) : null,
 			})
 			.onConflictDoUpdate({
 				target: controlState.nodeId,
@@ -252,6 +254,8 @@ export class ControlPlaneService {
 					canPromote: report.canPromote,
 					replicationLagSeconds: report.replicationLagSeconds,
 					updatedAt: now,
+					// HA Wave 5: an older agent omits the flags; keep "unknown", never a stale value.
+					featureFlagsJson: report.featureFlags ? JSON.stringify(report.featureFlags) : null,
 				},
 			})
 			.run();
@@ -273,6 +277,7 @@ export class ControlPlaneService {
 				replicationLagSeconds: state.replicationLagSeconds,
 				version: node.version,
 				updatedAt: new Date(state.updatedAt).toISOString(),
+				featureFlags: state.featureFlagsJson ? parseJson<Record<string, boolean> | null>(state.featureFlagsJson, null) : null,
 			}));
 		const snapshot = this.snapshot();
 		if (!snapshot) return rows.sort((a, b) => a.name.localeCompare(b.name));

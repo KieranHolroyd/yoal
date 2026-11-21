@@ -1,4 +1,4 @@
-import type { PackingStrategy, ReplicaPlan, ReplicaRefusal, ReplicaSpread, WorkloadReplica } from '@yoal/contracts';
+import { placementSpread, type PackingStrategy, type ReplicaPlan, type ReplicaRefusal, type ReplicaSpread, type WorkloadReplica } from '@yoal/contracts';
 
 /**
  * Replica placement across nodes (docs/CLUSTERING.md §8.2, docs/SCALING.md).
@@ -41,6 +41,8 @@ export interface ReplicaRequest {
 	stack?: boolean;
 	/** Why new copies are placed (`deploy`, `scale`, …), recorded on each. */
 	reason?: string;
+	/** `REGIONS` (HA-PLAN H26). Absent is off: a stored `spread: region` is then placed as `zone`. */
+	regions?: boolean;
 }
 
 export type ReplicaDecision =
@@ -53,6 +55,9 @@ export function planReplicas(request: ReplicaRequest): ReplicaDecision {
 	if (!Number.isInteger(request.memoryMb) || request.memoryMb < 0)
 		return { ok: false, message: 'Replica memory must be a non-negative integer.', refusals: [], placeable: 0 };
 
+	// A stored `spread: region` is placed as `zone` (`placementSpread`): with REGIONS off, and until
+	// W13 lane A builds region placement. Never the weaker node spread, never an error.
+	request = { ...request, spread: placementSpread(request.spread, { REGIONS: request.regions ?? false }) };
 	// Work on copies: a refused plan must leave the caller's candidates untouched.
 	const candidates = request.candidates.map((candidate) => ({ ...candidate }));
 	const byId = new Map(candidates.map((candidate) => [candidate.id, candidate]));

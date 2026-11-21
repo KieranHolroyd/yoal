@@ -1,7 +1,11 @@
 import * as z from 'zod';
 
-/** Multi-node workload replicas (docs/CLUSTERING.md §8.2, C4). */
-export const replicaSpreads = ['node', 'zone'] as const;
+/**
+ * Multi-node workload replicas (docs/CLUSTERING.md §8.2, C4). `region` (HA-PLAN H26) is
+ * control-plane placement only: no desired-state schema carries a spread, so no agent sees the
+ * value. It is refused on every write while `REGIONS` is off (`regionWriteIssues`).
+ */
+export const replicaSpreads = ['node', 'zone', 'region'] as const;
 export type ReplicaSpread = (typeof replicaSpreads)[number];
 
 export const workloadReplicaSchema = z.object({
