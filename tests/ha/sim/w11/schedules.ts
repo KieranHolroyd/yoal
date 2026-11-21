@@ -201,6 +201,7 @@ function clockStep(seed: number): Scenario {
 	const t = rng.int(4_000, 12_000);
 	const node = rng.pick(['p', 'a', 'b'] as const);
 	const delta = (rng.chance(0.65) ? -1 : 1) * rng.int(30_000, 120_000);
+	const durability: Durability = rng.chance(0.5) ? 'sync' : 'async';
 	const faults = [fault(0, t, 'clock-step', { node, value: delta })];
 	const isolates = rng.chance(0.55);
 	const duration = rng.int(20_000, 35_000);
@@ -208,11 +209,15 @@ function clockStep(seed: number): Scenario {
 		faults.push(edge(1, t, 'p', 'arb', duration));
 		if (node !== 'b') faults.push(edge(2, t, 'p', 'b', duration));
 		if (node !== 'a') faults.push(edge(3, t, 'p', 'a', duration));
+		// The replica the primary can still reach answers its keep-alive and is the one the notice
+		// must reach. Drop it sometimes to exercise the safer-but-slower path.
+		if (node !== 'p' && rng.chance(0.3))
+			faults.push(fault(4, 0, 'notice', { target: node, notice: 'drop', durationMs: 70_000 }));
 	}
 	return finish(
 		faults,
-		isolates ? { failover: { after: t, withinMs: 30_000 } } : {},
-		{ durability: rng.chance(0.5) ? 'sync' : 'async' },
+		isolates ? { failover: { after: t, withinMs: 60_000 } } : {},
+		{ durability },
 	);
 }
 
@@ -236,8 +241,8 @@ function syncNamedDead(seed: number): Scenario {
 		);
 	if (variant === 0)
 		return finish(
-			[fault(0, t, 'crash', { node: 'b' }), fault(1, t + 6_000, 'kill-primary')],
-			{ failover: { after: t + 6_000, withinMs: 30_000 } },
+			[fault(0, t, 'crash', { node: 'b' }), fault(1, t + 10_000, 'kill-primary')],
+			{ failover: { after: t + 10_000, withinMs: 30_000 } },
 			{ durability: 'sync', sync: ['b'] },
 		);
 	if (variant === 1)
@@ -272,19 +277,68 @@ function failsafeKeepalive(seed: number): Scenario {
 				noPrimary: { from: t, to: t + duration },
 				primaryStays: { node: 'p', from: t, to: t + duration },
 				requireAcks: { from: t, to: t + duration - 1_000, min: 1 },
+				// The primary keeps serving through the failsafe; a post-outage fence is a
+				// recovery, not a failover, so §9's clock (last renew) is not applicable.
+				ttf: false,
 			},
 			{ durability: 'async', durationMs: Math.max(70_000, t + duration + 10_000) },
 		);
 	// Mixed: sync {a}; a is the eligible member and keeps answering the primary. b is unreachable,
-	// so the primary's failsafe fails and it fences at the proof/TTL deadline. a's own stream goes
-	// down when the primary fences, and W11 §4.4 still blocks a for one TTL after its last answer.
+	// so the primary's failsafe fails and it fences at the proof/TTL deadline. Revision 3's fence
+	// notice should let a acquire at the expiry; a dropped notice falls back to the one-TTL block.
+	const faults: Fault[] = [
+		edge(0, t, 'p', 'arb', duration + 20_000),
+		edge(1, t, 'p', 'b', duration + 20_000),
+	];
+	if (rng.chance(0.35))
+		faults.push(fault(2, 0, 'notice', { target: 'a', notice: 'drop', durationMs: 90_000 }));
 	return finish(
-		[
-			edge(0, t, 'p', 'arb', duration + 20_000),
-			edge(1, t, 'p', 'b', duration + 20_000),
-		],
+		faults,
 		{ failover: { after: t, withinMs: 60_000 } },
 		{ durability: 'sync', sync: ['a'], durationMs: Math.max(90_000, t + duration + 30_000) },
+	);
+}
+
+/**
+ * Revision 3: the canonical two-fault case with best-effort fence-notice delivery. The primary
+ * loses the arbiter and `b`, so it fences at ~t+15..21 s. The eligible sync member `a` is
+ * reachable and answers the keep-alive. The notice is delivered, dropped, delayed, duplicated,
+ * stale or bad-epoch: the model judges the bound only when `a` holds a valid one, and records the
+ * one-TTL slower path (with an alert) otherwise.
+ */
+function fenceNotice(seed: number): Scenario {
+	const { rng, finish } = base(seed, 'fence-notice');
+	const t = rng.int(4_000, 10_000);
+	const faults: Fault[] = [
+		edge(0, t, 'p', 'arb', 80_000),
+		edge(1, t, 'p', 'b', 80_000),
+	];
+	const pick = rng.int(0, 99);
+	const mode: 'delivered' | 'drop' | 'delay' | 'duplicate' | 'stale' | 'bad-epoch' =
+		pick < 50
+			? 'delivered'
+			: pick < 65
+				? 'drop'
+				: pick < 75
+					? 'delay'
+					: pick < 85
+						? 'duplicate'
+						: pick < 92
+							? 'stale'
+							: 'bad-epoch';
+	if (mode !== 'delivered')
+		faults.push(
+			fault(2, 0, 'notice', {
+				target: 'a',
+				notice: mode,
+				durationMs: 90_000,
+				value: mode === 'delay' ? rng.int(500, 8_000) : 500,
+			}),
+		);
+	return finish(
+		faults,
+		{ failover: { after: t, withinMs: 70_000 } },
+		{ durability: 'sync', sync: ['a'], durationMs: 100_000 },
 	);
 }
 
@@ -408,6 +462,7 @@ const GENERATORS: Record<Family, (seed: number) => Scenario> = {
 	'failsafe-keepalive': failsafeKeepalive,
 	'control-down': controlDown,
 	refusal,
+	'fence-notice': fenceNotice,
 	mixed,
 };
 
@@ -546,8 +601,8 @@ export function syncNamedDeadClosed(): Scenario {
 		1,
 		'w11-sync-named-dead-then-close',
 		'sync-named-dead',
-		[fault(0, 8_000, 'crash', { node: 'b' }), fault(1, 14_000, 'kill-primary')],
-		{ failover: { after: 14_000, withinMs: 30_000 } },
+		[fault(0, 8_000, 'crash', { node: 'b' }), fault(1, 18_000, 'kill-primary')],
+		{ failover: { after: 18_000, withinMs: 30_000 } },
 		{ durability: 'sync', sync: ['b'] },
 	);
 }
@@ -613,14 +668,14 @@ export function failsafeKeepaliveFixed(): Scenario {
 }
 
 /**
- * The minimal counterexample to W11 §9's worst-case bound. Two faults:
+ * Revision 3's canonical two-fault case **with the fence notice delivered**:
  *   1. the primary cannot reach the arbiter, so its renewals fail;
  *   2. one other member (`b`) is unreachable, so the H21 failsafe fails and the primary fences at
  *      its one-TTL proof deadline.
  * The eligible member `a` is reachable from the primary and answers its keep-alive until the
- * fence. W11 §4.4 then blocks `a` for one TTL after its own last answer, which is after the lease
- * expired and after the primary fenced. With `pg_ctl promote` inside its 5 s budget, the time to
- * writable from the primary's last successful renew exceeds 30 s.
+ * fence. The notice is the §1.8 exception; `a` may acquire at lease expiry without the one-TTL
+ * block. The model still applies the §4.1 stream-down debounce, so this schedule measures the
+ * Rev-3 claim that the worst case stays within 30 s.
  */
 export function failsafeMinimalBound(): Scenario {
 	return simple(
@@ -630,6 +685,71 @@ export function failsafeMinimalBound(): Scenario {
 		[edge(0, 6_000, 'p', 'arb', 70_000), edge(1, 6_000, 'p', 'b', 70_000)],
 		{ failover: { after: 6_000, withinMs: 60_000 } },
 		{ durability: 'sync', sync: ['a'], durationMs: 40_000 },
+	);
+}
+
+/** Rev 3: the same two-fault case with the notice dropped. The one-TTL block must hold; the
+ * slower path is reported and alerted, not counted as a bound violation. */
+export function failsafeNoticeLost(): Scenario {
+	return simple(
+		1,
+		'w11-failsafe-notice-lost',
+		'fence-notice',
+		[
+			edge(0, 6_000, 'p', 'arb', 70_000),
+			edge(1, 6_000, 'p', 'b', 70_000),
+			fault(2, 0, 'notice', { target: 'a', notice: 'drop', durationMs: 60_000 }),
+		],
+		{ failover: { after: 6_000, withinMs: 60_000 } },
+		{ durability: 'sync', sync: ['a'], durationMs: 60_000 },
+	);
+}
+
+/** Rev 3: the notice is delayed past the fence; the member uses it if it arrives first. */
+export function failsafeNoticeDelayed(): Scenario {
+	return simple(
+		1,
+		'w11-failsafe-notice-delayed',
+		'fence-notice',
+		[
+			edge(0, 6_000, 'p', 'arb', 70_000),
+			edge(1, 6_000, 'p', 'b', 70_000),
+			fault(2, 0, 'notice', { target: 'a', notice: 'delay', value: 5_000, durationMs: 60_000 }),
+		],
+		{ failover: { after: 6_000, withinMs: 60_000 } },
+		{ durability: 'sync', sync: ['a'], durationMs: 60_000 },
+	);
+}
+
+/** Rev 3: the notice is duplicated; the receiver is idempotent. */
+export function failsafeNoticeDuplicated(): Scenario {
+	return simple(
+		1,
+		'w11-failsafe-notice-duplicated',
+		'fence-notice',
+		[
+			edge(0, 6_000, 'p', 'arb', 70_000),
+			edge(1, 6_000, 'p', 'b', 70_000),
+			fault(2, 0, 'notice', { target: 'a', notice: 'duplicate', value: 500, durationMs: 60_000 }),
+		],
+		{ failover: { after: 6_000, withinMs: 60_000 } },
+		{ durability: 'sync', sync: ['a'], durationMs: 60_000 },
+	);
+}
+
+/** Rev 3: a stale notice (previous generation) must not bypass the one-TTL block. */
+export function failsafeNoticeStale(): Scenario {
+	return simple(
+		1,
+		'w11-failsafe-notice-stale',
+		'fence-notice',
+		[
+			edge(0, 6_000, 'p', 'arb', 70_000),
+			edge(1, 6_000, 'p', 'b', 70_000),
+			fault(2, 0, 'notice', { target: 'a', notice: 'stale', durationMs: 60_000 }),
+		],
+		{ failover: { after: 6_000, withinMs: 60_000 } },
+		{ durability: 'sync', sync: ['a'], durationMs: 60_000 },
 	);
 }
 
@@ -668,5 +788,9 @@ export const FIXED_SCENARIOS: Record<string, () => Scenario> = {
 	'w11-control-down': controlDownFixed,
 	'w11-failsafe-keepalive': failsafeKeepaliveFixed,
 	'w11-failsafe-minimal': failsafeMinimalBound,
+	'w11-failsafe-notice-lost': failsafeNoticeLost,
+	'w11-failsafe-notice-delayed': failsafeNoticeDelayed,
+	'w11-failsafe-notice-duplicated': failsafeNoticeDuplicated,
+	'w11-failsafe-notice-stale': failsafeNoticeStale,
 	'w11-wall-clock-fence': wallClockFence,
 };

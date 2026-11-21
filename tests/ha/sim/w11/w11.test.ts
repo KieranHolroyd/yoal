@@ -8,6 +8,10 @@ import {
 	controlDownFixed,
 	failsafeKeepaliveFixed,
 	failsafeMinimalBound,
+	failsafeNoticeDelayed,
+	failsafeNoticeDuplicated,
+	failsafeNoticeLost,
+	failsafeNoticeStale,
 	generateScenario,
 	noDrillRefused,
 	partitionArbiterOkFixed,
@@ -221,33 +225,95 @@ describe('W11 automatic promotion (W11-SPEC §4-§5)', () => {
 	});
 });
 
-describe('W11-MODEL §counterexample: the §9 bound and the §4.4 keep-alive gate', () => {
-	test('the minimal two-fault schedule exceeds the 30 s worst case', () => {
-		const scenario = failsafeMinimalBound();
-		expect(scenario.faults).toHaveLength(2);
-		const result = new W11World({ seed: 15, scenario, trace: true }).run();
+describe('W11 Revision 3: the fence notice', () => {
+	test('the canonical two-fault case with the notice delivered is within the bound at ordinary seeds', () => {
+		for (const seed of [9, 15, 33]) {
+			const result = new W11World({ seed, scenario: failsafeMinimalBound(), trace: true }).run();
+			expect(result.violations).toEqual([]);
+			expect(result.stats.promotions).toBe(1);
+			expect(result.stats.fenceNoticesDelivered).toBeGreaterThanOrEqual(1);
+			expect(result.stats.fenceNoticePromotions).toBe(1);
+			expect(result.stats.fenceNoticeSlowPath).toBe(0);
+			expect(result.failoverLatenciesMs[0] as number).toBeLessThanOrEqual(30_000);
+			const trace = result.trace.map((e) => e.text).join('\n');
+			expect(trace).toContain('received fence notice for generation 1');
+			expect(trace).toContain('permits acquisition despite the keep-alive');
+		}
+	});
+
+	test('the remaining Rev-3 counterexample: with the notice delivered, the tail still exceeds 30 s', () => {
+		const result = new W11World({ seed: 3752, scenario: failsafeMinimalBound(), trace: true }).run();
 		expect(result.stats.promotions).toBe(1);
+		expect(result.stats.fenceNoticePromotions).toBe(1);
+		expect(result.stats.fenceNoticeSlowPath).toBe(0);
 		expect(result.violations).toHaveLength(1);
 		expect(result.violations[0]?.kind).toBe('time-to-writable-exceeded');
 		expect(result.failoverLatenciesMs[0] as number).toBeGreaterThan(30_000);
 		const trace = result.trace.map((e) => e.text).join('\n');
-		expect(trace).toContain('renew failed');
-		expect(trace).toContain('fencing at generation 1');
+		expect(trace).toContain('received fence notice for generation 1');
+		expect(trace).toContain('permits acquisition despite the keep-alive');
 		expect(trace).toContain('candidate at generation 2');
 		expect(trace).toContain('time to writable');
 	});
 
-	test('the whole 300-schedule sweep has no I3/I11/I12/I13 violation; only the bound fails', () => {
-		let boundViolations = 0;
+	test('without delivery the one-TTL block holds; the slower path is reported and alerted, not a bound violation', () => {
+		const result = new W11World({ seed: 3541, scenario: failsafeNoticeLost(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.promotions).toBe(1);
+		expect(result.stats.fenceNoticesDelivered).toBe(0);
+		expect(result.stats.fenceNoticeMisses).toBe(1);
+		expect(result.stats.fenceNoticeSlowPath).toBe(1);
+		expect(result.stats.fenceNoticeAlerts).toBeGreaterThanOrEqual(1);
+		expect(result.stats.fenceNoticePromotions).toBe(0);
+		expect(result.failoverLatenciesMs).toEqual([]);
+		expect(result.slowPathLatenciesMs[0] as number).toBeGreaterThan(30_000);
+		const trace = result.trace.map((e) => e.text).join('\n');
+		expect(trace).toContain('one-TTL block applied; alert');
+	});
+
+	test('duplicate delivery is idempotent', () => {
+		const result = new W11World({ seed: 15, scenario: failsafeNoticeDuplicated(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.fenceNoticeDuplicates).toBeGreaterThanOrEqual(1);
+		expect(result.stats.fenceNoticesDelivered).toBeGreaterThanOrEqual(2);
+		expect(result.stats.fenceNoticePromotions).toBe(1);
+	});
+
+	test('a delayed notice is used when it arrives before the promotion', () => {
+		const result = new W11World({ seed: 15, scenario: failsafeNoticeDelayed(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.fenceNoticesDelivered).toBeGreaterThanOrEqual(1);
+		expect(result.stats.fenceNoticePromotions).toBe(1);
+	});
+
+	test('a stale notice is stored but never authorises the generation; the block holds', () => {
+		const result = new W11World({ seed: 3752, scenario: failsafeNoticeStale(), trace: true }).run();
+		expect(result.violations).toEqual([]);
+		expect(result.stats.fenceNoticeStaleIgnored).toBeGreaterThanOrEqual(1);
+		expect(result.stats.fenceNoticePromotions).toBe(0);
+		expect(result.stats.fenceNoticeSlowPath).toBe(1);
+		expect(result.slowPathLatenciesMs[0] as number).toBeGreaterThan(30_000);
+	});
+
+	test('trust-stale-notice: a cross-generation notice is trusted and the early acquisition is caught', () => {
+		const result = new W11World({
+			seed: 3752,
+			scenario: failsafeNoticeStale(),
+			mutant: 'trust-stale-notice',
+		}).run();
+		expect(result.violations.some((v) => v.kind === 'acquired-too-early-after-keepalive')).toBe(true);
+	});
+});
+
+describe('W11 broad sweep', () => {
+	test('the 300-schedule sweep has no I3/I11/I12/I13 violation', () => {
 		const latencies: number[] = [];
 		for (let seed = 1; seed <= 300; seed++) {
 			const result = new W11World({ seed, scenario: scenarioFor(seed) }).run();
 			const other = result.violations.filter((v) => v.kind !== 'time-to-writable-exceeded');
 			expect(other.map((v) => `${v.property}/${v.kind}`)).toEqual([]);
-			boundViolations += result.violations.length;
 			latencies.push(...result.failoverLatenciesMs);
 		}
-		expect(boundViolations).toBeGreaterThan(0);
 		const sorted = [...latencies].sort((a, b) => a - b);
 		const median = sorted[Math.floor((sorted.length - 1) / 2)] as number;
 		expect(median).toBeLessThanOrEqual(25_000);

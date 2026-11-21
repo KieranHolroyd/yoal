@@ -31,6 +31,21 @@ export type Durability = 'sync' | 'async';
 export type SyncState = 'steady' | 'changing';
 export type SyncLossPolicy = 'downgrade' | 'block';
 
+/** W11-SPEC §1.8, Revision 3: an authenticated primary fence notice. */
+export interface FenceNotice {
+	/** The lease generation the primary held when it decided to fence. */
+	generation: number;
+	/**
+	 * The primary's authenticated term. W11-SPEC carries both fields; the database lease itself has
+	 * a generation (W9-SPEC §5.1), so the model treats the epoch as the sender's database term and
+	 * accepts a notice only when both name the generation being acquired from.
+	 */
+	epoch: number;
+	from: MemberId;
+	/** When the receiver accepted it (diagnostics). */
+	at?: number;
+}
+
 /**
  * Pieces of W11-SPEC that are deliberately varied to show the checker has teeth.
  *
@@ -51,7 +66,9 @@ export type Mutant =
 	/** The arbiter accepts a second holder at one generation (breaks I3). */
 	| 'cas-second-holder'
 	/** The primary fences on the node's wall clock instead of the monotonic proof window. */
-	| 'fence-wall-clock';
+	| 'fence-wall-clock'
+	/** Trust a fence notice for a generation/epoch other than the one being acquired. */
+	| 'trust-stale-notice';
 
 export interface DbLease {
 	generation: number;
@@ -78,7 +95,9 @@ export type FaultKind =
 	| 'kill-after-open'
 	| 'kill-after-barrier'
 	/** The control plane is unreachable. It never decides, so this must not stop failover (I11). */
-	| 'control-down';
+	| 'control-down'
+	/** Best-effort fence-notice delivery: drop, delay, duplicate, stale or bad-epoch (W11 §1.8). */
+	| 'notice';
 
 export interface Fault {
 	id: number;
@@ -92,6 +111,8 @@ export interface Fault {
 	target?: string;
 	durationMs?: number;
 	value?: number;
+	/** notice: how to perturb delivery to `target`. */
+	notice?: 'drop' | 'delay' | 'duplicate' | 'stale' | 'bad-epoch';
 }
 
 /**
@@ -180,6 +201,7 @@ export const FAMILIES = [
 	'failsafe-keepalive',
 	'control-down',
 	'refusal',
+	'fence-notice',
 	'mixed',
 ] as const;
 
@@ -241,6 +263,15 @@ export interface RunStats {
 	staleResumes: number;
 	asyncLostAcks: number;
 	ttfExempt: number;
+	fenceNoticesSent: number;
+	fenceNoticesDelivered: number;
+	fenceNoticesFailed: number;
+	fenceNoticePromotions: number;
+	fenceNoticeMisses: number;
+	fenceNoticeSlowPath: number;
+	fenceNoticeAlerts: number;
+	fenceNoticeDuplicates: number;
+	fenceNoticeStaleIgnored: number;
 }
 
 export interface RunResult {
@@ -251,6 +282,12 @@ export interface RunResult {
 	stats: RunStats;
 	/** Time-to-writable samples, in ms, from the lost primary's last applied lease write. */
 	failoverLatenciesMs: number[];
+	/**
+	 * Fence-notice paths that were allowed to be slower than the worst case: the primary fenced,
+	 * the notice was not delivered to the eventual promoter, and the one-TTL block applied. W11
+	 * §9/§11 allows these (with an alert) instead of counting a bound violation.
+	 */
+	slowPathLatenciesMs: number[];
 	trace: TraceEvent[];
 	events: number;
 	durationMs: number;

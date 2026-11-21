@@ -36,6 +36,7 @@ import {
 	type DbLease,
 	type Durability,
 	type Fault,
+	type FenceNotice,
 	type MemberId,
 	type Mutant,
 	type Property,
@@ -106,6 +107,8 @@ interface DbMember {
 	candidateBusy: boolean;
 	acquire: Acquire | null;
 	fenceTimer: number | null;
+	/** W11 §1.8: authenticated fence notices, keyed by the generation the sender held. */
+	fenceNotices: Map<number, FenceNotice>;
 	/** The lost primary's baseline, set when it stops serving; consumed by the next promotion. */
 	lostBaseline: number | null;
 	promotedAt: number | null;
@@ -136,6 +139,13 @@ interface Stored<T> {
 	body: T;
 	etag: string;
 	appliedAt: number;
+}
+
+interface NoticeFault {
+	target: MemberId | null;
+	mode: 'drop' | 'delay' | 'duplicate' | 'stale' | 'bad-epoch';
+	value: number;
+	until: number;
 }
 
 type ArbResult = { status: number; etag: string | null; date: number; body?: string; appliedAt?: number };
@@ -242,8 +252,18 @@ export class W11World {
 		staleResumes: 0,
 		asyncLostAcks: 0,
 		ttfExempt: 0,
+		fenceNoticesSent: 0,
+		fenceNoticesDelivered: 0,
+		fenceNoticesFailed: 0,
+		fenceNoticePromotions: 0,
+		fenceNoticeMisses: 0,
+		fenceNoticeSlowPath: 0,
+		fenceNoticeAlerts: 0,
+		fenceNoticeDuplicates: 0,
+		fenceNoticeStaleIgnored: 0,
 	};
 	readonly failoverLatenciesMs: number[] = [];
+	readonly slowPathLatenciesMs: number[] = [];
 
 	#queue = new EventQueue();
 	#rng: Rng;
@@ -258,6 +278,7 @@ export class W11World {
 
 	#edges = new Map<string, { mode: 'refuse' | 'drop' }[]>();
 	#lagged = new Map<MemberId, number>();
+	#noticeFaults: NoticeFault[] = [];
 
 	#syncLoss: 'downgrade' | 'block';
 
@@ -271,7 +292,16 @@ export class W11World {
 	#control = { available: true, rowGeneration: 1 };
 	#maxGenerationSeen = 1;
 	#fenceEvents: { id: MemberId; t: number }[] = [];
-	#failoverBaseline: { id: MemberId; baseline: number; at: number; cause: string } | null = null;
+	#failoverBaseline: {
+		id: MemberId;
+		baseline: number;
+		at: number;
+		cause: string;
+		/** The generation the lost primary held. */
+		generation: number;
+		/** True when the loss was a fence decision (so a fence notice could have been sent). */
+		fenced: boolean;
+	} | null = null;
 
 	#target: MemberId | null = null;
 	#polling = false;
@@ -355,6 +385,7 @@ export class W11World {
 				candidateBusy: false,
 				acquire: null,
 				fenceTimer: null,
+				fenceNotices: new Map<number, FenceNotice>(),
 				lostBaseline: null,
 				promotedAt: null,
 			};
@@ -577,6 +608,7 @@ export class W11World {
 			violations: this.violations,
 			stats: this.stats,
 			failoverLatenciesMs: this.failoverLatenciesMs,
+			slowPathLatenciesMs: this.slowPathLatenciesMs,
 			trace: this.#trace ?? [],
 			events: this.events,
 			durationMs: this.T,
@@ -815,14 +847,41 @@ export class W11World {
 				});
 				break;
 			}
+			case 'notice': {
+				const until = fault.durationMs ? fault.at + fault.durationMs : Number.POSITIVE_INFINITY;
+				const entry = {
+					target: (fault.target as MemberId | undefined) ?? null,
+					mode: fault.notice ?? 'drop',
+					value: fault.value ?? 0,
+					until,
+				};
+				this.#noticeFaults.push(entry);
+				this.#log(
+					'notice',
+					`fence-notice delivery ${entry.mode} for ${entry.target ?? 'every member'}${fault.durationMs ? ` until ${(until / 1000).toFixed(1)} s` : ''} (fault #${fault.id})`,
+				);
+				if (fault.durationMs)
+					this.#timer(until, () => {
+						const i = this.#noticeFaults.indexOf(entry);
+						if (i >= 0) this.#noticeFaults.splice(i, 1);
+					});
+				break;
+			}
 		}
 	}
 
-	#markLost(member: DbMember, cause: string): void {
+	#markLost(member: DbMember, cause: string, fenced = false): void {
 		if (member.state !== 'primary') return;
 		if (member.lostBaseline !== null) return;
 		member.lostBaseline = member.lastLeaseApply;
-		this.#failoverBaseline = { id: member.id, baseline: member.lastLeaseApply, at: this.T, cause };
+		this.#failoverBaseline = {
+			id: member.id,
+			baseline: member.lastLeaseApply,
+			at: this.T,
+			cause,
+			generation: member.generation,
+			fenced,
+		};
 		this.stats.primaryLosses++;
 		this.#log(member.id, `stopped serving (${cause}); time-to-writable clock starts at ${(member.lastLeaseApply / 1000).toFixed(3)} s`);
 	}
@@ -1434,12 +1493,18 @@ export class W11World {
 
 	#fence(member: DbMember, reason: string, superseded = false): void {
 		if (member.state !== 'primary') return;
-		if (!superseded) this.#markLost(member, reason);
+		if (!superseded) {
+			this.#markLost(member, reason, true);
+			if (this.#failoverBaseline?.id === member.id) this.#failoverBaseline.fenced = true;
+		}
 		member.state = 'fencing';
 		this.#cancel(member.fenceTimer);
 		this.#fenceEvents.push({ id: member.id, t: this.T });
 		this.stats.fences++;
 		this.#log(member.id, `fencing at generation ${member.generation}: ${reason}`);
+		// W11 §5.0: after stopping writes, before stopping Postgres, best-effort notice to every
+		// reachable member. The lease and keep-alive rules remain the authority.
+		this.#sendFenceNotices(member);
 		this.#timer(this.T + this.#rng.int(50, 300), () => {
 			if (member.state !== 'fencing') return;
 			member.state = 'fenced';
@@ -1447,6 +1512,122 @@ export class W11World {
 			member.effectiveSync = null;
 			this.#log(member.id, 'fenced; writes rejected');
 		});
+	}
+
+	/** W11 §1.8/§5.0: best effort; a lost or delayed notice falls back to the one-TTL block. */
+	#sendFenceNotices(primary: DbMember): void {
+		for (const peer of this.db) {
+			if (peer.id === primary.id) continue;
+			const fault = this.#noticeFaultFor(peer.id);
+			const make = (generation = primary.generation): FenceNotice => ({
+				generation,
+				epoch: generation,
+				from: primary.id,
+			});
+			const send = (notice: FenceNotice, label: string): void => {
+				this.stats.fenceNoticesSent++;
+				this.#call(
+					primary.id,
+					peer.id,
+					() => this.#receiveFenceNotice(peer, notice),
+					(err) => {
+						if (err) {
+							this.stats.fenceNoticesFailed++;
+							this.#log(primary.id, `fence notice to ${peer.id} not delivered (${err})${label}`);
+						} else {
+							this.#log(primary.id, `fence notice to ${peer.id} delivered${label}`);
+						}
+					},
+				);
+			};
+			if (fault?.mode === 'drop') {
+				this.stats.fenceNoticesSent++;
+				this.stats.fenceNoticesFailed++;
+				this.#log(primary.id, `fence notice to ${peer.id} lost (best effort)`);
+				continue;
+			}
+			if (fault?.mode === 'delay') {
+				const delay = Math.max(1, fault.value);
+				this.#log(primary.id, `fence notice to ${peer.id} delayed ${(delay / 1000).toFixed(1)} s`);
+				this.#timer(this.T + delay, () => {
+					if (!primary.alive) {
+						this.stats.fenceNoticesFailed++;
+						return;
+					}
+					send(make(), ' (delayed)');
+				});
+				continue;
+			}
+			if (fault?.mode === 'duplicate') {
+				this.stats.fenceNoticeDuplicates++;
+				send(make(), '');
+				this.#timer(this.T + Math.max(1, fault.value), () => {
+					if (!primary.alive) return;
+					send(make(), ' (duplicate)');
+				});
+				continue;
+			}
+			if (fault?.mode === 'stale') {
+				send({ generation: primary.generation - 1, epoch: primary.generation - 1, from: primary.id }, ' (stale, deliberately)');
+				continue;
+			}
+			if (fault?.mode === 'bad-epoch') {
+				send({ generation: primary.generation, epoch: primary.generation - 1, from: primary.id }, ' (bad epoch, deliberately)');
+				continue;
+			}
+			send(make(), '');
+		}
+	}
+
+	#noticeFaultFor(target: MemberId): { mode: 'drop' | 'delay' | 'duplicate' | 'stale' | 'bad-epoch'; value: number } | null {
+		for (let i = this.#noticeFaults.length - 1; i >= 0; i--) {
+			const fault = this.#noticeFaults[i] as NoticeFault;
+			if (fault.until <= this.T) continue;
+			if (fault.target !== null && fault.target !== target) continue;
+			return { mode: fault.mode, value: fault.value };
+		}
+		return null;
+	}
+
+	#receiveFenceNotice(member: DbMember, notice: FenceNotice): boolean {
+		if (notice.epoch !== notice.generation) {
+			this.stats.fenceNoticeStaleIgnored++;
+			this.#log(member.id, `ignored fence notice with epoch ${notice.epoch} for generation ${notice.generation}`);
+			return false;
+		}
+		if (notice.generation !== member.generation) {
+			// Cross-generation delivery is possible (stale or future); store it, but it can never
+			// authorise the generation the member is considering. The candidate check is the
+			// authority; this counter makes the path visible.
+			this.stats.fenceNoticeStaleIgnored++;
+			this.#log(
+				member.id,
+				`received a cross-generation fence notice for ${notice.generation} (we are at ${member.generation}); it will not authorise this generation`,
+			);
+		}
+		member.fenceNotices.set(notice.generation, { ...notice, at: this.T });
+		this.stats.fenceNoticesDelivered++;
+		this.#log(member.id, `received fence notice for generation ${notice.generation} from ${notice.from}`);
+		return true;
+	}
+
+	/** The notice a candidate may use for this lease: same generation, from its holder, same epoch. */
+	#fenceNoticeFor(member: DbMember, lease: DbLease): FenceNotice | null {
+		if (this.mutant === 'trust-stale-notice') {
+			let newest: FenceNotice | null = null;
+			for (const notice of member.fenceNotices.values())
+				if (!newest || notice.generation > newest.generation) newest = notice;
+			return newest;
+		}
+		return this.#noticeForLease(member, lease) ? (member.fenceNotices.get(lease.generation) as FenceNotice) : null;
+	}
+
+	#noticeForLease(member: DbMember, lease: DbLease): boolean {
+		const notice = member.fenceNotices.get(lease.generation);
+		if (!notice) return false;
+		if (notice.from !== lease.holderNodeId) return false;
+		if (notice.epoch !== lease.generation) return false;
+		return true;
 	}
 
 	#replicaTick(member: DbMember): void {
@@ -1502,12 +1683,25 @@ export class W11World {
 			if (member.streamDownSince === null || this.T - member.streamDownSince < SPEC.db.streamDownMs) return;
 			if (!this.#autoAllows(member, lease)) return;
 			if (this.mutant !== 'ignore-eligibility' && !this.#eligible(member, lease)) return;
+			const fenceNotice = this.#fenceNoticeFor(member, lease);
+			const answeredRecently = this.T - member.lastAnsweredToPrimary < SPEC.db.ttlMs;
 			if (
 				this.mutant !== 'ignore-keepalive' &&
 				this.mutant !== 'cas-same-generation' &&
-				this.T - member.lastAnsweredToPrimary < SPEC.db.ttlMs
+				answeredRecently &&
+				!fenceNotice
 			)
 				return;
+			if (
+				fenceNotice &&
+				answeredRecently &&
+				this.mutant !== 'ignore-keepalive' &&
+				this.mutant !== 'cas-same-generation'
+			)
+				this.#log(
+					member.id,
+					`fence notice for generation ${lease.generation} permits acquisition despite the keep-alive`,
+				);
 			if (member.candidateBusy) return;
 			member.candidateBusy = true;
 			member.state = 'candidate';
@@ -1573,7 +1767,7 @@ export class W11World {
 		sentAt: number,
 		sentAtWall: number,
 	): void {
-		if (this.#acquiredTooEarly(member, gen)) return;
+		if (this.#acquiredTooEarly(member, gen, fromLease)) return;
 		member.state = 'promoting';
 		member.acquire = {
 			fromLease,
@@ -1662,7 +1856,9 @@ export class W11World {
 
 		this.#checkI12(member, acquired);
 		this.#checkI13(member, acquired);
-		this.#consumeFailoverBaseline(member);
+		const noticeHeld = this.#noticeForLease(member, acquired.fromLease);
+		this.#consumeFailoverBaseline(member, noticeHeld);
+		member.fenceNotices.clear();
 		this.#rearm(member);
 	}
 
@@ -1711,7 +1907,7 @@ export class W11World {
 		}
 	}
 
-	#consumeFailoverBaseline(member: DbMember): void {
+	#consumeFailoverBaseline(member: DbMember, noticeHeld: boolean): void {
 		const baseline = this.#failoverBaseline;
 		if (!baseline || baseline.id === member.id) return;
 		const latency = this.T - baseline.baseline;
@@ -1723,6 +1919,27 @@ export class W11World {
 				`time to writable ${(latency / 1000).toFixed(2)} s, not judged: the arbiter was unreachable for the candidate`,
 			);
 			return;
+		}
+		if (baseline.fenced) {
+			if (noticeHeld) {
+				this.stats.fenceNoticePromotions++;
+			} else {
+				this.stats.fenceNoticeMisses++;
+				this.stats.fenceNoticeAlerts++;
+				this.#log(
+					member.id,
+					`fence notice for generation ${baseline.generation} was not delivered to ${member.id}; one-TTL block applied; alert`,
+				);
+				if (latency > SPEC.timeToWritable.worstMs) {
+					this.stats.fenceNoticeSlowPath++;
+					this.slowPathLatenciesMs.push(latency);
+					this.#log(
+						member.id,
+						`time to writable ${(latency / 1000).toFixed(2)} s; allowed slower path because the notice was not delivered`,
+					);
+					return;
+				}
+			}
 		}
 		this.failoverLatenciesMs.push(latency);
 		this.#log(
@@ -1918,9 +2135,11 @@ export class W11World {
 	 * machine never reaches the CAS in that state; the `ignore-keepalive` mutant does, and the
 	 * breach is reported so the rule is visible rather than silently assumed.
 	 */
-	#acquiredTooEarly(member: DbMember, gen: number): boolean {
+	#acquiredTooEarly(member: DbMember, gen: number, fromLease: DbLease): boolean {
 		const answeredFor = this.T - member.lastAnsweredToPrimary;
 		if (answeredFor >= SPEC.db.ttlMs) return false;
+		// W11 §1.8/§4.4: a valid notice for this generation is the one exception.
+		if (this.#noticeForLease(member, fromLease)) return false;
 		this.#violate(
 			'support',
 			'acquired-too-early-after-keepalive',

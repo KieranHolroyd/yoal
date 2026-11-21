@@ -75,6 +75,9 @@ function printStats(result: RunResult): void {
 	console.log(
 		`control down: ${s.controlDownPromotions} promotion(s), ${s.controlDownAcks} ack(s); row generation ${s.controlRowGeneration}; async acks missing at the end ${s.asyncLostAcks}`,
 	);
+	console.log(
+		`fence notices: sent ${s.fenceNoticesSent}, delivered ${s.fenceNoticesDelivered}, failed ${s.fenceNoticesFailed}; promotions with notice ${s.fenceNoticePromotions}; misses ${s.fenceNoticeMisses}; slow path ${s.fenceNoticeSlowPath}; alerts ${s.fenceNoticeAlerts}; duplicates ${s.fenceNoticeDuplicates}; stale ignored ${s.fenceNoticeStaleIgnored}`,
+	);
 }
 
 if (flags.scenario) {
@@ -101,6 +104,10 @@ if (flags.scenario) {
 		);
 	printStats(result);
 	printLatencies(result.failoverLatenciesMs);
+	if (result.slowPathLatenciesMs.length > 0) {
+		console.log(`slower path (no notice): ${result.slowPathLatenciesMs.length} sample(s)`);
+		printLatencies(result.slowPathLatenciesMs);
+	}
 	if (flags.trace) {
 		console.log('trace:');
 		printTrace(result);
@@ -133,13 +140,18 @@ interface FamilyStats {
 	syncClosed: number;
 	syncFellBack: number;
 	syncDowngraded: number;
+	noticeDelivered: number;
+	noticeMissed: number;
+	noticeSlow: number;
 	latencies: number[];
+	slowLatencies: number[];
 	violations: number;
 }
 
 const perFamily = new Map<string, FamilyStats>();
 const failures: RunResult[] = [];
 const allLatencies: number[] = [];
+const allSlowLatencies: number[] = [];
 const started = performance.now();
 
 for (let seed = firstSeed; seed < firstSeed + runs; seed++) {
@@ -161,7 +173,11 @@ for (let seed = firstSeed; seed < firstSeed + runs; seed++) {
 		syncClosed: 0,
 		syncFellBack: 0,
 		syncDowngraded: 0,
+		noticeDelivered: 0,
+		noticeMissed: 0,
+		noticeSlow: 0,
 		latencies: [],
+		slowLatencies: [],
 		violations: 0,
 	};
 	stats.runs++;
@@ -178,8 +194,13 @@ for (let seed = firstSeed; seed < firstSeed + runs; seed++) {
 	stats.syncClosed += result.stats.syncChangesClosed;
 	stats.syncFellBack += result.stats.syncChangesFellBack;
 	stats.syncDowngraded += result.stats.syncChangesDowngraded;
+	stats.noticeDelivered += result.stats.fenceNoticesDelivered;
+	stats.noticeMissed += result.stats.fenceNoticeMisses;
+	stats.noticeSlow += result.stats.fenceNoticeSlowPath;
 	stats.latencies.push(...result.failoverLatenciesMs);
+	stats.slowLatencies.push(...result.slowPathLatenciesMs);
 	allLatencies.push(...result.failoverLatenciesMs);
+	allSlowLatencies.push(...result.slowPathLatenciesMs);
 	stats.violations += result.violations.length;
 	perFamily.set(family, stats);
 	if (result.violations.length > 0) failures.push(result);
@@ -188,7 +209,7 @@ for (let seed = firstSeed; seed < firstSeed + runs; seed++) {
 const elapsed = performance.now() - started;
 console.log(`w11 model: ${runs} schedules, ${(elapsed / 1000).toFixed(2)} s, ${(elapsed / runs).toFixed(2)} ms/run, mutant ${mutant}`);
 console.log(
-	'family                 runs  promos  acks  losses  fences  candidates  lost-cas  ctl-promos  strict-ms  max-strict  median-s  worst-s  violations',
+	'family                 runs  promos  acks  losses  fences  candidates  lost-cas  ctl-promos  strict-ms  max-strict  median-s  worst-s  notice-deliv  notice-miss  slow-path  slow-med  slow-worst  violations',
 );
 for (const family of FAMILIES) {
 	const stats = perFamily.get(family);
@@ -196,8 +217,11 @@ for (const family of FAMILIES) {
 	const sorted = [...stats.latencies].sort((a, b) => a - b);
 	const median = sorted.length > 0 ? (sorted[Math.floor((sorted.length - 1) / 2)] as number) : null;
 	const worst = sorted.length > 0 ? (sorted[sorted.length - 1] as number) : null;
+	const slowSorted = [...stats.slowLatencies].sort((a, b) => a - b);
+	const slowMedian = slowSorted.length > 0 ? (slowSorted[Math.floor((slowSorted.length - 1) / 2)] as number) : null;
+	const slowWorst = slowSorted.length > 0 ? (slowSorted[slowSorted.length - 1] as number) : null;
 	console.log(
-		`${family.padEnd(22)} ${String(stats.runs).padStart(5)} ${String(stats.promotions).padStart(6)} ${String(stats.acks).padStart(6)} ${String(stats.primaryLosses).padStart(7)} ${String(stats.fences).padStart(7)} ${String(stats.candidates).padStart(11)} ${String(stats.lostCas).padStart(9)} ${String(stats.controlPromotions).padStart(11)} ${String(Math.round(stats.strictOverlapMs)).padStart(10)} ${String(Math.round(stats.maxStrictOverlapMs)).padStart(11)} ${(median === null ? '—' : (median / 1000).toFixed(2)).padStart(8)} ${(worst === null ? '—' : (worst / 1000).toFixed(2)).padStart(7)}  ${stats.violations === 0 ? 'none' : `${stats.violations} violation(s)`}`,
+		`${family.padEnd(22)} ${String(stats.runs).padStart(5)} ${String(stats.promotions).padStart(6)} ${String(stats.acks).padStart(6)} ${String(stats.primaryLosses).padStart(7)} ${String(stats.fences).padStart(7)} ${String(stats.candidates).padStart(11)} ${String(stats.lostCas).padStart(9)} ${String(stats.controlPromotions).padStart(11)} ${String(Math.round(stats.strictOverlapMs)).padStart(10)} ${String(Math.round(stats.maxStrictOverlapMs)).padStart(11)} ${(median === null ? '—' : (median / 1000).toFixed(2)).padStart(8)} ${(worst === null ? '—' : (worst / 1000).toFixed(2)).padStart(7)} ${String(stats.noticeDelivered).padStart(12)} ${String(stats.noticeMissed).padStart(11)} ${String(stats.noticeSlow).padStart(9)} ${(slowMedian === null ? '—' : (slowMedian / 1000).toFixed(2)).padStart(8)} ${(slowWorst === null ? '—' : (slowWorst / 1000).toFixed(2)).padStart(10)}  ${stats.violations === 0 ? 'none' : `${stats.violations} violation(s)`}`,
 	);
 }
 
@@ -224,6 +248,7 @@ if (sortedAll.length > 0) {
 			],
 			stats: {} as never,
 			failoverLatenciesMs: sortedAll,
+			slowPathLatenciesMs: [],
 			trace: [],
 			events: 0,
 			durationMs: 0,
@@ -232,6 +257,22 @@ if (sortedAll.length > 0) {
 } else {
 	console.log('time to writable: no failover samples');
 }
+
+const sortedSlow = [...allSlowLatencies].sort((a, b) => a - b);
+if (sortedSlow.length > 0) {
+	const slowMedian = sortedSlow[Math.floor((sortedSlow.length - 1) / 2)] as number;
+	const slowWorst = sortedSlow[sortedSlow.length - 1] as number;
+	console.log(
+		`slower path without a delivered fence notice: ${sortedSlow.length} sample(s), median ${(slowMedian / 1000).toFixed(2)} s, worst ${(slowWorst / 1000).toFixed(2)} s (allowed by §9/§11, with an alert)`,
+	);
+}
+
+const totalDelivered = [...perFamily.values()].reduce((n, s) => n + s.noticeDelivered, 0);
+const totalMissed = [...perFamily.values()].reduce((n, s) => n + s.noticeMissed, 0);
+const totalSlow = [...perFamily.values()].reduce((n, s) => n + s.noticeSlow, 0);
+console.log(
+	`fence notices: ${totalDelivered} delivered to a member, ${totalMissed} promotion(s) without a notice, ${totalSlow} slower-path sample(s)`,
+);
 
 console.log(`\nviolating runs: ${failures.filter((f) => f.seed >= 0).length}`);
 
