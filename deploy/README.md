@@ -42,7 +42,7 @@ admin_cidrs    = ["203.0.113.7/32"]
 platform_host  = "control.example.org"
 content_domain = "apps.example.org"
 acme_email     = "ops@example.org"
-features       = ["INGRESS_SET", "STEERING"]   # until `yoal ha init --profile ha` exists
+features       = ["INGRESS_SET", "STEERING"]   # or install.sh --profile ha; then yoal ha init --profile ha
 EOF
 terraform apply                       # 1. network, balancer, bucket, Key Vault, the first VM
 ```
@@ -96,21 +96,22 @@ terraform apply                       # 1. network, balancer, bucket, Key Vault,
 Re-running `terraform apply` never replaces a running node: `custom_data`/`user_data` changes are
 ignored, so removing spent tokens later is safe.
 
-## Installer flags HA-PLAN §8 assumes that do not exist (TODO for lanes A/B or the installer owner)
+## Installer flags HA-PLAN §8 uses
 
-Each is a `TODO(installer):` comment in the templates, and `cloud-init.test.ts` fails once the
-installer gains it, so the template gets wired.
+The installer gained these in Wave 5 lane B. `cloud-init.test.ts` checks that each exists and that
+the templates pass the ones they have variables for.
 
-| §8 flag | Where §8 uses it | Today |
+| §8 flag | Where | Status |
 |---|---|---|
-| `--profile ha` | `install.sh` | No flag. `features` appends `YOAL_FEATURE_INGRESS_SET/STEERING`; later `yoal ha init --profile ha` (lane B) |
-| `--zone <zone>` | `install.sh` and `node.sh` | No flag on either. Set under **Nodes → Edit node** |
-| `--roles <list>` | `node.sh` | No flag. Set under **Nodes → Edit node** |
-| `--object-store azure://<container>` (and `s3://`, `gcs://`) | `install.sh` | `--object-store local\|r2` only. Azure/GCS are env-only (`YOAL_OBJECT_STORE`, `YOAL_AZURE_*`, `YOAL_GCS_*`, behind `OBJECT_STORE_*` flags) |
+| `--profile single\|ha\|ha-dr` | `install.sh` | Built. Writes the profile's `YOAL_FEATURE_*` lines into `yoal.env`, the same lines `yoal ha init --profile` prints. The templates still use `features` (no module variable yet: `TODO(terraform)`) |
+| `--zone <zone>` | `install.sh` and `node.sh` | Built and passed by both templates. Sent with the join |
+| `--roles <list>` | `node.sh` (and `install.sh --join`) | Built and passed by the join template. Sent with the join. The first machine holds every role |
+| `--object-store azure://<container>` (and `s3://`, `gcs://`) | `install.sh` | Built. Credentials come from the environment or `--object-store-credentials-file`, never the command line. Azure and GCS also write their `OBJECT_STORE_*` flag. No module passes one yet (`TODO(terraform)`) |
 | `--domain` | `install.sh` | The real flag is `--platform-host` (the templates use it) |
 
-Also missing for a hands-off run: a `node.sh` way to pass the token other than `--token` on the
-command line, and an installer or join option that puts the first machine on the overlay (step 6).
+`node.sh` also takes `--token-file <path>` or `--token-file -` (stdin), so the join token is not
+in the process list or the shell history; the join template pipes it in. Still missing for a
+hands-off run: an installer or join option that puts the first machine on the overlay (step 6).
 
 **HA-PLAN §10 "Arbiter credentials" is not reached today.** The modules create an arbiter identity
 scoped to blob reads, writes and deletes under `yoal/ha/` (Azure: a custom role with only those

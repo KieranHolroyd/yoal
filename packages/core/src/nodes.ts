@@ -408,6 +408,10 @@ export class NodeService {
 		version?: string;
 		networkMode?: 'yoal' | 'external';
 		wireguardPublicKey?: string;
+		/** `node.sh --zone` / `install.sh --zone` (HA Wave 5); absent is `default`. */
+		zone?: string;
+		/** `node.sh --roles` (HA Wave 5); absent keeps the roles the node's mode implies. */
+		roles?: NodeRole[];
 	}): {
 		nodeId: string;
 		token: string;
@@ -443,6 +447,22 @@ export class NodeService {
 				.all()
 				.map((row) => row.address),
 		);
+		const zone = input.zone === undefined ? null : nodeZoneSchema.safeParse(input.zone);
+		if (zone && !zone.success) throw new ValidationError(`Invalid zone "${input.zone}": ${zone.error.issues[0]?.message ?? 'not a zone name'}.`);
+		const roles =
+			input.roles === undefined
+				? null
+				: input.roles.length > 0 && input.roles.every((role) => nodeRoleSchema.safeParse(role).success)
+					? { success: true as const, data: input.roles }
+					: null;
+		if (input.roles !== undefined && !roles) throw new ValidationError('Invalid roles: use ingress, control, compute, data or build.');
+		// A zone belongs to one region: a new node in a zone other nodes use joins their region.
+		const zoneRegion = zone
+			? (this.ctx.sqlite
+					.query<{ region: string }, [string]>('SELECT DISTINCT region FROM nodes WHERE zone = ?')
+					.all(zone.data)
+					.map((row) => row.region)[0] ?? 'default')
+			: 'default';
 		const privateAddress = managed ? allocateOverlayAddress(this.ctx.cluster.get().overlay.cidr, used) : null;
 		if (managed && !privateAddress)
 			throw new ConflictError('The overlay CIDR has no free address. Widen it before adding another node.');
@@ -475,13 +495,15 @@ export class NodeService {
 					managed ? listenPort : null,
 				],
 			);
+			if (zone) this.ctx.sqlite.run('UPDATE nodes SET zone = ?, region = ? WHERE id = ?', [zone.data, zoneRegion, nodeId]);
+			if (roles) this.ctx.sqlite.run('UPDATE nodes SET roles_json = ? WHERE id = ?', [JSON.stringify([...new Set(roles.data)]), nodeId]);
 			this.ctx.sqlite.run('UPDATE node_join_tokens SET used_at = ?, used_by_node_id = ? WHERE id = ?', [now, nodeId, join.id]);
 		})();
 		this.ctx.audit.record({
 			action: 'node.join',
 			resource: 'node',
 			resourceId: nodeId,
-			args: { name: input.name, mode },
+			args: { name: input.name, mode, ...(zone ? { zone: zone.data } : {}), ...(roles ? { roles: roles.data } : {}) },
 			result: 'ok',
 		});
 		this.bump();

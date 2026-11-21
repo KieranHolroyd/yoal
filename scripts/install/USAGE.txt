@@ -32,6 +32,19 @@ Options:
   --smtp-password <pass>      SMTP password.
   --smtp-from <address>       From address (default Yoal <noreply@<content-domain>>).
   --object-store local|r2     Artifact storage (default local).
+  --object-store azure://<container>|gcs://<bucket>|s3://<bucket>
+                              An external store (HA-PLAN W3). Azure and GCS also turn on their
+                              YOAL_FEATURE_OBJECT_STORE_* flag. Credentials come from the
+                              environment (YOAL_AZURE_*, YOAL_GCS_*, R2_*) or the file below,
+                              never from the command line; s3:// needs R2_ENDPOINT.
+  --object-store-credentials-file <path>
+                              The store's keys, one KEY=value per line; for gcs:// it may be the
+                              service-account JSON itself. Also YOAL_OBJECT_STORE_CREDENTIALS_FILE.
+  --profile single|ha|ha-dr   Write the profile's YOAL_FEATURE_* lines into yoal.env, the same
+                              lines `yoal ha init --profile` prints. Then run that command once
+                              every node has joined. Without it nothing changes.
+  --zone <zone>               This machine's zone (lowercase letters, digits, hyphens), set when
+                              it enrols. Later: Nodes → Edit node.
   --r2-account-id <id>        R2 account id.
   --r2-bucket <bucket>        R2 bucket.
   --r2-access-key-id <id>     R2 access key.
@@ -63,6 +76,8 @@ Options:
   --name <node-name>          The node's name (with --join).
   --endpoint <host[:port]>    Underlay address other nodes dial for WireGuard (with --join;
                               default: this server's IPv4, port 51820).
+  --roles <role,...>          The node's roles (with --join): ingress, compute, data, control,
+                              build. Default: compute,data. Later: Nodes → Edit node.
   -h, --help                  Print this help and exit.
 
 Bootstrap environment:

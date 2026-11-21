@@ -28,26 +28,51 @@ ORIGIN=${origin}
 REPO=${repo}
 CHANNEL=${channel}
 TOKEN=''
+TOKEN_FILE=''
 NAME=''
 ENDPOINT=''
+ZONE=''
+ROLES=''
 
 usage() {
-	echo "usage: node.sh --token <join-token> --name <node-name> [--endpoint <host[:port]>]" >&2
+	echo "usage: node.sh (--token <join-token> | --token-file <path|->) --name <node-name> [--endpoint <host[:port]>] [--zone <zone>] [--roles ingress,compute,data,control]" >&2
 	exit 2
 }
 
 while [ "$#" -gt 0 ]; do
 	case "$1" in
 		--token) [ "$#" -ge 2 ] || usage; TOKEN=$2; shift 2 ;;
+		--token-file) [ "$#" -ge 2 ] || usage; TOKEN_FILE=$2; shift 2 ;;
 		--name) [ "$#" -ge 2 ] || usage; NAME=$2; shift 2 ;;
 		--endpoint) [ "$#" -ge 2 ] || usage; ENDPOINT=$2; shift 2 ;;
+		--zone) [ "$#" -ge 2 ] || usage; ZONE=$2; shift 2 ;;
+		--roles) [ "$#" -ge 2 ] || usage; ROLES=$2; shift 2 ;;
 		-h|--help) usage ;;
 		*) echo "unknown argument: $1" >&2; usage ;;
 	esac
 done
 
+# The token from a file (or - for stdin) stays out of ps and the shell history.
+if [ -n "$TOKEN_FILE" ]; then
+	if [ "$TOKEN_FILE" = "-" ]; then IFS= read -r TOKEN || true; else TOKEN=$(head -n 1 "$TOKEN_FILE") || { echo "cannot read $TOKEN_FILE" >&2; exit 1; }; fi
+fi
 [ -n "$TOKEN" ] || usage
 [ -n "$NAME" ] || usage
+# Validated here so a typo fails before anything installs; the control plane checks them again.
+if [ -n "$ZONE" ]; then
+	case "$ZONE" in
+		*[!a-z0-9-]*|-*|*-|*--*) echo "--zone: use lowercase letters, digits and single hyphens" >&2; exit 2 ;;
+	esac
+	[ "\${#ZONE}" -le 32 ] || { echo "--zone: at most 32 characters" >&2; exit 2; }
+fi
+if [ -n "$ROLES" ]; then
+	for ROLE in $(echo "$ROLES" | tr ',' ' '); do
+		case "$ROLE" in
+			ingress|compute|data|control|build) ;;
+			*) echo "--roles: unknown role $ROLE (use ingress, compute, data, control, build)" >&2; exit 2 ;;
+		esac
+	done
+fi
 [ "$(id -u)" = "0" ] || { echo "run as root (sudo sh -s -- ...)" >&2; exit 1; }
 command -v systemctl >/dev/null 2>&1 || { echo "systemd is required" >&2; exit 1; }
 
@@ -63,6 +88,8 @@ if ! command -v yoal-agent >/dev/null 2>&1; then
 	}
 	set -- --yes --join "$ORIGIN" --name "$NAME"
 	[ -z "$ENDPOINT" ] || set -- "$@" --endpoint "$ENDPOINT"
+	[ -z "$ZONE" ] || set -- "$@" --zone "$ZONE"
+	[ -z "$ROLES" ] || set -- "$@" --roles "$ROLES"
 	# The token travels in the environment, not on the installer's command line.
 	YOAL_JOIN_TOKEN=$TOKEN YOAL_REPO=$REPO YOAL_CHANNEL=$CHANNEL sh "$TMP/install.sh" "$@"
 	exit 0
@@ -77,9 +104,12 @@ if [ -f /etc/yoal/agent.env ]; then
 	cp /etc/yoal/agent.env "/etc/yoal/agent.env.bak.$(date +%s)"
 fi
 
-set -- join "$ORIGIN" --token "$TOKEN" --name "$NAME" --network-mode yoal
+set -- join "$ORIGIN" --name "$NAME" --network-mode yoal
 [ -z "$ENDPOINT" ] || set -- "$@" --public-address "$ENDPOINT"
-yoal-agent "$@" > /etc/yoal/agent.env
+[ -z "$ZONE" ] || set -- "$@" --zone "$ZONE"
+[ -z "$ROLES" ] || set -- "$@" --roles "$ROLES"
+# The token travels in the environment, not on yoal-agent's command line.
+YOAL_JOIN_TOKEN=$TOKEN yoal-agent "$@" > /etc/yoal/agent.env
 chmod 600 /etc/yoal/agent.env
 
 systemctl enable --now yoal-helper >/dev/null 2>&1 || true

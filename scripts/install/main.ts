@@ -50,6 +50,7 @@ import { TRIGGER_PATH_UNIT, triggerUnits, updateCommandScript } from '../update-
 import { controlPlaneUnits, DEFAULT_CONTROL_PLANE_PATHS, ensureMasterKeyDropIns, GUARD_UNIT, MASTER_KEY_DROP_IN, PRIMARY_UNIT, STANDBY_UNIT } from '../systemd/control-plane.ts';
 import { CONFIG_COMMAND, CONFIG_PATH_UNIT, CONFIG_SERVICE_UNIT, ensurePlatformConfigUnits } from '../platform-config/units.ts';
 import { readEnvFile, writeEnvFile } from './env-file.ts';
+import { objectStoreEnv, parseObjectStore, parseProfile, parseRoles, parseZone, profileFlagLines, type InstallProfile } from './ha-flags.ts';
 import { ensureVapidKeys } from '../../packages/contracts/src/vapid.ts';
 import { ensureWorkerd, pinnedWorkerdVersion, workerdArch } from './workerd.ts';
 import { ensureFrankenphp, frankenphpArch, FRANKENPHP_LINK, FRANKENPHP_PINNED_VERSION } from './frankenphp.ts';
@@ -172,8 +173,19 @@ interface Options {
 	githubClientId?: string;
 	githubClientSecret?: string;
 	smtp?: { host: string; port: number; user: string; password: string; from: string };
-	objectStore: 'local' | 'r2';
+	objectStore: 'local' | 'r2' | 'azure' | 'gcs';
 	r2?: { accountId: string; bucket: string; accessKeyId: string; secretAccessKey: string };
+	/**
+	 * `--object-store azure://…|gcs://…|s3://…` (HA Wave 5): the `yoal.env` keys for the store, its
+	 * flag line for Azure/GCS, and any required key no source had. Credentials never come from argv.
+	 */
+	objectStoreTarget?: { env: Map<string, string>; missing: string[]; label: string };
+	/** `--profile` (HA Wave 5): writes the same YOAL_FEATURE_* lines `yoal ha init` prints. */
+	profile?: InstallProfile;
+	/** `--zone` (HA Wave 5): this machine's zone, sent with its join. */
+	zone?: string;
+	/** `--roles` (HA Wave 5, with --join): this machine's roles, sent with its join. */
+	roles?: string[];
 	noAgent: boolean;
 	/** Install the pinned FrankenPHP binary for PHP process apps (D121). Opt-in: it is large. */
 	withPhp: boolean;
@@ -279,7 +291,7 @@ const options: Options = {
 	replaceCaddyfile: has('--replace-caddyfile'),
 	githubClientId: setting('--github-client-id', ['GITHUB_CLIENT_ID']) || undefined,
 	githubClientSecret: setting('--github-client-secret', ['GITHUB_CLIENT_SECRET']) || undefined,
-	objectStore: (setting('--object-store', ['YOAL_OBJECT_STORE'], 'local') as 'local' | 'r2') || 'local',
+	objectStore: 'local',
 	noAgent: has('--no-agent'),
 	withPhp: has('--with-php') || process.env.YOAL_INSTALL_PHP === '1',
 	withKubernetes: has('--with-kubernetes') || process.env.YOAL_INSTALL_KUBERNETES === '1',
@@ -303,9 +315,57 @@ if (has('--join')) {
 	}
 	options.join = { controlUrl: controlUrl.replace(/\/+$/, ''), token, name, endpoint: value('--endpoint', '') };
 }
-if (options.objectStore !== 'local' && options.objectStore !== 'r2') {
-	console.error(`--object-store must be local or r2 (got "${options.objectStore}")`);
+try {
+	const rawStore = setting('--object-store', ['YOAL_OBJECT_STORE'], 'local') || 'local';
+	if ((rawStore === 'azure' || rawStore === 'gcs') && !has('--object-store')) {
+		// Configured earlier in yoal.env: a re-run keeps the kind and every key it reads.
+		options.objectStore = rawStore;
+	} else {
+		const choice = parseObjectStore(rawStore);
+		if (!('name' in choice)) options.objectStore = choice.kind;
+		else {
+			const credentialsPath = setting('--object-store-credentials-file', ['YOAL_OBJECT_STORE_CREDENTIALS_FILE']);
+			let file: Map<string, string> | undefined;
+			let credentialsJson = false;
+			if (credentialsPath) {
+				let text: string;
+				try {
+					text = readFileSync(credentialsPath, 'utf8');
+				} catch {
+					throw new Error(`--object-store-credentials-file ${credentialsPath}: cannot read it`);
+				}
+				credentialsJson = text.trimStart().startsWith('{');
+				if (!credentialsJson) file = readEnvFile(credentialsPath);
+			}
+			const target = objectStoreEnv(choice, { env: process.env, file, existing: existingEnv, credentialsPath, credentialsJson });
+			options.objectStore = choice.kind === 's3' ? 'r2' : choice.kind;
+			options.objectStoreTarget = { env: target.set, missing: target.missing, label: rawStore };
+		}
+	}
+	if (has('--profile')) {
+		if (options.join) throw new Error('--profile is for the control-plane machine; a joining machine takes its flags from the control plane.');
+		options.profile = parseProfile(value('--profile'));
+	}
+	if (has('--zone')) options.zone = parseZone(value('--zone'));
+	if (has('--roles')) {
+		if (!options.join) throw new Error('--roles is for a machine that joins (--join, or node.sh); the first machine holds every role.');
+		options.roles = parseRoles(value('--roles'));
+	}
+} catch (error) {
+	console.error((error as Error).message);
 	process.exit(64);
+}
+if (options.profile || options.zone || options.roles || options.objectStoreTarget) {
+	// Printed before anything else so --dry-run shows it on any machine.
+	console.log('HA flags:');
+	if (options.profile)
+		console.log(`  profile ${options.profile}: ${profileFlagLines(options.profile).map(([key, value]) => `${key}=${value}`).join(' ') || 'no flag lines'} (written to yoal.env)`);
+	if (options.zone) console.log(`  zone ${options.zone} (sent with the join)`);
+	if (options.roles) console.log(`  roles ${options.roles.join(',')} (sent with the join)`);
+	if (options.objectStoreTarget) {
+		const keys = [...options.objectStoreTarget.env.keys()].join(', ');
+		console.log(`  object store ${options.objectStoreTarget.label}: ${keys}${options.objectStoreTarget.missing.length > 0 ? `; missing ${options.objectStoreTarget.missing.join(', ')}` : ''}`);
+	}
 }
 
 if (process.env.YOAL_SMTP_HOST || args.includes('--smtp-host') || existingEnv.get('YOAL_SMTP_HOST')) {
@@ -317,7 +377,7 @@ if (process.env.YOAL_SMTP_HOST || args.includes('--smtp-host') || existingEnv.ge
 		from: setting('--smtp-from', ['YOAL_SMTP_FROM'], `Yoal <noreply@${options.contentDomain}>`),
 	};
 }
-if (options.objectStore === 'r2') {
+if (options.objectStore === 'r2' && !options.objectStoreTarget) {
 	options.r2 = {
 		accountId: setting('--r2-account-id', ['R2_ACCOUNT_ID', 'YOAL_R2_ACCOUNT_ID']),
 		bucket: setting('--r2-bucket', ['R2_BUCKET', 'YOAL_R2_BUCKET']),
@@ -955,10 +1015,14 @@ async function preflight(): Promise<void> {
 	}
 	log(`caddy ${capture(caddyBin, ['version']) ?? 'unknown'}`);
 
-	if (options.objectStore === 'r2') {
+	if (options.objectStore === 'r2' && !options.objectStoreTarget) {
 		const missing = Object.entries(options.r2 ?? {}).filter(([, v]) => !v).map(([k]) => k);
 		if (missing.length) fail(`R2 selected but missing: ${missing.join(', ')}`);
 	}
+	if (options.objectStoreTarget && options.objectStoreTarget.missing.length > 0)
+		fail(
+			`--object-store ${options.objectStoreTarget.label} needs ${options.objectStoreTarget.missing.join(', ')}: set them in the environment or in --object-store-credentials-file, never on the command line.`,
+		);
 	if (!isDomainName(options.platformHost) && !isIpv4(options.platformHost) && !validDomain(options.platformHost))
 		fail(`Invalid platform host "${options.platformHost}" (a domain or an IPv4 address).`);
 	if (!isDomainName(options.contentDomain)) fail(`Invalid content domain "${options.contentDomain}".`);
@@ -1113,6 +1177,10 @@ function writeSecrets(): Map<string, string> {
 		// write it explicitly. The control plane reads the same optional R2_ENDPOINT.
 		env.set('R2_ENDPOINT', existing.get('R2_ENDPOINT') || `https://${options.r2.accountId}.r2.cloudflarestorage.com`);
 	}
+	// `--object-store azure://|gcs://|s3://` (HA Wave 5): the store's keys and, for Azure/GCS, its flag.
+	if (options.objectStoreTarget) for (const [key, value] of options.objectStoreTarget.env) env.set(key, value);
+	// `--profile` (HA Wave 5): the same flag lines `yoal ha init` prints; yoal.env stays the only flag store.
+	if (options.profile) for (const [key, value] of profileFlagLines(options.profile)) env.set(key, value);
 	if (!options.dryRun) {
 		writeEnvFile(ENV_FILE, env);
 		syncRememberedChannel();
@@ -1621,6 +1689,8 @@ function bootstrapNode(env: Map<string, string>, release: string): void {
 			// The edge agent reaches the control plane on its socket, not through Caddy (D105).
 			YOAL_CONTROL_SOCKET: CONTROL_SOCKET,
 			YOAL_CADDY_ADMIN_SOCKET: detectCaddyAdminSocket(),
+			// `--zone` (HA Wave 5): the first node's zone, set at enrolment.
+			YOAL_NODE_ZONE: options.zone ?? '',
 		},
 	});
 	if (result.code !== 0) fail('Node enrollment failed.');
@@ -2023,8 +2093,21 @@ async function joinWorker(join_: NonNullable<Options['join']>): Promise<void> {
 	step('Join');
 	const agentBin = join(OPT_DIR, 'current', 'agent', 'yoal-agent');
 	const joined = Bun.spawnSync({
-		cmd: [agentBin, 'join', controlUrl.origin, '--token', join_.token, '--name', join_.name, '--network-mode', 'yoal', '--public-address', endpoint],
-		env: { ...process.env, YOAL_DATA_DIR: env.get('YOAL_DATA_DIR')! },
+		cmd: [
+			agentBin,
+			'join',
+			controlUrl.origin,
+			'--name',
+			join_.name,
+			'--network-mode',
+			'yoal',
+			'--public-address',
+			endpoint,
+			...(options.zone ? ['--zone', options.zone] : []),
+			...(options.roles ? ['--roles', options.roles.join(',')] : []),
+		],
+		// The token goes in the environment, so it is never in this machine's process list.
+		env: { ...process.env, YOAL_DATA_DIR: env.get('YOAL_DATA_DIR')!, YOAL_JOIN_TOKEN: join_.token },
 		stdout: 'pipe',
 		stderr: 'pipe',
 	});

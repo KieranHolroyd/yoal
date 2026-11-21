@@ -181,7 +181,7 @@ describe('preflight on a fixture fleet', () => {
 	});
 
 	test('a fleet built to fail each check reports that check id with a fail and the exact fix', async () => {
-		const cases: Array<{ id: HaCheckId; breakIt: (fleet: Fleet) => Promise<void> | void; fix: RegExp }> = [
+		const cases: Array<{ id: HaCheckId; breakIt: (fleet: Fleet) => unknown; fix: RegExp }> = [
 			{ id: 'nodes', breakIt: ({ sqlite, ids }) => sqlite.run("UPDATE nodes SET status = 'offline' WHERE id <> ?", [ids.a1!]), fix: /node\.sh --roles/ },
 			{
 				id: 'node-capabilities',
@@ -199,7 +199,7 @@ describe('preflight on a fixture fleet', () => {
 				id: 'arbiter-conditional-writes',
 				breakIt: async ({ core, store }) => {
 					// A store that accepts If-None-Match and ignores it: the probe catches what a 501 check would not.
-					(store as MemoryObjectStore).writeConditional = async () => ({ status: 200, etag: '"same"' });
+					(store as MemoryObjectStore).writeConditional = async () => ({ status: 200, etag: '"same"', serverDate: null });
 					await core.ctx.haDoctor.probeArbiter({ force: true });
 				},
 				fix: /YOAL_OBJECT_STORE=/,
@@ -326,7 +326,7 @@ describe('ha init', () => {
 		const { core } = await fleet('ha');
 		const key = buildPrincipal({ kind: 'apiKey', userId: 'user_1', orgId: 'org_1', role: 'owner', platformAdmin: true, credential: 'apiKey' } as never);
 		await expect(core.haInit.apply(key, { profile: 'ha', apply: true })).rejects.toMatchObject({ status: 403 });
-		const member = buildPrincipal({ kind: 'user', userId: 'user_2', orgId: 'org_1', role: 'member', platformAdmin: false });
+		const member = buildPrincipal({ kind: 'user', userId: 'user_2', orgId: 'org_1', role: 'viewer', platformAdmin: false });
 		expect(() => core.haInit.plan(member, { profile: 'ha' })).toThrow(expect.objectContaining({ status: 403 }));
 	});
 });
@@ -417,3 +417,20 @@ describe('drills', () => {
 function sqlite_offline_capable(core: Core): void {
 	core.ctx.sqlite.run('UPDATE nodes SET capabilities_json = ?', [JSON.stringify([...CAPS, 'offline-drill'])]);
 }
+
+describe('join with --zone and --roles (node.sh, HA-PLAN §8 step 2)', () => {
+	test('the zone and roles land on the node; a zone other nodes use keeps their region; bad values are refused', async () => {
+		const { core, sqlite, ids } = await fleet('ha');
+		sqlite.run("UPDATE nodes SET region = 'ukwest' WHERE id = ?", [ids.a3!]);
+		const joined = core.nodes.join({ token: core.nodes.createJoinToken(admin, 'b1').token, name: 'b1', zone: 'uksouth-3', roles: ['ingress', 'compute'] });
+		const row = sqlite.query<{ zone: string; region: string; roles_json: string }, [string]>('SELECT zone, region, roles_json FROM nodes WHERE id = ?').get(joined.nodeId);
+		expect(row).toEqual({ zone: 'uksouth-3', region: 'ukwest', roles_json: '["ingress","compute"]' });
+		const plain = core.nodes.join({ token: core.nodes.createJoinToken(admin, 'b2').token, name: 'b2' });
+		expect(sqlite.query<{ zone: string; roles_json: string | null }, [string]>('SELECT zone, roles_json FROM nodes WHERE id = ?').get(plain.nodeId)).toEqual({
+			zone: 'default',
+			roles_json: null,
+		});
+		expect(() => core.nodes.join({ token: core.nodes.createJoinToken(admin, 'b3').token, name: 'b3', zone: 'has space' })).toThrow(/Invalid zone/);
+		expect(() => core.nodes.join({ token: core.nodes.createJoinToken(admin, 'b4').token, name: 'b4', roles: ['router' as never] })).toThrow(/Invalid roles/);
+	});
+});
