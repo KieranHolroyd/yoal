@@ -114,7 +114,7 @@ Call `whoami` first to see the client, your role and the permissions that apply 
 
 Every tool carries the MCP hints `readOnlyHint`, `destructiveHint` and `idempotentHint`, so a client can approve reads automatically and ask before destructive calls. Twenty-one tools are marked destructive: the nine deletes, the four detaches, `revoke_share_link`, `revoke_site_session`, `sign_out_all_visitors`, `revoke_database_credential`, `revoke_storage_key`, `remove_email_suppression`, `remove_email_address` and `apply_stack`.
 
-Eighteen tools ask a person to confirm before they act: the ten deletes (`delete_project`, `delete_projects`, `delete_database`, `delete_database_replica`, `delete_storage`, `delete_event_rule`, `delete_dashboard`, `delete_alert_rule`, `delete_slo`, `delete_log_drain`), plus `sign_out_all_visitors`, `revoke_database_credential`, `revoke_storage_key`, `remove_email_suppression`, `add_email_address`, `remove_email_address`, `send_email` and `apply_stack`. Each prompt names the exact target. The `apply_stack` prompt names the stack, counts what it creates and updates, and lists the first steps; the answer is bound to that exact plan. The `send_email` prompt shows the sender, recipients, subject and the start of the body, and warns that a sent message cannot be recalled.
+Twenty-four tools ask a person to confirm before they act: the thirteen deletes (`delete_project`, `delete_projects`, `delete_environment`, `delete_job`, `delete_database`, `delete_database_replica`, `delete_storage`, `delete_k8s_cluster`, `delete_event_rule`, `delete_dashboard`, `delete_alert_rule`, `delete_slo`, `delete_log_drain`), plus `remove_domain`, `unbind_role`, `sign_out_all_visitors`, `revoke_database_credential`, `revoke_storage_key`, `remove_email_suppression`, `add_email_address`, `remove_email_address`, `send_email`, `apply_stack` and `apply_k8s_config` (a real apply, not a dry run). Each prompt names the exact target. The `apply_stack` prompt names the stack, counts what it creates and updates, and lists the first steps; the answer is bound to that exact plan. The `send_email` prompt shows the sender, recipients, subject and the start of the body, and warns that a sent message cannot be recalled.
 
 How the prompt reaches you depends on the client:
 
@@ -179,7 +179,7 @@ You don't need to name tools. Ask in plain language and the agent picks them. Th
 
 ## Tool catalogue
 
-There are 171 tools. The permission column lists every scope a call checks, and a note in parentheses says when a second one applies. Tools that ask you to confirm are marked as such. Some tools appear only while their feature is on: Email (on by default), and Jobs, point-in-time recovery, Blueprints and the container console (off by default; see [configuration](/self-hosting/configuration)).
+There are 236 tools. The permission column lists every scope a call checks, and a note in parentheses says when a second one applies. Tools that ask you to confirm are marked as such. Some tools appear only while their feature is on: Email, Jobs, point-in-time recovery, Blueprints, the container console and Kubernetes are on by default, and SLOs are off by default (see [configuration](/self-hosting/configuration)).
 
 ### Documentation
 
