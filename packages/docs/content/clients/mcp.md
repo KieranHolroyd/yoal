@@ -91,6 +91,8 @@ These are the permissions the MCP tools use. The tables in the catalogue below n
 | `deployment:create` | Deploy sites and files, run uploads, invoke functions and run their cron handlers |
 | `deployment:promote` | Point production or an environment at an existing deployment |
 | `deployment:rollback` | Move an environment back to its previous deployment |
+| `domain:read`, `domain:create`, `domain:delete` | List and re-check custom domains, add them and remove them |
+| `build:read`, `build:cancel` | Read builds and their log tails, and cancel a queued or running build |
 | `database:read`, `database:create`, `database:update`, `database:delete` | Read, create, change and delete managed databases |
 | `storage:read`, `storage:create`, `storage:update`, `storage:delete` | The same for object storage |
 | `broker:read`, `broker:create`, `broker:update`, `broker:delete` | The same for queue brokers and event rules |
@@ -218,6 +220,9 @@ These two tools search and read this documentation, as it shipped with the platf
 | `get_deployment` | Get one deployment by id or short id | `deployment:read` |
 | `promote_deployment` | Point production, or an environment, at an existing deployment. Instant, with no rebuild | `deployment:promote` |
 | `rollback` | Point an environment back at its previous deployment, including its configuration | `deployment:rollback` |
+| `list_builds` | List a project's builds from its connected repository, newest first, with status, ref, commit, error and the deployment each produced. No logs | `build:read` |
+| `get_build` | Show one build with the last 200 lines of its log, and whether earlier output was left out | `build:read` |
+| `cancel_build` | Cancel a queued or running build. A finished build is refused | `build:cancel` |
 
 ### Pipelines
 
@@ -241,6 +246,8 @@ See [Pipelines](/deploying/pipelines). There are no tools for secrets, variables
 |---|---|---|
 | `list_environments` | List named environments with their host, access mode and current deployment | `project:read` |
 | `create_environment` | Create a named environment, served at `<project>--<env>` | `project:update` |
+| `update_environment` | Rename a named environment or change its access mode or password. Production is refused; use `set_access` for it | `project:update` |
+| `delete_environment` | Delete a named environment and its host. Refused for production and while it still has deployments. Asks to confirm | `project:update` |
 | `deploy_to_environment` | Deploy files or an upload into one environment, leaving production alone | `deployment:create`, `project:read` |
 | `get_workload` | Show the runtime spec and status of a process or container project | `deployment:read` |
 | `set_workload` | Set the runtime spec of a process or container project. Secrets are references only | `project:update` |
@@ -399,6 +406,17 @@ A cluster is a k3s control plane with up to 8 agent machines, on a node that has
 | `list_k8s_backups` | List a cluster's scheduled, manual and pre-upgrade snapshots with status, size, version and expiry | `kubernetes:read` |
 | `restore_k8s_backup` | Restore a snapshot into a new cluster. Never overwrites a live cluster | `kubernetes:create` |
 | `delete_k8s_cluster` | Soft-delete a cluster; it can be restored for the trash period. Asks to confirm. Permanent deletion is dashboard and CLI only | `kubernetes:read`, `kubernetes:delete` |
+
+### Custom domains
+
+A custom domain serves a project's production deployment on a hostname you own. It stays pending until a DNS TXT record proves you control it; then Yoal issues its certificate.
+
+| Tool | What it does | Permission |
+|---|---|---|
+| `list_domains` | List custom domains for one project, or every project you can read, with status, the TXT record that proves each one and the last check | `domain:read` |
+| `add_domain` | Attach a hostname to a project, optionally with its `www` sibling. Returns the TXT record to create and next steps | `domain:create` |
+| `check_domain` | Re-read a domain's DNS records now, and say what is still missing | `domain:read` |
+| `remove_domain` | Detach a domain from its project. Adding it back needs DNS verification again. Asks to confirm | `domain:delete` |
 
 ### Access and share links
 
