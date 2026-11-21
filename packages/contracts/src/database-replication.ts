@@ -138,8 +138,6 @@ export const databaseReplicaRewindTaskSchema = z.object({
 	databaseId: z.string().min(1).max(100),
 	replicaId: z.string().min(1).max(100),
 	replicaWorkloadId: z.string().min(1).max(100),
-	/** The replica's physical slot on the new primary, written to `primary_slot_name`. */
-	slot: slotSchema,
 	/**
 	 * The control plane rendered `wal_log_hints=on` for the old primary's unit (HA-PLAN W10), so
 	 * the helper may skip the config-file probe. `pg_rewind` failing is still the backstop: an old
@@ -153,12 +151,13 @@ export type DatabaseReplicaRewindTask = z.infer<typeof databaseReplicaRewindTask
  * The owner role and password for one rewind. The node that holds the old primary fetches it only
  * after the control plane has recorded the rewind task; it is never in desired state. `pg_rewind`
  * connects as the database owner (a superuser) because it needs the catalog file functions; the
- * same role exists on the new primary because its data is a physical copy.
+ * same role exists on the new primary because its data is a physical copy. The rewind does not need
+ * the replica's slot: the adopted directory starts as a standby and the replica unit supplies
+ * `primary_slot_name` from its own desired-state profile.
  */
 export const databaseReplicaRewindActivationSchema = z.object({
 	databaseId: z.string().min(1).max(100),
 	replicaId: z.string().min(1).max(100),
-	slot: slotSchema,
 	user: z.string().regex(/^[a-z_][a-z0-9_]{0,62}$/),
 	password: z.string().min(8).max(200),
 });

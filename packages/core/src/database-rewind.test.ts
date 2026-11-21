@@ -116,7 +116,7 @@ function report(node: JoinedNode, databaseId: string, slots: DatabaseReplication
 }
 
 describe('PITR with replicas (PITR_REWIND on)', () => {
-	test('a replica of a PITR database runs the PITR image and stanza, and a backup runs from it', async () => {
+	test('a replica of a PITR database runs the PITR image and stanza; backups stay on the primary', async () => {
 		const db = core.databases.create(owner, { name: 'orders', version: '18', placement: primary.nodeId });
 		core.databases.setPitrPolicy(owner, 'orders', { enabled: true });
 		const replica = core.databaseReplicas.add(owner, 'orders', { node: second.nodeId });
@@ -138,13 +138,16 @@ describe('PITR with replicas (PITR_REWIND on)', () => {
 		expect(primaryWorkload.database).toMatchObject({ pgRewind: true, pitr: { stanza: db.id } });
 		expect(primaryWorkload.image).toBe(postgresPitrImage('18'));
 
-		// The first full backup is pending; with a streaming replica it moves to the replica's node.
-		const tasks = await core.databases.pitrTasksForNode(second.nodeId);
-		const backup = tasks.find((task) => task.action === 'basebackup')!;
-		expect(backup).toMatchObject({ databaseId: db.id, workloadId: replica.workloadId, stanza: db.id });
-		expect((await core.databases.pitrTasksForNode(primary.nodeId)).some((task) => task.action === 'basebackup')).toBe(false);
+		// The first full backup stays on the primary even though a streaming replica exists:
+		// pgBackRest's single-host config cannot back up from a standby (`pg1`/`pg2` is deferred).
+		const primaryTasks = await core.databases.pitrTasksForNode(primary.nodeId);
+		const backup = primaryTasks.find((task) => task.action === 'basebackup')!;
+		expect(backup).toMatchObject({ databaseId: db.id, stanza: db.id });
+		expect(backup.workloadId).toBeUndefined();
+		expect((await core.databases.pitrTasksForNode(second.nodeId)).some((task) => task.action === 'basebackup')).toBe(false);
 		expect(() => core.databases.pitrActivation(third.nodeId, backup.id)).toThrow(/another node/);
-		const activation = core.databases.pitrActivation(second.nodeId, backup.id);
+		expect(() => core.databases.pitrActivation(second.nodeId, backup.id)).toThrow(/another node/);
+		const activation = core.databases.pitrActivation(primary.nodeId, backup.id);
 		expect(activation).toMatchObject({ databaseId: db.id, stanza: db.id, action: 'basebackup' });
 		// The node gets credentials; every credential-free surface stays clean.
 		expect(JSON.stringify(core.databases.pitrStatus(owner, 'orders'))).not.toContain(repo.secretAccessKey);
@@ -180,12 +183,12 @@ describe('PITR with replicas (PITR_REWIND on)', () => {
 		const oldState = await core.nodes.desiredState(primary.token);
 		expect(oldState.databasePurges).not.toContain(db.id);
 		expect(oldState.databaseReplicaRewinds).toEqual([
-			{ databaseId: db.id, replicaId: rewind.id, replicaWorkloadId: rewind.workloadId, slot: rewind.slot!, walLogHints: true },
+			{ databaseId: db.id, replicaId: rewind.id, replicaWorkloadId: rewind.workloadId, walLogHints: true },
 		]);
 		// It is not in desired state until the rewind reports, so no basebackup races the adoption.
 		expect(oldState.workloads.some((item) => item.id === rewind.workloadId)).toBe(false);
 		const activation = core.databaseReplicas.rewindActivation(primary.nodeId, rewind.id);
-		expect(activation).toMatchObject({ databaseId: db.id, replicaId: rewind.id, slot: rewind.slot, user: 'orders' });
+		expect(activation).toMatchObject({ databaseId: db.id, replicaId: rewind.id, user: 'orders' });
 		expect(activation.password.length).toBeGreaterThanOrEqual(8);
 		expect(() => core.databaseReplicas.rewindActivation(second.nodeId, rewind.id)).toThrow(/another node/);
 

@@ -1,11 +1,10 @@
-import { and, desc, eq, inArray, isNotNull, isNull, lte, or } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, lte } from 'drizzle-orm';
 import {
 	databaseAttachments,
 	databaseBackups,
 	databasePitr,
 	databasePitrTasks,
 	databaseCredentials,
-	databaseReplicas,
 	databaseRotations,
 	databases,
 	nodes,
@@ -2384,37 +2383,19 @@ export class DatabaseService {
 	/** Pending PITR tasks for one node, additive to the logical backup task list. */
 	async pitrTasksForNode(nodeId: string): Promise<DatabasePitrTask[]> {
 		if (!featureEnabled(this.ctx.config, 'PITR')) return [];
-		// Narrow in SQL to this node's primary databases plus databases with a live replica here
-		// (a backup may run from it); scanning every pending task on every node does not scale.
-		const replicaDatabaseIds = [
-			...new Set(
-				this.ctx.db
-					.select({ databaseId: databaseReplicas.databaseId })
-					.from(databaseReplicas)
-					.where(and(eq(databaseReplicas.nodeId, nodeId), isNull(databaseReplicas.removingAt)))
-					.all()
-					.map((row) => row.databaseId),
-			),
-		];
-		const scope =
-			replicaDatabaseIds.length > 0
-				? or(
-						eq(databases.nodeId, nodeId),
-						and(inArray(databases.id, replicaDatabaseIds), eq(databasePitrTasks.action, 'basebackup')),
-					)
-				: eq(databases.nodeId, nodeId);
 		const rows = this.ctx.db
 			.select({ task: databasePitrTasks, db: databases, state: databasePitr })
 			.from(databasePitrTasks)
 			.innerJoin(databases, eq(databases.id, databasePitrTasks.databaseId))
 			.leftJoin(databasePitr, eq(databasePitr.databaseId, databasePitrTasks.databaseId))
-			.where(and(eq(databasePitrTasks.status, 'pending'), isNull(databases.deletedAt), scope))
+			.where(and(eq(databasePitrTasks.status, 'pending'), isNull(databases.deletedAt), eq(databases.nodeId, nodeId)))
 			.all();
 		return rows.flatMap(({ task, db, state }) => {
-			// A backup may run from a streaming replica (HA-PLAN W10); every other task needs the
-			// primary, which after a promotion is the database row's new node. The stanza never
-			// changes, so the repository sees one continuous history.
-			const workload = this.pitrWorkloadFor(db, task.action);
+			// Every PITR task runs on the primary's node. pgBackRest cannot back up from a standby
+			// with this single-host config (`backup-standby` needs both `pg1-*` and `pg2-*` hosts);
+			// routing a backup to a replica is deferred until that two-host config exists. The
+			// stanza is still the database's, so a later replica path writes the same history.
+			const workload = this.pitrWorkloadFor(db);
 			if (workload.nodeId !== nodeId) return [];
 			return [
 				{
@@ -2444,14 +2425,9 @@ export class DatabaseService {
 			.where(eq(databasePitrTasks.id, taskId))
 			.get();
 		if (!row) throw new NotFoundError('PITR task');
-		// A backup task may legitimately run on a replica node chosen when the task was built; any
-		// live replica node of this database may fetch the repository for it. Restore and status stay
-		// on the primary.
-		const ownsTask =
-			row.db.nodeId === nodeId ||
-			(row.task.action === 'basebackup' &&
-				this.ctx.databaseReplicas.rowsFor(row.db.id).some((replica) => replica.nodeId === nodeId && !replica.removingAt));
-		if (!ownsTask)
+		// PITR tasks run on the primary's node; backing up from a replica is deferred until the
+		// two-host `pg1`/`pg2` pgBackRest configuration exists.
+		if (row.db.nodeId !== nodeId)
 			throw new CoreError('forbidden', 'This PITR task belongs to another node.', 403);
 		const repo = this.ctx.config.pitrRepository;
 		if (!repo) throw new ValidationError(this.pitrRepoMissingMessage());
@@ -2481,13 +2457,8 @@ export class DatabaseService {
 				.where(eq(databasePitrTasks.id, result.taskId))
 				.get();
 			if (!row) continue;
-			// A backup may run from a replica (W10); either the primary's node or a live replica's
-			// node may acknowledge it. A restore or status stays on the primary.
-			const ownsTask =
-				row.db.nodeId === nodeId ||
-				(row.task.action === 'basebackup' &&
-					this.ctx.databaseReplicas.rowsFor(row.db.id).some((replica) => replica.nodeId === nodeId && !replica.removingAt));
-			if (!ownsTask) continue;
+			// Every PITR task (backup, restore, status) belongs to the primary's node.
+			if (row.db.nodeId !== nodeId) continue;
 			if (row.task.status === 'ok' || row.task.status === 'failed') continue;
 			const ok = result.status === 'ok';
 			this.ctx.db
@@ -2696,16 +2667,13 @@ export class DatabaseService {
 			: false;
 	}
 
-	/** The workload a PITR task should run in: a streaming replica for a backup, else the primary. */
-	pitrWorkloadFor(database: DatabaseRow, action: DatabasePitrTask['action']): { workloadId: string; nodeId: string } {
-		if (action !== 'basebackup' || !this.pitrRewindEnabled()) return { workloadId: database.id, nodeId: database.nodeId };
-		const repo = this.ctx.config.pitrRepository;
-		const replica = this.ctx.databaseReplicas.backupMember(
-			database.id,
-			(nodeId) =>
-				this.pitrRewindForNode(nodeId) && (!repo || pitrStoreProblem(this.ctx, repo, nodeId) === null),
-		);
-		return replica ?? { workloadId: database.id, nodeId: database.nodeId };
+	/**
+	 * The workload a PITR task runs in: the primary's own container. A replica's workload id would
+	 * only exist on that replica's node, and pgBackRest needs the primary for this single-host
+	 * config; backing up from a standby is deferred until `pg1`/`pg2` two-host configuration ships.
+	 */
+	pitrWorkloadFor(database: DatabaseRow): { workloadId: string; nodeId: string } {
+		return { workloadId: database.id, nodeId: database.nodeId };
 	}
 
 	/** Queue a status check for one database now (a promotion writes the new primary's config). */

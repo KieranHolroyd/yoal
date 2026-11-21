@@ -143,7 +143,6 @@ export interface HelperRuntime {
 		replicaId: string,
 		input: {
 			databaseId?: unknown;
-			slot?: unknown;
 			walLogHints?: unknown;
 			user?: unknown;
 			password?: unknown;
@@ -801,7 +800,7 @@ export function createHandler(
 				const id = assertDatabaseId(decodeURIComponent(rewindMatch[1]!), 'replica id');
 				const body = assertRecord(await readJson(request, maxBodyBytes), 'request');
 				for (const key of Object.keys(body))
-					if (key !== 'databaseId' && key !== 'slot' && key !== 'walLogHints' && key !== 'user' && key !== 'password')
+					if (key !== 'databaseId' && key !== 'walLogHints' && key !== 'user' && key !== 'password')
 						throw new ValidationError(`request.${key} is not supported`);
 				return json({ ok: true, ...(await runtime.rewindReplica(id, body)) });
 			}

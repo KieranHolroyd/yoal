@@ -639,6 +639,11 @@ describe('helper PITR verbs', () => {
 		expect(psql.slice(psql.indexOf('-U'), psql.indexOf('-U') + 4)).toEqual(['-U', 'main_db', '-d', 'main_db']);
 	});
 
+	test('status without a config never derives a stanza from the workload id', async () => {
+		const { driver } = await fixture();
+		expect(await driver.pitrStatus('db_dbr_abc123')).toMatchObject({ configured: false, stanza: '' });
+	});
+
 	test('rejects an in-place or future restore target before touching the data dir', async () => {
 		const { driver, runner, stateDir } = await fixture();
 		await driver.pitrConfigure(SOURCE, repo, SOURCE);
@@ -848,6 +853,23 @@ describe('pg_rewind (HA-PLAN W10)', () => {
 		expect(await fs.lstat(join(stateDir, SOURCE)).catch(() => null)).toBeNull();
 	});
 
+	test('a marker for another database or replica does not count as this adoption', async () => {
+		const { driver, runner, stateDir } = await fixture((argv) => {
+			if (argv.includes('pg_controldata')) return controldata(true);
+			return undefined;
+		});
+		await fs.mkdir(join(stateDir, REPLICA), { recursive: true });
+		await fs.writeFile(
+			join(stateDir, REPLICA, 'yoal-rewind.json'),
+			JSON.stringify({ databaseId: 'db_other', replicaId: REPLICA, rewoundAt: new Date().toISOString() }),
+		);
+		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, user: 'main_db', password: PASSWORD });
+		expect(result).toMatchObject({ rewound: true, fallback: null });
+		expect(runner.podman().some((argv) => argv.includes('pg_rewind'))).toBe(true);
+		const marker = JSON.parse(await fs.readFile(join(stateDir, REPLICA, 'yoal-rewind.json'), 'utf8')) as Record<string, unknown>;
+		expect(marker).toMatchObject({ databaseId: SOURCE, replicaId: REPLICA });
+	});
+
 	test('a PG_VERSION without the rewind marker is not reported as a successful rewind', async () => {
 		const { driver, runner, stateDir } = await fixture();
 		await fs.mkdir(join(stateDir, REPLICA, 'pgdata'), { recursive: true });
@@ -876,7 +898,7 @@ describe('pg_rewind (HA-PLAN W10)', () => {
 		expect(await fs.readFile(join(stateDir, REPLICA, 'pgdata', 'PG_VERSION'), 'utf8')).toBe('18\n');
 	});
 
-	test('a transport failure that never clears gives up after the bounded retries and rebuilds', async () => {
+	test('a transport failure that never clears gives up after three attempts (two retries) and rebuilds', async () => {
 		let rewinds = 0;
 		const { driver, stateDir } = await fixture((argv) => {
 			if (argv.includes('pg_controldata')) return controldata(true);
@@ -888,7 +910,7 @@ describe('pg_rewind (HA-PLAN W10)', () => {
 		});
 		const result = await driver.rewindReplica(REPLICA, { databaseId: SOURCE, user: 'main_db', password: PASSWORD });
 		expect(result).toMatchObject({ rewound: false, fallback: 'rebuild' });
-		expect(result.reason).toMatch(/after 3 transport attempts/);
+		expect(result.reason).toMatch(/after 3 transport attempts \(2 retries\)/);
 		expect(rewinds).toBe(3);
 		expect(await fs.lstat(join(stateDir, SOURCE)).catch(() => null)).toBeNull();
 		expect(await fs.lstat(join(stateDir, REPLICA)).catch(() => null)).toBeNull();

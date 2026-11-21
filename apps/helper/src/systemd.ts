@@ -137,7 +137,6 @@ import {
 	pitrRecoveryContainerName,
 	pitrRestoreContainerName,
 	pitrRewindMarkerPath,
-	pitrStanzaFor,
 	renderPgBackRestConfig,
 	renderPgBackRestKey,
 	renderPgControldataArgs,
@@ -1445,9 +1444,10 @@ export class SystemdDriver {
 
 		const source = await this.dataDirFor(databaseId);
 		const target = resolve(dirname(source), id);
-		// A previous run wrote the adoption marker: report success again. Never infer this from
-		// `PG_VERSION`, which a fallback rebuild's fresh directory also has.
-		if (await this.rewindMarkerPresent(target)) return { replicaId: id, rewound: true, fallback: null, reason: null };
+		// A previous run wrote the adoption marker for THIS database and replica: report success
+		// again. Never infer this from `PG_VERSION`, which a fallback rebuild's fresh directory has.
+		if (await this.rewindMarkerPresent(target, databaseId, id))
+			return { replicaId: id, rewound: true, fallback: null, reason: null };
 		const sourceReady = await fs
 			.lstat(join(source, 'pgdata', 'PG_VERSION'))
 			.then((stat) => stat.isFile())
@@ -1495,7 +1495,8 @@ export class SystemdDriver {
 		let rewound = await runRewind();
 		let attempts = 1;
 		// A transport failure leaves the diverged dir intact, so retry it before paying for a full
-		// rebuild. Anything else (no common ancestor, hint logging off) cannot succeed by retrying.
+		// rebuild. Three attempts in total (the first run plus two retries). Anything else (no
+		// common ancestor, hint logging off) cannot succeed by retrying.
 		while (
 			rewound.code !== 0 &&
 			pgRewindFailureKind(rewound.stderr) === 'transport' &&
@@ -1507,7 +1508,7 @@ export class SystemdDriver {
 		}
 		if (rewound.code !== 0) {
 			const transport = pgRewindFailureKind(rewound.stderr) === 'transport';
-			const suffix = transport && attempts > 1 ? ` after ${attempts} transport attempts` : '';
+			const suffix = transport && attempts > 1 ? ` after ${attempts} transport attempts (${attempts - 1} retries)` : '';
 			return this.rebuildAfterRewind(
 				source,
 				id,
@@ -1531,13 +1532,13 @@ export class SystemdDriver {
 		return { replicaId: id, rewound: true, fallback: null, reason: null };
 	}
 
-	/** True when a previous successful `pg_rewind` adopted this replica's directory. */
-	private async rewindMarkerPresent(target: string): Promise<boolean> {
+	/** True when a previous successful `pg_rewind` adopted this exact database/replica pair. */
+	private async rewindMarkerPresent(target: string, databaseId: string, replicaId: string): Promise<boolean> {
 		const text = await fs.readFile(pitrRewindMarkerPath(target), 'utf8').catch(() => null);
 		if (text === null) return false;
 		try {
 			const marker = JSON.parse(text) as Record<string, unknown>;
-			return typeof marker.databaseId === 'string' && typeof marker.replicaId === 'string';
+			return marker.databaseId === databaseId && marker.replicaId === replicaId;
 		} catch {
 			return false;
 		}
@@ -2140,7 +2141,6 @@ END $$;`];
 	 */
 	async pitrStatus(id: string): Promise<HelperPitrStatus> {
 		assertDatabaseId(id, 'database id');
-		const fallbackStanza = pitrStanzaFor(id);
 		const paths = pitrPaths(this.runtimeDir, id);
 		const configured = await fs
 			.lstat(paths.config)
@@ -2148,7 +2148,10 @@ END $$;`];
 			.catch(() => false);
 		const empty: HelperPitrStatus = {
 			configured: false,
-			stanza: fallbackStanza,
+			// No stanza is derived here: the id may be a replica workload id (`db_dbr_…`), whose
+			// derived stanza would be an orphan. The config written by `pitr/configure` is the only
+			// source of the database's stanza.
+			stanza: '',
 			repo: { bucket: null, region: null, endpoint: null, path: null },
 			archiveStatus: 'unknown',
 			recoverableFrom: null,
@@ -2162,7 +2165,9 @@ END $$;`];
 		};
 		if (!configured) return empty;
 		const text = await fs.readFile(paths.config, 'utf8');
-		const stanza = parsePitrStanza(text) ?? fallbackStanza;
+		const stanza = parsePitrStanza(text);
+		if (!stanza)
+			throw new ValidationError(`Database ${id} has a pgBackRest config without a stanza; configure PITR first.`);
 		const value = (key: string) => {
 			const line = text.split('\n').find((entry) => entry.startsWith(`${key}=`));
 			return line ? line.slice(key.length + 1).trim() || null : null;

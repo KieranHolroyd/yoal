@@ -85,7 +85,7 @@ describe('ReplicaLinkForwarder', () => {
 class FakeHelper {
 	configured: Array<{ id: string; slots: string[]; password: string | null }> = [];
 	promoted: string[] = [];
-	rewinds: Array<{ replicaId: string; databaseId: string; slot: string; walLogHints: boolean }> = [];
+	rewinds: Array<{ replicaId: string; databaseId: string; walLogHints: boolean }> = [];
 	failConfigure = false;
 	failPromote = false;
 	failRewind = false;
@@ -109,15 +109,10 @@ class FakeHelper {
 	}
 	async rewindReplica(
 		replicaId: string,
-		input: { databaseId: string; slot: string; walLogHints: boolean; user: string; password: string },
+		input: { databaseId: string; walLogHints: boolean; user: string; password: string },
 	): Promise<{ rewound: boolean; fallback: 'rebuild' | null; reason: string | null }> {
 		if (this.failRewind) throw new Error('no such container');
-		this.rewinds.push({
-			replicaId,
-			databaseId: input.databaseId,
-			slot: input.slot,
-			walLogHints: input.walLogHints,
-		});
+		this.rewinds.push({ replicaId, databaseId: input.databaseId, walLogHints: input.walLogHints });
 		return this.rewindResult;
 	}
 }
@@ -140,7 +135,6 @@ function runnerWith(options: { version?: string; slots?: string[] } = {}) {
 				return Response.json({
 					databaseId: PRIMARY,
 					replicaId: 'dbr_1',
-					slot: SLOT,
 					user: 'orders',
 					password: 'Abcdefghijklmnop_qrstu',
 				});
@@ -254,10 +248,10 @@ describe('DatabaseReplicationRunner', () => {
 
 	test('a rewind fetches its own activation and reports success or a rebuild once', async () => {
 		const r = runnerWith();
-		const rewind = { databaseId: PRIMARY, replicaId: 'dbr_1', replicaWorkloadId: REPLICA, slot: SLOT, walLogHints: true };
+		const rewind = { databaseId: PRIMARY, replicaId: 'dbr_1', replicaWorkloadId: REPLICA, walLogHints: true };
 		await r.runner.runOnce(state({ databaseReplicaRewinds: [rewind] }), signal);
 		await r.runner.runOnce(state({ databaseReplicaRewinds: [rewind] }), signal);
-		expect(r.helper.rewinds).toEqual([{ replicaId: REPLICA, databaseId: PRIMARY, slot: SLOT, walLogHints: true }]);
+		expect(r.helper.rewinds).toEqual([{ replicaId: REPLICA, databaseId: PRIMARY, walLogHints: true }]);
 		expect(r.requests).toContain('https://control.test/api/agent/database-rewind/dbr_1');
 		expect(r.runner.pendingRewindResults()).toEqual([{ replicaId: 'dbr_1', status: 'ok', rewound: true }]);
 		r.runner.acknowledgeRewinds(['dbr_1']);

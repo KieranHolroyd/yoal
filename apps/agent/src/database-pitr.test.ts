@@ -173,7 +173,7 @@ describe('database PITR runner', () => {
 		expect(calls).toEqual([`configure:${SOURCE}:${SOURCE}`, `backup:${SOURCE}:full:${SOURCE}`]);
 	});
 
-	test('a backup task with a workloadId runs in the replica container, on the same stanza', async () => {
+	test('a task that names another workload uses that container and the database stanza', async () => {
 		const { runner, calls, advance } = harness();
 		const replicaId = 'db_dbr_fedcba9876543210fedcba9876543210';
 		const backup = task({ action: 'basebackup', baseBackupType: 'full', workloadId: replicaId });
@@ -187,7 +187,7 @@ describe('database PITR runner', () => {
 		]);
 	});
 
-	test('a backup task with a workloadId waits for the replica workload, not the database id', async () => {
+	test('a backup task with a workloadId waits for that workload, not the database id', async () => {
 		const { runner, calls, advance } = harness();
 		const replicaId = 'db_dbr_fedcba9876543210fedcba9876543210';
 		const backup = task({ action: 'basebackup', baseBackupType: 'full', workloadId: replicaId });

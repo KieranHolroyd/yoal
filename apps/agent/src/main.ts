@@ -1449,14 +1449,14 @@ class AgentRuntime {
 			const state = this.desired;
 			if (!state || state.databasePitrTasks.length === 0) continue;
 			try {
-				// Ready = running on its current activation (the sampler's targets carry that check).
-				const ready = new Set(
-					this.workloads
-						.databaseTargets()
-						.filter((target) => target.status === 'running')
-						.map((target) => target.id),
+				// Ready = desired activation applied and the last report is running. A replica has no
+				// held monitor, so the stats sampler's `databaseTargets()` must not be the source.
+				const ready = this.workloads.readyWorkloadIds();
+				await this.databasePitr.runOnce(
+					state,
+					(id) => ready.has(id),
+					this.shutdownController.signal,
 				);
-				await this.databasePitr.runOnce(state, (id) => ready.has(id), this.shutdownController.signal);
 			} catch (error) {
 				log('warn', `Database PITR task failed: ${errorText(error)}`);
 			}

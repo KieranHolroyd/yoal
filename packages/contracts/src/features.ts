@@ -273,10 +273,11 @@ export const FEATURE_FLAGS = {
 	},
 	PITR_REWIND: {
 		name: 'PITR_REWIND',
-		// HA Wave 3, W10. Opt-in: pgBackRest in the replica image, backups from a replica, rewind.
+		// HA Wave 3, W10. Opt-in: pgBackRest in the replica image, rewind. A backup from a replica
+		// is deferred until pgBackRest has a two-host `pg1`/`pg2` config.
 		default: false,
 		area: 'backups',
-		description: 'Replica PITR, backups from a replica and pg_rewind when an old primary re-attaches (HA-PLAN W10).'
+		description: 'Replica PITR and pg_rewind when an old primary re-attaches (HA-PLAN W10).'
 	},
 	STEERING: {
 		name: 'STEERING',

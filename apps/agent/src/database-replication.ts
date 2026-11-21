@@ -232,7 +232,6 @@ export class DatabaseReplicationRunner {
 				throw new Error('The rewind activation does not match the desired task');
 			const result = await this.helper.rewindReplica(task.replicaWorkloadId, {
 				databaseId: task.databaseId,
-				slot: activation.slot,
 				walLogHints: task.walLogHints,
 				user: activation.user,
 				password: activation.password,

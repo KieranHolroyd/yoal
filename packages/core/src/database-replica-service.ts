@@ -493,34 +493,6 @@ export class DatabaseReplicaService {
 			});
 	}
 
-	/**
-	 * A replica a pgBackRest backup can run from (HA-PLAN W10): live, same generation, streaming or
-	 * lagging, lowest node id. The backup lands in the same stanza, so this only spreads the load
-	 * off the primary; it never changes the repository. Null means run on the primary.
-	 */
-	backupMember(databaseId: string, accept?: (nodeId: string) => boolean): { workloadId: string; nodeId: string } | null {
-		const database = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
-		if (!database) return null;
-		const online = new Set(
-			this.ctx.db
-				.select({ id: nodes.id })
-				.from(nodes)
-				.where(eq(nodes.status, 'online'))
-				.all()
-				.map((row) => row.id),
-		);
-		const row = this.rowsFor(databaseId).find(
-			(replica) =>
-				!replica.removingAt &&
-				replica.hostPort !== null &&
-				replica.primaryGeneration === database.primaryGeneration &&
-				(replica.status === 'streaming' || replica.status === 'lagging') &&
-				online.has(replica.nodeId) &&
-				(accept ? accept(replica.nodeId) : true),
-		);
-		return row ? { workloadId: databaseReplicaWorkloadId(row.id), nodeId: row.nodeId } : null;
-	}
-
 	/** Every readable replica of a database, lowest node id first, for a stable read endpoint (H24). */
 	readableUpstreamsFor(databaseId: string): Array<{ replicaId: string; nodeId: string; port: number }> {
 		const database = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
@@ -765,7 +737,6 @@ export class DatabaseReplicaService {
 						databaseId: row.databaseId,
 						replicaId: row.id,
 						replicaWorkloadId: databaseReplicaWorkloadId(row.id),
-						slot: row.slot!,
 						// The old primary ran with `-c wal_log_hints=on` since `pgRewind` was rendered
 						// for its unit; a runtime flag is invisible to the helper's config probe.
 						walLogHints: true,
@@ -780,13 +751,11 @@ export class DatabaseReplicaService {
 		if (!row || row.removingAt || !row.rewindFromDatabaseId || row.rewindDoneAt !== null)
 			throw new NotFoundError('Database replica rewind');
 		if (row.nodeId !== nodeId) throw new CoreError('forbidden', 'This replica rewind belongs to another node.', 403);
-		if (!row.slot) throw new ConflictError('The replica has no slot yet.');
 		const database = this.ctx.db.select().from(databases).where(eq(databases.id, row.databaseId)).get();
 		if (!database || database.deletedAt) throw new NotFoundError('Database');
 		return {
 			databaseId: row.databaseId,
 			replicaId: row.id,
-			slot: row.slot,
 			// `pg_rewind --source-server` needs a superuser; the owner is one and exists on the new
 			// primary because it is a physical copy of this cluster.
 			user: databaseIdentifier(database.name),

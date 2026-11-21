@@ -97,8 +97,8 @@ export class DatabasePitrRunner {
 
 	private databasesOf(task: DatabasePitrTask): string[] {
 		if (task.action === 'restore' && task.targetDatabaseId) return [task.databaseId, task.targetDatabaseId];
-		// A backup may run inside a replica, where only that workload id exists on the node; the
-		// database id is not a workload there, so gating on it would hold the task forever.
+		// A task may name another workload (reserved for a future standby backup path); only that id
+		// exists as a workload on this node, so gating on the database id would hold it forever.
 		return [task.workloadId ?? task.databaseId];
 	}
 

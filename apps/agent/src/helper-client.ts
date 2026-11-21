@@ -114,7 +114,7 @@ export interface HelperApi {
 	/** Rewind an old primary onto the new primary and adopt it as `replicaId` (HA-PLAN W10). */
 	rewindReplica(
 		replicaId: string,
-		input: { databaseId: string; slot: string; walLogHints: boolean; user: string; password: string },
+		input: { databaseId: string; walLogHints: boolean; user: string; password: string },
 	): Promise<{ rewound: boolean; fallback: 'rebuild' | null; reason: string | null }>;
 	/** Write the 0400 pgBackRest config for PITR (docs/PITR.md); `stanza` belongs to the database. */
 	pitrConfigure(
@@ -394,7 +394,7 @@ export class HelperClient
 
 	async rewindReplica(
 		replicaId: string,
-		input: { databaseId: string; slot: string; walLogHints: boolean; user: string; password: string },
+		input: { databaseId: string; walLogHints: boolean; user: string; password: string },
 	): Promise<{ rewound: boolean; fallback: 'rebuild' | null; reason: string | null }> {
 		// pg_rewind copies only the diverged blocks, but a large data dir can still take minutes.
 		const body = (await this.request(

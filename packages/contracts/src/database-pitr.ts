@@ -19,9 +19,10 @@ import { objectStoreCredentialsSchema, objectStoreTargetSchema, type ObjectStore
 
 export const DATABASE_PITR_FORMAT = 'pgbackrest' as const;
 /**
- * HA-PLAN W10: the agent can run a backup inside a replica, render `wal_log_hints` and execute the
- * `pg_rewind` verb. Sent only to a node that advertises it, so an older helper never receives
- * `database.pgRewind` (which it would reject) or a task whose container is a replica.
+ * HA-PLAN W10: the agent can rerender `wal_log_hints` and execute the `pg_rewind` verb. Sent only
+ * to a node that advertises it, so an older helper never receives `database.pgRewind` (which it
+ * would reject). A backup may carry a `workloadId` in the contract for a future standby path, but
+ * the control plane currently always routes PITR work to the primary.
  */
 export const PITR_REWIND_CAPABILITY = 'pitr-rewind';
 export const pitrBaseBackupTypes = ['full', 'diff', 'incr'] as const;
@@ -167,9 +168,10 @@ export const databasePitrTaskSchema = z.object({
 	databaseId: z.string().min(1).max(100),
 	databaseName: z.string().min(1).max(80),
 	/**
-	 * HA-PLAN W10: the container the helper runs the task in, when it is not the primary's own
-	 * (`pitrBaseBackup` can run from a replica). Null means `databaseId`; the stanza and repository
-	 * stay the source database's, so a backup from a replica lands in the same repository.
+	 * The container the helper runs the task in, when it is not the primary's own. The control plane
+	 * currently always uses the primary: pgBackRest cannot back up from a standby without the
+	 * two-host `pg1`/`pg2` config. Null therefore means `databaseId`; the stanza and repository are
+	 * always the source database's.
 	 */
 	workloadId: z.string().min(1).max(120).nullable().optional(),
 	engine: z.enum(databaseEngines),

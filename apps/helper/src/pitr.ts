@@ -483,7 +483,7 @@ export function pgRewindFailureKind(stderr: string): 'transport' | 'rebuild' {
 	return PG_REWIND_TRANSPORT_PATTERNS.some((pattern) => pattern.test(stderr)) ? 'transport' : 'rebuild';
 }
 
-/** How often a transport failure is retried before the rebuild fallback deletes the directory. */
+/** Three attempts in total (the first run plus two retries) before the rebuild fallback. */
 export const PG_REWIND_TRANSPORT_ATTEMPTS = 3;
 
 /**

@@ -334,6 +334,22 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 		return run;
 	}
 
+	/**
+	 * Workload ids that are ready to be touched by a background task: the desired activation is the
+	 * one that was applied, and the last report is `running`. This deliberately does not need a held
+	 * database monitor (a read replica has none) and is not limited to the stats sampler's targets.
+	 */
+	readyWorkloadIds(): Set<string> {
+		const ready = new Set<string>();
+		for (const [id, applied] of this.applied) {
+			const desired = this.desiredById.get(id);
+			if (!desired || applied.activationVersion !== desired.activationVersion) continue;
+			if (this.reports.get(id)?.status !== 'running') continue;
+			ready.add(id);
+		}
+		return ready;
+	}
+
 	/** Running-or-not database workloads the sampler may connect to (credentials in memory only). */
 	databaseTargets(): DatabaseTarget[] {
 		const targets: DatabaseTarget[] = [];
