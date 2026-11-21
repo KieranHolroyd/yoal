@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, eq, inArray, isNotNull, isNull, or, sql } from 'drizzle-orm';
 import { deploymentCanaries, deployments, nodes, projects, releases, workloadReplicas, workloads } from '@yoal/db';
 import {
 	RUN_LEASES_CAPABILITY,
@@ -628,6 +628,11 @@ export class WorkloadService {
 			this.ctx.db.delete(workloadReplicas).where(eq(workloadReplicas.workloadId, id)).run();
 			priorRows = [];
 		}
+		// A release still held behind its release command never ran (H25): the copies run what its
+		// rollout came from, or nothing on a first deploy. A deploy on top must hold that, never
+		// promote the held release to "what runs", whose migration may still be going or failed.
+		if (existing && running === existing.deploymentId && this.awaitingRelease(existing, this.specOf(project, existing)))
+			running = existing.rolloutFromDeploymentId;
 		// A promote or rollback keeps the copies where they are; the workload's node is copy 0's.
 		const keptFirst = options.keepSpread && !resolved.replicas ? [...priorRows].sort((a, b) => a.replicaIndex - b.replicaIndex)[0] : undefined;
 		const values = {
@@ -1044,14 +1049,7 @@ export class WorkloadService {
 			// Normally the rollout records the release the copies still run. If that pointer was
 			// pruned, fall back to the deployment on the copies themselves, so a gated rollout never
 			// blanks an app that has something running.
-			const runningCopy = this.ctx.db
-				.select({ deploymentId: workloadReplicas.deploymentId })
-				.from(workloadReplicas)
-				.where(eq(workloadReplicas.workloadId, workload.id))
-				.get()?.deploymentId;
-			const held = awaitingRelease
-				? this.copyRelease(workload.rolloutFromDeploymentId) ?? this.copyRelease(runningCopy ?? null)
-				: null;
+			const held = awaitingRelease ? this.copyRelease(workload.rolloutFromDeploymentId) ?? this.heldCopyRelease(workload) : null;
 			// Nothing to hold and nothing running: a first deploy awaits its command with no copies.
 			if (awaitingRelease && !held) return [];
 			const released = held?.deployment ?? current;
@@ -1157,6 +1155,26 @@ export class WorkloadService {
 				};
 			});
 		});
+	}
+
+	/**
+	 * The release a gated workload's copies still run when the rollout's pointer is gone: the
+	 * lowest-indexed copy that names an old, still-runnable deployment. Never a copy with no
+	 * deployment of its own (that would be the held release) and never the held release itself.
+	 */
+	private heldCopyRelease(workload: WorkloadRow): ReturnType<WorkloadService['copyRelease']> {
+		const rows = this.ctx.db
+			.select({ deploymentId: workloadReplicas.deploymentId })
+			.from(workloadReplicas)
+			.where(and(eq(workloadReplicas.workloadId, workload.id), isNotNull(workloadReplicas.deploymentId)))
+			.orderBy(workloadReplicas.replicaIndex)
+			.all();
+		for (const row of rows) {
+			if (row.deploymentId === workload.deploymentId) continue;
+			const release = this.copyRelease(row.deploymentId);
+			if (release) return release;
+		}
+		return null;
 	}
 
 	/**
