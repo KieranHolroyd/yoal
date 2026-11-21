@@ -50,7 +50,7 @@ import { TRIGGER_PATH_UNIT, triggerUnits, updateCommandScript } from '../update-
 import { controlPlaneUnits, DEFAULT_CONTROL_PLANE_PATHS, ensureMasterKeyDropIns, GUARD_UNIT, MASTER_KEY_DROP_IN, PRIMARY_UNIT, STANDBY_UNIT } from '../systemd/control-plane.ts';
 import { CONFIG_COMMAND, CONFIG_PATH_UNIT, CONFIG_SERVICE_UNIT, ensurePlatformConfigUnits } from '../platform-config/units.ts';
 import { readEnvFile, writeEnvFile } from './env-file.ts';
-import { objectStoreEnv, parseObjectStore, parseProfile, parseRoles, parseZone, profileFlagLines, type InstallProfile } from './ha-flags.ts';
+import { applyProfileBlock, objectStoreEnv, parseObjectStore, parseProfile, parseRoles, parseZone, profileFlagLines, type InstallProfile } from './ha-flags.ts';
 import { ensureVapidKeys } from '../../packages/contracts/src/vapid.ts';
 import { ensureWorkerd, pinnedWorkerdVersion, workerdArch } from './workerd.ts';
 import { ensureFrankenphp, frankenphpArch, FRANKENPHP_LINK, FRANKENPHP_PINNED_VERSION } from './frankenphp.ts';
@@ -368,7 +368,11 @@ if (options.profile || options.zone || options.roles || options.objectStoreTarge
 	// Printed before anything else so --dry-run shows it on any machine.
 	console.log('HA flags:');
 	if (options.profile)
-		console.log(`  profile ${options.profile}: ${profileFlagLines(options.profile).map(([key, value]) => `${key}=${value}`).join(' ') || 'no flag lines'} (written to yoal.env)`);
+		console.log(
+			options.profile === 'single'
+				? '  profile single: removes the flag lines an earlier --profile added to yoal.env'
+				: `  profile ${options.profile}: ${profileFlagLines(options.profile).map(([key, value]) => `${key}=${value}`).join(' ')} (written to yoal.env)`,
+		);
 	if (options.zone) console.log(`  zone ${options.zone} (sent with the join)`);
 	if (options.roles) console.log(`  roles ${options.roles.join(',')} (sent with the join)`);
 	if (options.objectStoreTarget) {
@@ -1197,8 +1201,13 @@ function writeSecrets(): Map<string, string> {
 		run('chmod', ['0640', keyCopy.to], { allowFailure: true });
 		log(`copied the GCS key to ${keyCopy.to} (root:yoal 0640)`);
 	} else if (keyCopy) log(`would copy ${keyCopy.from} to ${keyCopy.to} (root:yoal 0640)`);
-	// `--profile` (HA Wave 5): the same flag lines `yoal ha init` prints; yoal.env stays the only flag store.
-	if (options.profile) for (const [key, value] of profileFlagLines(options.profile)) env.set(key, value);
+	// `--profile` (HA Wave 5): the same flag lines `yoal ha init` prints, in a marked block that a later
+	// --profile replaces and --profile single removes; yoal.env stays the only flag store.
+	if (options.profile) {
+		const next = applyProfileBlock(env, options.profile);
+		env.clear();
+		for (const [key, value] of next) env.set(key, value);
+	}
 	if (!options.dryRun) {
 		writeEnvFile(ENV_FILE, env);
 		syncRememberedChannel();

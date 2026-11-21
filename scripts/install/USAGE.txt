@@ -47,7 +47,8 @@ Options:
                               service-account JSON itself. Also YOAL_OBJECT_STORE_CREDENTIALS_FILE.
   --profile single|ha|ha-dr   Write the profile's YOAL_FEATURE_* lines into yoal.env, the same
                               lines `yoal ha init --profile` prints. Then run that command once
-                              every node has joined. Without it nothing changes.
+                              every node has joined. single removes the lines an earlier
+                              --profile added. Without it nothing changes.
   --zone <zone>               This machine's zone (lowercase letters, digits, hyphens), set when
                               it enrols. Later: Nodes → Edit node.
   --r2-account-id <id>        R2 account id.

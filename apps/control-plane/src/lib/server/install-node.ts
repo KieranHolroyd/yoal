@@ -36,6 +36,8 @@ ROLES=''
 
 usage() {
 	echo "usage: node.sh (--token <join-token> | --token-file <path|->) --name <node-name> [--endpoint <host[:port]>] [--zone <zone>] [--roles ingress,compute,data,control]" >&2
+	echo "  --token-file - reads the token from stdin, so save node.sh first: it does not work with curl ... | sh" >&2
+	echo "  --roles may list only roles the join token allows (yoal nodes enrol --roles ...)" >&2
 	exit 2
 }
 

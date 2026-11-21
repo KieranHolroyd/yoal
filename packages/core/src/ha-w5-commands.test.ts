@@ -134,6 +134,9 @@ describe('single node, flags off', () => {
 		for (const id of haCheckIds) expect(entries(report, id).length).toBeGreaterThan(0);
 		expect(failing(report, 'nodes')[0]?.evidence).toEqual(expect.arrayContaining([expect.stringContaining('ingress: 1 online (needs 2)')]));
 		expect(failing(report, 'arbiter-conditional-writes')[0]?.fix?.kind).toBe('env');
+		// Only kinds the control plane accepts: there is no YOAL_OBJECT_STORE=s3.
+		expect(failing(report, 'arbiter-conditional-writes')[0]?.fix?.value).not.toContain('YOAL_OBJECT_STORE=s3');
+		expect(failing(report, 'arbiter-conditional-writes')[0]?.fix?.value).toContain('YOAL_OBJECT_STORE=r2');
 		expect(failing(report, 'platform-store')[0]?.fix?.kind).toBe('env');
 		expect(failing(report, 'steering')[0]?.fix?.value).toBe('YOAL_FEATURE_STEERING=1');
 		expect(failing(report, 'certificates')[0]?.fix?.value).toBe('YOAL_FEATURE_SHARED_CERTIFICATES=1');

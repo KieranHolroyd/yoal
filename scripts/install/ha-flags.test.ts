@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { haInitPlan } from '../../packages/contracts/src/ha-init.ts';
 import { parsePlatformObjectStoreKind } from '../../packages/contracts/src/platform-config.ts';
-import { GCS_CREDENTIALS_COPY, objectStoreEnv, parseObjectStore, parseProfile, parseRoles, parseZone, profileFlagLines } from './ha-flags.ts';
+import { GCS_CREDENTIALS_COPY, PROFILE_BLOCK_KEY, applyProfileBlock, objectStoreEnv, parseObjectStore, parseProfile, parseRoles, parseZone, profileFlagLines } from './ha-flags.ts';
 
 describe('installer HA flags (HA-PLAN §8 steps 1–2)', () => {
 	test('--profile writes exactly the flag lines yoal ha init prints, and single writes none', () => {
@@ -15,6 +15,24 @@ describe('installer HA flags (HA-PLAN §8 steps 1–2)', () => {
 		expect(profileFlagLines('ha').some(([key]) => key === 'YOAL_FEATURE_REGIONS')).toBe(false);
 		expect(profileFlagLines('ha-dr')).toContainEqual(['YOAL_FEATURE_REGIONS', '1']);
 		expect(() => parseProfile('cluster')).toThrow(/--profile must be/);
+	});
+
+	test('--profile lines live in a marked block: a later --profile replaces it, and single removes it', () => {
+		const env = new Map([
+			['YOAL_PLATFORM_ORIGIN', 'https://control.example.com'],
+			['YOAL_FEATURE_FUNCTIONS', '0'],
+		]);
+		const ha = applyProfileBlock(env, 'ha');
+		expect(ha.get(PROFILE_BLOCK_KEY)).toBe('ha');
+		expect(ha.get('YOAL_FEATURE_STEERING')).toBe('1');
+		expect(ha.get('YOAL_FEATURE_FUNCTIONS')).toBe('0');
+		const dr = applyProfileBlock(ha, 'ha-dr');
+		expect(dr.get('YOAL_FEATURE_REGIONS')).toBe('1');
+		const single = applyProfileBlock(dr, 'single');
+		expect([...single.keys()]).toEqual(['YOAL_PLATFORM_ORIGIN', 'YOAL_FEATURE_FUNCTIONS']);
+		// A flag the operator set before the first --profile is left alone.
+		const own = applyProfileBlock(new Map([['YOAL_FEATURE_STEERING', '1']]), 'ha');
+		expect([...applyProfileBlock(own, 'single').entries()]).toEqual([['YOAL_FEATURE_STEERING', '1']]);
 	});
 
 	test('--zone and --roles are validated like Nodes → Edit node', () => {

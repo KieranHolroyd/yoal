@@ -61,7 +61,7 @@ The default. The node generates its WireGuard key locally and joins the managed 
 curl -fsSL https://control.example.com/install/node.sh | sudo sh -s -- --token <token> --name <name>
 ```
 
-To keep the token out of the process list and your shell history, save the script and pass the token in a file, or on standard input with `--token-file -`. `--zone` and `--roles` set what **Nodes → Edit node** would, at join:
+To keep the token out of the process list and your shell history, save the script and pass the token in a file, or on standard input with `--token-file -`. Standard input does not work with `curl … | sh`, where it is the script itself. `--zone` and `--roles` set what **Nodes → Edit node** would, at join:
 
 ```sh
 curl -fsSL https://control.example.com/install/node.sh -o node.sh
@@ -103,7 +103,7 @@ Redirect the output to `/etc/yoal/agent.env` as the install script does. For a N
 | `--zone <zone>` | No | The node's zone. A zone other nodes already use keeps their region. |
 | `--roles <list>` | No | Comma-separated roles: `ingress`, `compute`, `data`, `control`, `build`. |
 
-`--token` can be left out when `YOAL_JOIN_TOKEN` holds the token.
+`--token` can be left out when `YOAL_JOIN_TOKEN` holds the token. An agent from a release before these flags refuses `--zone` and `--roles`; `node.sh` and the installer use the agent of the control plane's own release, so this only matters for an agent you installed yourself.
 
 The control plane decides the mode, not the command.
 

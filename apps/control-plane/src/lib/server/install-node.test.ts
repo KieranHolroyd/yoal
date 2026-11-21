@@ -39,6 +39,8 @@ describe('node installer script', () => {
 		// Only an older agent, which cannot read the variable, still gets it as an argument.
 		expect(script).toContain('yoal-agent join --help 2>&1 | grep -q YOAL_JOIN_TOKEN');
 		expect(Bun.spawnSync({ cmd: ['sh', '-n', '/dev/stdin'], stdin: new TextEncoder().encode(script) }).exitCode).toBe(0);
+		// stdin is the script itself under `curl | sh`, so the usage says to save it first.
+		expect(script).toContain('--token-file - reads the token from stdin, so save node.sh first: it does not work with curl ... | sh');
 
 		const dir = mkdtempSync(join(tmpdir(), 'yoal-node-sh-'));
 		try {

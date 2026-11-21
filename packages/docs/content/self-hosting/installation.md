@@ -173,7 +173,7 @@ These flags are passed to the installer. Each one is also available as an enviro
 | `--object-store-endpoint <url>` | The S3 endpoint for `s3://`. | `R2_ENDPOINT` |
 | `--object-store-region <region>` | The S3 region for `s3://`. Required for `s3://`. | `R2_REGION` |
 | `--object-store-credentials-file <path>` | The store's keys, one `KEY=value` per line. For `gcs://` it can be the service-account key itself. The installer never takes these keys on the command line. | `YOAL_OBJECT_STORE_CREDENTIALS_FILE` |
-| `--profile single\|ha\|ha-dr` | Write the profile's `YOAL_FEATURE_*` lines into `/etc/yoal/yoal.env`: the same lines `yoal ha init --profile` prints. Run that command once the other nodes have joined. Without the flag no flag line changes. | none |
+| `--profile single\|ha\|ha-dr` | Write the profile's `YOAL_FEATURE_*` lines into `/etc/yoal/yoal.env`: the same lines `yoal ha init --profile` prints. Run that command once the other nodes have joined. `--profile single` removes the lines an earlier `--profile` added (a line you set yourself first stays). Without the flag no flag line changes. | none |
 | `--zone <zone>` | This machine's zone, set when it enrols: lowercase letters, digits and single hyphens. Change it later under **Nodes → Edit node**. | none |
 | `--r2-account-id <id>` | R2 account ID. Required with `--object-store r2`. | `R2_ACCOUNT_ID` |
 | `--r2-bucket <bucket>` | R2 bucket. Required with `--object-store r2`. | `R2_BUCKET` |

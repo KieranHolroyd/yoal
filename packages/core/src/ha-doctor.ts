@@ -621,7 +621,8 @@ export class HaDoctorService {
 			evidence: [detail],
 			fix: {
 				kind: 'env',
-				value: 'YOAL_OBJECT_STORE=s3 (or azure, gcs) with a store that honours If-None-Match and If-Match, plus its credentials, in yoal.env; then restart the control plane.',
+				value:
+					'In yoal.env: YOAL_OBJECT_STORE=r2 with R2_ENDPOINT, R2_REGION, R2_BUCKET and its keys (any S3 store), or azure or gcs with YOAL_FEATURE_OBJECT_STORE_AZURE=1 / _GCS=1 and their keys, on a store that honours If-None-Match and If-Match; then restart the control plane.',
 			},
 			subject: null,
 		});

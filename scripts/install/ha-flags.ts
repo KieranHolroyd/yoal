@@ -36,6 +36,31 @@ export function profileFlagLines(profile: InstallProfile): Array<[string, string
 	});
 }
 
+/**
+ * The marked block in `yoal.env`. The file is rewritten sorted with no comments, so the marker is two
+ * keys: the profile, and the flag lines the profile added. A later `--profile` replaces the block and
+ * `--profile single` removes it; a flag line that existed before the first `--profile` is the
+ * operator's and is never removed.
+ */
+export const PROFILE_BLOCK_KEY = 'YOAL_HA_PROFILE';
+export const PROFILE_BLOCK_FLAGS_KEY = 'YOAL_HA_PROFILE_FLAGS';
+
+export function applyProfileBlock(env: ReadonlyMap<string, string>, profile: InstallProfile): Map<string, string> {
+	const out = new Map(env);
+	for (const key of (out.get(PROFILE_BLOCK_FLAGS_KEY) ?? '').split(',').filter(Boolean)) out.delete(key);
+	out.delete(PROFILE_BLOCK_KEY);
+	out.delete(PROFILE_BLOCK_FLAGS_KEY);
+	if (profile === 'single') return out;
+	const added: string[] = [];
+	for (const [key, value] of profileFlagLines(profile)) {
+		if (!out.has(key)) added.push(key);
+		out.set(key, value);
+	}
+	out.set(PROFILE_BLOCK_KEY, profile);
+	if (added.length > 0) out.set(PROFILE_BLOCK_FLAGS_KEY, added.join(','));
+	return out;
+}
+
 export function parseZone(value: string): string {
 	const parsed = nodeZoneSchema.safeParse(value);
 	if (!parsed.success) throw new Error(`--zone ${value}: use 1–32 lowercase letters, digits and single hyphens`);
