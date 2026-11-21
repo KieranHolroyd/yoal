@@ -904,7 +904,8 @@ yoal ha migrate attachments --apply               # move them now; each restarts
 REST: `GET /api/v1/ha/attachments/migrate` (dry run), `POST /api/v1/ha/attachments/migrate` with
 `{ "apply": true, "projects": ["shop"] }`. A platform operator can run the dry run; `--apply` needs
 a platform admin (the admin-only check other platform writes use, so by default a dashboard session:
-an API key gets `403`). An app the upgrade put on the gateway keeps exactly the variables it had,
+an API key gets `403`). In the dashboard that is **Settings → High availability → Move apps to their
+endpoints**: the dry run first, then type `move` to apply. An app the upgrade put on the gateway keeps exactly the variables it had,
 and gains its read URL on its own next deploy. A `blocked` app names the node whose agent lacks the
 gateway: update that agent (§4.1.2) and run it again. Each move is audited as
 `ha.migrate-attachments`.
@@ -942,8 +943,9 @@ before it expires (`yoal ha ca` shows the date; it is valid for 10 years). `yoal
 `yoal ha status` show the CA only while the gateway flag is on.
 
 1. `yoal ha ca`: note the active fingerprint, and that every node holds a live leaf.
-2. `yoal ha ca rotate` (`POST /api/v1/ha/ca/rotate`; a platform admin, by default from a dashboard
-   session: an API key gets `403`). A new CA signs from now. The old one becomes `previous` and stays
+2. **Settings → High availability → Install CA**, type `rotate` (or `yoal ha ca rotate`,
+   `POST /api/v1/ha/ca/rotate`; a platform admin, by default from a dashboard session: an API key
+   gets `403`). The dashboard keeps the button off while any node is on the previous CA. A new CA signs from now. The old one becomes `previous` and stays
    in every node's trust bundle, so no endpoint loses mTLS. Audited as `ha.ca.rotate`.
 3. Each node moves to the new CA when it next renews, within 60 days. There is no command to force a
    node to renew early.

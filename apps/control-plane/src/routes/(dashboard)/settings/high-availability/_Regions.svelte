@@ -1,31 +1,21 @@
 <script lang="ts">
-	import GlobeIcon from '@lucide/svelte/icons/globe';
 	import type { RegionPromotionView, RegionsView } from '@yoal/contracts';
-	import { createQuery } from '@tanstack/svelte-query';
-	import { fetchJson } from '#lib/query.js';
 	import StatusBadge from '#lib/components/yoal/StatusBadge.svelte';
-	import { Badge } from '#lib/components/ui/badge/index.js';
 	import * as Table from '#lib/components/ui/table/index.js';
 	import type { Tone } from '#lib/status.js';
-	import Panel from '../../_lib/Panel.svelte';
 	import { formatDateTime } from '../../_lib/format.js';
 
 	/**
-	 * Regions (HA-PLAN H26, W13), read-only: each region's zones, nodes and databases, and the open
-	 * or last region promotion with each step's fence. Promoting a region is `yoal ha region promote`
-	 * on the control plane in that region; this card never changes anything.
+	 * Regions (HA-PLAN H26, W13), read-only: the detail under the Regions status card. Zones that
+	 * name two regions, the open or last region promotion with each step's fence, and the notes.
+	 * Promoting a region is `yoal ha region promote` on the control plane in that region; nothing
+	 * here changes anything.
 	 */
-	let { initial }: { initial: RegionsView } = $props();
-
-	const live = createQuery(() => ({
-		queryKey: ['ha-regions'] as const,
-		queryFn: ({ signal }) => fetchJson<RegionsView>('/api/v1/ha/regions', { signal, cache: 'no-store' }),
-		initialData: initial,
-		refetchInterval: (query) => (query.state.data?.active ? 5_000 : 30_000),
-		staleTime: 2_000
-	}));
-	const view = $derived(live.data ?? initial);
-	const promotion = $derived<RegionPromotionView | null>(view.active ?? view.recent[0] ?? null);
+	let {
+		view,
+		promotion,
+		running
+	}: { view: RegionsView; promotion: RegionPromotionView | null; running: boolean } = $props();
 
 	const stageTone: Record<RegionPromotionView['stage'], Tone> = {
 		'control-plane': 'info',
@@ -44,56 +34,24 @@
 	};
 </script>
 
-<Panel
-	title="Regions"
-	icon={GlobeIcon}
-	description="Each region's zones, nodes and databases. Promote a region with yoal ha region promote on the control plane there."
-	count={view.regions.length}
-	flush
->
-	<Table.Root>
-		<Table.Header>
-			<Table.Row>
-				<Table.Head>Region</Table.Head>
-				<Table.Head>Zones</Table.Head>
-				<Table.Head>Nodes</Table.Head>
-				<Table.Head class="text-right">Database primaries</Table.Head>
-				<Table.Head class="text-right">Standbys</Table.Head>
-			</Table.Row>
-		</Table.Header>
-		<Table.Body>
-			{#each view.regions as region (region.name)}
-				<Table.Row>
-					<Table.Cell class="font-medium">
-						{region.name}
-						{#if region.primary}<Badge variant="secondary" class="ml-2">control plane</Badge>{/if}
-					</Table.Cell>
-					<Table.Cell class="font-mono text-xs">{region.zones.join(', ')}</Table.Cell>
-					<Table.Cell class="text-xs">
-						{region.nodes.filter((node) => node.online).length}/{region.nodes.length} online:
-						{region.nodes.map((node) => node.name).join(', ')}
-					</Table.Cell>
-					<Table.Cell class="text-right tabular-nums">{region.databases.primaries}</Table.Cell>
-					<Table.Cell class="text-right tabular-nums">{region.databases.standbys}</Table.Cell>
-				</Table.Row>
-			{/each}
-		</Table.Body>
-	</Table.Root>
-
+<div class="mt-3 divide-y rounded-lg border" data-section="region-detail">
 	{#each view.conflicts as conflict (conflict.zone)}
-		<p class="border-t px-4 py-2 text-sm text-destructive">
-			Zone {conflict.zone} names regions {conflict.regions.join(', ')} (nodes {conflict.nodes.join(', ')}). A zone belongs to exactly
-			one region.
+		<p class="px-4 py-2 text-sm text-destructive">
+			Zone {conflict.zone} names regions {conflict.regions.join(', ')} (nodes {conflict.nodes.join(
+				', '
+			)}). A zone belongs to exactly one region.
 		</p>
 	{/each}
 
 	{#if promotion}
-		<div class="space-y-2 border-t px-4 py-3">
+		<div class="space-y-2 px-4 py-3">
 			<div class="flex flex-wrap items-center gap-2 text-sm">
-				<span class="font-medium">{view.active ? 'Promotion in progress' : 'Last promotion'}:</span>
+				<span class="font-medium">{running ? 'Region promotion in progress' : 'Last region promotion'}:</span>
 				<span>{promotion.fromRegion} → {promotion.toRegion}</span>
 				<StatusBadge status={promotion.stage} tone={stageTone[promotion.stage]} />
-				<span class="text-muted-foreground">by {promotion.confirmedBy}, {formatDateTime(promotion.confirmedAt)}</span>
+				<span class="text-muted-foreground"
+					>by {promotion.confirmedBy}, {formatDateTime(promotion.confirmedAt)}</span
+				>
 			</div>
 			{#if promotion.error}<p class="text-sm text-destructive">{promotion.error}</p>{/if}
 			<Table.Root>
@@ -115,9 +73,13 @@
 								{#if step.message}<span class="block text-muted-foreground">{step.message}</span>{/if}
 							</Table.Cell>
 							<Table.Cell class="font-mono text-xs tabular-nums">
-								{step.fencedGeneration === null ? `at ${step.expectedGeneration}` : `${step.expectedGeneration} → ${step.fencedGeneration}`}
+								{step.fencedGeneration === null
+									? `at ${step.expectedGeneration}`
+									: `${step.expectedGeneration} → ${step.fencedGeneration}`}
 							</Table.Cell>
-							<Table.Cell class="tabular-nums">{step.lagSeconds === null ? '–' : `${step.lagSeconds} s`}</Table.Cell>
+							<Table.Cell class="tabular-nums"
+								>{step.lagSeconds === null ? '–' : `${step.lagSeconds} s`}</Table.Cell
+							>
 							<Table.Cell><StatusBadge status={step.status} tone={stepTone[step.status]} /></Table.Cell>
 						</Table.Row>
 					{/each}
@@ -127,6 +89,6 @@
 	{/if}
 
 	{#each view.notes as note (note)}
-		<p class="border-t px-4 py-2 text-xs text-muted-foreground">{note}</p>
+		<p class="px-4 py-2 text-xs text-muted-foreground">{note}</p>
 	{/each}
-</Panel>
+</div>

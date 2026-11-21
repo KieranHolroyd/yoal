@@ -214,6 +214,9 @@ describe('existing attachments move on their own next deploy (item 7)', () => {
 		expect(core.endpoints.migrateAttachments(operator, { projects: ['mig-b'] }).apply).toBe(false);
 		expect(() => core.endpoints.migrateAttachments(operator, { apply: true, projects: ['mig-b'] })).toThrow(/platform admin/);
 		expect(env(bId, workerA.nodeId)).toEqual(before);
+		// An empty list is refused, not read as "every app".
+		expect(() => core.endpoints.migrateAttachments(owner, { apply: true, projects: [] })).toThrow(/at least one app/);
+		expect(env(bId, workerA.nodeId)).toEqual(before);
 		const applied = core.endpoints.migrateAttachments(owner, { apply: true, projects: ['mig-b'] });
 		expect(applied.apply).toBe(true);
 		expect(applied.projects.find((item) => item.slug === 'mig-b')!.status).toBe('moved');
