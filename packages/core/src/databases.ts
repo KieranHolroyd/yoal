@@ -359,6 +359,13 @@ export class DatabaseService {
 
 		const disk: DiskRow | null = this.ctx.disks.pick(storage.plan, decision.nodeId, input.storageMb);
 		this.ctx.quota.assertCanCreateDatabase(principal.orgId, project?.id, input.storageMb, memoryMb);
+		// HA-PLAN H26: a standby region places an async replica there, in the same transaction as
+		// the database, so a refusal leaves nothing behind. Refused before anything is written when
+		// the region cannot hold it.
+		const standby =
+			input.standbyRegion !== undefined
+				? this.ctx.regions.standbyTarget({ primaryNodeId: decision.nodeId, region: input.standbyRegion, memoryMb })
+				: null;
 
 		const id = newId('db_');
 		const now = this.ctx.now();
@@ -395,11 +402,14 @@ export class DatabaseService {
 					createdBy: principal.userId,
 					createdAt: now,
 					updatedAt: now,
+					...(input.standbyRegion !== undefined ? { standbyRegion: input.standbyRegion } : {}),
 				})
 				.run();
 			this.insertBuiltInCredentials(principal, id, input.name, ownerSecret, monitorSecret, info.capabilities.metrics);
 			if (project)
 				this.insertAttachment(principal, id, project, input.envPrefix ?? info.defaultEnvPrefix);
+			if (standby && !standby.existing)
+				this.ctx.databaseReplicas.add(principal, input.name, { node: standby.nodeId, mode: 'async' });
 		})();
 		this.ctx.audit.record({
 			principal,
@@ -433,6 +443,13 @@ export class DatabaseService {
 		if (patch.standbyRegion !== undefined && patch.standbyRegion !== null && row.engine !== 'postgres')
 			throw new ValidationError('A standby region is only available for PostgreSQL.');
 		this.ctx.moves.assertNotMoving(row);
+		// HA-PLAN H26: a new standby region needs an async replica there; refused before anything is
+		// written when the region cannot hold one. Clearing it keeps the replica (remove it with
+		// `yoal db replicas remove`): it is still never promoted automatically, being in another region.
+		const standby =
+			patch.standbyRegion != null && patch.standbyRegion !== row.standbyRegion
+				? this.ctx.regions.standbyTarget({ primaryNodeId: row.nodeId, region: patch.standbyRegion, memoryMb: row.memoryMb, databaseId: row.id })
+				: null;
 		const info = databaseEngineRegistry[row.engine];
 		const projectId = this.attachmentsOf(row.id)[0]?.projectId;
 		if (patch.storageMb !== undefined || patch.memoryMb !== undefined)
@@ -485,17 +502,22 @@ export class DatabaseService {
 			pooler === false
 				? null
 				: row.poolerPort ?? (poolerEnabled ? this.allocatePoolerPort(row.nodeId) : null);
-		this.ctx.db
-			.update(databases)
-			.set({
-				...columns,
-				...(extensions ? { extensionsJson: JSON.stringify(extensions) } : {}),
-				poolerEnabled,
-				poolerPort,
-				updatedAt: this.ctx.now(),
-			})
-			.where(eq(databases.id, row.id))
-			.run();
+		this.ctx.sqlite.transaction(() => {
+			this.ctx.db
+				.update(databases)
+				.set({
+					...columns,
+					...(extensions ? { extensionsJson: JSON.stringify(extensions) } : {}),
+					poolerEnabled,
+					poolerPort,
+					updatedAt: this.ctx.now(),
+				})
+				.where(eq(databases.id, row.id))
+				.run();
+			// The replica is added with the row, so a refusal (a PITR database without
+			// PITR_REWIND, an agent too old) leaves the standby region unset.
+			if (standby && !standby.existing) this.ctx.databaseReplicas.add(principal, name, { node: standby.nodeId, mode: 'async' });
+		})();
 		// An engine version change restarts on a new image: re-apply the studio principal after it.
 		if (patch.version !== undefined && patch.version !== row.version)
 			this.ctx.databaseStudio.principals.invalidate(row.id, 'version-change');

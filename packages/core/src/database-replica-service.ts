@@ -68,6 +68,7 @@ import type {
 	FailoverStageOutcome,
 } from './failover-service.ts';
 import { resolvePlacement } from './placement.ts';
+import { crossRegionPromotionRefusal, syncTargetRefusal } from './regions.ts';
 import { newId, parseJson, randomBytes, sha256Hex } from './util.ts';
 
 type ReplicaRow = typeof databaseReplicas.$inferSelect;
@@ -156,6 +157,11 @@ export class DatabaseReplicaService {
 			);
 		const sameNode = node.id === database.nodeId;
 		const primaryNode = this.ctx.db.select().from(nodes).where(eq(nodes.id, database.nodeId)).get();
+		// HA-PLAN H26: `sync` is only offered inside one region; a replica in another region stays async.
+		if (input.mode === 'sync' && primaryNode) {
+			const crossRegion = syncTargetRefusal(primaryNode, node);
+			if (crossRegion) throw new ValidationError(crossRegion);
+		}
 		if (!sameNode && !node.privateAddress)
 			throw new ValidationError(`"${node.name}" has no managed overlay address, so the replica cannot stream from another node.`);
 		if (!sameNode && !primaryNode?.privateAddress)
@@ -279,6 +285,34 @@ export class DatabaseReplicaService {
 			.get();
 		if (!row || row.removingAt) throw new NotFoundError('Database replica');
 		return this.promoteRow(principal, database, row, input, options);
+	}
+
+	/**
+	 * The database step of `yoal ha region promote` (HA-PLAN H26): the same fenced W10 path as
+	 * `promote`, keyed on the database id instead of an org-scoped name, because a region promotion
+	 * moves every org's databases. The caller (`RegionService`) has already required a platform
+	 * admin; `principal` is recorded in the audit. `expectedGeneration` is the CAS (`If-Match`); a
+	 * region promotion always accepts the data loss the operator confirmed (RPO = measured lag).
+	 */
+	async promoteForRegion(
+		principal: Principal,
+		input: { databaseId: string; replicaId: string; expectedGeneration: number },
+	): Promise<DatabaseFailoverView> {
+		const database = this.ctx.db.select().from(databases).where(eq(databases.id, input.databaseId)).get();
+		if (!database || database.deletedAt) throw new NotFoundError('Database');
+		if (database.primaryGeneration !== input.expectedGeneration)
+			throw new CoreError(
+				'precondition_failed',
+				`"${database.name}" is at primary generation ${database.primaryGeneration}, not ${input.expectedGeneration}.`,
+				412,
+			);
+		const row = this.ctx.db
+			.select()
+			.from(databaseReplicas)
+			.where(and(eq(databaseReplicas.id, input.replicaId), eq(databaseReplicas.databaseId, database.id)))
+			.get();
+		if (!row || row.removingAt) throw new NotFoundError('Database replica');
+		return this.promoteRow(principal, database, row, { confirm: true, acceptDataLoss: true }, { source: 'manual' });
 	}
 
 	/** The async half of `promote`: the lease read is the gate, the row is the display cache. */
@@ -454,6 +488,12 @@ export class DatabaseReplicaService {
 				(row) => row.nodeId === plan.candidateNodeId && !row.removingAt && row.primaryGeneration === database.primaryGeneration,
 			);
 			if (!replica) return { status: 'failed', message: 'No live replica on the candidate node.' };
+			// HA-PLAN H26: automatic promotion never moves a database across regions.
+			const crossRegion = crossRegionPromotionRefusal(
+				this.ctx.db.select({ region: nodes.region }).from(nodes).where(eq(nodes.id, database.nodeId)).get() ?? {},
+				this.ctx.db.select({ name: nodes.name, region: nodes.region }).from(nodes).where(eq(nodes.id, replica.nodeId)).get() ?? { name: replica.nodeId },
+			);
+			if (crossRegion) return { status: 'failed', message: crossRegion };
 			if (!fence.holds()) return { status: 'failed', message: 'The controller lost its lease before fencing.' };
 			try {
 				const started = this.begin(database, replica, {

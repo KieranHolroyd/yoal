@@ -84,6 +84,7 @@ function ingressNodes(ctx: CoreContext): DnsFailoverNode[] {
 			id: nodes.id,
 			name: nodes.name,
 			zone: nodes.zone,
+			region: nodes.region,
 			status: nodes.status,
 			publicAddress: nodes.publicAddress,
 			wgEndpoint: nodes.wgEndpoint,
@@ -92,8 +93,11 @@ function ingressNodes(ctx: CoreContext): DnsFailoverNode[] {
 		})
 		.from(nodes)
 		.all();
-	return rows
-		.filter((row) => ids.has(row.id))
+	// HA-PLAN H18/W13 stacked steering: across regions the records carry the active region's
+	// ingress, and fall back to the other regions' only while it has none online. With one region
+	// (or REGIONS off) this is the whole ingress set, as before.
+	return ctx.regions
+		.steeringIngress(rows.filter((row) => ids.has(row.id)))
 		.map((row) => ({
 			id: row.id,
 			name: row.name,

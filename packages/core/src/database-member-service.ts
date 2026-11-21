@@ -8,6 +8,7 @@ import {
 	nodes,
 } from '@yoal/db';
 import {
+	regionOf,
 	DATABASE_REPLICA_REPORT_STALE_SECONDS,
 	DB_MEMBER_CAPABILITY,
 	DB_MEMBER_SELF_FENCING_CAPABILITY,
@@ -56,6 +57,7 @@ import { ConflictError, CoreError, NotFoundError, ValidationError } from './erro
 import { slotName } from './database-replica-service.ts';
 import type { DatabaseRow } from './databases.ts';
 import { newId, parseJson, sha256Hex } from './util.ts';
+import { crossRegionPromotionRefusal, syncTargetRefusal } from './regions.ts';
 
 /**
  * Database members, durability, the synchronous set and planned switchover (HA-PLAN H21–H23, W10;
@@ -123,14 +125,22 @@ export class DatabaseMemberService {
 		return row;
 	}
 
-	/** The desired-state entry lane B renders; null while the flag is off or there is no replica. */
-	membersDesired(databaseId: string): DatabaseMembersDesired | null {
+	/**
+	 * The desired-state entry lane B renders; null while the flag is off or there is no replica.
+	 * `forNodeId` renders it for one node: a node outside the primary's region never carries the
+	 * W11 policy, so its member machine is never armed and never a candidate (HA-PLAN H26: a standby
+	 * region's replica never auto-promotes). With every node in one region it is byte-identical.
+	 */
+	membersDesired(databaseId: string, forNodeId?: string): DatabaseMembersDesired | null {
 		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA')) return null;
 		const row = this.ctx.db.select().from(databases).where(eq(databases.id, databaseId)).get();
 		if (!row) return null;
 		const members = this.members(databaseId);
 		if (members.length < 2) return null;
-		const auto = featureEnabled(this.ctx.config, 'DB_AUTO_PROMOTE') && row.failoverMode === 'auto';
+		const auto =
+			featureEnabled(this.ctx.config, 'DB_AUTO_PROMOTE') &&
+			row.failoverMode === 'auto' &&
+			(forNodeId === undefined || this.#sameRegionAsPrimary(row, forNodeId));
 		return {
 			databaseId,
 			generation: row.primaryGeneration,
@@ -746,6 +756,13 @@ export class DatabaseMemberService {
 		// must refuse before the lease is even read.
 		if (!this.ctx.failoverPolicies.autoActiveForRow(database))
 			return 'automatic failover is no longer eligible (policy, controller or node self-fencing changed)';
+		// HA-PLAN H26: a replica outside the primary's region is never promoted automatically.
+		const candidateNode = this.#node(candidateNodeId);
+		const crossRegion = crossRegionPromotionRefusal(this.#node(database.nodeId) ?? {}, {
+			name: candidateNode?.name ?? candidateNodeId,
+			region: candidateNode?.region,
+		});
+		if (crossRegion) return crossRegion;
 		const store = this.#store();
 		if (!store) return 'no arbiter with conditional writes is configured';
 		let record;
@@ -965,13 +982,17 @@ export class DatabaseMemberService {
 			.all();
 		const ids = new Set([...rows.map((row) => row.databaseId), ...replicaRows.map((row) => row.databaseId)]);
 		return [...ids].flatMap((id) => {
-			const desired = this.membersDesired(id);
+			const desired = this.membersDesired(id, nodeId);
 			return desired ? [desired] : [];
 		});
 	}
 
-	/** Every database with a replica, for every node's desired state, so any consumer can poll. */
-	membersDesiredAll(limit = 500): DatabaseMembersDesired[] {
+	/**
+	 * Every database with a replica, for every node's desired state, so any consumer can poll.
+	 * `forNodeId` strips the W11 policy for a node outside a database's primary region (see
+	 * `membersDesired`).
+	 */
+	membersDesiredAll(limit = 500, forNodeId?: string): DatabaseMembersDesired[] {
 		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA')) return [];
 		const ids = this.ctx.db
 			.selectDistinct({ databaseId: databaseReplicas.databaseId })
@@ -982,7 +1003,7 @@ export class DatabaseMemberService {
 			.slice(0, limit)
 			.map((row) => row.databaseId);
 		return ids.flatMap((id) => {
-			const desired = this.membersDesired(id);
+			const desired = this.membersDesired(id, forNodeId);
 			return desired ? [desired] : [];
 		});
 	}
@@ -1706,12 +1727,16 @@ export class DatabaseMemberService {
 			const lagSeconds = replica.lagSeconds ?? 0;
 			const lagBytes = replica.lagBytes ?? 0;
 			if (lagSeconds > 30 || lagBytes > 256 * 1024 * 1024) {
+				// HA-PLAN H26: a standby region's replica lag is the data a region promotion would lose.
+				const standby = database.standbyRegion !== null && regionOf(this.#node(replica.nodeId) ?? {}) === database.standbyRegion;
 				await this.#notify(
 					database,
 					`replica_lag:${replica.id}`,
 					'warning',
-					'Replica lag',
-					`Replica ${replica.id} is ${lagSeconds} s / ${lagBytes} bytes behind. Reads from it may be stale; check the overlay and disk.`,
+					standby ? 'Standby region replica lag' : 'Replica lag',
+					standby
+						? `The standby replica ${replica.id} in region ${database.standbyRegion} is ${lagSeconds} s / ${lagBytes} bytes behind. A region promotion now would lose about that much; check the link between the regions.`
+						: `Replica ${replica.id} is ${lagSeconds} s / ${lagBytes} bytes behind. Reads from it may be stale; check the overlay and disk.`,
 				);
 			}
 		}
@@ -1811,7 +1836,15 @@ export class DatabaseMemberService {
 		principal: Principal,
 	): Promise<void> {
 		const replicas = this.ctx.databaseReplicas.rowsFor(database.id).filter((row) => !row.removingAt && row.primaryGeneration === database.primaryGeneration);
-		const crossNode = replicas.filter((row) => row.nodeId !== database.nodeId);
+		// HA-PLAN H26: `sync` is only offered inside one region; a replica in another region (a
+		// standby region's in particular) stays async and is never a sync target.
+		const crossNode = replicas.filter((row) => row.nodeId !== database.nodeId && this.#sameRegionAsPrimary(database, row.nodeId));
+		const elsewhere = replicas.filter((row) => row.nodeId !== database.nodeId && !this.#sameRegionAsPrimary(database, row.nodeId));
+		if (crossNode.length === 0 && elsewhere.length > 0)
+			throw new ValidationError(
+				syncTargetRefusal(this.#node(database.nodeId) ?? { name: database.nodeId }, this.#node(elsewhere[0]!.nodeId) ?? { name: elsewhere[0]!.nodeId }) ??
+					'A synchronous replica must be in the primary\'s region.',
+			);
 		const zones = new Set(crossNode.map((row) => this.#node(row.nodeId)?.zone ?? row.nodeId));
 		// CLUSTERING §9.2: one sync replica has no slack, so `sync` needs two replicas in different
 		// zones unless the operator explicitly chooses to block instead.
@@ -1850,6 +1883,13 @@ export class DatabaseMemberService {
 	): Promise<void> {
 		if (this.#activeFailover(database.id))
 			throw new ConflictError('A failover is active; a sync-set change cannot be opened until it finishes.');
+		// HA-PLAN H26: the one choke point every sync set passes through. A target outside the
+		// primary's region is refused, whichever picker chose it.
+		if (target !== null && !this.#sameRegionAsPrimary(database, target))
+			throw new ValidationError(
+				syncTargetRefusal(this.#node(database.nodeId) ?? { name: database.nodeId }, this.#node(target) ?? { name: target }) ??
+					'A synchronous replica must be in the primary\'s region.',
+			);
 		const store = this.#store();
 		if (!store) throw new CoreError('unavailable', 'No arbiter is configured; a sync change cannot be recorded.', 409);
 		const current = await store.read(database.id);
@@ -2132,10 +2172,12 @@ export class DatabaseMemberService {
 			.run();
 	}
 
+	/** Members a sync decision may name: never one outside the primary's region (HA-PLAN H26). */
 	#memberViews(databaseId: string): SyncMemberView[] {
+		const database = this.#database(databaseId);
 		return this.ctx.databaseReplicas
 			.rowsFor(databaseId)
-			.filter((row) => !row.removingAt)
+			.filter((row) => !row.removingAt && this.#sameRegionAsPrimary(database, row.nodeId))
 			.map((row) => ({
 				nodeId: row.nodeId,
 				streaming: databaseReplicaReadable(row.status) && this.#memberHealthy(this.#database(row.databaseId), row),
@@ -2159,11 +2201,17 @@ export class DatabaseMemberService {
 					row.nodeId !== database.nodeId &&
 					row.slot !== null &&
 					row.primaryGeneration === database.primaryGeneration &&
+					this.#sameRegionAsPrimary(database, row.nodeId) &&
 					databaseReplicaReadable(row.status) &&
 					this.#memberHealthy(database, row),
 			)
 			.sort((a, b) => a.nodeId.localeCompare(b.nodeId));
 		return candidates[0]?.nodeId ?? null;
+	}
+
+	/** True when `nodeId` is in the database primary's region (stored regions; `default` when unset). */
+	#sameRegionAsPrimary(database: Pick<DatabaseRow, 'nodeId'>, nodeId: string): boolean {
+		return regionOf(this.#node(database.nodeId) ?? {}) === regionOf(this.#node(nodeId) ?? {});
 	}
 
 	#memberHealthy(database: DatabaseRow, replica: ReplicaRow): boolean {

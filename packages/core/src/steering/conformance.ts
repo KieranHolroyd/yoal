@@ -10,6 +10,7 @@ export function steeringNode(overrides: Partial<SteeringNode> = {}): SteeringNod
 		id: 'node-a',
 		name: 'node-a',
 		zone: 'a',
+		region: 'default',
 		status: 'online',
 		roles: ['ingress', 'compute'],
 		capabilities: ['ingress-set'],
