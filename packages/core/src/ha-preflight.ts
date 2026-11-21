@@ -1,5 +1,9 @@
-import { haFindingStatus, type HaCheck, type HaCheckFixKind, type HaProfile } from '@yoal/contracts';
+import { eq } from 'drizzle-orm';
+import { DEFAULT_REGION, haFindingStatus, regionOf, zoneRegions, type HaCheck, type HaCheckFixKind, type HaProfile } from '@yoal/contracts';
+import { nodes as nodeTable } from '@yoal/db';
+import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
+import { parseJson } from './util.ts';
 
 /**
  * The platform-dependency preflight (HA-PLAN H28/W12). Pure over the context's existing facts so
@@ -163,4 +167,197 @@ export function haFindingChecks(findings: readonly HaFinding[]): HaCheck[] {
 		fix: finding.fix && finding.severity !== 'info' ? { kind: FINDING_FIX_KINDS[finding.key], value: finding.fix } : null,
 		subject: null,
 	}));
+}
+
+/**
+ * The `regions` check (HA-PLAN H26, W13; Wave 5 lane A). One entry per finding, each with its fix:
+ * - while `REGIONS` is off: region values stored from when it was on (placed as zone) warn, and
+ *   `ha-dr` fails because it needs regions;
+ * - a zone whose nodes name different regions fails (only a direct database write can make one);
+ * - `ha-dr` needs a second region with an online data node, and warns without a control-plane
+ *   standby there (the promotion runs on it) or without any database standby region;
+ * - a database whose standby region holds no live replica fails; one whose standby lags warns;
+ * - a fleet whose ingress spans regions without a cross-region driver (`dns-failover` or
+ *   `webhook`, alone or stacked) warns.
+ * A clean fleet is one `pass` naming each region and its zones.
+ */
+export function regionChecks(ctx: CoreContext, profile: HaProfile): HaCheck[] {
+	const title = 'Regions';
+	const checks: HaCheck[] = [];
+	const nodes = ctx.sqlite
+		.query<{ id: string; name: string; zone: string; region: string; status: string; roles_json: string | null; mode: string; can_build: number }, []>(
+			'SELECT id, name, zone, region, status, roles_json, mode, can_build FROM nodes ORDER BY name',
+		)
+		.all();
+	const roles = (id: string) => ctx.nodes.view(ctx.db.select().from(nodeTable).where(eq(nodeTable.id, id)).get()!).roles;
+	if (!featureEnabled(ctx.config, 'REGIONS')) {
+		const evidence = storedRegionValues(ctx);
+		if (evidence.length > 0)
+			checks.push({
+				id: 'regions',
+				title: 'Region values are stored while regions are off',
+				status: 'warn',
+				evidence: [...evidence, 'A spread: region is placed as zone while REGIONS is off.'],
+				fix: { kind: 'env', value: 'YOAL_FEATURE_REGIONS=1, or put each value back to node/zone and the default region.' },
+				subject: null,
+			});
+		if (profile === 'ha-dr')
+			checks.push({
+				id: 'regions',
+				title,
+				status: 'fail',
+				evidence: ['ha-dr needs a standby region, and regions are off on this platform.'],
+				fix: { kind: 'env', value: 'YOAL_FEATURE_REGIONS=1' },
+				subject: null,
+			});
+		if (checks.length === 0)
+			checks.push({ id: 'regions', title, status: 'pass', evidence: ['Regions are off; every node is in the default region.'], fix: null, subject: null });
+		return checks;
+	}
+
+	for (const conflict of zoneRegions(nodes).conflicts)
+		checks.push({
+			id: 'regions',
+			title: `Zone ${conflict.zone} is in more than one region`,
+			status: 'fail',
+			evidence: [`Nodes ${conflict.nodes.join(', ')} name regions ${conflict.regions.join(', ')}; a zone belongs to exactly one region.`],
+			fix: { kind: 'command', value: `yoal nodes set <node> --region ${conflict.regions[0]} (for each node in zone ${conflict.zone} that names another region)` },
+			subject: { kind: 'zone', id: conflict.zone, name: conflict.zone },
+		});
+
+	const regionOfId = new Map(nodes.map((node) => [node.id, regionOf(node)]));
+	const names = [...new Set(nodes.map((node) => regionOf(node)))].sort();
+	const active = ctx.regions.activeRegion();
+	if (profile === 'ha-dr') {
+		const standby = nodes.filter((node) => regionOf(node) !== active && node.status === 'online' && roles(node.id).includes('data'));
+		if (standby.length === 0)
+			checks.push({
+				id: 'regions',
+				title: 'No standby region',
+				status: 'fail',
+				evidence: [`Every online data node is in region ${active} (regions: ${names.join(', ')}).`],
+				fix: { kind: 'command', value: 'yoal nodes set <node> --zone <zone> --region <standby-region> (an online data node in another region)' },
+				subject: null,
+			});
+		else {
+			const standbyControl = ctx.sqlite
+				.query<{ node_id: string }, []>("SELECT node_id FROM control_state WHERE role IN ('standby', 'standby-behind', 'joining')")
+				.all()
+				.filter((row) => (regionOfId.get(row.node_id) ?? DEFAULT_REGION) !== active);
+			if (standbyControl.length === 0)
+				checks.push({
+					id: 'regions',
+					title: 'No control-plane standby outside the active region',
+					status: 'warn',
+					evidence: [`A region promotion runs on the control plane in the surviving region; none is enrolled outside ${active}.`],
+					fix: { kind: 'command', value: `yoal ha control enrol --node <node in ${standby[0]!.region}> --csr <file>` },
+					subject: null,
+				});
+			const withStandby = ctx.sqlite.query('SELECT 1 FROM databases WHERE standby_region IS NOT NULL AND deleted_at IS NULL LIMIT 1').get();
+			if (!withStandby)
+				checks.push({
+					id: 'regions',
+					title: 'No database has a standby region',
+					status: 'warn',
+					evidence: ['A region promotion moves only databases with a replica in the surviving region.'],
+					fix: { kind: 'command', value: `yoal db update <database> --standby-region ${standby[0]!.region}` },
+					subject: null,
+				});
+		}
+	}
+
+	const replicas = ctx.sqlite
+		.query<{ database_id: string; node_id: string; lag_seconds: number | null; status: string }, []>(
+			'SELECT database_id, node_id, lag_seconds, status FROM database_replicas WHERE removing_at IS NULL',
+		)
+		.all();
+	for (const database of ctx.sqlite
+		.query<{ id: string; name: string; standby_region: string }, []>(
+			'SELECT id, name, standby_region FROM databases WHERE standby_region IS NOT NULL AND deleted_at IS NULL ORDER BY name',
+		)
+		.all()) {
+		const there = replicas.filter((row) => row.database_id === database.id && regionOfId.get(row.node_id) === database.standby_region);
+		const subject = { kind: 'database' as const, id: database.id, name: database.name };
+		// After a region promotion the region it left becomes the standby region (W13 review): say so,
+		// because the fix is to rebuild a replica there once it is back, not to undo anything.
+		const moved = ctx.sqlite
+			.query<{ finished_at: number | null }, [string, string]>(
+				`SELECT s.finished_at FROM region_promotion_steps s JOIN region_promotions p ON p.id = s.promotion_id
+				  WHERE s.kind = 'database' AND s.resource_id = ? AND s.status = 'done' AND p.from_region = ?
+				  ORDER BY s.finished_at DESC LIMIT 1`,
+			)
+			.get(database.id, database.standby_region);
+		if (there.length === 0)
+			checks.push({
+				id: 'regions',
+				title: `${database.name} has no replica in its standby region`,
+				status: 'fail',
+				evidence: [
+					moved
+						? `A region promotion moved it away from ${database.standby_region}${moved.finished_at ? ` at ${new Date(moved.finished_at).toISOString()}` : ''}; that region is now its standby and holds no live replica. Rebuild one there once the region is back.`
+						: `Standby region ${database.standby_region} holds no live replica of ${database.name}, so a region promotion would leave it behind.`,
+				],
+				fix: { kind: 'command', value: `yoal db replicas add ${database.name} --node <data node in ${database.standby_region}>` },
+				subject,
+			});
+		else {
+			const worst = Math.max(...there.map((row) => row.lag_seconds ?? 0));
+			if (worst > 30)
+				checks.push({
+					id: 'regions',
+					title: `${database.name}'s standby replica lags`,
+					status: 'warn',
+					evidence: [`The standby replica in ${database.standby_region} is ${worst} s behind: a region promotion now would lose about that much.`],
+					fix: { kind: 'manual', value: `Check the link between the primary's region and ${database.standby_region}.` },
+					subject,
+				});
+		}
+	}
+
+	const ingress = new Set(ctx.ingressSet.nodes());
+	const ingressRegions = new Set(nodes.filter((node) => ingress.has(node.id)).map((node) => regionOf(node)));
+	const selection = ctx.cluster.get().steering;
+	const drivers = [selection.driver, ...selection.stacked];
+	if (ingressRegions.size > 1 && !drivers.some((kind) => kind === 'dns-failover' || kind === 'webhook'))
+		checks.push({
+			id: 'regions',
+			title: 'Ingress spans regions without a cross-region driver',
+			status: 'warn',
+			evidence: [`Ingress nodes are in ${[...ingressRegions].sort().join(', ')}; steering is ${drivers.join(' + ')}.`],
+			fix: { kind: 'setting', value: 'Settings → High availability → Steering: driver dns-failover, stacked external-lb (a balancer in each region, DNS across regions).' },
+			subject: null,
+		});
+
+	if (!checks.some((check) => check.status === 'fail' || check.status === 'warn'))
+		checks.push({
+			id: 'regions',
+			title,
+			status: 'pass',
+			evidence: names.map((name) => `${name}: zones ${[...new Set(nodes.filter((node) => regionOf(node) === name).map((node) => node.zone))].sort().join(', ')}${name === active ? ' (active)' : ''}`),
+			fix: null,
+			subject: null,
+		});
+	return checks;
+}
+
+/** Region values stored anywhere, as evidence lines (nodes, standby regions, spreads). */
+export function storedRegionValues(ctx: CoreContext): string[] {
+	const evidence: string[] = [];
+	if (ctx.cluster.get().replicas.spread === 'region') evidence.push('cluster replicas.spread is region');
+	for (const row of ctx.sqlite
+		.query<{ slug: string; placement: string | null; workload: string | null }, []>(
+			'SELECT slug, placement_json AS placement, workload_json AS workload FROM projects WHERE deleted_at IS NULL ORDER BY slug',
+		)
+		.all()) {
+		if (parseJson<{ spread?: string } | null>(row.placement, null)?.spread === 'region') evidence.push(`project ${row.slug} placementSpec.spread is region`);
+		if (parseJson<{ placement?: { spread?: string } } | null>(row.workload, null)?.placement?.spread === 'region')
+			evidence.push(`project ${row.slug} placement.spread is region`);
+	}
+	for (const row of ctx.sqlite.query<{ name: string; region: string }, []>("SELECT name, region FROM nodes WHERE region <> 'default' ORDER BY name").all())
+		evidence.push(`node ${row.name} is in region ${row.region}`);
+	for (const row of ctx.sqlite
+		.query<{ name: string; region: string }, []>('SELECT name, standby_region AS region FROM databases WHERE standby_region IS NOT NULL AND deleted_at IS NULL ORDER BY name')
+		.all())
+		evidence.push(`database ${row.name} has standby region ${row.region}`);
+	return evidence;
 }

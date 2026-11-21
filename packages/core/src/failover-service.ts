@@ -29,6 +29,7 @@ import { ControlPlaneLease, SqliteLeaseStore, type LeaseDecision } from './lease
 import { OFFLINE_AFTER_MS } from './nodes.ts';
 import { buildSystemPrincipal } from './iam/system.ts';
 import { newId, parseJson, randomToken } from './util.ts';
+import { partitionByPrimaryRegion } from './regions.ts';
 import type { MoveReason, ReplicaCopy } from './workloads.ts';
 
 /**
@@ -817,7 +818,7 @@ export class FailoverService {
 				continue;
 			}
 			if (!lost || event?.status === 'manual') continue;
-			const choice = this.#promotionChoice(byDatabase.get(database.id) ?? [], facts, config);
+			const choice = this.#promotionChoice(byDatabase.get(database.id) ?? [], facts, config, database.nodeId);
 			// W11: automatic promotion is per database and defaults to manual. A database that is
 			// not armed, or whose effective durability no longer meets §1.3, is a manual promotion
 			// even when the controller and the global flag are on. Arming enforced every §3 gate.
@@ -1028,9 +1029,20 @@ export class FailoverService {
 		}
 	}
 
-	#promotionChoice(rows: Array<typeof databaseReplicas.$inferSelect>, facts: Map<string, NodeFact>, config: ClusterConfig) {
+	#promotionChoice(rows: Array<typeof databaseReplicas.$inferSelect>, facts: Map<string, NodeFact>, config: ClusterConfig, primaryNodeId: string) {
+		// HA-PLAN H26: a replica outside the primary's region (a standby region's) is never chosen
+		// here, automatic or not; only `yoal ha region promote` moves a database across regions.
+		const fleet = new Map(
+			this.ctx.db
+				.select({ id: nodes.id, name: nodes.name, region: nodes.region })
+				.from(nodes)
+				.all()
+				.map((node) => [node.id, node]),
+		);
+		const { inRegion, refused } = partitionByPrimaryRegion(rows, primaryNodeId, fleet);
+		const crossRegion = refused.map(({ replica, reason }) => ({ id: replica.id, nodeId: replica.nodeId, reason }));
 		// A replica on a node that is itself silent cannot be promoted, whatever it last reported.
-		const replicas: DatabaseReplica[] = rows.map((row) => {
+		const replicas: DatabaseReplica[] = inRegion.map((row) => {
 			const node = facts.get(row.nodeId);
 			const reachable = node !== undefined && !node.unreachable && node.status !== 'offline';
 			return {
@@ -1053,7 +1065,7 @@ export class FailoverService {
 		const pending = replicas
 			.filter((replica) => replica.status === 'pending')
 			.map((replica) => ({ id: replica.id, nodeId: replica.nodeId, reason: 'replica is pending (it has not streamed)' }));
-		return { ...choice, refusals: [...choice.refusals, ...pending] };
+		return { ...choice, refusals: [...choice.refusals, ...pending, ...crossRegion] };
 	}
 
 	// ------------------------------------------------------------------ reads
@@ -1164,7 +1176,7 @@ export class FailoverService {
 					}),
 			},
 			databases: databaseRows.map((database) => {
-				const choice = this.#promotionChoice(byDatabase.get(database.id) ?? [], facts, config);
+				const choice = this.#promotionChoice(byDatabase.get(database.id) ?? [], facts, config, database.nodeId);
 				const candidate = choice.replica;
 				const primary = facts.get(database.nodeId);
 				return {

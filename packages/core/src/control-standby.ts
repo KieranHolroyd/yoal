@@ -353,6 +353,9 @@ export class ControlStandby {
 		// `canPromote` and refuses a fenced node; without this exemption the Promote button would
 		// be served by the standby but its POST would 503.
 		if (path === '/api/v1/ha/control/promote') return null;
+		// `yoal ha region promote` runs on the surviving region's standby: its first step is this
+		// node's own CAS (the same `ControlPlaneService.promote`), and it writes nothing before it.
+		if (/^\/api\/v1\/ha\/regions\/[a-z0-9-]{1,32}\/promote$/.test(path)) return null;
 		const snapshot = this.snapshot();
 		if (snapshot.role === 'primary') return null;
 		return {

@@ -20,5 +20,7 @@ export const GET: RequestHandler = (event) =>
 			...(core.controlPlane.enabled() ? { controlPlane: core.controlPlane.status() } : {}),
 			// The install CA, only while ENDPOINTS_GATEWAY uses it: off, the document is unchanged.
 			...(core.nodeCa.inUse() ? { nodeCa: core.nodeCa.status() } : {}),
+			// Regions (W13), only while REGIONS is on: off, the document is unchanged.
+			...(core.regions.enabled() ? { regions: core.regions.view(principal) } : {}),
 		};
 	});

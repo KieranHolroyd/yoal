@@ -56,6 +56,8 @@ export function databaseLeaseKey(databaseId: string): string {
 export interface DatabaseLeaseRecord {
 	lease: DatabaseLease;
 	etag: string;
+	/** The arbiter's clock from the read (epoch ms), when the store sent one. */
+	serverDate?: number | null;
 }
 
 /** Conditional access to one database's lease. The store, not this process, arbitrates. */
@@ -74,7 +76,7 @@ export class ObjectStoreDatabaseLeaseStore implements DatabaseLeaseStore {
 		if (response.status === 404) return null;
 		if (response.status !== 200 || !response.body || !response.etag)
 			throw new Error(`The database lease store answered ${response.status}${response.etag === null ? ' without an ETag' : ''}.`);
-		return { lease: parseLease(response.body), etag: response.etag };
+		return { lease: parseLease(response.body), etag: response.etag, serverDate: response.serverDate ?? null };
 	}
 
 	async compareAndSwap(databaseId: string, expectedEtag: string | null, lease: DatabaseLease): Promise<boolean> {

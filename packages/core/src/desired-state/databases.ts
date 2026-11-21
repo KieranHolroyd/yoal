@@ -62,7 +62,9 @@ export class DatabaseState extends DesiredStatePart {
 		return {
 			...base,
 			...withRewinds,
-			databaseMembers: this.ctx.databaseMembers.membersDesiredAll(),
+			// HA-PLAN H26: rendered per node, so a node outside a database's primary region never
+			// carries its W11 policy (identical to before while every node is in one region).
+			databaseMembers: this.ctx.databaseMembers.membersDesiredAll(500, node.id),
 			databaseSyncTasks: this.ctx.databaseMembers.syncTasksForNode(node.id),
 			databaseSwitchovers: switchovers,
 		};

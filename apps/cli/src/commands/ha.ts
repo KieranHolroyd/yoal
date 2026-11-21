@@ -3,7 +3,16 @@ import { dirname, join } from 'node:path';
 import { parseArgs, requirePositional, type FlagSpec } from '../args.ts';
 import { installControlEnrolment, parseSealedControlBundle } from '../control-enrol.ts';
 import { UsageError } from '../errors.ts';
-import { formatAttachments, formatControlStatus, formatHaStatus, formatMigration, formatNodeCa } from '../ha.ts';
+import {
+	formatAttachments,
+	formatControlStatus,
+	formatHaStatus,
+	formatMigration,
+	formatNodeCa,
+	formatRegionPlan,
+	formatRegionPromotion,
+	formatRegions,
+} from '../ha.ts';
 import { formatDrill, formatDrillList, formatMs } from '../drills.ts';
 import {
 	drillTargets,
@@ -41,6 +50,8 @@ const flags: FlagSpec = {
 	wait: { type: 'boolean' },
 	apply: { type: 'boolean' },
 	project: { type: 'string', multiple: true },
+	'plan-hash': { type: 'string' },
+	'accept-data-loss': { type: 'boolean' },
 	profile: { type: 'string' },
 	steering: { type: 'string' },
 	certificates: { type: 'string' },
@@ -132,6 +143,18 @@ Actions:
       Rotate the install CA (platform admin). The old CA stays trusted until every node renews; a
       second rotation is refused while a node still holds a certificate the previous CA signed.
 
+  region [status] [--json]
+      Regions (YOAL_FEATURE_REGIONS): each region's zones, nodes and databases, and region promotions.
+  region promote <region> [--json]
+      Show the plan: control plane, then each database with a replica there (standby region first),
+      then steering, with each step's fence and the data a promotion would lose. Changes nothing.
+  region promote <region> --confirm <region> --plan-hash <hash> --accept-data-loss --reason <text>
+                 [--break-glass] [--json]
+      Promote it (platform admin, on the control plane in that region). The region name typed back
+      and the hash the plan showed are required; a plan whose generations moved is refused. While
+      the old region still holds a valid lease it is refused unless --break-glass, which is audited:
+      use it only once the old region is known to be stopped. Run the same command again to resume.
+
   db arm|disarm|drill <database> [--json]
       Automatic database failover (W11): arm after the policy and a passed drill, disarm now, or run
       a measured drill. Same path as \`yoal db failover\`.
@@ -150,6 +173,9 @@ Options:
   --master-key <f>   Master key path (default /etc/yoal/master.key)
   --env <file>       Allowlisted env file to merge (default /etc/yoal/yoal.env)
   --project <slug>   Limit the migration to this app (repeatable)
+  --confirm <region> The region name typed back, to promote it
+  --plan-hash <hash> The plan hash \`yoal ha region promote <region>\` printed
+  --accept-data-loss Accept losing writes after the last replicated one (RPO = the lag shown)
   --apply            Move the listed apps now (without it, a dry run)
   --json             Print the raw response`;
 
@@ -167,6 +193,7 @@ export async function haCommand(argv: string[]): Promise<void> {
 	}
 	const action = requirePositional(args, 0, 'action');
 	if (action === 'control') return controlCommand(args);
+	if (action === 'region' || action === 'regions') return regionCommand(args);
 	if (action === 'init') return initCommand(args);
 	if (action === 'preflight') return preflightCommand(args);
 	if (action === 'drill' && (args.boolean('all') || args.string('resource') !== undefined || isCatalogueAction(args.positionals[1])))
@@ -291,6 +318,64 @@ async function standbyEnrolCommand(args: ReturnType<typeof parseArgs>, openPath:
 			`Next: set YOAL_CONTROL_ROLE=standby and YOAL_FEATURE_CONTROL_STANDBY=1, then start yoal-control-plane. Promotion is refused until ${join(dataDir, 'ha-control-enrolment.json')} exists.`,
 		].join('\n'),
 	);
+}
+
+/** `yoal ha region [status]` and `yoal ha region promote <region>` (HA-PLAN H26, W13). */
+async function regionCommand(args: ReturnType<typeof parseArgs>): Promise<void> {
+	const sub = args.positionals[1] ?? 'status';
+	const json = args.boolean('json');
+	const client = await authenticatedClient();
+	if (sub === 'status') {
+		if (args.positionals.length > 2) throw new UsageError(usage);
+		const { view, raw } = await client.getRegions();
+		if (json) printJson(raw);
+		else console.log(formatRegions(view));
+		return;
+	}
+	if (sub !== 'promote') throw new UsageError(`Unknown region action "${sub}".\n\n${usage}`);
+	const region = requirePositional(args, 2, 'region');
+	if (args.positionals.length > 3) throw new UsageError(usage);
+	const confirm = args.string('confirm');
+	if (confirm === undefined) {
+		for (const flag of ['plan-hash', 'reason'] as const)
+			if (args.string(flag) !== undefined) throw new UsageError(`--${flag} needs --confirm ${region}.`);
+		const { result, raw } = await client.promoteRegion(region, {});
+		if (json) return printJson(raw);
+		if ('id' in result) {
+			console.log(`A promotion to ${region} is already open:\n${formatRegionPromotion(result)}\n\nResume it with --confirm ${region} --plan-hash ${result.planHash} --accept-data-loss --reason <text>.`);
+			return;
+		}
+		console.log(
+			[
+				formatRegionPlan(result),
+				'',
+				'Nothing has changed. To promote, run this on the control plane in that region:',
+				`  yoal ha region promote ${region} --confirm ${region} --plan-hash ${result.planHash} --accept-data-loss --reason "<why>"`,
+			].join('\n'),
+		);
+		return;
+	}
+	const planHash = args.string('plan-hash');
+	const reason = args.string('reason');
+	if (!planHash) throw new UsageError('Missing --plan-hash: run `yoal ha region promote <region>` first and copy the hash it prints.');
+	if (!args.boolean('accept-data-loss')) throw new UsageError('A region promotion loses writes after the last replicated one; pass --accept-data-loss.');
+	if (!reason) throw new UsageError('Missing --reason: it is recorded in the audit log.');
+	const { result, raw } = await client.promoteRegion(region, {
+		confirm,
+		planHash,
+		acceptDataLoss: true,
+		reason,
+		...(args.boolean('break-glass') ? { breakGlass: true } : {}),
+	});
+	if (json) return printJson(raw);
+	if (!('id' in result)) {
+		console.log(formatRegionPlan(result));
+		return;
+	}
+	console.log(formatRegionPromotion(result));
+	if (result.stage === 'failed') process.exitCode = 1;
+	else if (result.stage !== 'completed')
+		console.log(`\nThe promotion continues on its own as each database finishes. Follow it with \`yoal ha region\`.`);
 }
 
 /** `yoal ha drill` (D235): node offline drills. */

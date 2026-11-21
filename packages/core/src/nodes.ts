@@ -53,8 +53,11 @@ import {
 	OFFLINE_DRILL_CAPABILITY,
 	WG_SUBNETS_CAPABILITY,
 	machineSubnetFor,
+	DEFAULT_REGION,
 	regionOf,
+	resolvedSpread,
 	zoneRegionIssue,
+	type ReplicaSpread,
 } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, UnauthorizedError, ValidationError } from './errors.ts';
@@ -110,6 +113,8 @@ export interface NodeView {
 	zone: string;
 	/** The region the zone belongs to (HA-PLAN H26); `default` unless an operator named one. */
 	region: string;
+	/** Set only by a forced region change: what it affected (HA-PLAN H26). */
+	warnings?: string[];
 	/** What the node may run; derived from mode/can_build when roles_json is null. */
 	roles: NodeRole[];
 	/** Operator labels. */
@@ -885,7 +890,7 @@ export class NodeService {
 		return this.view({ ...node, ...changes });
 	}
 
-	update(principal: Principal, nodeId: string, input: NodeUpdate): NodeView {
+	update(principal: Principal, nodeId: string, input: NodeUpdate, options: { force?: boolean } = {}): NodeView {
 		this.assertPlatformAdmin(principal);
 		const reservedLabel = Object.keys(input.labels ?? {}).find((key) => key.startsWith('yoal.io/'));
 		if (reservedLabel)
@@ -931,6 +936,23 @@ export class NodeService {
 			);
 			if (issue) throw new ValidationError(issue);
 		}
+		// W13 review: a node's region is what keeps `sync`, automatic promotion and `spread: region`
+		// inside a region, so it does not change under a database member, a region-spread copy or an
+		// open region promotion, unless a platform admin forces it (audited, with what it affects).
+		let regionAffected: string[] = [];
+		if (changes.region !== undefined) {
+			regionAffected = this.regionChangeBlockers(node.id);
+			// Returning to `default` is always allowed (the documented way back, Wave 5 decision);
+			// it is audited with what it affects, like a forced change.
+			if (regionAffected.length > 0 && changes.region !== DEFAULT_REGION) {
+				if (!options.force)
+					throw new ConflictError(
+						`${node.name} cannot move to region "${changes.region}": ${regionAffected.join('; ')}. Move those first, or force it as a platform admin if you accept the effect on each.`,
+					);
+				if (!this.ctx.platformIam.canAdminister(principal))
+					throw new CoreError('forbidden', 'Forcing a region change needs a platform admin.', 403);
+			}
+		}
 		if (patch.roles !== undefined) {
 			const next = [...new Set(patch.roles)] as NodeRole[];
 			const removed = rolesFor(node).filter((role) => !next.includes(role));
@@ -974,15 +996,54 @@ export class NodeService {
 			action: 'node.update',
 			resource: 'node',
 			resourceId: nodeId,
-			args: changes,
+			args: regionAffected.length > 0 ? { ...changes, force: options.force === true, affected: regionAffected } : changes,
 			result: 'ok',
 		});
-		// Address, slice and storage changes all reach agents through desired state.
+		// Address, slice and storage changes all reach agents through desired state. A region change
+		// re-renders every node's member policy too (`membersDesired` is per node, H26).
 		this.bump();
 		// Removing the ingress role takes the key away with the payload, but not from the machine:
 		// every ACME certificate is reissued (HA-PLAN H20, CLUSTERING §7.3 "Key security").
 		if (removedRoles.includes('ingress')) this.ctx.certificates.onIngressRemoved(nodeId);
-		return this.view({ ...node, ...changes, updatedAt: now });
+		const view = this.view({ ...node, ...changes, updatedAt: now });
+		return regionAffected.length > 0 ? { ...view, warnings: regionAffected.map((item) => `Moved while ${item.startsWith('a region') ? item : `it ${item}`}.`) } : view;
+	}
+
+	/**
+	 * Why this node's region must not change now (HA-PLAN H26): the database members it holds, the
+	 * `spread: region` copies on it, and an open region promotion. Empty when it may.
+	 */
+	regionChangeBlockers(nodeId: string): string[] {
+		const out: string[] = [];
+		const open = this.ctx.sqlite.query<{ to_region: string }, []>('SELECT to_region FROM region_promotions WHERE finished_at IS NULL LIMIT 1').get();
+		if (open) out.push(`a region promotion to ${open.to_region} is open`);
+		const members = this.ctx.sqlite
+			.query<{ name: string }, [string, string]>(
+				`SELECT name FROM databases WHERE deleted_at IS NULL AND (node_id = ?
+				   OR id IN (SELECT database_id FROM database_replicas WHERE node_id = ? AND removing_at IS NULL)) ORDER BY name`,
+			)
+			.all(nodeId, nodeId)
+			.map((row) => row.name);
+		if (members.length) out.push(`holds database members (${members.join(', ')})`);
+		const clusterSpread = this.ctx.cluster.get().replicas.spread;
+		const spread = this.ctx.sqlite
+			.query<{ slug: string; spec: string; placement: string | null }, [string, string]>(
+				`SELECT DISTINCT p.slug AS slug, w.spec_json AS spec, p.placement_json AS placement FROM workloads w
+				   JOIN projects p ON p.id = w.project_id AND p.deleted_at IS NULL
+				  WHERE w.node_id = ? OR EXISTS (SELECT 1 FROM workload_replicas r WHERE r.workload_id = w.id AND r.node_id = ?)`,
+			)
+			.all(nodeId, nodeId)
+			.filter(
+				(row) =>
+					resolvedSpread(
+						parseJson<{ placement?: { spread?: ReplicaSpread } } | null>(row.spec, null)?.placement,
+						parseJson<{ spread?: ReplicaSpread } | null>(row.placement, null),
+						clusterSpread,
+					) === 'region',
+			)
+			.map((row) => row.slug);
+		if (spread.length) out.push(`holds spread: region copies (${[...new Set(spread)].sort().join(', ')})`);
+		return out;
 	}
 
 	/** Refuse dropping a role while resources placed under it still run on the node. */

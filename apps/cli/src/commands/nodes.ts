@@ -15,7 +15,7 @@ import {
 	type RolloutStrategy,
 	type RolloutView,
 } from '../node-rollouts.ts';
-import { printJson } from '../output.ts';
+import { printJson, renderTable } from '../output.ts';
 import { authenticatedClient } from './common.ts';
 import { confirmOrRefuse } from './run-operation.ts';
 
@@ -32,6 +32,9 @@ const flags: FlagSpec = {
 	node: { type: 'string', multiple: true },
 	'skip-failed': { type: 'boolean' },
 	limit: { type: 'string' },
+	zone: { type: 'string' },
+	region: { type: 'string' },
+	force: { type: 'boolean' },
 	name: { type: 'string' },
 	roles: { type: 'string' },
 	help: { type: 'boolean', short: 'h' },
@@ -77,10 +80,18 @@ async function enrolCommand(args: ParsedArgs): Promise<void> {
 
 const usage = `Usage: yoal nodes <action> [options]
 
-Update worker nodes to the control plane's version (platform admin). Starting, resuming and
-cancelling need a dashboard session: an API key can plan and read, and gets 403 for the rest.
+List nodes, set a node's zone or region, and update worker nodes to the control plane's version
+(platform admin). Starting, resuming and cancelling a rollout need a dashboard session: an API key
+can plan and read, and gets 403 for the rest.
 
 Actions:
+  list [--json]                      Every node with its status, zone, region and roles
+  set <node> [--zone <zone>] [--region <region>] [--force]
+                                     Change a node's zone or region. A zone belongs to exactly one
+                                     region; a region other than default needs YOAL_FEATURE_REGIONS.
+                                     A region change is refused while the node holds database
+                                     members or spread: region copies, or a region promotion is
+                                     open; --force overrides that (platform admin, audited)
   enrol [--name <name>] [--roles <role,...>]
                                      A single-use join token, and the node.sh line to run with it
   update <node>                      Install the control plane's release on one node (id or name)
@@ -120,9 +131,47 @@ export async function nodesCommand(argv: string[]): Promise<void> {
 	const action = requirePositional(args, 0, 'action');
 	if (action === 'enrol' || action === 'enroll') return enrolCommand(args);
 	const client = await authenticatedClient();
+	if (action === 'list' || action === 'ls') return listNodes(client, args);
+	if (action === 'set') return setNode(client, args);
 	if (action === 'update') return updateOne(client, args);
 	if (action === 'rollout' || action === 'rollouts') return rollout(client, args);
 	throw new UsageError(`Unknown nodes action "${action}".\n\n${usage}`);
+}
+
+async function listNodes(client: ApiClient, args: ParsedArgs): Promise<void> {
+	const { nodes, raw } = await client.listNodes();
+	if (args.boolean('json')) return printJson(raw);
+	if (nodes.length === 0) {
+		console.log('No nodes.');
+		return;
+	}
+	console.log(
+		renderTable(
+			['NODE', 'STATUS', 'ZONE', 'REGION', 'ROLES', 'AGENT'],
+			nodes.map((node) => [node.name, node.status ?? '-', node.zone ?? '-', node.region ?? 'default', (node.roles ?? []).join(', '), node.agentVersion ?? '-']),
+		),
+	);
+}
+
+/** `yoal nodes set <node> --zone <z> --region <r>` (HA-PLAN H26). */
+async function setNode(client: ApiClient, args: ParsedArgs): Promise<void> {
+	const ref = requirePositional(args, 1, 'node');
+	const zone = args.string('zone');
+	const region = args.string('region');
+	if (zone === undefined && region === undefined) throw new UsageError('Pass --zone, --region or both.');
+	const { nodes } = await client.listNodes();
+	const node = resolveNode(nodes, ref);
+	const { node: updated, raw } = await client.updateNodeSettings(
+		node.id,
+		{
+			...(zone !== undefined ? { zone } : {}),
+			...(region !== undefined ? { region } : {}),
+		},
+		{ force: args.boolean('force') },
+	);
+	if (args.boolean('json')) return printJson(raw);
+	for (const warning of updated.warnings ?? []) console.error(`Warning: ${warning}`);
+	console.log(`${updated.name ?? node.name}: zone ${updated.zone ?? zone ?? '-'}, region ${updated.region ?? region ?? 'default'}.`);
 }
 
 async function updateOne(client: ApiClient, args: ParsedArgs): Promise<void> {

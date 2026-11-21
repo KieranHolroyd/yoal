@@ -28,6 +28,8 @@ export interface PlacementCandidate {
 	reservedDiskBytes?: number;
 	/** Failure domain (CLUSTERING §3.2). */
 	zone?: string;
+	/** The region the zone belongs to (HA-PLAN H26); absent is `default`. */
+	region?: string;
 	/** Roles the node may run, already derived from mode/can_build when unset. */
 	roles?: NodeRole[];
 	/** Operator labels plus derived `yoal.io/*` facts. */

@@ -60,6 +60,7 @@ Creates a database. With `--project`, it is attached to that project at once and
 | `--disk <where>` | Where the data lives: `system`, `fast`, `bulk` or a disk name. Default: the setting in **Settings → Storage**. |
 | `--pooler`, `--no-pooler` | Run a PgBouncer sidecar and inject `<PREFIX>_POOL_URL`. PostgreSQL only. On by default. |
 | `--extension <name>` | Enable an allowlisted extension, such as `pg_trgm` or `uuid-ossp`. Repeat the flag for more. PostgreSQL only. See [extensions](/data/databases#extensions). |
+| `--standby-region <name>` | Keep an async replica in this region that is never promoted automatically. PostgreSQL only; needs regions. See [regions](/self-hosting/regions#keep-a-database-standby-in-another-region). |
 
 | Engine | Versions | Default version | Default prefix | Default memory |
 | --- | --- | --- | --- | --- |
@@ -106,6 +107,8 @@ New memory, CPU and storage limits apply the next time the database restarts, so
 | `--storage <size>` | New storage budget. |
 | `--pooler`, `--no-pooler` | Turn the PgBouncer sidecar on or off. PostgreSQL only. |
 | `--extension <name>` | Enable another allowlisted extension. Repeatable. PostgreSQL only. Extensions already enabled are kept; this never drops one. |
+| `--standby-region <name>` | Add an async replica in this region that is never promoted automatically. PostgreSQL only; needs regions. |
+| `--no-standby-region` | Clear the standby region. The replica stays; remove it with `db replicas remove`. |
 | `--version <version>` | Move to a newer version in place, for MySQL, MariaDB, Valkey, Redis and ClickHouse. Asks for confirmation, because there is no way back. A PostgreSQL major goes through [`db upgrade`](#db-upgrade); MongoDB needs a backup and restore. |
 | `-y`, `--yes` | Skip the `--version` confirmation. Required with `--version` off a terminal. |
 

@@ -34,15 +34,13 @@ import type { CoreContext } from './context.ts';
 import { CoreError } from './errors.ts';
 import { DEFAULT_CONTROL_LEASE_POLICY } from './ha-lease.ts';
 import { isConditionalStore } from './ha-control-arbiter.ts';
-import { haFindingChecks, haFindings } from './ha-preflight.ts';
+import { haFindingChecks, haFindings, regionChecks } from './ha-preflight.ts';
 import { probeConditionalWrites, type ConditionalWriteSupport } from './object-store/probe.ts';
 import { rolesFor } from './nodes.ts';
 import { parseJson } from './util.ts';
 
 /** Check ids the W12 findings already cover. */
 const W12_CHECKS: ReadonlySet<HaCheckId> = new Set(['platform-store', 'registry-storage', 'identity', 'mail', 'telemetry-spool']);
-/** Check ids built by another lane: lane A owns `regions` (the foundation's REGIONS-off warning stays here). */
-const OTHER_LANE_CHECKS: ReadonlySet<HaCheckId> = new Set(['regions']);
 
 const TITLES: Readonly<Record<HaCheckId, string>> = {
 	nodes: 'Nodes and roles',
@@ -147,8 +145,8 @@ const editNode = (node: { id: string; name: string }, field: string, value: stri
 	`Nodes → ${node.name} → Edit node → ${field} (PATCH /api/v1/nodes/${node.id} {"${field.toLowerCase()}": ${value}})`;
 
 /**
- * `yoal ha preflight` and `yoal doctor` (HA-PLAN H27, W14). Wave 5 lane B; lane A builds the
- * `regions` check.
+ * `yoal ha preflight` and `yoal doctor` (HA-PLAN H27, W14). Wave 5 lane B; the `regions` check
+ * is lane A's (`regionChecks`, W13).
  *
  * `preflight` returns every check id in the `HaCheck` shape, each from real state:
  * - nodes, roles, zones and capabilities from the `nodes` rows the heartbeats keep;
@@ -347,10 +345,8 @@ export class HaDoctorService {
 			...haOnly('backups', () => this.#backupsCheck()),
 			...haOnly('headroom', () => this.#headroomCheck()),
 		];
-		// Lane A builds `regions`; until it does, say so honestly, beside the foundation's warning.
-		for (const id of OTHER_LANE_CHECKS)
-			checks.push({ id, title: TITLES[id], status: 'skip', evidence: ['Not checked yet: this check is built by Wave 5 lane A.'], fix: null, subject: null });
-		checks.push(...this.#regionWarnings());
+		// Lane A (W13): the `regions` check, including region values stored while REGIONS is off.
+		checks.push(...regionChecks(this.ctx, profile));
 		const findings = haFindingChecks(haFindings(this.ctx, profile));
 		checks.push(...findings);
 		// A W12 check with no finding ran and found nothing to report.
@@ -990,36 +986,4 @@ export class HaDoctorService {
 		return { id: 'flags-consistent', title, status: 'pass', evidence: [`${hosts.length} control-plane host(s) agree.`], fix: null, subject: null };
 	}
 
-	/** Region values stored while `REGIONS` is off: placed as zone, never an error; a warning here. */
-	#regionWarnings(): HaCheck[] {
-		if (featureEnabled(this.ctx.config, 'REGIONS')) return [];
-		const evidence: string[] = [];
-		if (this.ctx.cluster.get().replicas.spread === 'region') evidence.push('cluster replicas.spread is region');
-		for (const row of this.ctx.sqlite
-			.query<{ slug: string; placement: string | null; workload: string | null }, []>(
-				'SELECT slug, placement_json AS placement, workload_json AS workload FROM projects WHERE deleted_at IS NULL ORDER BY slug',
-			)
-			.all()) {
-			if (parseJson<{ spread?: string } | null>(row.placement, null)?.spread === 'region') evidence.push(`project ${row.slug} placementSpec.spread is region`);
-			if (parseJson<{ placement?: { spread?: string } } | null>(row.workload, null)?.placement?.spread === 'region')
-				evidence.push(`project ${row.slug} placement.spread is region`);
-		}
-		for (const row of this.ctx.sqlite.query<{ name: string; region: string }, []>("SELECT name, region FROM nodes WHERE region <> 'default' ORDER BY name").all())
-			evidence.push(`node ${row.name} is in region ${row.region}`);
-		for (const row of this.ctx.sqlite
-			.query<{ name: string; region: string }, []>('SELECT name, standby_region AS region FROM databases WHERE standby_region IS NOT NULL AND deleted_at IS NULL ORDER BY name')
-			.all())
-			evidence.push(`database ${row.name} has standby region ${row.region}`);
-		if (evidence.length === 0) return [];
-		return [
-			{
-				id: 'regions',
-				title: 'Region values are stored while regions are off',
-				status: 'warn',
-				evidence: [...evidence, 'A spread: region is placed as zone while REGIONS is off.'],
-				fix: { kind: 'env', value: 'YOAL_FEATURE_REGIONS=1, or put each value back to node/zone and the default region.' },
-				subject: null,
-			},
-		];
-	}
 }
