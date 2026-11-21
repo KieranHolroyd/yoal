@@ -136,7 +136,13 @@ import {
 	logDrainLevels,
 	logDrainSources,
 	type LogDrainView,
+	haCertificateSources,
+	haInitSteeringDrivers,
+	haProfiles,
 } from '@yoal/contracts';
+
+/** The steering drivers `ha init` offers (never `direct`). */
+type HaInitSteering = (typeof haInitSteeringDrivers)[number];
 import { MAX_DURATION_SECONDS, featureEnabled, parseAuditTime, parseManifestYaml } from '@yoal/core';
 import { authSecret } from './config';
 import { core } from './core';
@@ -5965,6 +5971,74 @@ function buildServer(
 			scopeChallenge: requires('project:read'),
 		},
 		async () => run(() => ({ ...core.failover.status(principal), haTargets: core.slos.targets(principal) })),
+	);
+
+	tool(
+		'get_ha_init_plan',
+		{
+			title: 'Get HA init plan',
+			description:
+				'Read what `yoal ha init --profile <single|ha|ha-dr>` would do (read-only): the YOAL_FEATURE_* lines to put in yoal.env on every ' +
+				'control-plane host, the cluster settings it sets and their current values, the questions (steering, certificate source, ' +
+				'standby region) with defaults, the preflight, and every reason applying it would be refused now. ' +
+				'Requires a platform operator or admin role. MCP never applies a profile; a platform admin applies it from the dashboard or CLI.',
+			inputSchema: z.object({
+				profile: z.enum(haProfiles).default('ha').describe('The profile to plan'),
+				steering: z.enum(haInitSteeringDrivers as [HaInitSteering, ...HaInitSteering[]]).optional().describe('Steering driver answer'),
+				certificates: z.enum(haCertificateSources).optional().describe('Certificate source answer'),
+				standbyRegion: z.string().max(64).optional().describe('ha-dr only: the standby region'),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async ({ profile, steering, certificates, standbyRegion }) =>
+			run(() =>
+				core.haInit.plan(principal, {
+					profile,
+					answers: {
+						...(steering ? { steering } : {}),
+						...(certificates ? { certificates } : {}),
+						...(standbyRegion ? { standbyRegion } : {}),
+					},
+				}),
+			),
+	);
+
+	tool(
+		'get_ha_checks',
+		{
+			title: 'Get HA checks',
+			description:
+				'Run the HA preflight (`yoal ha preflight`) or the doctor (`yoal doctor`), read-only: every check with pass, warn, fail or skip, ' +
+				'what was observed, and the exact fix (a command, a setting, a yoal.env line or a manual step). The preflight checks a profile ' +
+				'before `ha init`; the doctor checks the running install and each node (heartbeat, Caddy, drift, agent version, disk). ' +
+				'The arbiter probe result is the last one the API ran (at most a minute old); a never-probed arbiter is a skip. ' +
+				'Requires a platform operator or admin role.',
+			inputSchema: z.object({
+				mode: z.enum(['preflight', 'doctor']).default('preflight'),
+				profile: z.enum(haProfiles).optional().describe('Preflight only; default the install’s own profile'),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async ({ mode, profile }) => run(() => (mode === 'doctor' ? core.haDoctor.doctor(principal) : core.haDoctor.preflight(principal, profile))),
+	);
+
+	tool(
+		'list_ha_drills',
+		{
+			title: 'List HA drills',
+			description:
+				'Read the drill catalogue and recent results (read-only): every scenario (`yoal ha drill <scenario>`), whether it runs on a fleet ' +
+				'or only in the lab and why, its confirmation, flags, minimum HA level and bound; then recent runs, newest first, with the measured ' +
+				'RTO, lost commits, failed requests or refusal. Requires a platform operator or admin role. MCP never starts a drill.',
+			inputSchema: z.object({
+				limit: z.number().int().min(1).max(200).default(20).describe('Recent runs to list'),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('project:read'),
+		},
+		async ({ limit }) => run(() => ({ scenarios: core.haDrills.catalogue(principal).scenarios, runs: core.haDrills.list(principal, limit) })),
 	);
 
 	tool(

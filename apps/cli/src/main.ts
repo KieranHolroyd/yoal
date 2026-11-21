@@ -16,6 +16,7 @@ import { functionCommand } from './commands/function.ts';
 import { jobsCommand } from './commands/jobs.ts';
 import { repoCommand, runOrPipelineCommand, secretCommand, varCommand, workflowCommand } from './commands/pipelines.ts';
 import { haCommand } from './commands/ha.ts';
+import { doctorCommand } from './commands/doctor.ts';
 import { fleetCommand } from './commands/fleet.ts';
 import { nodesCommand } from './commands/nodes.ts';
 import { scaleCommand } from './commands/scale.ts';
@@ -157,6 +158,7 @@ const commands: Record<string, (argv: string[]) => Promise<void>> = {
 	volume: volumeCommand,
 	volumes: volumeCommand,
 	ha: haCommand,
+	doctor: doctorCommand,
 	fleet: fleetCommand,
 	nodes: nodesCommand,
 	node: nodesCommand,
@@ -231,6 +233,10 @@ Commands:
   import <file> [--apply] [--secrets <f>]   Recreate an export's configuration here (create-only; plan by default)
   volume [list|show|snapshot|restore|…]      Persistent app volumes and their snapshots (\`yoal volume --help\`)
   ha status                                  Failover controller: lease, lost nodes, recent failovers (platform admin)
+  ha init --profile <ha|ha-dr|single>        Turn HA on or off as one profile, after its preflight (platform admin)
+  ha preflight [--profile <p>]               Every HA check with the exact fix; changes nothing
+  ha drill <scenario>|--all                  Run catalogue drills on named resources; measure RTO and RPO
+  doctor                                     Check the running install and every node (platform operator)
   ha control [status|promote|enrol]          Control-plane standby: roles, epochs, promotion, enrolment (platform admin)
   scale <project> [copies] [--auto --min --max --cpu]  Run more or fewer copies, or let Yoal decide (\`yoal scale --help\`)
   fleet [status|rebalance|move|links|link-test]  Node utilisation, rebalancing, and latency/throughput between nodes (\`yoal fleet --help\`)
