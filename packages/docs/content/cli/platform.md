@@ -11,8 +11,8 @@ Most of these commands need a **platform admin**, an install-wide role separate 
 
 | Commands | Who can run them |
 | --- | --- |
-| `ha status`, `ha preflight`, `ha init` (until it applies), `ha drill`, `doctor`, `ha attachments`, `ha migrate attachments` (without `--apply`), `ha ca`, `fleet status`, `fleet links`, `fleet rebalance` (preview), `nodes rollout plan`, `status` and `list`, `upgrade plan` | A platform admin, with any credential, including the API key the CLI uses. |
-| `ha init` when it applies, `ha migrate attachments --apply`, `ha ca rotate`, `fleet rebalance --apply`, `fleet link-test`, `nodes enrol`, `nodes update`, `nodes rollout start`, `resume` and `cancel` | A platform admin signed in to the dashboard. By default an API key gets `403` for these, even a platform admin's; make the change from the dashboard instead. |
+| `ha status`, `ha preflight`, `ha init` (until it applies), `ha drill` for scenarios that take nothing down, `doctor`, `ha attachments`, `ha migrate attachments` (without `--apply`), `ha ca`, `fleet status`, `fleet links`, `fleet rebalance` (preview), `nodes rollout plan`, `status` and `list`, `upgrade plan` | A platform admin, with any credential, including the API key the CLI uses. |
+| `ha init` when it applies, `ha drill` for a scenario that takes something down (such as `node-offline`), `ha migrate attachments --apply`, `ha ca rotate`, `fleet rebalance --apply`, `fleet link-test`, `nodes enrol`, `nodes update`, `nodes rollout start`, `resume` and `cancel` | A platform admin signed in to the dashboard. By default an API key gets `403` for these, even a platform admin's; make the change from the dashboard instead. |
 | `fleet move` | Anyone with `project:update` on the project. `--status` needs read access to the project. |
 | `upgrade apply`, `upgrade rollback` | Root on the Yoal host. No API credential can do this. |
 
@@ -96,7 +96,7 @@ yoal ha preflight --profile ha-dr --json | jq '.checks[] | select(.status == "fa
 Injects one fault on one resource you name, measures how long recovery takes and how much data was lost, and records the result. `yoal ha drill catalogue` lists every scenario: what it is run against, whether it runs on a fleet or only in a test lab, how it is confirmed, the lowest HA level it accepts, and the bound it is judged by. `yoal ha drill runs` lists recent results, and `yoal ha drill show <id>` shows one.
 
 - A drill never picks a resource for you: name it with `--resource`.
-- A scenario that takes something down for real (such as `node-offline`) needs the resource's name typed back, with `--confirm <name>` or at the prompt. The database failover drill asks for a yes and promotes a disposable copy you name with `--drill-database`, never the database itself.
+- A scenario that takes something down for real (such as `node-offline`) needs a platform admin signed in to the dashboard, and the resource's name typed back with `--confirm <name>` or at the prompt. The node that hosts the control plane also needs `--include-control`. The database failover drill asks for a yes and promotes a disposable copy you name with `--drill-database`, never the database itself.
 - A drill is refused on a resource whose declared HA level is below the scenario's minimum, and on a resource that is already below its own declared level.
 - Scenarios that need a fault only a test lab can inject (killing a process, a network partition, a skewed clock, a full disk) are refused with the reason. So are `zone-offline`, `control-plane-failover` and `region-failover`.
 - `release-readiness-fail` and `release-command-fail` are recorded as skipped: there is no way yet to run them on a live project.
@@ -109,6 +109,7 @@ Injects one fault on one resource you name, measures how long recovery takes and
 | `--confirm <name>` | The resource's name, for a scenario that takes it down. |
 | `--minutes <n>` | How long a node stays dark, from 1 to 30. The default is 5. |
 | `--drill-database <copy>` | The disposable copy a database failover drill promotes. |
+| `--include-control` | Allow the node that hosts the control plane. |
 | `--node`, `--ingress-node`, `--database`, `--project`, `--target <kind>:<resource>` | With `--all`: the resources to drill. Repeat each as needed. |
 | `--yes` | Confirm without a prompt. With `--all`, include the scenarios that need a confirmation. |
 | `--json` | Print the raw response. |
@@ -116,10 +117,11 @@ Injects one fault on one resource you name, measures how long recovery takes and
 ```sh
 yoal ha drill catalogue
 yoal ha drill node-offline --resource worker-b --confirm worker-b
+yoal ha drill node-offline --resource edge --confirm edge --include-control
 yoal ha drill --all --database main:main-copy --project shop --yes
 ```
 
-`yoal ha drill node-offline` without `--resource` is the older node offline drill, which can pick an eligible node at random; see [disaster drills](/self-hosting/clustering#disaster-drills).
+`yoal ha drill node-offline` without `--resource` is the older node offline drill, which can pick an eligible node at random; it needs `--confirm` with the node's name, or `random`. See [disaster drills](/self-hosting/clustering#disaster-drills). A database drill names a database in your own organisation.
 
 ### ha status
 

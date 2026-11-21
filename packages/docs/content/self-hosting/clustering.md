@@ -208,8 +208,8 @@ yoal ha drill --all --database main:main-copy --project shop --yes
 A disaster drill takes one node off the control plane for a few minutes, so you can see the failover setup above work before a real outage. Start one from **Settings → High availability → Disaster drill**, or from the CLI:
 
 ```sh
-yoal ha drill node-offline --wait               # a random eligible node, 5 minutes, then the report
-yoal ha drill node-offline --node worker-2 --minutes 10
+yoal ha drill node-offline --confirm random --wait          # a random eligible node, 5 minutes, then the report
+yoal ha drill node-offline --node worker-2 --confirm worker-2 --minutes 10
 yoal ha drill list                              # which nodes can be drilled, and recent results
 yoal ha drill cancel drl_…                      # end it early
 ```
@@ -225,7 +225,7 @@ Rules:
 - The last online node is never drilled.
 - A drill fails if the node heartbeats in the middle of it (for example, its agent restarted) or does not come back within 3 minutes of the end.
 
-Drills need a platform admin. The REST endpoints are `GET` and `POST /api/v1/ha/drills`, `GET /api/v1/ha/drills/{id}` and `POST /api/v1/ha/drills/{id}/cancel`.
+Starting a drill needs a platform admin signed in to the dashboard, and the node's name typed back (or `random` for a random pick): the dashboard asks for it, the CLI takes `--confirm` or asks, and the API refuses a start without it (`confirm` in the request body). The REST endpoints are `GET` and `POST /api/v1/ha/drills`, `GET /api/v1/ha/drills/{id}` and `POST /api/v1/ha/drills/{id}/cancel`.
 
 The same drill is also the `node-offline` scenario of [`yoal ha drill`](/cli/platform#ha-drill), which always names the node and needs its name typed back.
 

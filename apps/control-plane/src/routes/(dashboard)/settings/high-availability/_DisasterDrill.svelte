@@ -79,7 +79,10 @@
 			confirmLabel: 'Start drill',
 			tone: 'danger',
 			action: '?/startDrill',
+			// The server checks it too: the node's name, or "random" for a random pick.
+			typeToConfirm: node ? node.nodeName : 'random',
 			fields: {
+				confirm: node ? node.nodeName : 'random',
 				node: target,
 				durationSeconds: String(Number(minutes) * 60),
 				includeControlNode: includeControl ? 'true' : ''

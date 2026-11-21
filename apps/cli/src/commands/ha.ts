@@ -90,18 +90,21 @@ Actions:
       On the standby: unseal the bundle, verify the master-key fingerprint and config digest, write
       master.key 0400 and the allowlisted yoal.env 0600, and write the enrolment record 0600.
       Promotion is refused on a host without that record.
-  drill node-offline [--node <id|name>] [--minutes <n>] [--include-control] [--wait] [--json]
+  drill node-offline [--node <id|name>] [--confirm <name|random>] [--minutes <n>] [--include-control]
+                     [--wait] [--json]
       Disaster drill: take a node off the control plane for a while (default 5 min, 1–30) so the
       failover controller, alerts and steering react as to a real loss. Without --node a random
       eligible node is picked; the control-plane host only with --include-control. The node comes
       back by itself. --wait follows it and prints the report: detection time, recovery time and
       every failover action. Ctrl-C while waiting ends the drill early.
   drill <scenario> --resource <id|name> [--confirm <name>] [--yes] [--minutes <n>]
-                [--drill-database <copy>] [--json]
+                [--drill-database <copy>] [--include-control] [--json]
       One catalogue drill on one named resource: it injects the fault, measures RTO and RPO, and
       records the result. A destructive scenario needs the resource's name typed back (--confirm
       <name>, or the prompt). Refused on a resource below the scenario's HA level, and for a
-      scenario that runs in the lab only. \`yoal ha drill catalogue\` lists them.
+      scenario that runs in the lab only. The node that hosts the control plane also needs
+      --include-control. Destructive scenarios need a platform admin signed in to the dashboard.
+      \`yoal ha drill catalogue\` lists them.
   drill --all [--node <n>]... [--ingress-node <n>]... [--database <db>[:<copy>]]...
               [--project <slug>]... [--target <kind>:<resource>]... [--yes] [--json]
       Every scenario that is safe on a fleet (not destructive, no typed name) against the resources
@@ -293,8 +296,9 @@ async function standbyEnrolCommand(args: ReturnType<typeof parseArgs>, openPath:
 /** `yoal ha drill` (D235): node offline drills. */
 async function drillCommand(args: ReturnType<typeof parseArgs>): Promise<void> {
 	const sub = requirePositional(args, 1, 'drill action');
-	const client = await authenticatedClient();
 	const json = args.boolean('json');
+	if (sub === 'node-offline') return nodeOfflineDrill(args, json);
+	const client = await authenticatedClient();
 	if (sub === 'list') {
 		const { view, raw } = await client.listDrills();
 		if (json) printJson(raw);
@@ -314,13 +318,28 @@ async function drillCommand(args: ReturnType<typeof parseArgs>): Promise<void> {
 		else console.log(sub === 'cancel' ? `Ended the drill on ${drill.nodeName}; it is back within about 5 s.` : formatDrill(drill));
 		return;
 	}
-	if (sub !== 'node-offline') throw new UsageError(`Unknown drill action "${sub}". Name the resource with --resource, or see yoal ha drill catalogue.\n\n${usage}`);
+	throw new UsageError(`Unknown drill action "${sub}". Name the resource with --resource, or see yoal ha drill catalogue.\n\n${usage}`);
+}
+
+/** `yoal ha drill node-offline` (D235): the server needs the typed confirmation too. */
+async function nodeOfflineDrill(args: ReturnType<typeof parseArgs>, json: boolean): Promise<void> {
 
 	const minutesFlag = args.string('minutes');
 	const minutes = minutesFlag === undefined ? 5 : Number(minutesFlag);
 	if (!Number.isInteger(minutes) || minutes < 1 || minutes > 30) throw new UsageError('--minutes must be a whole number from 1 to 30.');
 	const node = args.string('node');
+	// The server needs the node's name typed back, or "random" for a random pick (HA-PLAN §10).
+	const expected = node ?? 'random';
+	let confirm = args.string('confirm');
+	if (!confirm) {
+		if (!process.stdin.isTTY)
+			throw new UsageError(`A node offline drill takes a node dark: pass --confirm ${node ? '<the node\'s name>' : 'random'} to start it.`);
+		confirm = await promptText(`This takes ${node ?? 'a random eligible node'} off the control plane. Type ${node ? 'its name' : '"random"'} to confirm: `);
+	}
+	if (node === undefined && confirm !== expected) throw new UsageError('Not confirmed: type "random" to drill a node picked at random.');
+	const client = await authenticatedClient();
 	let drill = await client.startDrill({
+		confirm,
 		...(node ? { node } : {}),
 		durationSeconds: minutes * 60,
 		includeControlNode: args.boolean('include-control'),
@@ -553,6 +572,7 @@ async function catalogueDrillCommand(args: ReturnType<typeof parseArgs>): Promis
 		...(confirm !== undefined ? { confirm } : {}),
 		...(durationSeconds !== undefined ? { durationSeconds } : {}),
 		...(args.string('drill-database') ? { drillDatabase: args.string('drill-database') } : {}),
+		...(args.boolean('include-control') ? { includeControlNode: true } : {}),
 	});
 	if (json) printJson(run);
 	else console.log(formatDrillRun(run));

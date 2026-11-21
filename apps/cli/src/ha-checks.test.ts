@@ -179,6 +179,9 @@ describe('the ha init, preflight, drill and doctor dispatchers', () => {
 		await expect(haCommand(['drill', '--all', '--target', 'main'])).rejects.toThrow(/kind:resource/);
 		await expect(haCommand(['drill', 'runs', '--limit', '0'])).rejects.toThrow(/--limit/);
 		await expect(doctorCommand(['extra'])).rejects.toThrow(/Usage: yoal doctor/);
+		// The node offline drill needs the typed confirmation, which the server checks too.
+		if (!process.stdin.isTTY) await expect(haCommand(['drill', 'node-offline', '--node', 'a1'])).rejects.toThrow(/--confirm/);
+		await expect(haCommand(['drill', 'node-offline', '--confirm', 'a1'])).rejects.toThrow(/"random"/);
 	});
 
 	test('doctor prints its usage', async () => {

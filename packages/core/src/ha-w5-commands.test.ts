@@ -375,6 +375,7 @@ describe('drills', () => {
 	test('node-offline hands the named node to the D235 drill and records it; the view reads its measurements', async () => {
 		const { core, sqlite, ids } = await fleet('ha');
 		sqlite.run('UPDATE nodes SET capabilities_json = ? ', [JSON.stringify([...CAPS, 'offline-drill'])]);
+		sqlite.run('UPDATE nodes SET roles_json = ? WHERE id = ?', [JSON.stringify(['ingress', 'compute', 'data']), ids.a2!]);
 		const run = await core.haDrills.run(admin, { scenario: 'node-offline', resource: 'a2', confirm: 'a2', durationSeconds: 120 });
 		expect(run).toMatchObject({ scenario: 'node-offline', status: 'running', resource: { kind: 'node', id: ids.a2, name: 'a2' } });
 		const drill = core.nodeDrills.view(admin).running;
@@ -453,5 +454,79 @@ describe('join with --zone and --roles (node.sh, HA-PLAN §8 step 2)', () => {
 		expect(rolesOf(core.nodes.join({ token: worker.token, name: 'c2', roles: ['data'] }).nodeId)).toBe('["data"]');
 		expect(() => core.nodes.createJoinToken(admin, 'c3', { roles: ['router' as never] })).toThrow(/Invalid roles/);
 		expect(sqlite.query<{ roles_json: string | null }, []>("SELECT roles_json FROM node_join_tokens WHERE node_name = 'c2'").get()?.roles_json).toBe('["compute","data"]');
+	});
+});
+
+describe('drill review fixes', () => {
+	const operatorOf = (core: Core) => {
+		core.ctx.platformIam.bind(admin, { userId: 'user_op', roleId: 'platform-operator' });
+		return buildPrincipal({ kind: 'user', userId: 'user_op', orgId: 'org_1', role: 'viewer', platformAdmin: false });
+	};
+
+	test('the control plane’s host is refused without the explicit opt-in, and the refusal names it', async () => {
+		const { core, sqlite } = await fleet('ha');
+		sqlite.run('UPDATE nodes SET capabilities_json = ?', [JSON.stringify([...CAPS, 'offline-drill'])]);
+		await expect(core.haDrills.run(admin, { scenario: 'node-offline', resource: 'a2', confirm: 'a2' })).rejects.toMatchObject({
+			status: 409,
+			message: expect.stringMatching(/a2 hosts the control plane.*includeControlNode/),
+		});
+		expect(core.nodeDrills.view(admin).running).toBeNull();
+		const run = await core.haDrills.run(admin, { scenario: 'node-offline', resource: 'a2', confirm: 'a2', includeControlNode: true });
+		expect(run.status).toBe('running');
+	});
+
+	test('destructive drills need a platform admin; an operator may still run the non-destructive ones', async () => {
+		const { core, sqlite, ids } = await fleet('ha');
+		const operator = operatorOf(core);
+		sqlite.run('UPDATE nodes SET capabilities_json = ?, roles_json = ?', [JSON.stringify([...CAPS, 'offline-drill']), JSON.stringify(['compute', 'data'])]);
+		await expect(core.haDrills.run(operator, { scenario: 'node-offline', resource: 'a2', confirm: 'a2' })).rejects.toMatchObject({
+			status: 403,
+			message: expect.stringContaining('platform admin'),
+		});
+		core.databases.create(admin, { name: 'main', placement: ids.a1! });
+		// Past the permission check: refused on the HA level instead.
+		await expect(core.haDrills.run(operator, { scenario: 'stale-generation-promote', resource: 'main' })).rejects.toMatchObject({ status: 409 });
+		expect(core.haDrills.catalogue(operator).scenarios.length).toBeGreaterThan(0);
+	});
+
+	test('the D235 drill path needs a platform admin and the typed node name (or "random") server-side', async () => {
+		const { core, sqlite, ids } = await fleet('ha');
+		sqlite.run('UPDATE nodes SET capabilities_json = ?, roles_json = ?', [JSON.stringify([...CAPS, 'offline-drill']), JSON.stringify(['compute', 'data'])]);
+		const operator = operatorOf(core);
+		expect(() => core.haDrills.startNodeDrill(operator, { node: 'a2', confirm: 'a2' })).toThrow(expect.objectContaining({ status: 403 }));
+		expect(() => core.haDrills.startNodeDrill(admin, { node: 'a2' })).toThrow(expect.objectContaining({ status: 422, message: expect.stringContaining('type the name "a2"') }));
+		expect(() => core.haDrills.startNodeDrill(admin, { node: ids.a2!, confirm: 'a3' })).toThrow(expect.objectContaining({ status: 422 }));
+		expect(() => core.haDrills.startNodeDrill(admin, {})).toThrow(expect.objectContaining({ status: 422, message: expect.stringContaining('"random"') }));
+		expect(core.haDrills.startNodeDrill(admin, { node: ids.a2!, confirm: 'a2', durationSeconds: 120 }).nodeName).toBe('a2');
+	});
+
+	test('a database drill uses the operator’s own database, never a same-named one in another org, with generation -1', async () => {
+		const { core, ids } = await fleet('ha');
+		const other = buildPrincipal({ kind: 'user', userId: 'user_9', orgId: 'org_2', role: 'owner', platformAdmin: false });
+		const mine = core.databases.create(admin, { name: 'main', placement: ids.a1! });
+		const theirs = core.databases.create(other, { name: 'main', placement: ids.a2! });
+		for (const db of [mine, theirs])
+			core.ctx.sqlite.run(
+				`INSERT INTO database_replicas (id, database_id, node_id, status, slot, primary_generation, replay_lsn, reported_at, created_at, updated_at)
+				 VALUES (?, ?, ?, 'streaming', ?, 0, '0/100', ?, 1, 1)`,
+				[`dbr_${db.id}`, db.id, ids.a3!, `slot_${db.id}`, NOW],
+			);
+		// Both are L2, so only the resolution decides which one is drilled.
+		const levels = core.ctx.topology.resourceLevels.bind(core.ctx.topology);
+		core.ctx.topology.resourceLevels = () => {
+			const real = levels();
+			for (const db of [mine, theirs]) real.databases.set(db.id, { level: 'L2', blockers: [] } as never);
+			return real;
+		};
+		const calls: Array<{ name: string; ifMatch: unknown; org: string }> = [];
+		core.ctx.databaseReplicas.promote = (async (principal: { orgId: string }, name: string, _replica: string, _input: unknown, options: { ifMatch?: unknown }) => {
+			calls.push({ name, ifMatch: options.ifMatch, org: principal.orgId });
+			throw Object.assign(new Error('stale'), { code: 'precondition_failed', status: 412 });
+		}) as never;
+		// The other org's database, by id, is not the operator's to drill.
+		await expect(core.haDrills.run(admin, { scenario: 'stale-generation-promote', resource: theirs.id })).rejects.toMatchObject({ status: 404 });
+		const run = await core.haDrills.run(admin, { scenario: 'stale-generation-promote', resource: 'main' });
+		expect(run.resource.id).toBe(mine.id);
+		expect(calls).toEqual([{ name: 'main', ifMatch: -1, org: 'org_1' }]);
 	});
 });

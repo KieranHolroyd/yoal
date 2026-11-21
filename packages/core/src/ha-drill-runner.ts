@@ -19,6 +19,7 @@ import {
 	type HaDrillScenario,
 	type HaDrillScenarioId,
 	type HaLevel,
+	type NodeDrillStartRequest,
 	type NodeDrillView,
 	type Principal,
 } from '@yoal/contracts';
@@ -97,12 +98,14 @@ export class HaDrillRunner {
 		if (!parsed.success) throw new ValidationError('Invalid drill request.', parsed.error.issues);
 		const request = parsed.data;
 		const entry = haDrillScenario(request.scenario);
+		// HA-PLAN §10: a scenario that takes something down needs a platform admin, not an operator.
+		if (entry.destructive) this.#assertAdmin(principal, entry.id);
 		if (entry.availability === 'lab')
 			throw new ConflictError(`The ${entry.id} drill runs in the lab only: ${entry.fleetUnavailableReason}`);
 		const missing = entry.flags.filter((name) => !featureEnabled(this.ctx.config, name));
 		if (missing.length > 0)
 			throw new ConflictError(`The ${entry.id} drill needs ${missing.map((name) => `${featureEnvKey(name)}=1`).join(', ')}.`);
-		const resource = this.#resolve(entry.resourceKind, request.resource);
+		const resource = this.#resolve(principal, entry.resourceKind, request.resource);
 		const confirmation = haDrillConfirmationIssue(entry, resource.name, request.confirm);
 		if (confirmation) throw new ValidationError(confirmation);
 		const level = this.#levelIssue(entry, resource);
@@ -111,7 +114,7 @@ export class HaDrillRunner {
 		switch (entry.id) {
 			case 'node-offline':
 			case 'ingress-offline':
-				return this.#nodeOffline(principal, entry, resource, request.durationSeconds, batchId);
+				return this.#nodeOffline(principal, entry, resource, request.durationSeconds, request.includeControlNode, batchId);
 			case 'database-failover': {
 				if (!request.drillDatabase)
 					throw new ValidationError(`Name a disposable copy of ${resource.name} (--drill-database); a drill never promotes the database itself.`);
@@ -164,6 +167,25 @@ export class HaDrillRunner {
 		return { runs, skipped, passed: runs.length > 0 && runs.every((run) => run.status === 'passed') };
 	}
 
+	/**
+	 * The D235 node offline drill as `POST /api/v1/ha/drills` and the dashboard start it (HA-PLAN
+	 * §10): a platform admin, and the node's name typed back in `confirm` (or `random` when the
+	 * drill picks the node). Checked here so neither surface relies on its UI for it.
+	 */
+	startNodeDrill(principal: Principal, input: NodeDrillStartRequest & { confirm?: string }): NodeDrillView {
+		this.#assertAdmin(principal, 'node-offline');
+		const { confirm, ...request } = input;
+		if (request.node) {
+			const name =
+				this.ctx.sqlite
+					.query<{ name: string }, [string, string]>('SELECT name FROM nodes WHERE id = ? OR name = ? LIMIT 1')
+					.get(request.node, request.node)?.name ?? request.node;
+			if (confirm?.trim() !== name) throw new ValidationError(`The node-offline drill is destructive: type the name "${name}" to confirm.`);
+		} else if (confirm?.trim() !== 'random')
+			throw new ValidationError('The node-offline drill is destructive: type "random" to confirm a drill on a node picked at random.');
+		return this.ctx.nodeDrills.start(principal, request);
+	}
+
 	/** Recent catalogue runs, newest first. */
 	list(principal: Principal, limit = 50): HaDrillRunView[] {
 		this.#assert(principal);
@@ -187,13 +209,19 @@ export class HaDrillRunner {
 		entry: HaDrillScenario,
 		resource: Resource,
 		durationSeconds: number | undefined,
+		includeControlNode: boolean,
 		batchId: string | null,
 	): HaDrillRunView {
+		// The typed name is not the control-plane opt-in: that stays explicit, as on the D235 path.
+		const candidate = this.ctx.nodeDrills.view(principal).candidates.find((item) => item.nodeId === resource.id);
+		if (candidate?.controlNode && !includeControlNode)
+			throw new ConflictError(
+				`${resource.name} hosts the control plane: drilling it withdraws the ingress through it. Pass includeControlNode (yoal ha drill … --include-control) to drill it anyway.`,
+			);
 		const drill = this.ctx.nodeDrills.start(principal, {
 			node: resource.id,
 			...(durationSeconds ? { durationSeconds } : {}),
-			// The typed name is a stronger opt-in than the D235 flag for the control plane's host.
-			includeControlNode: true,
+			includeControlNode,
 		});
 		return this.#record(principal, entry, resource, batchId, { status: 'running', recordId: drill.id, startedAt: drill.startedAt });
 	}
@@ -211,8 +239,8 @@ export class HaDrillRunner {
 				message: `${resource.name} has no replica, so there is no promotion to refuse.`,
 			});
 		const started = this.ctx.now();
-		// Never the current generation: the fence must refuse this before anything moves.
-		const stale = database.generation > 0 ? database.generation - 1 : database.generation + 1;
+		// A generation no database ever had: the fence must refuse it before anything moves.
+		const stale = -1;
 		try {
 			await this.ctx.databaseReplicas.promote(
 				principal,
@@ -250,7 +278,12 @@ export class HaDrillRunner {
 			throw new CoreError('forbidden', 'Drills need a platform admin or operator.', 403);
 	}
 
-	#resolve(kind: HaDrillResourceKind, ref: string): Resource {
+	#assertAdmin(principal: Principal, what: string): void {
+		if (!this.ctx.platformIam.canAdminister(principal))
+			throw new CoreError('forbidden', `The ${what} drill takes something down: it needs a platform admin signed in to the dashboard.`, 403);
+	}
+
+	#resolve(principal: Principal, kind: HaDrillResourceKind, ref: string): Resource {
 		if (kind === 'node' || kind === 'ingress-node') {
 			const row = this.ctx.sqlite
 				.query<{ id: string; name: string; mode: string; roles_json: string | null }, [string, string]>(
@@ -263,12 +296,13 @@ export class HaDrillRunner {
 			return { kind, id: row.id, name: row.name };
 		}
 		if (kind === 'database') {
-			const rows = this.ctx.sqlite
-				.query<{ id: string; name: string }, [string, string]>('SELECT id, name FROM databases WHERE deleted_at IS NULL AND (id = ? OR name = ?)')
-				.all(ref, ref);
-			const exact = rows.find((row) => row.id === ref);
-			if (!exact && rows.length > 1) throw new ValidationError(`More than one database is named ${ref}; use its id.`);
-			const row = exact ?? rows[0];
+			// The drill and promotion services look a database up by name in the caller's org, so the
+			// level check must use that same row: never a same-named database in another org.
+			const row = this.ctx.sqlite
+				.query<{ id: string; name: string }, [string, string, string]>(
+					'SELECT id, name FROM databases WHERE deleted_at IS NULL AND org_id = ? AND (id = ? OR name = ?) LIMIT 1',
+				)
+				.get(principal.orgId, ref, ref);
 			if (!row) throw new NotFoundError('Database');
 			return { kind, id: row.id, name: row.name };
 		}

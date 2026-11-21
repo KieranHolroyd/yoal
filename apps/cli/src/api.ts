@@ -595,7 +595,7 @@ export class ApiClient {
 	}
 
 	/** Start a drill; without `node` the control plane picks an eligible node at random. */
-	async startDrill(input: { node?: string; durationSeconds?: number; includeControlNode?: boolean }): Promise<DrillView> {
+	async startDrill(input: { node?: string; durationSeconds?: number; includeControlNode?: boolean; confirm?: string }): Promise<DrillView> {
 		return (await this.request('POST', '/api/v1/ha/drills', { body: input })) as DrillView;
 	}
 
@@ -633,7 +633,7 @@ export class ApiClient {
 		return { scenarios: (raw as { scenarios: HaDrillScenarioView[] }).scenarios, raw };
 	}
 
-	async runHaDrill(input: { scenario: string; resource: string; confirm?: string | true; durationSeconds?: number; drillDatabase?: string }): Promise<HaDrillRunView> {
+	async runHaDrill(input: { scenario: string; resource: string; confirm?: string | true; durationSeconds?: number; drillDatabase?: string; includeControlNode?: boolean }): Promise<HaDrillRunView> {
 		return (await this.request('POST', '/api/v1/ha/drills/run', { body: input })) as HaDrillRunView;
 	}
 
