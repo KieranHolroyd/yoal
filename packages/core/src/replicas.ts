@@ -1,4 +1,4 @@
-import { placementSpread, type PackingStrategy, type ReplicaPlan, type ReplicaRefusal, type ReplicaSpread, type WorkloadReplica } from '@yoal/contracts';
+import { placementSpread, regionOf, type PackingStrategy, type ReplicaPlan, type ReplicaRefusal, type ReplicaSpread, type WorkloadReplica } from '@yoal/contracts';
 
 /**
  * Replica placement across nodes (docs/CLUSTERING.md §8.2, docs/SCALING.md).
@@ -14,6 +14,8 @@ export interface ReplicaCandidate {
 	id: string;
 	name: string;
 	zone: string;
+	/** The node's region (HA-PLAN H26); absent is `default`. Read only under `spread: region`. */
+	region?: string;
 	status: string;
 	/** Free memory **without** this workload's own copies; the planner charges those itself. */
 	freeMemoryMb: number;
@@ -41,7 +43,10 @@ export interface ReplicaRequest {
 	stack?: boolean;
 	/** Why new copies are placed (`deploy`, `scale`, …), recorded on each. */
 	reason?: string;
-	/** `REGIONS` (HA-PLAN H26). Absent is off: a stored `spread: region` is then placed as `zone`. */
+	/**
+	 * `REGIONS` (HA-PLAN H26). Absent is off: a stored `spread: region` is then placed as `zone`.
+	 * On, `spread: region` never puts two copies in one region (and so never in one zone).
+	 */
 	regions?: boolean;
 }
 
@@ -55,8 +60,8 @@ export function planReplicas(request: ReplicaRequest): ReplicaDecision {
 	if (!Number.isInteger(request.memoryMb) || request.memoryMb < 0)
 		return { ok: false, message: 'Replica memory must be a non-negative integer.', refusals: [], placeable: 0 };
 
-	// A stored `spread: region` is placed as `zone` (`placementSpread`): with REGIONS off, and until
-	// W13 lane A builds region placement. Never the weaker node spread, never an error.
+	// A stored `spread: region` is placed as `zone` while REGIONS is off (`placementSpread`): never
+	// the weaker node spread, never an error.
 	request = { ...request, spread: placementSpread(request.spread, { REGIONS: request.regions ?? false }) };
 	// Work on copies: a refused plan must leave the caller's candidates untouched.
 	const candidates = request.candidates.map((candidate) => ({ ...candidate }));
@@ -69,12 +74,21 @@ export function planReplicas(request: ReplicaRequest): ReplicaDecision {
 	const assignments: WorkloadReplica[] = [];
 	const copiesOn = new Map<string, number>();
 	const usedZones = new Set<string>();
+	const usedRegions = new Set<string>();
 	const charge = (node: ReplicaCandidate) => {
 		node.freeMemoryMb -= request.memoryMb;
 		if (node.freeCpuMillis != null && request.cpuMillis) node.freeCpuMillis -= request.cpuMillis;
 		copiesOn.set(node.id, (copiesOn.get(node.id) ?? 0) + 1);
 		usedZones.add(node.zone);
+		usedRegions.add(regionOf(node));
 	};
+	// A zone or region that already holds a copy is out under that spread (a hard filter, §3.4).
+	const spreadTaken = (candidate: ReplicaCandidate): string | null =>
+		request.spread === 'zone' && usedZones.has(candidate.zone)
+			? `zone ${candidate.zone} already holds a copy`
+			: request.spread === 'region' && usedRegions.has(regionOf(candidate))
+				? `region ${regionOf(candidate)} already holds a copy`
+				: null;
 
 	// Existing copies first: lowest indices are the ones a scale-down keeps.
 	const kept: number[] = [];
@@ -98,9 +112,7 @@ export function planReplicas(request: ReplicaRequest): ReplicaDecision {
 		const fits = (candidate: ReplicaCandidate) =>
 			candidate.freeMemoryMb >= request.memoryMb && cpuFits(candidate, request.cpuMillis);
 		const free = healthy.filter((candidate) => (copiesOn.get(candidate.id) ?? 0) === 0);
-		let eligible = free
-			.filter((candidate) => request.stack || request.spread !== 'zone' || !usedZones.has(candidate.zone))
-			.filter(fits);
+		let eligible = free.filter((candidate) => request.stack || spreadTaken(candidate) === null).filter(fits);
 		// Stacking only once no empty node can take the copy.
 		if (eligible.length === 0 && request.stack) eligible = healthy.filter(fits);
 		eligible.sort(
@@ -118,8 +130,8 @@ export function planReplicas(request: ReplicaRequest): ReplicaDecision {
 				const why =
 					held && !request.stack
 						? 'already holds a copy'
-						: !request.stack && request.spread === 'zone' && usedZones.has(candidate.zone)
-							? `zone ${candidate.zone} already holds a copy`
+						: !request.stack && spreadTaken(candidate) !== null
+							? spreadTaken(candidate)!
 							: candidate.freeMemoryMb < request.memoryMb
 								? `only ${Math.max(0, candidate.freeMemoryMb)} MB free`
 								: !cpuFits(candidate, request.cpuMillis)

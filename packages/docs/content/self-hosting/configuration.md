@@ -224,6 +224,7 @@ Each flag is set with `YOAL_FEATURE_<NAME>`. Accepted values are `1`, `true`, `o
 | `MULTI_NODE_REPLICAS` | on | Spread HTTP workload replicas across nodes. |
 | `SERVICE_ENDPOINTS` | on | Cross-node database attachments through loopback service endpoints. |
 | `ENDPOINTS_GATEWAY` | off | Every attachment, containers included, through a stable endpoint on the app's own node, with pooled and read ports, so promoting a replica changes no app's environment. Needs every involved node's agent to support it. Turning it on moves no running app; see [attachment endpoints](/self-hosting/clustering#attachment-endpoints). |
+| `REGIONS` | off | Group zones into regions: a node region, `spread: region`, a database standby region that is never promoted automatically, and the human-confirmed region promotion. See [regions and disaster recovery](/self-hosting/regions). Once a region value is stored, downgrading the control plane is unsupported until you put it back. |
 | `DB_AUTO_PROMOTE` | off | Let automatic failover promote a PostgreSQL read replica when its primary's node goes silent. Needs `failover.enabled`, and has no effect until primaries can fence themselves; see [clustering](/self-hosting/clustering#automatic-failover). |
 | `APP_VOLUMES` | on | Attach persistent volumes to deployed workloads. |
 | `JOBS` | on | Cron jobs and one-off commands on process and container apps. See [app jobs](/compute/scheduled-jobs#app-jobs). |

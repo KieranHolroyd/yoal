@@ -11,8 +11,8 @@ Most of these commands need a **platform admin**, an install-wide role separate 
 
 | Commands | Who can run them |
 | --- | --- |
-| `ha status`, `ha preflight`, `ha init` (until it applies), `ha drill` for scenarios that take nothing down, `doctor`, `ha attachments`, `ha migrate attachments` (without `--apply`), `ha ca`, `fleet status`, `fleet links`, `fleet rebalance` (preview), `nodes rollout plan`, `status` and `list`, `upgrade plan` | A platform admin, with any credential, including the API key the CLI uses. |
-| `ha init` when it applies, `ha drill` for a scenario that takes something down (such as `node-offline`), `ha migrate attachments --apply`, `ha ca rotate`, `fleet rebalance --apply`, `fleet link-test`, `nodes enrol`, `nodes update`, `nodes rollout start`, `resume` and `cancel` | A platform admin signed in to the dashboard. By default an API key gets `403` for these, even a platform admin's; make the change from the dashboard instead. |
+| `ha status`, `ha preflight`, `ha init` (until it applies), `ha drill` for scenarios that take nothing down, `doctor`, `ha attachments`, `ha migrate attachments` (without `--apply`), `ha ca`, `ha region` and the `ha region promote` plan, `nodes list`, `fleet status`, `fleet links`, `fleet rebalance` (preview), `nodes rollout plan`, `status` and `list`, `upgrade plan` | A platform admin, with any credential, including the API key the CLI uses. |
+| `ha init` when it applies, `ha drill` for a scenario that takes something down (such as `node-offline`), `ha migrate attachments --apply`, `ha ca rotate`, `ha region promote --confirm`, `fleet rebalance --apply`, `fleet link-test`, `nodes enrol`, `nodes set`, `nodes update`, `nodes rollout start`, `resume` and `cancel` | A platform admin signed in to the dashboard. By default an API key gets `403` for these, even a platform admin's; make the change from the dashboard instead. |
 | `fleet move` | Anyone with `project:update` on the project. `--status` needs read access to the project. |
 | `upgrade apply`, `upgrade rollback` | Root on the Yoal host. No API credential can do this. |
 
@@ -34,6 +34,8 @@ yoal ha status [--events <n>] [--json]
 yoal ha attachments [--json]
 yoal ha migrate attachments [--project <slug>]... [--apply] [--json]
 yoal ha ca [rotate] [--json]
+yoal ha region [status] [--json]
+yoal ha region promote <region> [--confirm <region> --plan-hash <hash> --accept-data-loss --reason <text> [--break-glass]] [--json]
 ```
 
 `ha init`, `ha preflight` and `ha drill` set up and prove high availability; see [high availability setup](/self-hosting/clustering#high-availability-setup). `ha status` shows the failover controller. It only reads. See [automatic failover](/self-hosting/clustering#automatic-failover). The other commands are for [attachment endpoints](/self-hosting/clustering#attachment-endpoints).
@@ -172,6 +174,29 @@ Shows the install's certificate authority: the one that signs, a previous one st
 
 `yoal ha ca rotate` creates a new authority. The old one stays trusted, so no node loses its connections; each node moves to the new one when it renews, within 60 days. A second rotation is refused while nodes still hold certificates the previous one signed. Needs a platform admin signed in to the dashboard.
 
+### ha region
+
+Lists each region with its zones, nodes, database primaries and standbys, and the open or last region promotion with its steps. Needs regions on; see [regions and disaster recovery](/self-hosting/regions).
+
+### ha region promote
+
+```sh
+yoal ha region promote ukwest
+yoal ha region promote ukwest --confirm ukwest --plan-hash <hash> --accept-data-loss --reason "uksouth unreachable"
+```
+
+Without `--confirm`, prints the plan and changes nothing: the control plane, each database with a replica in the region, then steering, with each step's fence, the data the promotion would lose, the plan hash, and any lease the old region still holds. With the region typed back, the hash, `--accept-data-loss` and `--reason`, it runs the plan on the control plane the CLI points at, which must be in that region.
+
+| Flag | Description |
+| --- | --- |
+| `--confirm <region>` | The region name typed back. |
+| `--plan-hash <hash>` | The hash the plan printed. A plan whose generations moved since is refused. |
+| `--accept-data-loss` | Required: writes after the last replicated one are lost. |
+| `--reason <text>` | Required: recorded in the audit log. |
+| `--break-glass` | Promote although the old region still holds a valid lease (one that names another node and has not expired). Only once that region is known to be stopped. Stored on the promotion, so later database steps honour it too; audited. |
+
+The command exits 1 if the promotion failed. Running it again with the same hash resumes an open promotion.
+
 ## doctor
 
 ```sh
@@ -279,14 +304,34 @@ yoal fleet link-test --from edge --to edge-b --seconds 10
 ## nodes
 
 ```sh
-yoal nodes <enrol|update|rollout> [options]
+yoal nodes <list|set|enrol|update|rollout> [options]
 ```
 
-`nodes enrol` creates a join token for a new machine. The other actions update worker nodes to the control plane's own version, one at a time or across the fleet in waves. A node never downgrades. The control-plane host itself is upgraded with [`upgrade`](#upgrade). See [worker nodes](/self-hosting/upgrades#worker-nodes).
+Lists nodes, sets a node's zone or region, creates join tokens for new machines (`nodes enrol`), and updates worker nodes to the control plane's own version, one at a time or across the fleet in waves. A node never downgrades. The control-plane host itself is upgraded with [`upgrade`](#upgrade). See [worker nodes](/self-hosting/upgrades#worker-nodes).
 
 Aliases: `node`. `rollouts` is accepted for `rollout`.
 
 Wherever a node is named, you can use its id or its name; a name shared by several nodes is an error that lists their ids.
+
+### nodes list
+
+```sh
+yoal nodes list [--json]
+```
+
+Every node with its status, zone, region, roles and agent version.
+
+### nodes set
+
+```sh
+yoal nodes set <node> [--zone <zone>] [--region <region>] [--force] [--json]
+```
+
+Changes a node's zone, region or both. A zone belongs to exactly one region, so a change that would put one zone in two regions is refused. A region change is also refused while the node holds database primaries or replicas or `spread: region` copies, or while a region promotion is open; `--force` overrides that, is audited, and prints what it affected. A region other than `default` needs regions on; see [regions and disaster recovery](/self-hosting/regions#put-nodes-in-regions). Needs a platform admin signed in to the dashboard.
+
+```sh
+yoal nodes set dr-1 --zone ukwest-1 --region ukwest
+```
 
 ### nodes enrol
 

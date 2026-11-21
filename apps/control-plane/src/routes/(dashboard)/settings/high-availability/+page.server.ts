@@ -23,6 +23,8 @@ export const load: PageServerLoad = ({ locals }) => {
 		probers: core.externalProber.list(principal),
 		/** Node offline drills: running, recent and which nodes may be drilled (D235). */
 		drills: core.nodeDrills.view(principal),
+		/** Regions (HA-PLAN H26), read-only; null while YOAL_FEATURE_REGIONS is off. */
+		regions: core.regions.enabled() ? core.regions.view(principal) : null,
 		/** The policy editor writes platform settings, which is admin-only. */
 		canEditPolicies: core.ctx.platformIam.canAdminister(principal)
 	};

@@ -20,6 +20,7 @@
 	import { formatDateTime, formatRelative } from '../../_lib/format.js';
 	import PolicyPanel from '../_lib/PolicyPanel.svelte';
 	import DisasterDrill from './_DisasterDrill.svelte';
+	import Regions from './_Regions.svelte';
 	import SettingsHeader from '../_lib/SettingsHeader.svelte';
 	import type { PageProps } from './$types';
 
@@ -462,6 +463,10 @@
 	</Panel>
 
 	<DisasterDrill initial={data.drills} />
+
+	{#if data.regions}
+		<Regions initial={data.regions} />
+	{/if}
 
 	<Panel title="Failover history" icon={HistoryIcon} description="Every action the controller decided on, newest first. The epoch is the lease it acted under." count={failover.recent.length} flush>
 		{#if failover.recent.length === 0}

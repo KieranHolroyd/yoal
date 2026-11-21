@@ -3,6 +3,9 @@ import { deploymentCanaries, deployments, nodes, projects, releases, workloadRep
 import {
 	RUN_LEASES_CAPABILITY,
 	resolvedSpread,
+	placementSpread,
+	DEFAULT_REGION,
+	type ReplicaSpread,
 	ENDPOINTS_GATEWAY_CAPABILITY,
 	type CanarySample,
 	type ImagePrePull,
@@ -266,9 +269,10 @@ export class WorkloadService {
 			// Copies that already run keep their node, so a deploy updates a set in place instead of
 			// reshuffling it; only missing copies are placed (SCALING §3).
 			const planned = planReplicas({
+				regions: featureEnabled(this.ctx.config, 'REGIONS'),
 				count: spec.replicas,
 				memoryMb: spec.memoryMb,
-				spread: resolvedSpread(spec.placement, placementSpec, clusterConfig.spread),
+				spread: this.effectiveSpread(resolvedSpread(spec.placement, placementSpec, clusterConfig.spread)),
 				cpuMillis: Math.round((spec.cpus ?? 1) * 1000),
 				strategy: scheduling.strategy,
 				stack: mode === 'stack',
@@ -756,10 +760,11 @@ export class WorkloadService {
 		if (this.scalingMode(project, { ...spec, replicas: 2 }, workload).mode !== 'spread') return false;
 		if (this.copyRelease(running) === null) return false;
 		const planned = planReplicas({
+			regions: featureEnabled(this.ctx.config, 'REGIONS'),
 			count: 2,
 			memoryMb: spec.memoryMb,
 			cpuMillis: Math.round((spec.cpus ?? 1) * 1000),
-			spread: resolvedSpread(spec.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread),
+			spread: this.effectiveSpread(resolvedSpread(spec.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread)),
 			strategy: this.ctx.cluster.get().scheduling.strategy,
 			reason: 'surge',
 			existing: [{ index: 0, nodeId: workload.nodeId }],
@@ -1430,9 +1435,11 @@ export class WorkloadService {
 			.filter((other) => other.id !== row.id);
 		const all = this.candidates({ excludeWorkloadId: workload.id });
 		const zoneOf = new Map(all.map((candidate) => [candidate.id, candidate.zone ?? 'default']));
-		const spread = resolvedSpread(spec.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread);
+		const spread = this.effectiveSpread(resolvedSpread(spec.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread));
 		const keptNodes = new Set(siblings.map((other) => other.nodeId));
 		const keptZones = new Set(siblings.map((other) => zoneOf.get(other.nodeId) ?? 'default'));
+		const regionOfNode = new Map(all.map((candidate) => [candidate.id, candidate.region ?? DEFAULT_REGION]));
+		const keptRegions = new Set(siblings.map((other) => regionOfNode.get(other.nodeId) ?? DEFAULT_REGION));
 		// The siblings still hold their own shares; only this copy's room was given back above.
 		const share = Math.ceil(workload.memoryMb / Math.max(1, siblings.length + 1));
 		for (const candidate of all) if (keptNodes.has(candidate.id)) candidate.reservedMemoryMb += share;
@@ -1442,11 +1449,13 @@ export class WorkloadService {
 				.filter((candidate) => to === undefined || candidate.id === to)
 				.filter((candidate) => !keptNodes.has(candidate.id))
 				.filter((candidate) => spread !== 'zone' || !keptZones.has(candidate.zone ?? 'default'))
+				.filter((candidate) => spread !== 'region' || !keptRegions.has(candidate.region ?? DEFAULT_REGION))
 				.filter((candidate) => this.canHost(candidate.id, spec, workload.projectId)),
 		);
 		if (candidates.length === 0)
 			return { ok: false, message: 'placement_blocked: no other online node can take this copy.' };
 		const planned = planReplicas({
+			regions: featureEnabled(this.ctx.config, 'REGIONS'),
 			count: 1,
 			memoryMb: spec.memoryMb,
 			cpuMillis: Math.round((spec.cpus ?? 1) * 1000),
@@ -1631,6 +1640,11 @@ export class WorkloadService {
 	balanceSnapshot(exclude: ReadonlySet<string> = new Set()): { nodes: BalanceNode[]; units: BalanceUnit[] } {
 		const candidates = this.candidates();
 		const zoneOf = new Map(candidates.map((candidate) => [candidate.id, candidate.zone ?? 'default']));
+		const regionByNode = new Map(candidates.map((candidate) => [candidate.id, candidate.region ?? DEFAULT_REGION]));
+		const zonesInRegions = (regions: string[]): string[] => {
+			const wanted = new Set(regions);
+			return [...new Set(candidates.filter((candidate) => wanted.has(candidate.region ?? DEFAULT_REGION)).map((candidate) => candidate.zone ?? 'default'))];
+		};
 		const balanceNodes: BalanceNode[] = candidates.map((candidate) => ({
 			id: candidate.id,
 			name: candidate.name,
@@ -1660,7 +1674,7 @@ export class WorkloadService {
 		for (const { workload, project } of rows) {
 			if (!workload.nodeId || !ACTIVE_STATUSES.includes(workload.status)) continue;
 			const spec = this.specOf(project as ProjectRow, workload);
-			const spread = resolvedSpread(spec.placement, placementSpecFor(project as ProjectRow), this.ctx.cluster.get().replicas.spread);
+			const spread = this.effectiveSpread(resolvedSpread(spec.placement, placementSpecFor(project as ProjectRow), this.ctx.cluster.get().replicas.spread));
 			const allowed = candidates.filter((candidate) => this.canHost(candidate.id, spec, workload.projectId)).map((candidate) => candidate.id);
 			const allowedNodeIds = allowed.length === candidates.length ? null : allowed;
 			const copies = replicaRows.filter((row) => row.workloadId === workload.id);
@@ -1690,7 +1704,14 @@ export class WorkloadService {
 					cpuMillis: workload.cpus * 1000,
 					blocker: copy.status === 'pending' ? 'it is already moving' : null,
 					avoidNodeIds: siblings.map((other) => other.nodeId),
-					avoidZones: spread === 'zone' ? siblings.map((other) => zoneOf.get(other.nodeId) ?? 'default') : [],
+					// A zone is in exactly one region, so avoiding every zone of a sibling's region is
+					// exactly avoiding that region (HA-PLAN H26).
+					avoidZones:
+						spread === 'zone'
+							? siblings.map((other) => zoneOf.get(other.nodeId) ?? 'default')
+							: spread === 'region'
+								? zonesInRegions(siblings.map((other) => regionByNode.get(other.nodeId) ?? DEFAULT_REGION))
+								: [],
 					allowedNodeIds,
 				});
 			}
@@ -2371,10 +2392,11 @@ export class WorkloadService {
 			if (mode === 'spread' || mode === 'stack') {
 				const plan = (count: number) =>
 					planReplicas({
+						regions: featureEnabled(this.ctx.config, 'REGIONS'),
 						count,
 						memoryMb: next.memoryMb,
 						cpuMillis: Math.round((next.cpus ?? 1) * 1000),
-						spread: resolvedSpread(next.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread),
+						spread: this.effectiveSpread(resolvedSpread(next.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread)),
 						strategy: this.ctx.cluster.get().scheduling.strategy,
 						stack: mode === 'stack',
 						reason: 'scale',
@@ -2448,10 +2470,11 @@ export class WorkloadService {
 			return Math.max(1, Math.min(limit, Math.floor((node.sliceMemoryMb - node.reservedMemoryMb) / spec.memoryMb)));
 		}
 		const planned = planReplicas({
+			regions: featureEnabled(this.ctx.config, 'REGIONS'),
 			count: limit,
 			memoryMb: spec.memoryMb,
 			cpuMillis: Math.round((spec.cpus ?? 1) * 1000),
-			spread: resolvedSpread(spec.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread),
+			spread: this.effectiveSpread(resolvedSpread(spec.placement, placementSpecFor(project), this.ctx.cluster.get().replicas.spread)),
 			stack: mode === 'stack',
 			existing: workload ? this.copyPlacements(workload) : [],
 			candidates: this.copyCandidates(project, spec, workload?.id),
@@ -2605,6 +2628,14 @@ export class WorkloadService {
 		);
 	}
 
+	/**
+	 * The spread placement applies (HA-PLAN H26): a stored `spread: region` is placed as `zone` while
+	 * `REGIONS` is off (`placementSpread`), and across regions while it is on.
+	 */
+	private effectiveSpread(spread: ReplicaSpread): ReplicaSpread {
+		return placementSpread(spread, { REGIONS: featureEnabled(this.ctx.config, 'REGIONS') });
+	}
+
 	/** Candidates as the spread planner wants them: compute nodes, ingress nodes last. */
 	private replicaCandidates(candidates: PlacementCandidate[]) {
 		return candidates
@@ -2613,6 +2644,7 @@ export class WorkloadService {
 				id: candidate.id,
 				name: candidate.name,
 				zone: candidate.zone ?? 'default',
+				region: candidate.region ?? DEFAULT_REGION,
 				status: candidate.status,
 				freeMemoryMb: candidate.sliceMemoryMb - candidate.reservedMemoryMb,
 				freeCpuMillis:
@@ -2682,6 +2714,7 @@ export class WorkloadService {
 					diskFreeBytes: nodeDiskFreeBytes(parseJson<Record<string, unknown> | null>(node.statsJson, null)),
 					reservedDiskBytes: reservedDisk.get(node.id) ?? 0,
 					zone: facts.zone,
+					region: facts.region,
 					roles: facts.roles,
 					labels: facts.derivedLabels,
 					volumeClasses: volume?.classes ?? [],

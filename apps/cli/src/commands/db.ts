@@ -78,6 +78,8 @@ Create options:
       --[no-]pooler            PgBouncer sidecar (default on; postgres only; injects <PREFIX>_POOL_URL)
       --extension <name>       Enable an allowlisted extension, e.g. pg_trgm, uuid-ossp
                                (repeatable; postgres only)
+      --standby-region <name>  Keep an async replica in this region that is never promoted
+                               automatically (postgres only; needs YOAL_FEATURE_REGIONS)
 
 Update options:
       --memory <size>, --cpus <n>, --storage <size>
@@ -85,6 +87,8 @@ Update options:
       --[no-]pooler            Turn the PgBouncer sidecar on or off (postgres only)
       --extension <name>       Enable another allowlisted extension (repeatable; postgres only;
                                disabling never drops one)
+      --standby-region <name>  Add an async replica in this region that is never promoted
+                               automatically; --no-standby-region clears it (the replica stays)
       --version <version>      Move forward in place: mysql, mariadb, valkey, redis and clickhouse.
                                Asks first, since there is no way back. A PostgreSQL major goes
                                through \`yoal db upgrade\`; mongodb needs a backup and restore.
@@ -128,6 +132,7 @@ const createFlags: FlagSpec = {
 	disk: { type: 'string' },
 	pooler: { type: 'boolean' },
 	extension: { type: 'string', multiple: true },
+	'standby-region': { type: 'string' },
 };
 
 const attachFlags: FlagSpec = {
@@ -146,6 +151,8 @@ const updateFlags: FlagSpec = {
 	storage: { type: 'string' },
 	pooler: { type: 'boolean' },
 	extension: { type: 'string', multiple: true },
+	'standby-region': { type: 'string' },
+	'no-standby-region': { type: 'boolean' },
 };
 
 const detachFlags: FlagSpec = { ...baseFlags, project: { type: 'string', short: 'p' } };
@@ -307,6 +314,8 @@ async function createDatabase(argv: string[]): Promise<void> {
 	if (args.has('pooler')) input.pooler = args.boolean('pooler');
 	const extensions = args.strings('extension');
 	if (extensions.length > 0) input.extensions = extensions;
+	const standbyRegion = args.string('standby-region');
+	if (standbyRegion) input.standbyRegion = standbyRegion;
 
 	const client = await authenticatedClient();
 	const { database, raw } = await client.createDatabase(input);
@@ -357,10 +366,14 @@ async function updateDatabase(argv: string[]): Promise<void> {
 	if (args.has('pooler')) patch.pooler = args.boolean('pooler');
 	const version = args.string('version');
 	if (version) patch.version = version;
+	const standbyRegion = args.string('standby-region');
+	if (standbyRegion && args.boolean('no-standby-region')) throw new UsageError('Pass --standby-region or --no-standby-region, not both.');
+	if (standbyRegion) patch.standbyRegion = standbyRegion;
+	if (args.boolean('no-standby-region')) patch.standbyRegion = null;
 	const added = args.strings('extension');
 	if (Object.keys(patch).length === 0 && added.length === 0)
 		throw new UsageError(
-			'Nothing to update. Pass --memory, --cpus, --storage, --pooler or --no-pooler, --extension or --version.',
+			'Nothing to update. Pass --memory, --cpus, --storage, --pooler or --no-pooler, --extension, --standby-region or --version.',
 		);
 
 	const client = await authenticatedClient();
@@ -382,6 +395,8 @@ async function updateDatabase(argv: string[]): Promise<void> {
 		return;
 	}
 	console.log(`Updated "${database.name}" (${engineLabel(database)}).`);
+	if (patch.standbyRegion)
+		console.log(`Its standby replica in ${patch.standbyRegion} is async and is never promoted automatically: yoal db replicas ${database.name}`);
 	// Limits are not part of the activation (docs/DATABASES.md), so only the other fields restart it.
 	if (patch.version || patch.pooler !== undefined || patch.extensions)
 		console.log(`It restarts on node ${nodeLabel(database)} with the change. Follow it: yoal db info ${database.name}`);

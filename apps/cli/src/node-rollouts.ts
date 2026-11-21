@@ -97,6 +97,10 @@ export interface NodeSummary {
 	name: string;
 	agentVersion?: string | null;
 	status?: string;
+	/** Failure domain and its region (HA-PLAN H26); older control planes omit `region`. */
+	zone?: string;
+	region?: string;
+	roles?: string[];
 }
 
 export function rolloutActive(status: RolloutStatus): boolean {

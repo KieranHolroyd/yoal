@@ -11,10 +11,16 @@ export interface SteeringNode {
 	id: string;
 	name: string;
 	zone: string;
+	/** The node's region (HA-PLAN H26); `default` unless an operator named one. */
+	region: string;
 	status: string;
 	roles: readonly string[];
 	capabilities: readonly string[];
-	/** Serves the edge payload: `IngressSetService.nodes()` contains this id. */
+	/**
+	 * Offered traffic: `IngressSetService.nodes()` contains this id and, when the fleet spans regions
+	 * (`REGIONS`), the node is in the active region, or that region has no online ingress (H18
+	 * stacked steering, `regionSteeringSet`). With one region this is the whole ingress set.
+	 */
 	ingress: boolean;
 	/** The agent advertises `ingress-set`, so it can answer the health endpoint (H19). */
 	capable: boolean;

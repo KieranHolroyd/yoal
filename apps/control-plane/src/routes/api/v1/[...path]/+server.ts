@@ -474,7 +474,10 @@ const api: RequestHandler = async (event) => {
 			}
 			const nodeId = segments[1]!;
 			if (segments.length === 2 && method === 'PATCH')
-				return core.nodes.update(principal, nodeId, await readJson(request, nodeUpdateSchema));
+				// `?force=1`: a platform admin forcing a region change past its blockers (HA-PLAN H26).
+				return core.nodes.update(principal, nodeId, await readJson(request, nodeUpdateSchema), {
+					force: new URL(request.url).searchParams.get('force') === '1',
+				});
 			if (segments.length === 2 && method === 'DELETE') return core.nodes.remove(principal, nodeId);
 			if (segments[2] === 'drain' && method === 'POST')
 				return core.nodes.setDraining(principal, nodeId, true);

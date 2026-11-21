@@ -3481,6 +3481,8 @@ export const regionPromotions = sqliteTable(
 		leaseExpiresAt: integer('lease_expires_at'),
 		attempt: integer('attempt').notNull().default(1),
 		acceptDataLoss: integer('accept_data_loss', { mode: 'boolean' }).notNull(),
+		/** Confirmed while the old region still held a valid lease (0136); every step honours it. */
+		breakGlass: integer('break_glass', { mode: 'boolean' }).notNull().default(false),
 		reason: text('reason').notNull(),
 		confirmedBy: text('confirmed_by').notNull(),
 		confirmedAt: integer('confirmed_at').notNull(),

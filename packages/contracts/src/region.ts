@@ -40,16 +40,13 @@ export const REGIONS_DOWNGRADE_NOTE =
 	'Once a spread: region or a non-default node region is stored, an older control plane cannot parse the cluster configuration or project placement, so downgrading the control plane is unsupported until those values are put back.';
 
 /**
- * The spread placement actually applies. `region` is placed as `zone` while `REGIONS` is off, and
- * also while it is on until W13 lane A builds region placement (lane A changes the second case).
- * Pure; the replica planner calls it (`packages/core/src/replicas.ts`).
+ * The spread placement actually applies. `region` is placed as `zone` while `REGIONS` is off (the
+ * closest safe constraint, never the weaker node spread), and as `region` while it is on (W13).
+ * Pure; the replica planner and the workload service call it (`packages/core/src/replicas.ts`).
  */
 export function placementSpread(spread: ReplicaSpread, features: Pick<FeatureFlags, 'REGIONS'>): ReplicaSpread {
 	if (spread !== 'region') return spread;
-	if (!features.REGIONS) return 'zone';
-	// Region placement is not built yet (W13 lane A replaces this line): the closest safe
-	// constraint is zone spread, never the weaker node spread.
-	return 'zone';
+	return features.REGIONS ? 'region' : 'zone';
 }
 
 /** The implicit region every node is in until an operator names another. */
@@ -420,6 +417,12 @@ export const regionPromoteRequestSchema = z
 		acceptDataLoss: z.boolean().default(false),
 		/** Recorded in the audit log and the promotion record. */
 		reason: z.string().trim().min(1).max(500).optional(),
+		/**
+		 * Break glass: promote even though the old region still holds a valid lease generation (its
+		 * control-plane lease or a database lease has not expired). Only after the old region is
+		 * known to be stopped; audited. Without it such a promotion is refused.
+		 */
+		breakGlass: z.boolean().default(false),
 	})
 	.strict()
 	.superRefine((input, ctx) => {
@@ -447,6 +450,11 @@ export const regionPromotionViewSchema = z.object({
 	attempt: z.number().int().min(1),
 	// Human confirmation (always present: a promotion is stored only once confirmed).
 	acceptDataLoss: z.literal(true),
+	/**
+	 * The operator broke glass: the old region still held a valid lease when it was confirmed. Stored
+	 * on the record (migration 0136) so every database step, on any runner, applies the same rule.
+	 */
+	breakGlass: z.boolean().default(false),
 	reason: z.string().max(500),
 	confirmedBy: z.string().max(200),
 	confirmedAt: z.string(),

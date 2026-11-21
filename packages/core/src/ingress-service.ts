@@ -2,6 +2,7 @@ import { eq } from 'drizzle-orm';
 import { nodes } from '@yoal/db';
 import {
 	INGRESS_SET_CAPABILITY,
+	regionOf,
 	type IngressActivation,
 	type IngressSetView,
 	type IngressSettings,
@@ -304,17 +305,19 @@ export class SteeringService {
 	}
 
 	private snapshot(): SteeringNode[] {
-		const ingress = new Set(this.ctx.ingressSet.nodes());
-		return this.ctx.db
-			.select()
-			.from(nodes)
-			.all()
+		const set = new Set(this.ctx.ingressSet.nodes());
+		const rows = this.ctx.db.select().from(nodes).all();
+		// HA-PLAN H26/H18: across regions, every driver offers the active region's ingress, and the
+		// other regions' only while it has none online. One region (or REGIONS off): unchanged.
+		const ingress = new Set(this.ctx.regions.steeringIngress(rows.filter((row) => set.has(row.id))).map((row) => row.id));
+		return rows
 			.map((row) => {
 				const view = this.ctx.nodes.view(row);
 				return {
 					id: row.id,
 					name: row.name,
 					zone: row.zone,
+					region: regionOf(row),
 					status: row.status,
 					roles: view.roles,
 					capabilities: view.capabilities,

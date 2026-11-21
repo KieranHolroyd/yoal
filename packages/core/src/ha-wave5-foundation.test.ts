@@ -144,7 +144,9 @@ describe('REGIONS on', () => {
 			expect.objectContaining({ message: expect.stringContaining('a zone belongs to exactly one region') }),
 		);
 		core.nodes.update(principal, join2.nodeId, { zone: 'ukwest-1', region: 'ukwest' });
-		core.nodes.update(principal, join1.nodeId, { region: 'uksouth' });
+		// a1 holds the database "main": its region only changes when a platform admin forces it (W13 review).
+		expect(() => core.nodes.update(principal, join1.nodeId, { region: 'uksouth' })).toThrow(/holds database members \(main\)/);
+		core.nodes.update(principal, join1.nodeId, { region: 'uksouth' }, { force: true });
 		expect(() => core.nodes.update(principal, join1.nodeId, { zone: 'ukwest-1' })).toThrow(
 			expect.objectContaining({ message: expect.stringContaining('Zone "ukwest-1" is in region "ukwest"') }),
 		);
@@ -158,21 +160,24 @@ describe('REGIONS on', () => {
 		expect(core.nodes.update(principal, join2.nodeId, { region: 'ukwest' }).zone).toBe('ukwest-1');
 	});
 
-	test('spread: region and standby regions are refused as not built (lane A), not silently stored', async () => {
+	test('spread: region is stored, and a standby region needs a data node there (lane A built them)', async () => {
 		setFeature('REGIONS', true);
-		const notBuilt = { code: 'not_built', status: 501 };
-		expect(() => core.cluster.update(principal, { replicas: { spread: 'region' } })).toThrow(expect.objectContaining(notBuilt));
-		expect(() => core.databases.update(principal, 'main', { standbyRegion: 'ukwest' })).toThrow(expect.objectContaining(notBuilt));
-		await expect(core.projects.update(principal, app.slug, { placementSpec: { spread: 'region' } })).rejects.toMatchObject(notBuilt);
+		expect(core.cluster.update(principal, { replicas: { spread: 'region' } }).replicas.spread).toBe('region');
+		core.cluster.update(principal, { replicas: { spread: 'node' } });
+		// No node is in ukwest: refused with the contract's reason, and nothing is stored.
+		expect(() => core.databases.update(principal, 'main', { standbyRegion: 'ukwest' })).toThrow(
+			expect.objectContaining({ code: 'validation', message: expect.stringContaining('No online data node is in region "ukwest"') }),
+		);
+		expect((await core.projects.update(principal, app.slug, { placementSpec: { spread: 'region' } })).placementSpec).toEqual({ spread: 'region' });
+		await core.projects.update(principal, app.slug, { placementSpec: null });
 		expect(core.databases.get(principal, 'main').standbyRegion).toBeNull();
 	});
 });
 
 describe('lane stubs', () => {
-	test('lane A services refuse honestly (lane B is built: ha-w5-commands.test.ts)', async () => {
-		const notBuilt = { code: 'not_built', status: 501 };
-		expect(() => core.regions.view(principal)).toThrow(expect.objectContaining(notBuilt));
-		await expect(core.regions.promote(principal, 'ukwest', {})).rejects.toMatchObject(notBuilt);
+	test('both lanes are built: region services answer (lane B: ha-w5-commands.test.ts)', async () => {
+		expect(core.regions.view(principal)).toMatchObject({ enabled: false, regions: [{ name: 'default' }] });
+		await expect(core.regions.promote(principal, 'ukwest', {})).rejects.toMatchObject({ code: 'validation', message: expect.stringContaining('YOAL_FEATURE_REGIONS') });
 		expect(core.haDrills.catalogue(principal).scenarios).toBe(HA_DRILL_CATALOGUE);
 	});
 
