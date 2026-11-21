@@ -385,11 +385,11 @@ export class ServiceEndpointService {
 
 	/** The dry run under `platform:ha`; `apply` restarts apps, so it is for a platform admin only. */
 	migrateAttachments(principal: Principal, input: { apply?: boolean; projects?: string[] } = {}): AttachmentMigrationView {
-		// An empty list is never "every app": a caller that filtered down to nothing must not move everything.
-		if (input.apply && input.projects && input.projects.length === 0)
-			throw new ValidationError('Name at least one app to move, or leave the list out to move every app.');
 		const plan = this.migrationPlan(principal, { projects: input.projects });
 		if (!input.apply) return plan;
+		// An empty list is never "every app": a caller that filtered down to nothing must not move everything.
+		if (input.projects && input.projects.length === 0)
+			throw new ValidationError('Name at least one app to move, or leave the list out to move every app.');
 		if (!this.ctx.platformIam.canAdminister(principal))
 			throw new CoreError('forbidden', 'Only a platform admin role can move apps to their endpoints; a platform operator can run the dry run.', 403);
 		const projects = plan.projects.map((item): AttachmentMigrationItem => {

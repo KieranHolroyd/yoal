@@ -252,7 +252,7 @@
 								<p class="mt-3 text-xs">
 									Flags are read from <code class="font-mono">yoal.env</code> when the control plane starts.
 									Add these lines on every control-plane host, then restart it. Apply stays off until
-									every host runs them.
+									this control plane runs them.
 								</p>
 								<pre
 									class="mt-1.5 overflow-x-auto rounded bg-muted px-2 py-1.5 font-mono text-xs select-all">{view.plan.envLines.join(

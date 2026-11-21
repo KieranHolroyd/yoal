@@ -229,12 +229,14 @@
 		{/snippet}
 		<div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
 			<div class="rounded-lg border p-3">
-				<p class="text-xs text-muted-foreground">Automatic failover</p>
+				<p class="text-xs text-muted-foreground">Failover controller</p>
 				<p class="mt-1">
 					<Badge variant={failover.enabled ? 'success' : 'neutral'}>{failover.enabled ? 'On' : 'Off'}</Badge>
 				</p>
 				<p class="mt-1 text-xs text-muted-foreground">
-					{failover.enabled ? 'Lost nodes are acted on.' : 'Lost nodes are reported only. Drains still move copies.'}
+					{failover.enabled
+						? 'Lost nodes are acted on. Database promotion is shown under Databases.'
+						: 'Lost nodes are reported only. Drains still move copies.'}
 				</p>
 			</div>
 			<div class="rounded-lg border p-3">
