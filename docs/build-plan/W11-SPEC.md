@@ -51,7 +51,7 @@ Per database: `failoverMode: 'manual' | 'auto'`, `acceptDataLoss: boolean` (asyn
 - `count(nodes with role data and capability db-member) >= 3`, in ≥ 2 distinct zones;
 - `now - lastFailoverDrillAt <= 30 days`, and the drill passed;
 - the database has a replica on another online node;
-- no active switchover (`switchoverStep` not null) and no sync transition (`syncState !== 'stepping'`);
+- no active switchover (`switchoverStep` not null) and no sync transition (`syncState !== 'changing'`);
 - every involved node is on a version that declares `db-member`.
 
 Arming is an audited operator action. Turning `auto` off is immediate.

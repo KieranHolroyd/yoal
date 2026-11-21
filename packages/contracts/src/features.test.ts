@@ -98,7 +98,7 @@ describe('feature registry', () => {
 		expect(FEATURE_FLAGS.STEERING.description).toContain('H18');
 	});
 
-	test('HA Wave 1 flags are opt-in and cite their H-section (HA-WAVE-1.md)', () => {
+	test('the full opt-in set is stable and Wave 1 descriptions cite their H-section', () => {
 		expect([...OPT_IN_FEATURES]).toEqual([
 			'DB_AUTO_PROMOTE',
 			'ENDPOINTS_GATEWAY',

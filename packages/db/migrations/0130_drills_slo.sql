@@ -1,21 +1,26 @@
 -- Failover drills and W15 SLO objects (HA-PLAN W11 §12, W15; Wave 4 foundation). Additive only.
 --
--- A drill is a real promotion on a disposable database. Its measured time to writable and its
--- arbiter evidence are what arming reads: a failed, untested or stale drill refuses `auto`
--- (W11-SPEC §3, §12). Existing installs have no rows, so no policy changes.
+-- A drill is a real promotion on a disposable database. Its measured time to writable, lost
+-- commits and arbiter evidence are what arming reads: a failed, untested, unmeasured, too-slow or
+-- stale drill refuses `auto` (W11-SPEC §3, §9, §12). Existing installs have no rows, so no policy
+-- changes.
 CREATE TABLE IF NOT EXISTS database_failover_drills (
   id TEXT PRIMARY KEY,
+  -- The database whose policy this drill proves; the disposable copy (if any) is below.
   database_id TEXT NOT NULL,
+  drill_database_id TEXT,
   status TEXT NOT NULL DEFAULT 'running' CHECK (status IN ('running','passed','failed')),
+  -- The durability in force for the drill; a `sync` drill must prove RPO 0.
+  durability TEXT NOT NULL DEFAULT 'async' CHECK (durability IN ('async','sync')),
   from_node_id TEXT,
   to_node_id TEXT,
-  generation INTEGER NOT NULL DEFAULT 0,
+  generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
   started_at INTEGER NOT NULL,
   finished_at INTEGER,
   -- From the primary's last successful lease renew to the new primary accepting a write.
-  time_to_writable_ms INTEGER,
+  time_to_writable_ms INTEGER CHECK (time_to_writable_ms IS NULL OR time_to_writable_ms >= 0),
   -- Acknowledged commits lost; a `sync` drill must record 0 (I13).
-  lost_commits INTEGER,
+  lost_commits INTEGER CHECK (lost_commits IS NULL OR lost_commits >= 0),
   arbiter_tested INTEGER NOT NULL DEFAULT 0,
   arbiter_tested_at INTEGER,
   evidence_json TEXT NOT NULL DEFAULT '{}',

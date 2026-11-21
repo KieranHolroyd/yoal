@@ -1314,7 +1314,7 @@ export const databases = sqliteTable(
 		acceptDataLoss: integer('accept_data_loss', { mode: 'boolean' }).notNull().default(false),
 		/** When an operator last armed automatic failover (0129). */
 		autoArmedAt: integer('auto_armed_at'),
-		/** The passed drill arming reads; null until a drill passes (0129). */
+		/** Read cache for the latest PASSED drill; the drills table is the authority (0129). */
 		lastFailoverDrillAt: integer('last_failover_drill_at'),
 		/** Eligibility evidence captured at arming, as JSON (0129). */
 		failoverEvidenceJson: text('failover_evidence_json').notNull().default('{}'),
@@ -3358,8 +3358,13 @@ export const databaseFailoverDrills = sqliteTable(
 	'database_failover_drills',
 	{
 		id: text('id').primaryKey(),
+		/** The database whose policy this drill proves. */
 		databaseId: text('database_id').notNull(),
+		/** The disposable copy promoted by the drill, when it is not `databaseId`. */
+		drillDatabaseId: text('drill_database_id'),
 		status: text('status', { enum: ['running', 'passed', 'failed'] }).notNull().default('running'),
+		/** The durability in force for the drill; a `sync` drill must prove RPO 0. */
+		durability: text('durability', { enum: ['async', 'sync'] }).notNull().default('async'),
 		fromNodeId: text('from_node_id'),
 		toNodeId: text('to_node_id'),
 		generation: integer('generation').notNull().default(0),

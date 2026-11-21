@@ -58,6 +58,8 @@ export const failoverArmRefusalCodes = [
 	'engine-unsupported',
 	/** An async database did not explicitly accept possible commit loss. */
 	'data-loss-not-accepted',
+	/** `acceptDataLoss` is set on a `sync` database, where it means nothing and hides a mistake. */
+	'data-loss-not-needed',
 	/** A `sync` database is currently downgraded, so RPO 0 is not in force. */
 	'sync-downgraded',
 	/** Fewer than three data nodes declare `db-member`. */
@@ -74,11 +76,19 @@ export const failoverArmRefusalCodes = [
 	'sync-transition-open',
 	/** No failover drill has ever run for this database. */
 	'no-drill',
-	/** The last drill did not pass. */
+	/** The latest drill attempt is still running; do not arm on a half-finished result. */
+	'drill-running',
+	/** The latest passed drill has no finished time or no measured time to writable. */
+	'drill-unmeasured',
+	/** The latest passed drill took longer than the W11 worst-case bound (30 s). */
+	'drill-too-slow',
+	/** A `sync` drill lost acknowledged commits; RPO 0 is not proven. */
+	'drill-lost-commits',
+	/** The latest drill attempt did not pass. */
 	'drill-failed',
-	/** The last drill did not prove the arbiter. */
+	/** The latest passed drill did not prove the arbiter. */
 	'arbiter-untested',
-	/** The last passed drill is older than 30 days. */
+	/** The latest passed drill is older than 30 days. */
 	'drill-stale',
 ] as const;
 export type FailoverArmRefusalCode = (typeof failoverArmRefusalCodes)[number];
@@ -93,29 +103,67 @@ export const failoverArmRefusalSchema = z.object({
 export type FailoverArmRefusal = z.infer<typeof failoverArmRefusalSchema>;
 
 /** One failover drill: a real promotion on a disposable database (W11-SPEC §12). */
-export const databaseFailoverDrillSchema = z.object({
-	id: z.string().min(1).max(100),
-	databaseId: z.string().min(1).max(100),
-	status: z.enum(databaseFailoverDrillStatuses),
-	startedAt: z.string().datetime(),
-	finishedAt: z.string().datetime().nullable(),
-	/**
-	 * From the primary's last successful lease renew to the promoted member accepting its first
-	 * write. The W11 bound is median ≤ 25 s, worst ≤ 30 s (W11-SPEC §9).
-	 */
-	timeToWritableMs: z.number().int().nonnegative().nullable(),
-	/** Acknowledged commits lost; a `sync` drill must record 0 (I13). */
-	lostCommits: z.number().int().nonnegative().nullable(),
-	generation: z.number().int().nonnegative(),
-	fromNodeId: z.string().max(64).nullable(),
-	toNodeId: z.string().max(64).nullable(),
-	/** The drill took the lease compare-and-swap, so the arbiter is tested. */
-	arbiterTested: z.boolean().default(false),
-	arbiterTestedAt: z.string().datetime().nullable(),
-	/** Measured stages and any evidence the lane records; opaque to the foundation. */
-	evidence: z.record(z.string(), z.unknown()).default({}),
-	message: z.string().max(2_000).nullable(),
-});
+export const databaseFailoverDrillSchema = z
+	.object({
+		id: z.string().min(1).max(100),
+		/**
+		 * The database whose policy this drill proves. A drill may promote a disposable copy;
+		 * `drillDatabaseId` records that copy and `databaseId` remains the armed database.
+		 */
+		databaseId: z.string().min(1).max(100),
+		/** The database actually promoted, when it is a disposable copy; null when it is `databaseId`. */
+		drillDatabaseId: z.string().min(1).max(100).nullable().default(null),
+		status: z.enum(databaseFailoverDrillStatuses),
+		/** The durability in force for the drill; a `sync` drill must prove RPO 0. */
+		durability: z.enum(['async', 'sync']).default('async'),
+		startedAt: z.string().datetime(),
+		finishedAt: z.string().datetime().nullable(),
+		/**
+		 * From the primary's last successful lease renew to the promoted member accepting its first
+		 * write. The W11 bound is median ≤ 25 s, worst ≤ 30 s (W11-SPEC §9).
+		 */
+		timeToWritableMs: z.number().int().nonnegative().nullable(),
+		/** Acknowledged commits lost; a `sync` drill must record 0 (I13). */
+		lostCommits: z.number().int().nonnegative().nullable(),
+		generation: z.number().int().nonnegative(),
+		fromNodeId: z.string().max(64).nullable(),
+		toNodeId: z.string().max(64).nullable(),
+		/** The drill took the lease compare-and-swap, so the arbiter is tested. */
+		arbiterTested: z.boolean().default(false),
+		arbiterTestedAt: z.string().datetime().nullable(),
+		/** Measured stages and any evidence the lane records; opaque to the foundation. */
+		evidence: z.record(z.string(), z.unknown()).default({}),
+		message: z.string().max(2_000).nullable(),
+	})
+	.superRefine((drill, ctx) => {
+		if (drill.arbiterTested && drill.arbiterTestedAt === null)
+			ctx.addIssue({
+				code: 'custom',
+				path: ['arbiterTestedAt'],
+				message: 'a drill that tested the arbiter must record when it did so',
+			});
+		if (drill.status !== 'passed') return;
+		if (drill.finishedAt === null)
+			ctx.addIssue({ code: 'custom', path: ['finishedAt'], message: 'a passed drill needs a finished time' });
+		if (drill.timeToWritableMs === null)
+			ctx.addIssue({
+				code: 'custom',
+				path: ['timeToWritableMs'],
+				message: 'a passed drill needs a measured time to writable',
+			});
+		else if (drill.timeToWritableMs > 30_000)
+			ctx.addIssue({
+				code: 'custom',
+				path: ['timeToWritableMs'],
+				message: 'a passed drill must be writable within 30 s (W11-SPEC §9)',
+			});
+		if (drill.durability === 'sync' && drill.lostCommits !== 0)
+			ctx.addIssue({
+				code: 'custom',
+				path: ['lostCommits'],
+				message: 'a passed sync drill must record exactly 0 lost commits (I13)',
+			});
+	});
 export type DatabaseFailoverDrill = z.infer<typeof databaseFailoverDrillSchema>;
 
 /** What `yoal ha db arm <database>` sends. */
@@ -151,8 +199,12 @@ export const databaseFailoverPolicyViewSchema = z.object({
 	acceptDataLoss: z.boolean(),
 	/** When an operator last armed `auto`; null for a database that has never been armed. */
 	autoArmedAt: z.string().datetime().nullable(),
-	/** The start/last-success marker the W11 arming check reads; null when no drill passed. */
+	/**
+	 * Derived from the latest PASSED drill's `finishedAt` (the drills table is the authority); the
+	 * database's `last_failover_drill_at` column is only a cache for reads that do not join it.
+	 */
 	lastFailoverDrillAt: z.string().datetime().nullable(),
+	/** The latest drill attempt, whatever its status, so a running/failed attempt is visible. */
 	lastDrill: databaseFailoverDrillSchema.nullable(),
 	/** Current eligibility evidence, recomputed from the fleet. */
 	evidence: databaseFailoverEvidenceSchema,

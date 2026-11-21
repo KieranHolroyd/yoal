@@ -99,6 +99,8 @@ describe('W11 failover policy contracts', () => {
 		const drill = databaseFailoverDrillSchema.parse({
 			id: 'drl_1',
 			databaseId: 'db_1',
+			drillDatabaseId: 'db_drill_copy',
+			durability: 'sync',
 			status: 'passed',
 			startedAt: AT,
 			finishedAt: AT,
@@ -112,7 +114,38 @@ describe('W11 failover policy contracts', () => {
 			message: null,
 		});
 		expect(drill.timeToWritableMs).toBe(21_400);
+		expect(drill.drillDatabaseId).toBe('db_drill_copy');
+		expect(drill.durability).toBe('sync');
 		expect(drill.evidence).toEqual({});
+	});
+
+	test('a passed drill cannot parse without the evidence the bound requires', () => {
+		const passed = {
+			id: 'drl_1',
+			databaseId: 'db_1',
+			status: 'passed',
+			startedAt: AT,
+			finishedAt: AT,
+			timeToWritableMs: 21_400,
+			lostCommits: 0,
+			generation: 2,
+			fromNodeId: 'nod_1',
+			toNodeId: 'nod_2',
+			arbiterTested: true,
+			arbiterTestedAt: AT,
+			message: null,
+		};
+		expect(() => databaseFailoverDrillSchema.parse({ ...passed, finishedAt: null })).toThrow();
+		expect(() => databaseFailoverDrillSchema.parse({ ...passed, timeToWritableMs: null })).toThrow();
+		expect(() => databaseFailoverDrillSchema.parse({ ...passed, timeToWritableMs: 30_001 })).toThrow();
+		expect(() =>
+			databaseFailoverDrillSchema.parse({ ...passed, durability: 'sync', lostCommits: 1 }),
+		).toThrow();
+		expect(() =>
+			databaseFailoverDrillSchema.parse({ ...passed, arbiterTested: true, arbiterTestedAt: null }),
+		).toThrow();
+		// Async may lose commits, but a passed drill still needs a finished time and a measurement.
+		expect(databaseFailoverDrillSchema.parse({ ...passed, durability: 'async', lostCommits: 1 }).lostCommits).toBe(1);
 	});
 
 	test('the policy view shows the active state and every refusal', () => {

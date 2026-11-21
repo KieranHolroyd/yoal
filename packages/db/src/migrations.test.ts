@@ -437,4 +437,62 @@ describe('HA Wave 4 migrations 0129–0130 (docs/build-plan/HA-WAVE-4.md)', () =
 		expect(() => insertSlo('slo_3', 'no-budget', 1)).toThrow();
 		sqlite.close();
 	});
+
+	test('upgrades a populated 0128 database without changing existing rows', () => {
+		const sqlite = new Database(':memory:', { create: true, strict: true });
+		sqlite.run('CREATE TABLE yoal_migrations (id TEXT PRIMARY KEY, applied_at INTEGER NOT NULL)');
+		for (const migration of migrations) {
+			if (Number(migration.id.slice(0, 4)) > 128) continue;
+			sqlite.run(migration.sql);
+			sqlite.run('INSERT INTO yoal_migrations (id, applied_at) VALUES (?, ?)', [migration.id, 1]);
+		}
+		sqlite.run(
+			`INSERT INTO databases (id, org_id, name, version, node_id, host_port, memory_mb, owner_secret, monitor_secret, created_by, created_at, updated_at)
+			 VALUES ('db_old', 'org_1', 'old', '16', 'nod_1', 5432, 256, 'owner', 'monitor', 'user_1', 1, 1)`,
+		);
+		sqlite.run(
+			`INSERT INTO database_failovers (id, database_id, from_node_id, to_node_id, generation, status, started_at)
+			 VALUES ('dbf_old', 'db_old', 'nod_1', 'nod_2', 1, 'completed', 1)`,
+		);
+
+		expect(migrate(sqlite)).toEqual(['0129_db_failover_policy.sql', '0130_drills_slo.sql']);
+
+		expect(
+			sqlite
+				.query<{ failover_mode: string; accept_data_loss: number; auto_armed_at: number | null; last_failover_drill_at: number | null; failover_evidence_json: string }, []>(
+					"SELECT failover_mode, accept_data_loss, auto_armed_at, last_failover_drill_at, failover_evidence_json FROM databases WHERE id = 'db_old'",
+				)
+				.get(),
+		).toEqual({
+			failover_mode: 'manual',
+			accept_data_loss: 0,
+			auto_armed_at: null,
+			last_failover_drill_at: null,
+			failover_evidence_json: '{}',
+		});
+		expect(
+			sqlite
+				.query<{ promotion_source: string; evidence_json: string }, []>(
+					"SELECT promotion_source, evidence_json FROM database_failovers WHERE id = 'dbf_old'",
+				)
+				.get(),
+		).toEqual({ promotion_source: 'manual', evidence_json: '{}' });
+
+		sqlite.run(
+			`INSERT INTO database_failover_drills (id, database_id, status, started_at, created_by, created_at)
+			 VALUES ('drl_old', 'db_old', 'passed', 1, 'user_1', 1)`,
+		);
+		expect(
+			sqlite
+				.query<{ drill_database_id: string | null; durability: string; time_to_writable_ms: number | null; lost_commits: number | null; generation: number }, []>(
+					"SELECT drill_database_id, durability, time_to_writable_ms, lost_commits, generation FROM database_failover_drills WHERE id = 'drl_old'",
+				)
+				.get(),
+		).toEqual({ drill_database_id: null, durability: 'async', time_to_writable_ms: null, lost_commits: null, generation: 0 });
+		expect(() => sqlite.run("UPDATE database_failover_drills SET time_to_writable_ms = -1 WHERE id = 'drl_old'")).toThrow();
+		expect(() => sqlite.run("UPDATE database_failover_drills SET lost_commits = -1 WHERE id = 'drl_old'")).toThrow();
+		expect(() => sqlite.run("UPDATE database_failover_drills SET durability = 'sync-ish' WHERE id = 'drl_old'")).toThrow();
+		expect(() => sqlite.run("UPDATE database_failover_drills SET generation = -1 WHERE id = 'drl_old'")).toThrow();
+		sqlite.close();
+	});
 });

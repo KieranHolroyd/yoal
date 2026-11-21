@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
+import { and, asc, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
 import {
 	databaseFailoverDrills,
 	databaseFailovers,
@@ -9,6 +9,7 @@ import {
 import {
 	DB_MEMBER_CAPABILITY,
 	databaseFailoverEvidenceSchema,
+	databaseReplicaReadable,
 	type DatabaseFailoverArmRequest,
 	type DatabaseFailoverDrill,
 	type DatabaseFailoverDrillRequest,
@@ -22,7 +23,7 @@ import {
 import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
 import type { DatabaseRow } from './databases.ts';
-import { CoreError, NotFoundError } from './errors.ts';
+import { CoreError } from './errors.ts';
 import type { NodeView } from './nodes.ts';
 import { parseJson } from './util.ts';
 
@@ -71,6 +72,11 @@ export class DatabaseFailoverPolicyService {
 				'Automatic database failover is off: enable DB_AUTO_PROMOTE first (HA-PLAN W11).',
 				409,
 			);
+		// The lane's write is not here yet, but arming must still refuse an ineligible policy: the
+		// drill, member, zone and arbiter gates are the specification, not UI hints.
+		const refusal = this.#evaluate(database).refusals[0];
+		if (refusal)
+			throw new CoreError('conflict', `Automatic failover cannot be armed: ${refusal.message}`, 409);
 		throw new CoreError(
 			'conflict',
 			`not implemented (HA Wave 4 lane A): arming automatic failover for "${database.name}"`,
@@ -105,8 +111,7 @@ export class DatabaseFailoverPolicyService {
 	// ---------------------------------------------------------------- reads
 
 	#view(database: DatabaseRow): DatabaseFailoverPolicyView {
-		const { evidence, refusals } = this.#evaluate(database);
-		const lastDrill = this.#lastDrill(database.id);
+		const { evidence, refusals, latestAttempt, latestPassed } = this.#evaluate(database);
 		const rawEvidence = database.failoverEvidenceJson
 			? parseJson<unknown>(database.failoverEvidenceJson, null)
 			: null;
@@ -119,8 +124,9 @@ export class DatabaseFailoverPolicyService {
 			failoverMode: database.failoverMode,
 			acceptDataLoss: database.acceptDataLoss,
 			autoArmedAt: iso(database.autoArmedAt),
-			lastFailoverDrillAt: iso(database.lastFailoverDrillAt),
-			lastDrill: lastDrill ? this.#drillView(lastDrill) : null,
+			// The drills table is the authority; the column is a cache for reads that do not join it.
+			lastFailoverDrillAt: iso(latestPassed?.finishedAt ?? database.lastFailoverDrillAt),
+			lastDrill: latestAttempt ? this.#drillView(latestAttempt) : null,
 			evidence,
 			armedEvidence: armed?.success ? armed.data : null,
 			active: database.failoverMode === 'auto' && refusals.length === 0,
@@ -129,7 +135,12 @@ export class DatabaseFailoverPolicyService {
 	}
 
 	/** Current eligibility evidence and the refusals derived from it (W11-SPEC §3). */
-	#evaluate(database: DatabaseRow): { evidence: DatabaseFailoverEvidence; refusals: FailoverArmRefusal[] } {
+	#evaluate(database: DatabaseRow): {
+		evidence: DatabaseFailoverEvidence;
+		refusals: FailoverArmRefusal[];
+		latestAttempt: DrillRow | null;
+		latestPassed: DrillRow | null;
+	} {
 		const now = this.ctx.now();
 		const all = this.#allNodes();
 		const byId = new Map(all.map((node) => [node.id, node]));
@@ -142,24 +153,32 @@ export class DatabaseFailoverPolicyService {
 			const node = byId.get(id);
 			return node ? [node] : [];
 		});
-		const missingCapability = involved
-			.filter((node) => !node.capabilities.includes(DB_MEMBER_CAPABILITY))
-			.map((node) => node.id);
+		// A member whose node row is gone is as unusable as one on an old agent.
+		const missingCapability = [
+			...new Set([
+				...memberNodeIds.filter((id) => !byId.has(id)),
+				...involved.filter((node) => !node.capabilities.includes(DB_MEMBER_CAPABILITY)).map((node) => node.id),
+			]),
+		].sort();
 		const crossNodeReplica = this.#hasCrossNodeReplica(database, byId);
 		const switchover = this.#activeSwitchover(database.id);
-		const drill = this.#lastDrill(database.id);
-		const drillAge = drill?.finishedAt === null || drill?.finishedAt === undefined ? null : now - drill.finishedAt;
+		const latestAttempt = this.#latestDrill(database.id);
+		const latestPassed = this.#latestPassedDrill(database.id);
+		const drillAge =
+			latestPassed?.finishedAt === null || latestPassed?.finishedAt === undefined
+				? null
+				: now - latestPassed.finishedAt;
 
 		const evidence: DatabaseFailoverEvidence = {
 			autoPromoteEnabled: featureEnabled(this.ctx.config, 'DB_AUTO_PROMOTE'),
 			dataNodeCount: dataNodes.length,
 			dataZones: zones,
-			membersCapable: involved.length > 0 && missingCapability.length === 0,
-			drillId: drill?.id ?? null,
-			drillPassedAt: drill?.status === 'passed' && drill.finishedAt !== null ? iso(drill.finishedAt) : null,
-			drillTimeToWritableMs: drill?.timeToWritableMs ?? null,
-			arbiterTested: drill?.arbiterTested ?? false,
-			arbiterTestedAt: iso(drill?.arbiterTestedAt ?? null),
+			membersCapable: memberNodeIds.length > 0 && missingCapability.length === 0,
+			drillId: latestPassed?.id ?? null,
+			drillPassedAt: latestPassed?.finishedAt === null || latestPassed?.finishedAt === undefined ? null : iso(latestPassed.finishedAt),
+			drillTimeToWritableMs: latestPassed?.timeToWritableMs ?? null,
+			arbiterTested: latestPassed?.arbiterTested === true && latestPassed.arbiterTestedAt !== null,
+			arbiterTestedAt: iso(latestPassed?.arbiterTestedAt ?? null),
 			crossNodeReplica,
 			switchoverStep: switchover?.switchoverStep ?? null,
 			syncState: database.syncState,
@@ -187,6 +206,12 @@ export class DatabaseFailoverPolicyService {
 					'This sync database is currently downgraded to async, so RPO 0 is not in force; re-establish sync before arming auto.',
 					{ durability: database.durability, durabilityEffective: database.durabilityEffective },
 				);
+			if (database.acceptDataLoss)
+				refuse(
+					'data-loss-not-needed',
+					'acceptDataLoss only applies to an async database; clear it before arming this sync database.',
+					{ durability: database.durability },
+				);
 		} else if (!database.acceptDataLoss) {
 			refuse(
 				'data-loss-not-accepted',
@@ -213,7 +238,7 @@ export class DatabaseFailoverPolicyService {
 		if (!crossNodeReplica)
 			refuse(
 				'no-cross-node-replica',
-				'No replica is on another online node, so there is no automatic candidate to promote.',
+				'No streaming replica is on another online node, so there is no automatic candidate to promote.',
 				{ primaryNodeId: database.nodeId },
 			);
 		if (switchover)
@@ -228,33 +253,86 @@ export class DatabaseFailoverPolicyService {
 				'A sync-set transition is open, so the database is non-promotable; close it before arming auto.',
 				{ syncState: database.syncState },
 			);
-		if (!drill) refuse('no-drill', 'No failover drill has run for this database; run one before arming auto.');
-		else if (drill.status !== 'passed')
-			refuse('drill-failed', 'The last failover drill did not pass; fix it and run another.', {
-				drillId: drill.id,
-				status: drill.status,
+		if (!latestAttempt)
+			refuse('no-drill', 'No failover drill has run for this database; run one before arming auto.');
+		else {
+			if (latestAttempt.status === 'running')
+				refuse(
+					'drill-running',
+					'The latest failover drill is still running; wait for it to finish before arming auto.',
+					{ drillId: latestAttempt.id },
+				);
+			if (latestAttempt.status === 'failed')
+				refuse('drill-failed', 'The latest failover drill did not pass; fix it and run another.', {
+					drillId: latestAttempt.id,
+					status: latestAttempt.status,
+				});
+		}
+		if (latestPassed) {
+			if (latestPassed.finishedAt === null || latestPassed.timeToWritableMs === null)
+				refuse(
+					'drill-unmeasured',
+					'The latest passed drill has no finished time or no measured time to writable; run a complete drill.',
+					{ drillId: latestPassed.id, finishedAt: iso(latestPassed.finishedAt), timeToWritableMs: latestPassed.timeToWritableMs },
+				);
+			else if (latestPassed.timeToWritableMs > 30_000)
+				refuse(
+					'drill-too-slow',
+					'The latest passed drill was not writable within 30 s; fix the time-to-writable bound and run another.',
+					{ drillId: latestPassed.id, timeToWritableMs: latestPassed.timeToWritableMs, maxMs: 30_000 },
+				);
+			if (latestPassed.durability === 'sync' && latestPassed.lostCommits !== 0)
+				refuse(
+					'drill-lost-commits',
+					'The latest passed sync drill lost acknowledged commits; RPO 0 is not proven.',
+					{ drillId: latestPassed.id, durability: latestPassed.durability, lostCommits: latestPassed.lostCommits },
+				);
+			if (!latestPassed.arbiterTested || latestPassed.arbiterTestedAt === null)
+				refuse(
+					'arbiter-untested',
+					'The latest passed drill did not prove an arbiter compare-and-swap; run the drill with the arbiter.',
+					{ drillId: latestPassed.id },
+				);
+			else if (latestPassed.finishedAt !== null && drillAge !== null && drillAge > DRILL_MAX_AGE_MS)
+				refuse('drill-stale', 'The latest passed drill is older than 30 days; run a fresh one.', {
+					drillId: latestPassed.id,
+					finishedAt: iso(latestPassed.finishedAt),
+					maxAgeDays: 30,
+				});
+		} else if (latestAttempt && latestAttempt.status === 'passed') {
+			// A passed row that the passed-drill query did not return cannot be trusted.
+			refuse('drill-failed', 'The latest drill is marked passed but could not be read as a passed drill.', {
+				drillId: latestAttempt.id,
 			});
-		else if (!drill.arbiterTested)
-			refuse('arbiter-untested', 'The last drill did not prove an arbiter compare-and-swap; run the drill with the arbiter.', {
-				drillId: drill.id,
-			});
-		else if (drillAge === null || drillAge > DRILL_MAX_AGE_MS)
-			refuse('drill-stale', 'The last passed drill is older than 30 days; run a fresh one.', {
-				drillId: drill.id,
-				finishedAt: iso(drill.finishedAt),
-				maxAgeDays: 30,
-			});
+		}
 
-		return { evidence, refusals };
+		return { evidence, refusals, latestAttempt, latestPassed };
 	}
 
-	#lastDrill(databaseId: string): DrillRow | null {
+	#latestDrill(databaseId: string): DrillRow | null {
 		return (
 			this.ctx.db
 				.select()
 				.from(databaseFailoverDrills)
 				.where(eq(databaseFailoverDrills.databaseId, databaseId))
-				.orderBy(desc(databaseFailoverDrills.startedAt))
+				.orderBy(desc(databaseFailoverDrills.startedAt), desc(databaseFailoverDrills.id))
+				.limit(1)
+				.get() ?? null
+		);
+	}
+
+	#latestPassedDrill(databaseId: string): DrillRow | null {
+		return (
+			this.ctx.db
+				.select()
+				.from(databaseFailoverDrills)
+				.where(
+					and(
+						eq(databaseFailoverDrills.databaseId, databaseId),
+						eq(databaseFailoverDrills.status, 'passed'),
+					),
+				)
+				.orderBy(desc(databaseFailoverDrills.finishedAt), desc(databaseFailoverDrills.id))
 				.limit(1)
 				.get() ?? null
 		);
@@ -264,7 +342,9 @@ export class DatabaseFailoverPolicyService {
 		return {
 			id: row.id,
 			databaseId: row.databaseId,
+			drillDatabaseId: row.drillDatabaseId,
 			status: row.status,
+			durability: row.durability,
 			startedAt: new Date(row.startedAt).toISOString(),
 			finishedAt: iso(row.finishedAt),
 			timeToWritableMs: row.timeToWritableMs,
@@ -280,7 +360,7 @@ export class DatabaseFailoverPolicyService {
 	}
 
 	#allNodes(): NodeView[] {
-		const ids = this.ctx.db.select({ id: nodes.id }).from(nodes).all();
+		const ids = this.ctx.db.select({ id: nodes.id }).from(nodes).orderBy(asc(nodes.id)).all();
 		return ids.flatMap((row) => {
 			try {
 				return [this.ctx.nodes.get(row.id)];
@@ -296,16 +376,21 @@ export class DatabaseFailoverPolicyService {
 			.from(databaseReplicas)
 			.where(and(eq(databaseReplicas.databaseId, database.id), isNull(databaseReplicas.removingAt)))
 			.all();
-		return [...new Set([database.nodeId, ...replicas.map((row) => row.nodeId)])];
+		return [...new Set([database.nodeId, ...replicas.map((row) => row.nodeId)])].sort();
 	}
 
 	#hasCrossNodeReplica(database: DatabaseRow, byNode: Map<string, NodeView>): boolean {
 		const replicas = this.ctx.db
-			.select({ nodeId: databaseReplicas.nodeId })
+			.select({ nodeId: databaseReplicas.nodeId, status: databaseReplicas.status })
 			.from(databaseReplicas)
 			.where(and(eq(databaseReplicas.databaseId, database.id), isNull(databaseReplicas.removingAt)))
 			.all();
-		return replicas.some((row) => row.nodeId !== database.nodeId && byNode.get(row.nodeId)?.status === 'online');
+		return replicas.some(
+			(row) =>
+				row.nodeId !== database.nodeId &&
+				databaseReplicaReadable(row.status) &&
+				byNode.get(row.nodeId)?.status === 'online',
+		);
 	}
 
 	#activeSwitchover(databaseId: string) {

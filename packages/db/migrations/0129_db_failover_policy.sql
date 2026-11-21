@@ -2,8 +2,9 @@
 --
 -- `failover_mode` defaults to `manual`, so every existing database keeps today's behaviour even
 -- when DB_AUTO_PROMOTE is on. An `async` database may only be armed with `accept_data_loss = 1`;
--- a `sync` one is RPO 0 without it (W11-SPEC §1.3). `last_failover_drill_at` is the evidence
--- arming reads; `auto_armed_at` is when an operator last armed automatic failover.
+-- a `sync` one is RPO 0 without it (W11-SPEC §1.3). `last_failover_drill_at` is a read cache: the
+-- latest passed row in `database_failover_drills` (0130) is the authority. `auto_armed_at` is when
+-- an operator last armed automatic failover.
 ALTER TABLE databases ADD COLUMN failover_mode TEXT NOT NULL DEFAULT 'manual'
   CHECK (failover_mode IN ('manual','auto'));
 ALTER TABLE databases ADD COLUMN accept_data_loss INTEGER NOT NULL DEFAULT 0;
