@@ -9,7 +9,7 @@ import { CoreError } from './errors.ts';
 import { createCore, type Core } from './index.ts';
 import { LocalObjectStore } from './object-store.ts';
 import { buildPrincipal } from './orgs.ts';
-import { RegionService } from './region-service.ts';
+import { RegionService, regionRunnerId } from './region-service.ts';
 
 /**
  * W13 exit criteria with fake nodes in two regions (HA-PLAN H26): uksouth (a1 edge, a2) and ukwest
@@ -210,7 +210,7 @@ describe('automatic promotion never chooses the standby region', () => {
 					{ id, nodeId: a1.nodeId, primaryGeneration: 0, acceptDataLoss: true, failoverMode: 'auto', durabilityEffective: 'async', syncState: 'steady' } as never,
 					standby.nodeId,
 				),
-			).toMatch(/automatic failover is no longer eligible|never promoted automatically/);
+			).toMatch(/b[12] is in region "ukwest", not the primary's region "uksouth"; a replica in another region is never promoted automatically/);
 			const outcome = core.databaseReplicas.runFailoverStage(
 				'fence',
 				{ databaseId: id, candidateNodeId: standby.nodeId, generation: (database.primary_generation as number) + 1, reason: 'test' } as never,
@@ -382,5 +382,103 @@ describe('flag off', () => {
 		} finally {
 			(core.ctx.config.features as Record<string, boolean>).REGIONS = true;
 		}
+	});
+});
+
+describe('W13 rework', () => {
+	test('a promoted database swaps its standby region to the region it left', async () => {
+		const { orders, ledger } = setupFleet();
+		const plan = (await runner.promote(admin, 'ukwest', {})) as RegionPromotionPlan;
+		await runner.promote(admin, 'ukwest', { confirm: 'ukwest', planHash: plan.planHash, acceptDataLoss: true, reason: 'drill' });
+		completeFailover(orders);
+		await runner.tick();
+		completeFailover(ledger);
+		await runner.tick();
+		expect(core.databases.get(admin, 'orders').standbyRegion).toBe('uksouth');
+		expect(core.databases.get(admin, 'ledger').standbyRegion).toBe('uksouth');
+		// The preflight now asks for a replica back in uksouth, and says why.
+		const regions = core.haDoctor.preflight(admin, 'ha').checks.filter((check) => check.id === 'regions' && check.subject?.name === 'orders');
+		expect(regions).toEqual([
+			expect.objectContaining({ status: 'fail', evidence: [expect.stringContaining('region promotion moved it away from uksouth')] }),
+		]);
+		// A promotion back is planned with the standby-region database first.
+		const back = service(new FakeControlPlane(a1.nodeId), 'runner-a1');
+		opened.sqlite.run("UPDATE database_replicas SET status = 'streaming' WHERE 1");
+		core.databaseReplicas.add(admin, 'orders', { node: a1.nodeId });
+		opened.sqlite.run("UPDATE database_replicas SET status = 'streaming', replay_lsn = '0/6000000' WHERE node_id = ?", [a1.nodeId]);
+		const backPlan = (await back.promote(admin, 'uksouth', {})) as RegionPromotionPlan;
+		expect(backPlan.steps.find((step) => step.kind === 'database')).toMatchObject({ name: 'orders', status: 'pending' });
+	});
+
+	test('a region change on a node holding database members or region-spread copies is refused unless forced', async () => {
+		const { orders } = setupFleet();
+		const holder = core.databaseReplicas.list(admin, 'orders')[0]!.nodeId;
+		const patch = { zone: 'unk-9', region: 'uknorth' };
+		expect(() => core.nodes.update(admin, holder, patch)).toThrow(/holds database members \(orders/);
+		const before = core.nodes.stateVersion();
+		const forced = core.nodes.update(admin, holder, patch, { force: true });
+		expect(forced.region).toBe('uknorth');
+		expect(forced.warnings).toEqual([expect.stringContaining('orders')]);
+		// A region change bumps desired state, so the per-node W11 policy is rendered again.
+		expect(core.nodes.stateVersion()).toBeGreaterThan(before);
+		const audit = opened.sqlite.query<{ args_json: string }, []>("SELECT args_json FROM audit_log WHERE action = 'node.update' ORDER BY rowid DESC LIMIT 1").get()!;
+		expect(JSON.parse(audit.args_json)).toMatchObject({ force: true, affected: [expect.stringContaining('orders')] });
+		// Force is for a platform admin only.
+		const operator = buildPrincipal({ kind: 'user', userId: 'user_2', orgId: 'org_1', role: 'owner' });
+		expect(() => core.nodes.update(operator, holder, { zone: 'ukw-1', region: 'ukwest' }, { force: true })).toThrow();
+		core.nodes.update(admin, holder, { zone: holder === b1.nodeId ? 'ukw-1' : 'ukw-2', region: 'ukwest' }, { force: true });
+		void orders;
+		// A copy placed with spread: region pins its node's region too.
+		const project = await core.projects.create(admin, {
+			name: 'Spread',
+			slug: 'spread-region',
+			runtime: 'process',
+			placement: 'auto',
+			placementSpec: { spread: 'region' },
+			productionAccess: 'public',
+			previewAccess: 'platform',
+		});
+		opened.sqlite.run(
+			"INSERT INTO workloads (id, org_id, project_id, deployment_id, node_id, runtime, status, spec_json, memory_mb) VALUES ('wl_spread', 'org_1', ?, 'dep_x', ?, 'process', 'running', '{}', 64)",
+			[project.id, b2.nodeId],
+		);
+		opened.sqlite.run(
+			"INSERT INTO workload_replicas (id, workload_id, project_id, node_id, replica_index, status, created_at, updated_at) VALUES ('wr_spread', 'wl_spread', ?, ?, 0, 'running', 1, 1)",
+			[project.id, a2.nodeId],
+		);
+		opened.sqlite.run('DELETE FROM database_replicas');
+		opened.sqlite.run('DELETE FROM databases');
+		expect(() => core.nodes.update(admin, a2.nodeId, { zone: 'unk-8', region: 'uknorth' })).toThrow(/spread: region copies \(spread-region/);
+		opened.sqlite.run("DELETE FROM workload_replicas WHERE id = 'wr_spread'");
+		opened.sqlite.run("DELETE FROM workloads WHERE id = 'wl_spread'");
+	});
+
+	test('no region change while a promotion is open', async () => {
+		setupFleet();
+		const plan = (await runner.promote(admin, 'ukwest', {})) as RegionPromotionPlan;
+		await runner.promote(admin, 'ukwest', { confirm: 'ukwest', planHash: plan.planHash, acceptDataLoss: true, reason: 'drill' });
+		const idle = joinNode('c1', '10.47.3.1', 'unk-1', 'uknorth');
+		expect(() => core.nodes.update(admin, idle.nodeId, { zone: 'unk-2', region: 'uknorth2' })).toThrow(/a region promotion to ukwest is open/);
+		// Zone-only changes inside the same region still work.
+		expect(core.nodes.update(admin, idle.nodeId, { zone: 'unk-2' }).zone).toBe('unk-2');
+		opened.sqlite.run('DELETE FROM nodes WHERE id = ?', [idle.nodeId]);
+	});
+
+	test('two confirms at once: one runs, the other is a 409, never a 500', async () => {
+		setupFleet();
+		const plan = (await runner.promote(admin, 'ukwest', {})) as RegionPromotionPlan;
+		const confirm = { confirm: 'ukwest', planHash: plan.planHash, acceptDataLoss: true, reason: 'drill' };
+		const other = service(control, 'runner-other');
+		const results = await Promise.allSettled([runner.promote(admin, 'ukwest', confirm), other.promote(admin, 'ukwest', confirm)]);
+		expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
+		const rejected = results.find((result) => result.status === 'rejected') as PromiseRejectedResult;
+		expect(rejected.reason).toMatchObject({ status: 409 });
+		expect(control.promotions).toBe(1);
+	});
+
+	test('the default runner id carries a per-boot nonce and is stable within a process', () => {
+		const id = regionRunnerId();
+		expect(id).toMatch(/^.+:\d+:[a-f0-9]{12}$/);
+		expect(regionRunnerId()).toBe(id);
 	});
 });
