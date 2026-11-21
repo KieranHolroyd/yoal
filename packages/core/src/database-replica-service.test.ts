@@ -285,7 +285,7 @@ describe('promotion', () => {
 			{ failoverId: started.id, databaseId: db.id, replicaWorkloadId: target.workloadId },
 		]);
 
-		beat(second, { databaseReplicaPromotionResults: [{ failoverId: started.id, status: 'ok', lsn: '0/4000000' }] });
+		beat(second, { databaseReplicaPromotionResults: [{ failoverId: started.id, status: 'ok', promoted: true, lsn: '0/4000000' }] });
 		const moved = core.databases.get(owner, 'ledger');
 		expect(moved.nodeId).toBe(second.nodeId);
 		expect(moved.internalHost.process).toBe(`127.0.0.1:${target.hostPort}`);
@@ -321,7 +321,7 @@ describe('promotion', () => {
 		report(primary, db.id, [slotSample(replica.slot!)]);
 		const started = await core.databaseReplicas.promote(owner, 'safe', replica.id, { confirm: true });
 		beat(primary, { workloads: [] });
-		beat(third, { databaseReplicaPromotionResults: [{ failoverId: started.id, status: 'failed', error: 'target exists' }] });
+		beat(third, { databaseReplicaPromotionResults: [{ failoverId: started.id, status: 'failed', promoted: false, error: 'target exists' }] });
 		expect(core.databaseReplicas.failovers(owner, 'safe')[0]).toMatchObject({ stage: 'failed', message: expect.stringContaining('target exists') });
 		expect((await core.nodes.desiredState(primary.token)).workloads.some((item) => item.id === db.id)).toBe(true);
 		expect(core.databaseReplicas.list(owner, 'safe')[0]!.status).toBe('failed');
@@ -347,7 +347,7 @@ describe('promotion', () => {
 		expect(handler.run('fence', plan, fence)).toMatchObject({ status: 'done' });
 		expect(handler.run('promote', { ...plan, stage: 'promote' }, fence)).toMatchObject({ status: 'waiting' });
 		const task = (await core.databaseReplicas.promotionsForNode(second.nodeId)).find((item) => item.databaseId === db.id)!;
-		beat(second, { databaseReplicaPromotionResults: [{ failoverId: task.failoverId, status: 'ok', lsn: null }] });
+		beat(second, { databaseReplicaPromotionResults: [{ failoverId: task.failoverId, status: 'ok', promoted: true, lsn: null }] });
 		expect(handler.run('promote', { ...plan, stage: 'promote' }, fence)).toMatchObject({ status: 'done' });
 		expect(handler.run('repoint', { ...plan, stage: 'repoint' }, fence)).toMatchObject({ status: 'waiting' });
 		beat(second, { workloads: [{ id: db.id, status: 'running', restarts: 0 }] });

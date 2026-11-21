@@ -1380,7 +1380,10 @@ export class SystemdDriver {
 	 * and renames `<root>/<replica id>` to `<root>/<database id>` on the same filesystem. Re-running
 	 * it after a partial run finishes the hand-over.
 	 */
-	async replicaPromote(replicaId: string, raw: { databaseId?: unknown }): Promise<{ databaseId: string; lsn: string | null }> {
+	async replicaPromote(
+		replicaId: string,
+		raw: { databaseId?: unknown },
+	): Promise<{ databaseId: string; lsn: string | null; promoted: boolean; error?: string }> {
 		const id = assertReplicaWorkloadId(replicaId);
 		const databaseId = assertPrimaryDatabaseId(raw.databaseId, 'databaseId');
 		const source = await this.dataDirFor(id);
@@ -1388,7 +1391,7 @@ export class SystemdDriver {
 		const sourceExists = await fs.lstat(source).then((stat) => stat.isDirectory()).catch(() => false);
 		const targetExists = await fs.lstat(target).then(() => true).catch(() => false);
 		// A previous run already handed the directory over: report success again.
-		if (!sourceExists && targetExists) return { databaseId, lsn: null };
+		if (!sourceExists && targetExists) return { databaseId, lsn: null, promoted: true };
 		if (!sourceExists) throw new ValidationError(`Replica ${id} has no data directory on this node.`);
 		if (targetExists)
 			throw new ValidationError(`${target} already exists; refusing to promote ${id} over another copy of ${databaseId}.`);
@@ -1399,23 +1402,51 @@ export class SystemdDriver {
 		};
 		let recovering = await query('SELECT pg_is_in_recovery()');
 		if (recovering === null) throw new Error(`Replica ${id} is not answering; it must be running to be promoted.`);
+		// Latched the instant `pg_ctl promote` accepts: everything after this point may fail, but the
+		// replica is already a primary and the old one must never resume (review, main/C7).
+		let promoted = false;
 		if (recovering === 't') {
-			const promoted = await this.runner.run(renderPromoteArgs(this.podmanPath, id));
-			if (promoted.code !== 0)
-				throw new Error(`pg_ctl promote failed (${promoted.code}): ${promoted.stderr.trim().slice(0, 500) || 'no detail'}`);
+			const result = await this.runner.run(renderPromoteArgs(this.podmanPath, id));
+			if (result.code !== 0)
+				throw new Error(`pg_ctl promote failed (${result.code}): ${result.stderr.trim().slice(0, 500) || 'no detail'}`);
+			promoted = true;
 			for (let attempt = 0; attempt < 30 && recovering !== 'f'; attempt += 1) {
 				recovering = await query('SELECT pg_is_in_recovery()');
 				if (recovering !== 'f') await new Promise((resolve) => setTimeout(resolve, this.restorePollMs));
 			}
-			if (recovering !== 'f') throw new Error(`Replica ${id} was still in recovery 30 s after pg_ctl promote.`);
+			if (recovering !== 'f') {
+				const error = `Replica ${id} was still in recovery 30 s after pg_ctl promote.`;
+				return { databaseId, lsn: null, promoted: true, error };
+			}
+		} else {
+			// It was already out of recovery: a previous run promoted it. The hand-over may still be
+			// pending, and it is safe to finish it (idempotent retry).
+			promoted = true;
 		}
-		const lsn = await query('SELECT pg_current_wal_lsn()::text');
-		await query('CHECKPOINT');
-		await this.systemctl(['stop', serviceUnitName(id)]);
-		for (const marker of ['standby.signal', 'recovery.signal'])
-			await fs.rm(join(source, 'pgdata', marker), { force: true });
-		await fs.rename(source, target);
-		return { databaseId, lsn: lsn && /^[0-9A-F]{1,8}\/[0-9A-F]{1,8}$/i.test(lsn) ? lsn : null };
+		try {
+			const lsn = await query('SELECT pg_current_wal_lsn()::text');
+			await query('CHECKPOINT');
+			await this.systemctl(['stop', serviceUnitName(id)]);
+			for (const marker of ['standby.signal', 'recovery.signal'])
+				await fs.rm(join(source, 'pgdata', marker), { force: true });
+			await fs.rename(source, target);
+			return {
+				databaseId,
+				lsn: lsn && /^[0-9A-F]{1,8}\/[0-9A-F]{1,8}$/i.test(lsn) ? lsn : null,
+				promoted,
+			};
+		} catch (error) {
+			// The promotion itself succeeded; the hand-over did not. Report it as promoted so the
+			// control plane retries the hand-over and never resumes the old primary.
+			if (promoted)
+				return {
+					databaseId,
+					lsn: null,
+					promoted: true,
+					error: error instanceof Error ? error.message : String(error),
+				};
+			throw error;
+		}
 	}
 
 	// ------------------------------------------------------- synchronous set (H23, W10)

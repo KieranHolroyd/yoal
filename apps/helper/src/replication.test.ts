@@ -195,9 +195,11 @@ class ReplicationRunner implements CommandRunner {
 	calls: Array<{ argv: string[]; options?: CommandRunOptions }> = [];
 	recovery = 't';
 	status = '[]';
+	failStop = false;
 	async run(argv: string[], options?: CommandRunOptions): Promise<RunResult> {
 		this.calls.push({ argv, ...(options ? { options } : {}) });
 		const sql = argv[argv.indexOf('-c') + 1] ?? '';
+		if (this.failStop && argv[1] === 'stop') return { code: 1, stdout: '', stderr: 'stop failed' };
 		if (argv.includes('psql') && sql === 'SELECT pg_is_in_recovery()') return { code: 0, stdout: `${this.recovery}\n`, stderr: '' };
 		if (argv.includes('psql') && sql.startsWith('SELECT pg_current_wal_lsn')) return { code: 0, stdout: '0/5000060\n', stderr: '' };
 		if (argv.includes('psql') && sql === REPLICATION_STATUS_SQL) return { code: 0, stdout: this.status, stderr: '' };
@@ -289,14 +291,26 @@ describe('SystemdDriver replication verbs', () => {
 		await fs.mkdir(join(f.stateDir, REPLICA, 'pgdata'), { recursive: true });
 		await fs.writeFile(join(f.stateDir, REPLICA, 'pgdata', 'standby.signal'), '');
 		await fs.writeFile(join(f.stateDir, REPLICA, 'pgdata', 'PG_VERSION'), '17\n');
-		expect(await f.driver.replicaPromote(REPLICA, { databaseId: PRIMARY })).toEqual({ databaseId: PRIMARY, lsn: '0/5000060' });
+		expect(await f.driver.replicaPromote(REPLICA, { databaseId: PRIMARY })).toEqual({ databaseId: PRIMARY, lsn: '0/5000060', promoted: true });
 		expect(f.runner.calls.some((call) => call.argv.includes('pg_ctl'))).toBe(true);
 		expect(f.runner.calls.some((call) => call.argv.includes('stop') && call.argv.includes(`yoal-workload-${REPLICA}.service`))).toBe(true);
 		expect(await fs.readFile(join(f.stateDir, PRIMARY, 'pgdata', 'PG_VERSION'), 'utf8')).toBe('17\n');
 		await expect(fs.stat(join(f.stateDir, PRIMARY, 'pgdata', 'standby.signal'))).rejects.toThrow();
 		await expect(fs.stat(join(f.stateDir, REPLICA))).rejects.toThrow();
 		// Idempotent: a retry after the hand-over reports success without touching anything.
-		expect(await f.driver.replicaPromote(REPLICA, { databaseId: PRIMARY })).toEqual({ databaseId: PRIMARY, lsn: null });
+		expect(await f.driver.replicaPromote(REPLICA, { databaseId: PRIMARY })).toEqual({ databaseId: PRIMARY, lsn: null, promoted: true });
+	});
+
+	test('a failure after pg_ctl promote is latched as promoted, never thrown', async () => {
+		const f = await driverFixture();
+		await f.envFor(REPLICA);
+		await fs.mkdir(join(f.stateDir, REPLICA, 'pgdata'), { recursive: true });
+		await fs.writeFile(join(f.stateDir, REPLICA, 'pgdata', 'PG_VERSION'), '17\n');
+		f.runner.failStop = true;
+		const result = await f.driver.replicaPromote(REPLICA, { databaseId: PRIMARY });
+		expect(result).toMatchObject({ promoted: true, error: expect.stringContaining('systemctl stop failed') });
+		// The data dir is still under the replica id: the hand-over can be retried idempotently.
+		expect((await fs.stat(join(f.stateDir, REPLICA, 'pgdata'))).isDirectory()).toBe(true);
 	});
 
 	test('promote refuses to overwrite another copy of the database', async () => {

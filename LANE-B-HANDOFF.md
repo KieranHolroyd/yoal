@@ -53,6 +53,19 @@ revision fixes the independent review in `REVIEW-FINDINGS.md`. No merge to `main
 | 6 | The switchover route requires `If-Match` (missing = 428, malformed = 400). The node samples the target's `sync_state = 'sync'` before writing the barrier and polls `replay_lsn` until it reaches the barrier. Resume verifies read-only is off. The commit-loss harness now wraps the shipped `DatabaseDurabilityRunner` drain (100 runs) with a negative control, not only `runSwitchover`. | `if-match.ts`, agent `#sync`/`#waitForReplay`, `renderResumeWritesSql`, agent drain harness; tests across the helper, agent and control-plane suites. |
 | 7 | A node result at a stale lease ETag reports the setting it applied (`applied`) and is reconciled: a healthy named member re-opens the transition, otherwise `on_sync_loss` is recorded, and every path alerts. It is never recorded as a steady sync set. | `#reconcileStaleSyncAction`, agent `applied`; “a stale node watchdog result is reconciled…”, “a stale set-sync result re-opens the transition…”. |
 
+## Final verification response
+
+| # | Fixed | Evidence |
+| --- | --- | --- |
+| 1 | `repoint` passes `failover.id` to `onPromotion`, so `lease_taken_at` is set. `#retryPromotionLeases` now requires `status='promoting'`, the database row on the failover's `toNodeId`, and the row at the failover's generation. `onPromotion` refuses to lower the lease generation. Migration 0128 backfills `lease_taken_at = promoted_at`. | `repoint`, `#retryPromotionLeases`, `onPromotion`, 0128; “a historical completed failover is not re-processed and cannot lower the lease”. |
+| 2 | The tick visits every leased row (`durability='sync'` **or** a cached lease ETag), renews it, and only then applies sync-set decisions to `sync` rows. An async promotion's lease is renewed too. | `tick`, `#renewLeaseIfDue`; “an async lease is renewed by the tick too”. |
+| 3 | The helper latches promotion the instant `pg_ctl promote` succeeds; any later hand-over failure returns `{promoted: true, error}`. The agent keeps the workload held and reports `promoted: true`; the control plane alerts and keeps the promotion task for an idempotent hand-over retry, never `failFailover`/resume. | `SystemdDriver.replicaPromote`, agent `database-replication`, `applyPromotionResults`, `onHandoverFailed`; helper “a failure after pg_ctl promote is latched”, agent “a hand-over failure after promotion…”, core “a promotion that succeeded but failed its hand-over is retried, never resumed”. |
+| 4 | A switchover parked at `step='promote'` with `promotion_issued_at IS NULL` for longer than `SYNC_CHANGE_TIMEOUT` is alerted and queued for resume; a promotion that was handed out is left alone. | `#switchoverStalls`, `promotion_issued_at`; “a switchover parked at promote with no promotion resumes after the timeout”. |
+| 5 | `#retryPromotionLeases` runs before the `SYNC_REPLICA` feature check, so flag-off promotions still take their lease. | `tick`. |
+| 6 | Schema comments now say 0128, not 0127. | `packages/db/src/schema.ts`. |
+| 7 | The generated stream is exactly `0126_replica_durability.sql`, `0127_replica_rewind.sql` (verbatim from `origin/main`), `0128_sync_switchover_rewind.sql`; `migrations.test.ts` matches. `0127` was not edited. | `bun scripts/generate-migrations.ts` (128), `migrations.test.ts`. |
+| 8 | Hand-off notes the separate lane A `mayAcquire` path (expired + steady + eligible at generation + 1); `acquireRefusal` is unchanged. | W9-SPEC note below. |
+
 ## What is implemented
 
 - **Durability per database** (`async`/`sync`, `sync_timeout_seconds`, `on_sync_loss`) through
@@ -80,12 +93,13 @@ revision fixes the independent review in `REVIEW-FINDINGS.md`. No merge to `main
 
 - `bun run check` — all packages, 0 errors (one pre-existing Svelte warning in
   `settings/registry/+page.svelte`). `iam lint: no new role/kind checks`.
-- `bun test` — 6,516 pass, 74 skip, 0 fail across 592 files.
+- `bun test` — 6,522 pass, 74 skip, 0 fail across 592 files.
 - `YOAL_MIGRATION_BASE_REF=origin/main bun scripts/check-migrations.ts` — ok, 128 embedded
   migrations, no unreviewed destructive statement.
-- Focused: 98 tests across `database-sync.test.ts`, `database-switchover.test.ts`,
+- Focused: 120 tests across `database-sync.test.ts`, `database-switchover.test.ts`,
   `database-member-service.test.ts`, `database-replica-service.test.ts`,
   `apps/helper/src/replication.test.ts`, `apps/agent/src/database-durability.test.ts`,
+  `apps/agent/src/database-replication.test.ts`,
   `apps/control-plane/src/lib/server/if-match.test.ts`, plus the CLI dispatcher and migration
   tests. Both switchover harnesses (the core model and the shipped agent drain) include a 100-run
   zero-loss assertion and a negative control that loses an in-flight commit.
@@ -116,6 +130,13 @@ reconcile from the current lease (re-open the transition when it names a healthy
 record `on_sync_loss`) and alert, and it must never record the stale result as `steady`/`durability
 sync`. That is what `#reconcileStaleSyncAction` does. The rest of §5.5 stands; the fallback is
 stricter (fresh barrier + target replay proof), consistent with I13.
+
+**Lane A integration (not changed here):** `acquireRefusal` stays strict — an expired lease is
+un-held and is not permission to acquire. Lane A needs a separate `mayAcquire` path for the
+takeover rule: a member may acquire an **expired, steady, eligible** lease at **generation + 1**,
+using the arbiter's clock and the same sync-set eligibility. This worktree does not implement that
+acquisition; it only renews the holder's lease and raises the refusal for expired leases. Do not
+relax `acquireRefusal` to get takeover behaviour.
 
 ## Files
 

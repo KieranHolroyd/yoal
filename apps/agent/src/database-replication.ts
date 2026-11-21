@@ -189,9 +189,22 @@ export class DatabaseReplicationRunner {
 		this.runtime.hold(task.replicaWorkloadId);
 		this.held.set(task.failoverId, task.replicaWorkloadId);
 		try {
-			const { lsn } = await this.helper.replicaPromote(task.replicaWorkloadId, task.databaseId);
-			this.results.set(task.failoverId, { failoverId: task.failoverId, status: 'ok', lsn });
-			this.log('info', `Promoted ${task.replicaWorkloadId} to primary of ${task.databaseId}${lsn ? ` at ${lsn}` : ''}`);
+			const outcome = await this.helper.replicaPromote(task.replicaWorkloadId, task.databaseId);
+			if (outcome.promoted && outcome.error) {
+				// The promotion succeeded but the hand-over did not. Keep the workload held (it is a
+				// primary now) and report `promoted` so the control plane retries, never resumes.
+				this.results.set(task.failoverId, {
+					failoverId: task.failoverId,
+					status: 'failed',
+					promoted: true,
+					lsn: outcome.lsn,
+					error: outcome.error.slice(0, 2_000),
+				});
+				this.log('error', `Promoted ${task.replicaWorkloadId} but the hand-over failed: ${outcome.error}`);
+			} else {
+				this.results.set(task.failoverId, { failoverId: task.failoverId, status: 'ok', promoted: outcome.promoted, lsn: outcome.lsn });
+				this.log('info', `Promoted ${task.replicaWorkloadId} to primary of ${task.databaseId}${outcome.lsn ? ` at ${outcome.lsn}` : ''}`);
+			}
 		} catch (error) {
 			// Not handed over: the replica goes back to normal reconcile; the control plane decides.
 			this.runtime.release(task.replicaWorkloadId);
@@ -199,6 +212,7 @@ export class DatabaseReplicationRunner {
 			this.results.set(task.failoverId, {
 				failoverId: task.failoverId,
 				status: 'failed',
+				promoted: false,
 				error: errorText(error).slice(0, 2_000),
 			});
 			this.log('error', `Could not promote ${task.replicaWorkloadId}: ${errorText(error)}`);

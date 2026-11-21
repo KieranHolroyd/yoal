@@ -493,26 +493,28 @@ export const databaseFailovers = sqliteTable(
 		finishedAt: integer('finished_at'),
 		/** The replica being promoted (0069). */
 		replicaId: text('replica_id'),
-		/** `failover` for an unplanned promotion, `switchover` for a planned one (0127). */
+		/** `failover` for an unplanned promotion, `switchover` for a planned one (0128). */
 		kind: text('kind', { enum: ['failover', 'switchover'] }).notNull().default('failover'),
-		/** The primary's LSN after writes stopped (planned switchover, 0127). */
+		/** The primary's LSN after writes stopped (planned switchover, 0128). */
 		drainLsn: text('drain_lsn'),
-		/** `drain` | `resume` | `promote`, for the switchover surface (0127). */
+		/** `drain` | `resume` | `promote`, for the switchover surface (0128). */
 		switchoverStep: text('switchover_step'),
 		switchoverStartedAt: integer('switchover_started_at'),
-		/** Counts switchover drain/resume/promote attempts, so a retry is a new task version (0127). */
+		/** Counts switchover drain/resume/promote attempts, so a retry is a new task version (0128). */
 		switchoverAttempt: integer('switchover_attempt').notNull().default(0),
-		/** The old primary was rewound (or rebuilt) and no longer needs handling (0127). */
+		/** When the promotion task was first handed to the replica's node; null means never. */
+		promotionIssuedAt: integer('promotion_issued_at'),
+		/** The old primary was rewound (or rebuilt) and no longer needs handling (0128). */
 		rewoundAt: integer('rewound_at'),
-		/** `rewound` re-attached the old copy; `rebuild` needs a fresh replica there (0127). */
+		/** `rewound` re-attached the old copy; `rebuild` needs a fresh replica there (0128). */
 		rewindStatus: text('rewind_status', { enum: ['rewound', 'rebuild'] }),
-		/** The replica row on the old primary's node that receives the rewound copy (0127). */
+		/** The replica row on the old primary's node that receives the rewound copy (0128). */
 		rewindReplicaId: text('rewind_replica_id'),
 		/** State version the fence was issued at; the old node confirms at or after it. */
 		fenceVersion: integer('fence_version'),
 		fencedAt: integer('fenced_at'),
 		promotedAt: integer('promoted_at'),
-		/** When the database lease was last taken at the promoted generation (0127 review). */
+		/** When the database lease was last taken at the promoted generation (0128 review). */
 		leaseTakenAt: integer('lease_taken_at'),
 		/** The old primary's data dir was deleted on its node. */
 		oldPurgedAt: integer('old_purged_at'),
@@ -1273,24 +1275,24 @@ export const databases = sqliteTable(
 		onSyncLoss: text('on_sync_loss', { enum: ['downgrade', 'block'] }).notNull().default('downgrade'),
 		/** The node the lease currently names as synchronous (display cache; the lease is authority). */
 		syncReplicaNodeId: text('sync_replica_node_id'),
-		/** The lease's transition flag (0127): `changing` makes the database non-promotable. */
+		/** The lease's transition flag (0128): `changing` makes the database non-promotable. */
 		syncState: text('sync_state', { enum: ['steady', 'changing'] }).notNull().default('steady'),
-		/** What is in force, which is `async` after an on-sync-loss downgrade (0127). */
+		/** What is in force, which is `async` after an on-sync-loss downgrade (0128). */
 		durabilityEffective: text('durability_effective', { enum: ['async', 'sync'] }).notNull().default('async'),
 		syncSetAt: integer('sync_set_at'),
-		/** When the open change started, so a stuck one can time out (0127). */
+		/** When the open change started, so a stuck one can time out (0128). */
 		syncChangeStartedAt: integer('sync_change_started_at'),
-		/** The member a failed switch falls back to (0127). */
+		/** The member a failed switch falls back to (0128). */
 		syncPreviousNodeId: text('sync_previous_node_id'),
-		/** First observed loss of the synchronous standby, for the downgrade timer (0127). */
+		/** First observed loss of the synchronous standby, for the downgrade timer (0128). */
 		syncLostAt: integer('sync_lost_at'),
-		/** Counts sync-set openings, so a re-open to the same target has a new task version (0127). */
+		/** Counts sync-set openings, so a re-open to the same target has a new task version (0128). */
 		syncAttempt: integer('sync_attempt').notNull().default(0),
-		/** The phase the primary's node last reported for the open change (0127). */
+		/** The phase the primary's node last reported for the open change (0128). */
 		syncPhase: text('sync_phase', { enum: ['opening', 'switching', 'waiting-barrier', 'closing', 'rearming'] }),
-		/** The barrier LSN the node wrote, for an honest transition report (0127). */
+		/** The barrier LSN the node wrote, for an honest transition report (0128). */
 		syncBarrierLsn: text('sync_barrier_lsn'),
-		/** The lease ETag/expiry the control plane last read, handed to the primary's node as its token (0127). */
+		/** The lease ETag/expiry the control plane last read, handed to the primary's node as its token (0128). */
 		syncLeaseEtag: text('sync_lease_etag'),
 		syncLeaseExpiresAt: integer('sync_lease_expires_at'),
 		/** Set while a pooler-only restart is waiting for the node to acknowledge it. */

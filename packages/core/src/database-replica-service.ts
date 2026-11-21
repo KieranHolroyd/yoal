@@ -751,12 +751,21 @@ export class DatabaseReplicaService {
 		const tasks: DatabaseReplicaPromotionTask[] = [];
 		for (const row of rows) {
 			if (!row.replicaId) continue;
+			// A switchover promotion is only handed out at step `promote`: not while draining and not
+			// after it has been parked or resumed.
+			if (row.kind === 'switchover' && row.switchoverStep !== 'promote') continue;
 			const database = this.ctx.db.select().from(databases).where(eq(databases.id, row.databaseId)).get();
 			if (!database || database.deletedAt) continue;
 			// Do not hand the promotion to the node while the database is non-promotable. The row is
 			// the display cache; the lease is the gate (W10 review blocker 2).
 			if (database.syncState === 'changing') continue;
 			if (await this.ctx.databaseMembers.promotionRefusal(database, row.toNodeId, false)) continue;
+			if (row.promotionIssuedAt === null)
+				this.ctx.db
+					.update(databaseFailovers)
+					.set({ promotionIssuedAt: this.ctx.now() })
+					.where(eq(databaseFailovers.id, row.id))
+					.run();
 			tasks.push({ failoverId: row.id, databaseId: row.databaseId, replicaWorkloadId: databaseReplicaWorkloadId(row.replicaId) });
 		}
 		return tasks;
@@ -924,6 +933,15 @@ export class DatabaseReplicaService {
 			const failover = this.ctx.db.select().from(databaseFailovers).where(eq(databaseFailovers.id, result.failoverId)).get();
 			if (!failover || failover.toNodeId !== nodeId || failover.status !== 'promoting' || failover.promotedAt) continue;
 			const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
+			if (result.status === 'failed' && result.promoted) {
+				// `pg_ctl promote` succeeded; only the data-dir hand-over failed. The new primary is
+				// live, so this is never a resume. Keep the task for an idempotent retry and alert.
+				await this.ctx.databaseMembers.onHandoverFailed(
+					failover,
+					`The promotion succeeded but the hand-over failed: ${result.error ?? 'unknown error'}`,
+				);
+				continue;
+			}
 			if (result.status === 'failed') {
 				const message = `Promotion failed on the replica's node: ${result.error ?? 'unknown error'}`;
 				this.failFailover(failover, message);
@@ -1336,7 +1354,7 @@ export class DatabaseReplicaService {
 		// Take the lease at the new generation and re-arm the Revision 1 transition. A failure here
 		// leaves the promoted database live but without a lease: it must be surfaced, not hidden.
 		try {
-			await this.ctx.databaseMembers.onPromotion(database.id, replica.nodeId, failover.generation);
+			await this.ctx.databaseMembers.onPromotion(database.id, replica.nodeId, failover.generation, failover.id);
 		} catch (error) {
 			const message = `The promotion re-pointed ${database.id} but the lease could not be taken: ${(error as Error).message}`;
 			this.ctx.db

@@ -21,6 +21,8 @@ ALTER TABLE database_failovers ADD COLUMN switchover_step TEXT;
 ALTER TABLE database_failovers ADD COLUMN switchover_started_at INTEGER;
 -- A retry must be a new task version or the node de-duplicates it forever (W10 review).
 ALTER TABLE database_failovers ADD COLUMN switchover_attempt INTEGER NOT NULL DEFAULT 0;
+-- When the promotion task was first handed out; null + step promote means writes are parked.
+ALTER TABLE database_failovers ADD COLUMN promotion_issued_at INTEGER;
 ALTER TABLE database_failovers ADD COLUMN rewound_at INTEGER;
 -- `rewound` re-attached the old copy; `rebuild` needs a fresh replica on that node instead.
 ALTER TABLE database_failovers ADD COLUMN rewind_status TEXT;
@@ -66,3 +68,7 @@ CREATE TABLE IF NOT EXISTS database_member_status (
   observed_at INTEGER NOT NULL,
   PRIMARY KEY (database_id, node_id)
 );
+
+-- Promotions that already completed before this column existed have taken their lease (or the
+-- lease was taken under the old code); never replay a historical failover on a later tick.
+UPDATE database_failovers SET lease_taken_at = promoted_at WHERE promoted_at IS NOT NULL;

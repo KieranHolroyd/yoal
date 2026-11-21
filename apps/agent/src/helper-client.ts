@@ -110,7 +110,7 @@ export interface HelperApi {
 	 */
 	replicationConfigure(id: string, input: { slots: string[]; password: string | null }): Promise<void>;
 	replicationStatus(id: string): Promise<DatabaseReplicationSlotStatus[]>;
-	replicaPromote(replicaId: string, databaseId: string): Promise<{ lsn: string | null }>;
+	replicaPromote(replicaId: string, databaseId: string): Promise<{ lsn: string | null; promoted: boolean; error?: string }>;
 	/** Set or clear the synchronous set (H23); validated names only. */
 	syncConfigure(id: string, members: string[]): Promise<void>;
 	/** Write the barrier commit; returns the position the target must replay. */
@@ -389,15 +389,19 @@ export class HelperClient
 		return databaseReplicationSlotStatusSchema.array().max(32).parse(body.slots ?? []);
 	}
 
-	async replicaPromote(replicaId: string, databaseId: string): Promise<{ lsn: string | null }> {
+	async replicaPromote(replicaId: string, databaseId: string): Promise<{ lsn: string | null; promoted: boolean; error?: string }> {
 		// pg_ctl promote waits up to 60 s, then a checkpoint and a clean stop.
 		const body = (await this.request(
 			'POST',
 			`/v1/workloads/${encodeURIComponent(replicaId)}/replica/promote`,
 			{ databaseId },
 			240_000,
-		)) as { lsn?: unknown };
-		return { lsn: typeof body.lsn === 'string' ? body.lsn : null };
+		)) as { lsn?: unknown; promoted?: unknown; error?: unknown };
+		return {
+			lsn: typeof body.lsn === 'string' ? body.lsn : null,
+			promoted: body.promoted === true,
+			...(typeof body.error === 'string' ? { error: body.error } : {}),
+		};
 	}
 
 	async syncConfigure(id: string, members: string[]): Promise<void> {

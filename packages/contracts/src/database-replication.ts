@@ -120,6 +120,11 @@ export type DatabaseReplicaPromotionTask = z.infer<typeof databaseReplicaPromoti
 export const databaseReplicaPromotionResultSchema = z.object({
 	failoverId: z.string().min(1).max(100),
 	status: z.enum(['ok', 'failed']),
+	/**
+	 * `pg_ctl promote` succeeded even if the later hand-over failed. A failed result with this set
+	 * is promoted-but-not-handed-over: never put the old primary back (review, main/C7).
+	 */
+	promoted: z.boolean().default(false),
 	/** `pg_current_wal_lsn()` right after the promotion, when it succeeded. */
 	lsn: z.string().max(64).nullable().optional(),
 	error: z.string().max(2_000).optional(),

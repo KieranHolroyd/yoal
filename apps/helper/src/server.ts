@@ -103,7 +103,7 @@ export interface HelperRuntime {
 	 */
 	replicationConfigure?(id: string, input: { slots?: unknown; password?: unknown }): Promise<{ slots: string[] }>;
 	replicationStatus?(id: string): Promise<{ slots: ReplicationSlotStatus[] }>;
-	replicaPromote?(id: string, input: { databaseId?: unknown }): Promise<{ databaseId: string; lsn: string | null }>;
+	replicaPromote?(id: string, input: { databaseId?: unknown }): Promise<{ databaseId: string; lsn: string | null; promoted: boolean; error?: string }>;
 	/** The synchronous set (H23, W10): setting, barrier, stop/resume writes and the member probe. */
 	syncConfigure?(id: string, input: { members?: unknown }): Promise<{ members: string[] }>;
 	syncBarrier?(id: string): Promise<{ lsn: string }>;

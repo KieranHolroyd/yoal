@@ -87,6 +87,7 @@ class FakeHelper {
 	promoted: string[] = [];
 	failConfigure = false;
 	failPromote = false;
+	failHandover = false;
 	slots: DatabaseReplicationSlotStatus[] = [];
 	async replicationConfigure(id: string, input: { slots: string[]; password: string | null }): Promise<void> {
 		if (this.failConfigure) throw new Error('psql exited 2');
@@ -95,10 +96,11 @@ class FakeHelper {
 	async replicationStatus(): Promise<DatabaseReplicationSlotStatus[]> {
 		return this.slots;
 	}
-	async replicaPromote(replicaId: string): Promise<{ lsn: string | null }> {
+	async replicaPromote(replicaId: string): Promise<{ lsn: string | null; promoted: boolean; error?: string }> {
 		if (this.failPromote) throw new Error('target exists');
 		this.promoted.push(replicaId);
-		return { lsn: '0/5000060' };
+		if (this.failHandover) return { lsn: null, promoted: true, error: 'data dir rename failed' };
+		return { lsn: '0/5000060', promoted: true };
 	}
 }
 
@@ -201,7 +203,7 @@ describe('DatabaseReplicationRunner', () => {
 		await r.runner.runOnce(withReplica, signal);
 		expect(r.helper.promoted).toEqual([REPLICA]);
 		expect(r.held).toEqual([REPLICA]);
-		expect(r.runner.pendingPromotionResults()).toEqual([{ failoverId: 'dfo_1', status: 'ok', lsn: '0/5000060' }]);
+		expect(r.runner.pendingPromotionResults()).toEqual([{ failoverId: 'dfo_1', status: 'ok', promoted: true, lsn: '0/5000060' }]);
 		r.runner.acknowledgePromotions(['dfo_1']);
 		expect(r.runner.pendingPromotionResults()).toEqual([]);
 		await r.runner.runOnce(withReplica, signal);
@@ -219,7 +221,21 @@ describe('DatabaseReplicationRunner', () => {
 			signal,
 		);
 		expect(r.held).toEqual([]);
-		expect(r.runner.pendingPromotionResults()).toEqual([{ failoverId: 'dfo_2', status: 'failed', error: 'target exists' }]);
+		expect(r.runner.pendingPromotionResults()).toEqual([{ failoverId: 'dfo_2', status: 'failed', promoted: false, error: 'target exists' }]);
+	});
+
+	test('a hand-over failure after promotion is reported promoted, and the replica stays held', async () => {
+		const r = runnerWith();
+		r.helper.failHandover = true;
+		await r.runner.runOnce(
+			state({ databaseReplicaPromotions: [{ failoverId: 'dfo_3', databaseId: PRIMARY, replicaWorkloadId: REPLICA }] }),
+			signal,
+		);
+		// It is a primary now: releasing it would restart it as a standby.
+		expect(r.held).toEqual([REPLICA]);
+		expect(r.runner.pendingPromotionResults()).toEqual([
+			{ failoverId: 'dfo_3', status: 'failed', promoted: true, lsn: null, error: 'data dir rename failed' },
+		]);
 	});
 
 	test('the replica slot reaches the helper request', () => {

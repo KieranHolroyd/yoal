@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNotNull, isNull } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNotNull, isNull, or } from 'drizzle-orm';
 import {
 	databaseFailovers,
 	databaseReplicas,
@@ -443,6 +443,12 @@ export class DatabaseMemberService {
 		let expiresAt: number | null = null;
 		if (store) {
 			const current = await store.read(databaseId);
+			// A retry (or a stale result) must never move the lease backwards. Taking the same
+			// generation again is idempotent; a lower one is a bug or a historical failover.
+			if (current && current.lease.generation > generation)
+				throw new ConflictError(
+					`The database lease is at generation ${current.lease.generation}; refusing to lower it to ${generation}.`,
+				);
 			const next = renewedLease(
 				{
 					generation,
@@ -521,9 +527,26 @@ export class DatabaseMemberService {
 		);
 	}
 
-	/** The re-point succeeded but the lease CAS failed: alert and let the tick retry it. */
-	async onLeaseTakeFailed(failover: { id: string; databaseId: string }, message: string): Promise<void> {
+	/** The promotion succeeded but its data-dir hand-over failed: alert and keep the task. */
+	async onHandoverFailed(failover: { id: string; databaseId: string }, message: string): Promise<void> {
 		const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
+		if (!database) return;
+		this.ctx.db
+			.update(databaseFailovers)
+			.set({ message: `${message}. Retrying the hand-over; the old primary stays stopped.`.slice(0, 2_000) })
+			.where(eq(databaseFailovers.id, failover.id))
+			.run();
+		await this.#notify(
+			database,
+			'promotion_handover_failed',
+			'critical',
+			'Promoted but the hand-over failed',
+			`${message}. The new primary is live; the old primary is never resumed. The node retries the hand-over.`,
+		);
+	}
+
+	/** The re-point succeeded but the lease CAS failed: alert and let the tick retry it. */
+	async onLeaseTakeFailed(failover: { id: string; databaseId: string }, message: string): Promise<void> {		const database = this.ctx.db.select().from(databases).where(eq(databases.id, failover.databaseId)).get();
 		if (!database) return;
 		this.ctx.db
 			.update(databaseFailovers)
@@ -1220,21 +1243,24 @@ export class DatabaseMemberService {
 	 *   previous member when it is healthy, else applies `on_sync_loss`.
 	 */
 	async tick(now = this.ctx.now()): Promise<number> {
-		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA')) return 0;
+		// A promotion's lease retry is not a SYNC_REPLICA feature: an async database promoted under
+		// the flag still needs its lease taken after the flag is turned off.
+		let changed = await this.#retryPromotionLeases();
+		if (!featureEnabled(this.ctx.config, 'SYNC_REPLICA')) return changed;
 		await this.#replicaAlerts(now);
-		let changed = 0;
-		// A promotion whose re-point succeeded but whose lease CAS failed is retried here instead of
-		// being swallowed by a heartbeat handler (W10 review).
-		changed += await this.#retryPromotionLeases(now);
+		changed += await this.#switchoverStalls(now);
 		const rows = this.ctx.db
 			.select()
 			.from(databases)
-			.where(and(isNull(databases.deletedAt), eq(databases.durability, 'sync')))
+			.where(and(isNull(databases.deletedAt), or(eq(databases.durability, 'sync'), isNotNull(databases.syncLeaseEtag))))
 			.all();
 		for (const database of rows) {
 			// CAS writes renew the lease, but a steady set otherwise never writes again: without this
 			// the holder's lease is permanently expired one TTL after arming (W10 review blocker 3).
+			// Async databases have a lease too (a promotion creates one); renew it as well.
 			if (await this.#renewLeaseIfDue(database, now)) changed += 1;
+			// Only a `sync` row has a set/watchdog decision; an async lease is renewed and left alone.
+			if (database.durability !== 'sync') continue;
 			if (database.syncState === 'changing') {
 				// A change opened by a promotion starts with nobody named: arm the first healthy
 				// replica through the same non-promotable transition (major 9), or lose sync once the
@@ -1307,9 +1333,56 @@ export class DatabaseMemberService {
 
 	// ---------------------------------------------------------------- internals
 
-	/** Lag, replica-down and slot-lost alerts (docs/CLUSTERING.md §9.2, §12.5). */
-	async #replicaAlerts(now: number): Promise<void> {
+	/**
+	 * A switchover parked at `promote` that never had a promotion task handed out leaves writes
+	 * stopped with no timer. After `SYNC_CHANGE_TIMEOUT` alert and queue the resume; a task that
+	 * was handed out is not touched because the node may be promoting right now.
+	 */
+	async #switchoverStalls(now: number): Promise<number> {
+		let changed = 0;
 		const rows = this.ctx.db
+			.select({ failover: databaseFailovers, database: databases })
+			.from(databaseFailovers)
+			.innerJoin(databases, eq(databases.id, databaseFailovers.databaseId))
+			.where(
+				and(
+					eq(databaseFailovers.kind, 'switchover'),
+					eq(databaseFailovers.status, 'promoting'),
+					eq(databaseFailovers.switchoverStep, 'promote'),
+					isNull(databaseFailovers.promotedAt),
+					isNull(databaseFailovers.promotionIssuedAt),
+				),
+			)
+			.all();
+		for (const { failover, database } of rows) {
+			const since = failover.switchoverStartedAt ?? failover.startedAt;
+			if (now - since < SYNC_CHANGE_TIMEOUT_MS) continue;
+			const message = `The switchover drained writes but no promotion was issued within ${SYNC_CHANGE_TIMEOUT_MS / 1000} s; resuming writes and refusing the switchover.`;
+			this.ctx.db
+				.update(databaseFailovers)
+				.set({
+					status: 'failed',
+					switchoverStep: 'resume',
+					switchoverAttempt: failover.switchoverAttempt + 1,
+					switchoverStartedAt: now,
+					message,
+				})
+				.where(eq(databaseFailovers.id, failover.id))
+				.run();
+			await this.#notify(
+				database,
+				'switchover_parked',
+				'critical',
+				'Writes were stopped with no promotion',
+				message,
+			);
+			changed += 1;
+		}
+		return changed;
+	}
+
+	/** Lag, replica-down and slot-lost alerts (docs/CLUSTERING.md §9.2, §12.5). */
+	async #replicaAlerts(now: number): Promise<void> {		const rows = this.ctx.db
 			.select({ replica: databaseReplicas, database: databases })
 			.from(databaseReplicas)
 			.innerJoin(databases, eq(databases.id, databaseReplicas.databaseId))
@@ -1383,21 +1456,31 @@ export class DatabaseMemberService {
 	}
 
 	/** Retry a promotion's lease take that failed after the database was already re-pointed. */
-	async #retryPromotionLeases(now: number): Promise<number> {
+	async #retryPromotionLeases(): Promise<number> {
 		let changed = 0;
 		const rows = this.ctx.db
-			.select()
+			.select({ failover: databaseFailovers, database: databases })
 			.from(databaseFailovers)
-			.where(and(isNotNull(databaseFailovers.promotedAt), isNull(databaseFailovers.leaseTakenAt)))
+			.innerJoin(databases, eq(databases.id, databaseFailovers.databaseId))
+			.where(
+				and(
+					isNotNull(databaseFailovers.promotedAt),
+					isNull(databaseFailovers.leaseTakenAt),
+					eq(databaseFailovers.status, 'promoting'),
+					// Only the promotion that is still current: the row must be on the target node at
+					// the generation this failover promoted. A historical row can never lower the lease.
+					eq(databases.nodeId, databaseFailovers.toNodeId),
+					eq(databases.primaryGeneration, databaseFailovers.generation),
+				),
+			)
 			.all();
-		for (const row of rows) {
-			const database = this.ctx.db.select().from(databases).where(eq(databases.id, row.databaseId)).get();
-			if (!database || database.deletedAt) continue;
+		for (const { failover, database } of rows) {
+			if (database.deletedAt) continue;
 			try {
-				await this.onPromotion(database.id, row.toNodeId, row.generation, row.id);
+				await this.onPromotion(database.id, failover.toNodeId, failover.generation, failover.id);
 				changed += 1;
 			} catch (error) {
-				await this.onLeaseTakeFailed(row, errorText(error));
+				await this.onLeaseTakeFailed(failover, errorText(error));
 			}
 		}
 		return changed;
