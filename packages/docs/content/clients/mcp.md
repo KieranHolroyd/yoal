@@ -443,6 +443,7 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 |---|---|---|
 | `list_nodes` | List fleet nodes. Requires a platform admin role | `project:read` |
 | `get_ha_status` | Read the failover controller: whether automatic failover is on, the lease, how long each node has been silent, the ingress record set, databases whose primary is lost and the replica a promotion would use, and recent failover events. Requires a platform admin role; never changes anything | `project:read` |
+| `get_attachment_endpoints` | Read how every app reaches each database attached to it: per node holding a copy, the mode (`gateway`, `endpoint`, `direct` or `none`), the host and port, the pooled and read ports, and the node the connection lands on. No credentials. Requires a platform admin role; never changes anything | `project:read` |
 | `get_fleet` | Read fleet capacity: per node what is reserved and in use, what may move and why the rest is pinned, and the moves a rebalance would make. Requires a platform admin role; never changes anything | `project:read` |
 | `get_node_links` | Read the links between nodes: path, latency, loss, the last hour, and the last throughput test. Requires a platform admin role; never changes anything | `project:read` |
 | `get_usage` | Show usage for the organisation, or one project: counts, database and storage bytes, egress, builds and jobs, and percentage of each quota | `project:read` |

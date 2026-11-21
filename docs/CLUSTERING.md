@@ -1797,7 +1797,7 @@ lacks, and `L2` is refused when the value is `none`.
 
 | Engine | Mode | Read URLs | Failover | RPO / RTO | Phase |
 |---|---|---|---|---|---|
-| Postgres 16/17 | `streaming`, 1–2 replicas, async or `ANY 1` sync | `<P>_READ_URL`, `_READ_POOL_URL`, `_READ_URLS` | Yoal; manual C7, `auto` C8 | async = lag ≤ 1 s; sync = 0 / 90 s target, 2 min budget | C7, C8 |
+| Postgres 16/17 | `streaming`, 1–2 replicas, async or `ANY 1` sync | `<P>_READ_URL`, `_READ_URLS` (`_READ_POOL_URL` not built) | Yoal; manual C7, `auto` C8 | async = lag ≤ 1 s; sync = 0 / 90 s target, 2 min budget | C7, C8 |
 | MySQL 8.4/9.7, MariaDB 11.4/11.8 | `streaming`, GTID async | none | Yoal, manual only | lag ≈ 1 s / ≈ 10 min, operator-led | C10 |
 | MongoDB 8.0/9.0 | `native-cluster`, 3 voting members | `<P>_URI` already lists all members | the engine's election | 0 for `w:majority,j:true` / 10–30 s | C10 |
 | Valkey 9.1/8.1, Redis 8.10/8.8 | `streaming`, primary + async replicas, no Sentinel | none | Yoal, manual | AOF ≤ 1 s plus lag / ≈ 5 min | C10 |
@@ -1845,15 +1845,25 @@ replica's `pg_is_in_recovery()`, replay LSN and replay timestamp. New `db_replic
 replay_lsn`), `lag_seconds` and `replayed_lsn`. Alerts: lag above 30 s or 256 MB for 2 minutes (warn); not
 `streaming` for 60 s (page); `lost` immediately (page); no sync replica for 30 s (page).
 
-**Read URLs and the pooler.** An attachment gains `<P>_READ_URL`, `<P>_READ_POOL_URL` and `<P>_READ_URLS`
+**Read URLs and the pooler.** An attachment gains `<P>_READ_URL` and `<P>_READ_URLS`
 (comma-separated), all optional: an app that ignores them keeps working against the primary. The read URL
 is a **loopback port that does not change when the read target moves** — one extra port per attachment on
 the consumer node from `23000–23999` (§4.3; originally 22000–22999, now Kubernetes, HA-PLAN F2), mapped in `service_endpoints` to whichever replica
 serves reads. `_READ_URL` targets the replica with the lowest node id and `_READ_URLS` lists all;
 reads can trail by `lag_seconds`, and read-your-writes uses the direct URL.
 
-The pooler stays on the database's node (D85), so `_READ_POOL_URL` points at the read replica's pooler and
-`_POOL_URL` at the primary's.
+The pooler stays on the database's node (D85), so `_POOL_URL` points at the primary's pooler through its
+endpoint. **`_READ_POOL_URL` is not built:** C7 replicas run no pooler, so there is nothing for it to point
+at (review debt 2, 2026-11-21). An app reads through `_READ_URL` directly.
+
+**When an app gets its endpoints (HA-PLAN §9).** With `ENDPOINTS_GATEWAY` on, an app uses its stable
+endpoints (same-node primary, pooled and read) only once its own deploy, attach or `yoal ha migrate
+attachments` ran with every copy's node advertising `endpoints-gateway` (`workloads.endpoints_gateway`,
+migration 0132). A neighbour's deploy, an agent upgrade or a replica coming, going or being promoted
+moves no other app. Such an app's read endpoint exists from that deploy on, pointing at the primary
+until a replica serves reads, so replicas changing never change its environment; the endpoint's
+`version` bumps when its replica set changes (`service_endpoints.upstreams_key`), which tells the
+forwarder to cut sessions still on a replica that left.
 
 **Settings, disk and limits.** The helper renders `wal_level=replica` once a database has a replica (today
 only under PITR), `hot_standby=on`, `wal_receiver_timeout=wal_sender_timeout=60s`, `primary_conninfo …

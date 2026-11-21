@@ -343,8 +343,9 @@ promote itself with RPO > 0 without `accept_data_loss`.
   runtime gate in `crossNodeAllowed()` and `nodePin()` goes.
 - **Same node too.** An app on the database's own node also goes through its endpoint, so a
   promotion never changes its environment and never restarts it (G10).
-- **Pooler.** `_POOL_URL` and `_READ_POOL_URL` are offered through endpoints (G11); the pooler
-  follows the primary because the endpoint does.
+- **Pooler.** `_POOL_URL` is offered through endpoints (G11); the pooler follows the primary
+  because the endpoint does. `_READ_POOL_URL` is not built: replicas run no pooler (review debt 2,
+  2026-11-21).
 - **Ports.** Primary endpoints stay in 21000–21999; read endpoints take the new range from F2.
 - **Trust.** The per-install CA replaces pinned self-signed certificates (the unbuilt part of C2),
   so adding a node does not mean re-pinning every peer.
@@ -891,7 +892,8 @@ lease, no new unit, no new question in the installer.
 - **Existing installs.** Nothing changes until `ha init`. The first ingress is today's edge.
   Existing async replicas stay async. Existing attachments move onto endpoints one project at a
   time on that project's next deploy, or all at once with `yoal ha migrate attachments`, which
-  shows the plan first.
+  shows the plan first. Built (review debt 2): `workloads.endpoints_gateway` records the choice
+  per project, so a neighbour's deploy or a replica change never moves another app.
 - **Rolling it onto a live fleet** (CLUSTERING §20.6): observe-only for each driver for 24 h;
   second ingress warmed before it is offered traffic; `sync` enabled per database after a
   switchover drill passes; `auto` per database after a failover drill passes.
