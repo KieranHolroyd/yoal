@@ -4,6 +4,7 @@ import {
 	workloadSpecSchema,
 	type BlastRadiusItem,
 	type HaLevel,
+	type HaLevelAssessment,
 	type BlastRadiusView,
 	type Principal,
 	type TopologyNodeView,
@@ -126,7 +127,7 @@ export class TopologyService {
 				name: item.name,
 				nodeId: item.nodeId,
 				orgId: item.orgId,
-				haLevel: levels.workload(item.id),
+				haLevel: levels.workload(item.id).level,
 			});
 		}
 		for (const item of this.ctx.db
@@ -135,7 +136,7 @@ export class TopologyService {
 			.where(isNull(databases.deletedAt))
 			.all()) {
 			if (!nodeIds.has(item.nodeId)) continue;
-			items.push({ kind: 'database', ...item, haLevel: levels.database(item.id, item.nodeId) });
+			items.push({ kind: 'database', ...item, haLevel: levels.database(item.id, item.nodeId).level });
 		}
 		for (const item of this.ctx.db
 			.select({ id: storageInstances.id, name: storageInstances.name, nodeId: storageInstances.nodeId, orgId: storageInstances.orgId })
@@ -143,7 +144,7 @@ export class TopologyService {
 			.where(isNull(storageInstances.deletedAt))
 			.all()) {
 			if (!nodeIds.has(item.nodeId)) continue;
-			items.push({ kind: 'storage', ...item, haLevel: levels.storage(item.nodeId) });
+			items.push({ kind: 'storage', ...item, haLevel: levels.storage(item.nodeId).level });
 		}
 		for (const disk of this.ctx.db.select().from(disks).all()) {
 			if (!nodeIds.has(disk.nodeId)) continue;
@@ -171,22 +172,58 @@ export class TopologyService {
 	}
 
 	/**
+	 * Computed levels for every live resource, keyed by resource id (storage by its id too). W15 reads
+	 * this to compare a project's placement with its declared target; no principal is needed because
+	 * the output is fleet placement, and the callers that expose it are platform-gated.
+	 */
+	resourceLevels(): {
+		workloads: Map<string, HaLevelAssessment>;
+		databases: Map<string, HaLevelAssessment>;
+		storage: Map<string, HaLevelAssessment>;
+	} {
+		const levels = this.haLevels(this.ctx.db.select().from(nodes).all());
+		const workloadsMap = new Map<string, HaLevelAssessment>();
+		for (const row of this.ctx.db
+			.select({ id: workloads.id, nodeId: workloads.nodeId })
+			.from(workloads)
+			.where(isNotNull(workloads.nodeId))
+			.all()) {
+			if (row.nodeId) workloadsMap.set(row.id, levels.workload(row.id));
+		}
+		const databasesMap = new Map<string, HaLevelAssessment>();
+		for (const row of this.ctx.db
+			.select({ id: databases.id, nodeId: databases.nodeId })
+			.from(databases)
+			.where(isNull(databases.deletedAt))
+			.all())
+			databasesMap.set(row.id, levels.database(row.id, row.nodeId));
+		const storageMap = new Map<string, HaLevelAssessment>();
+		for (const row of this.ctx.db
+			.select({ id: storageInstances.id, nodeId: storageInstances.nodeId })
+			.from(storageInstances)
+			.where(isNull(storageInstances.deletedAt))
+			.all())
+			storageMap.set(row.id, levels.storage(row.nodeId));
+		return { workloads: workloadsMap, databases: databasesMap, storage: storageMap };
+	}
+
+	/**
 	 * HA levels from current placement (HA-PLAN G24, CLUSTERING §8.1), through `computeHaLevel`. Shown
 	 * whatever `RELEASE_PHASE` says: it describes where things run and changes no behaviour. A disk
 	 * is always `L0`; a storage instance is `L0` until bucket replication counts (C9).
 	 */
 	private haLevels(nodeRows: Array<typeof nodes.$inferSelect>): {
-		workload: (id: string) => HaLevel;
-		database: (id: string, nodeId: string) => HaLevel;
-		storage: (nodeId: string) => HaLevel;
+		workload: (id: string) => HaLevelAssessment;
+		database: (id: string, nodeId: string) => HaLevelAssessment;
+		storage: (nodeId: string) => HaLevelAssessment;
 	} {
 		const zoneOf = new Map(nodeRows.map((row) => [row.id, row.zone]));
 		const placed = (nodeIds: string[]) => ({ nodes: new Set(nodeIds).size, zones: new Set(nodeIds.map((id) => zoneOf.get(id) ?? 'default')).size });
-		const level = (input: HaLevelInput) => computeHaLevel(input).level;
+		const level = (input: HaLevelInput) => computeHaLevel(input);
 		return {
 			workload: (id) => {
 				const row = this.ctx.db.select().from(workloads).where(eq(workloads.id, id)).get();
-				if (!row?.nodeId) return 'L0';
+				if (!row?.nodeId) return { level: 'L0', blockers: ['no node'] };
 				const spec = workloadSpecSchema.safeParse(parseJson<unknown>(row.specJson, null)).data;
 				const copies = this.ctx.db.select({ nodeId: workloadReplicas.nodeId }).from(workloadReplicas).where(eq(workloadReplicas.workloadId, id)).all();
 				const nodeIds = copies.length > 0 ? copies.map((copy) => copy.nodeId) : [row.nodeId];

@@ -11,6 +11,7 @@ import {
 	type Permission,
 	type Principal,
 } from '@yoal/contracts';
+import { nodes } from '@yoal/db';
 import type { CoreContext } from './context.ts';
 import { DB_COUNTERS } from './database-metrics-sql.ts';
 import { CoreError, ForbiddenError, NotFoundError, UnauthorizedError, ValidationError } from './errors.ts';
@@ -180,6 +181,7 @@ export class MetricsExporter {
 		const appScope = wants('apps') || wants('traffic') || wants('volumes');
 		const projects = appScope ? this.#projects(principal.orgId, scope, settings, out) : [];
 		const databases = wants('databases') ? this.#databases(principal.orgId, scope.section === 'databases' ? scope.name : undefined) : [];
+		const replicas = this.#replicas(databases.map((database) => database.id));
 		const storage = wants('storage') ? this.#storage(principal.orgId, scope.section === 'storage' ? scope.name : undefined) : [];
 		const brokerRows = wants('brokers') ? this.#brokers(principal.orgId, scope.section === 'brokers' ? scope.name : undefined) : [];
 
@@ -201,7 +203,7 @@ export class MetricsExporter {
 		if (wants('apps')) this.#apps(principal.orgId, projects, out);
 		if (wants('traffic')) this.#traffic(projects, samples, out);
 		if (wants('volumes')) this.#appVolumes(principal.orgId, projects, out);
-		if (wants('databases')) this.#databaseSeries(databases, samples, out);
+		if (wants('databases')) this.#databaseSeries(databases, samples, replicas, out);
 		if (wants('storage')) this.#storageSeries(storage, samples, out);
 		if (wants('brokers')) this.#brokerSeries(brokerRows, samples, out);
 
@@ -358,11 +360,24 @@ export class MetricsExporter {
 	}
 
 	#databases(orgId: string, name: string | undefined): DatabaseRef[] {
-		const base = 'SELECT id, name, engine_name AS engine, version, status, memory_mb, cpus, storage_mb, size_bytes FROM databases WHERE org_id = ? AND deleted_at IS NULL';
+		const base =
+			'SELECT id, name, engine_name AS engine, version, status, memory_mb, cpus, storage_mb, size_bytes, durability_effective, sync_state, sync_replica_node_id, primary_generation FROM databases WHERE org_id = ? AND deleted_at IS NULL';
 		if (name === undefined) return this.ctx.sqlite.query<DatabaseRef, [string]>(`${base} ORDER BY name`).all(orgId);
 		const row = this.ctx.sqlite.query<DatabaseRef, [string, string]>(`${base} AND name = ?`).get(orgId, name);
 		if (!row) throw new NotFoundError(`Database "${name}"`);
 		return [row];
+	}
+
+	/** Replica rows for the databases in scope; one query, whether the scrape has one or hundreds. */
+	#replicas(databaseIds: string[]): ReplicaRef[] {
+		if (databaseIds.length === 0) return [];
+		return this.ctx.sqlite
+			.query<ReplicaRef, string[]>(
+				`SELECT database_id, node_id, status, lag_seconds, lag_bytes FROM database_replicas
+				 WHERE database_id IN (${placeholders(databaseIds.length)}) AND removing_at IS NULL
+				 ORDER BY database_id, node_id`,
+			)
+			.all(...databaseIds);
 	}
 
 	#storage(orgId: string, name: string | undefined): StorageRef[] {
@@ -383,13 +398,33 @@ export class MetricsExporter {
 		return [row];
 	}
 
-	#databaseSeries(rows: DatabaseRef[], samples: ScrapeSamples, out: Exposition): void {
+	#databaseSeries(rows: DatabaseRef[], samples: ScrapeSamples, replicas: ReplicaRef[], out: Exposition): void {
 		const latest = byId(samples.databases);
 		const counters = byId(samples.databaseCounters);
+		const nodeNames = new Map(this.ctx.sqlite.query<{ id: string; name: string }, []>('SELECT id, name FROM nodes').all().map((row) => [row.id, row.name]));
 		for (const db of rows) {
 			const labels = { database: db.name, database_id: db.id };
 			out.gauge('yoal_database_info', 'One series per managed database, carrying its engine and version.', { ...labels, engine: db.engine, version: db.version }, 1);
 			out.gauge('yoal_database_running', '1 while the control plane considers the database running.', labels, db.status === 'running' ? 1 : 0);
+			out.gauge('yoal_database_primary_generation', 'Promotion generation the primary is serving at.', labels, db.primary_generation);
+			out.gauge(
+				'yoal_database_durability_effective',
+				'The durability actually in force (1 for the effective value).',
+				{ ...labels, durability: db.durability_effective },
+				1,
+			);
+			out.gauge('yoal_database_sync_state', 'The sync-set transition state (1 for the current value).', { ...labels, state: db.sync_state }, 1);
+			for (const replica of replicas.filter((candidate) => candidate.database_id === db.id)) {
+				const replicaNode = nodeNames.get(replica.node_id) ?? replica.node_id;
+				const replicaLabels = { ...labels, node: replicaNode, node_id: replica.node_id };
+				out.gauge('yoal_database_replica_status', 'One series per replica at its reported state.', { ...replicaLabels, status: replica.status }, 1);
+				out.gauge('yoal_database_replica_streaming', '1 while the replica is streaming or briefly lagging.', replicaLabels, replica.status === 'streaming' || replica.status === 'lagging' ? 1 : 0);
+				if (replica.lag_seconds !== null) out.gauge('yoal_database_replica_lag_seconds', 'Replay delay reported by the replica.', replicaLabels, replica.lag_seconds);
+				if (replica.lag_bytes !== null) out.gauge('yoal_database_replica_lag_bytes', 'WAL bytes the replica is behind.', replicaLabels, replica.lag_bytes);
+				out.gauge('yoal_database_replica_is_sync', '1 while the lease names this replica as the synchronous member.', replicaLabels, db.sync_replica_node_id === replica.node_id ? 1 : 0);
+			}
+			if (db.sync_replica_node_id === null)
+				out.gauge('yoal_database_sync_member', '1 when no replica is the synchronous member.', { ...labels, node: '' }, 1);
 			out.gauge('yoal_database_memory_limit_bytes', 'Configured memory limit.', labels, db.memory_mb * MIB);
 			out.gauge('yoal_database_cpu_limit', 'Configured CPU limit.', labels, db.cpus);
 			out.gauge('yoal_database_storage_limit_bytes', 'Configured storage budget.', labels, db.storage_mb * MIB);
@@ -518,6 +553,7 @@ export class MetricsExporter {
 		if (settings.sections.platform) {
 			const out = new Exposition();
 			this.#nodes(out);
+			this.#ha(out);
 			lines.push(out.render().trimEnd());
 		}
 		const telemetry = this.ctx.telemetry;
@@ -529,6 +565,116 @@ export class MetricsExporter {
 			}
 		}
 		return `${lines.filter(Boolean).join('\n')}\n`;
+	}
+
+	#ha(out: Exposition): void {
+		const rank: Record<string, number> = { L0: 0, L1: 1, L2: 2, L3: 3 };
+		try {
+			for (const target of this.ctx.slos.targetsInternal()) {
+				const labels = { project: target.slug, project_id: target.projectId };
+				if (target.declared !== null) {
+					out.gauge('yoal_ha_declared_level', 'The HA level a project declares it needs (0=L0 … 3=L3).', { ...labels, level: target.declared }, rank[target.declared] ?? 0);
+					out.gauge(
+						'yoal_ha_effective_below_target',
+						'1 when the weakest live resource is below the declared HA level.',
+						labels,
+						target.belowTarget ? 1 : 0,
+					);
+				}
+				if (target.effective !== null)
+					out.gauge('yoal_ha_effective_level', 'The weakest live resource’s computed HA level (0=L0 … 3=L3).', { ...labels, level: target.effective }, rank[target.effective] ?? 0);
+				if (target.blockers.length > 0)
+					out.gauge('yoal_ha_level_blockers', 'Reasons the weakest resource is not one level up.', labels, target.blockers.length);
+			}
+			const levels = this.ctx.topology.resourceLevels();
+			for (const [kind, map] of [
+				['workload', levels.workloads],
+				['database', levels.databases],
+				['storage', levels.storage],
+			] as const) {
+				for (const [resource, assessment] of map)
+					out.gauge('yoal_ha_level', 'Computed HA level per live resource (0=L0 … 3=L3).', { kind, resource, level: assessment.level }, rank[assessment.level] ?? 0);
+			}
+		} catch (error) {
+			console.error('[metrics] HA level exposition failed:', error);
+		}
+
+		try {
+			const lease = this.ctx.controlPlane.lease();
+			if (lease) {
+				out.gauge('yoal_control_lease_holder', '1 for the control-plane node the lease names.', { holder: lease.holderNodeId }, 1);
+				out.gauge('yoal_control_lease_epoch', 'Epoch of the control-plane lease.', {}, lease.epoch);
+				const expires = Date.parse(lease.expiresAt);
+				if (Number.isFinite(expires)) out.gauge('yoal_control_lease_expires_timestamp_seconds', 'When the control-plane lease expires.', {}, expires / 1000);
+			}
+		} catch (error) {
+			console.error('[metrics] control lease exposition failed:', error);
+		}
+
+		try {
+			const memberNames = new Map(this.ctx.sqlite.query<{ id: string; name: string }, []>('SELECT id, name FROM nodes').all().map((row) => [row.id, row.name]));
+			const holders = this.ctx.sqlite
+				.query<
+					{
+						database_id: string;
+						node_id: string;
+						generation: number;
+						epoch: number;
+						lease_generation: number;
+						lease_epoch: number;
+						observed_at: number;
+						database_name: string | null;
+					},
+					[]
+				>(
+					`SELECT m.database_id, m.node_id, m.generation, m.epoch, m.lease_generation, m.lease_epoch, m.observed_at, d.name AS database_name
+					 FROM database_member_status m LEFT JOIN databases d ON d.id = m.database_id
+					 WHERE m.role = 'primary' ORDER BY m.database_id`,
+				)
+				.all();
+			for (const holder of holders) {
+				const labels = {
+					database: holder.database_name ?? holder.database_id,
+					database_id: holder.database_id,
+					node: memberNames.get(holder.node_id) ?? holder.node_id,
+					node_id: holder.node_id,
+				};
+				out.gauge('yoal_database_lease_holder', '1 for the member reporting the database primary role.', labels, 1);
+				out.gauge('yoal_database_lease_generation', 'Generation in the database lease the member reported.', labels, holder.lease_generation);
+				out.gauge('yoal_database_lease_epoch', 'Epoch in the database lease the member reported.', labels, holder.lease_epoch);
+				out.gauge('yoal_database_lease_observed_timestamp_seconds', 'When the member last reported its role.', labels, holder.observed_at / 1000);
+				out.gauge('yoal_database_generation', 'The generation the member serves at.', labels, holder.generation);
+				out.gauge('yoal_database_member_epoch', 'The member’s observed epoch.', labels, holder.epoch);
+			}
+		} catch (error) {
+			console.error('[metrics] database lease exposition failed:', error);
+		}
+
+		try {
+			const selection = this.ctx.steering.selection();
+			const active = this.ctx.steering.active();
+			const preflight = this.ctx.steering.preflight();
+			out.gauge('yoal_steering_active', '1 while a non-direct steering driver is selected and implemented.', {}, active ? 1 : 0);
+			out.gauge(
+				'yoal_steering_driver_info',
+				'The selected steering driver and any stacked drivers.',
+				{ driver: selection.kind, stacked: selection.stacked.join(',') },
+				1,
+			);
+			out.gauge('yoal_steering_findings', 'Preflight findings that keep the steering driver from acting.', { driver: preflight.kind }, preflight.findings.length);
+			out.gauge('yoal_steering_healthy', '1 when the selected driver has no preflight findings.', { driver: preflight.kind }, preflight.findings.length === 0 ? 1 : 0);
+			for (const row of this.ctx.db.select().from(nodes).all()) {
+				if (!this.ctx.nodes.view(row).roles.includes('ingress')) continue;
+				out.gauge(
+					'yoal_steering_ingress_node_ready',
+					'1 while an ingress node is online.',
+					{ node: row.name, node_id: row.id, zone: row.zone },
+					row.status === 'online' ? 1 : 0,
+				);
+			}
+		} catch (error) {
+			console.error('[metrics] steering exposition failed:', error);
+		}
 	}
 
 	#nodes(out: Exposition): void {
@@ -593,6 +739,18 @@ interface DatabaseRef {
 	cpus: number;
 	storage_mb: number;
 	size_bytes: number | null;
+	durability_effective: 'async' | 'sync';
+	sync_state: 'steady' | 'changing';
+	sync_replica_node_id: string | null;
+	primary_generation: number;
+}
+
+interface ReplicaRef {
+	database_id: string;
+	node_id: string;
+	status: string;
+	lag_seconds: number | null;
+	lag_bytes: number | null;
 }
 
 interface BrokerRef {

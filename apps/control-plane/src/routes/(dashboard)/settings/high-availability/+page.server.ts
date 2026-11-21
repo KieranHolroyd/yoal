@@ -1,4 +1,5 @@
 import { error, fail } from '@sveltejs/kit';
+import { projectHaTargetInputSchema } from '@yoal/contracts';
 import { core } from '#lib/server/core.js';
 import { failStatus, formString, toFormFailure } from '../../_lib/errors.js';
 import { policyState, savePolicies } from '../_lib/policies.server.js';
@@ -14,6 +15,10 @@ export const load: PageServerLoad = ({ locals }) => {
 		failover: core.failover.status(principal),
 		/** The profile and platform-dependency preflight (HA-PLAN H27/H28, W12). */
 		ha: core.ha.view(principal),
+		/** W15: declared versus effective levels, the failover/drill timeline and outside-in probes. */
+		targets: core.slos.targets(principal),
+		timeline: core.slos.timeline(principal, { limit: 50 }),
+		probers: core.externalProber.list(principal),
 		/** The policy editor writes platform settings, which is admin-only. */
 		canEditPolicies: core.ctx.platformIam.canAdminister(principal)
 	};
@@ -32,6 +37,46 @@ export const actions: Actions = {
 		try {
 			core.ha.setProfile(principal, profile as 'single' | 'ha' | 'ha-dr');
 			return { success: `The ${profile} profile is saved.` };
+		} catch (cause) {
+			return failure(cause);
+		}
+	},
+	/** W15: declare the HA level a project says it needs; an empty value clears the declaration. */
+	saveHaTarget: async ({ request, locals }) => {
+		const principal = locals.principal!;
+		const data = await request.formData();
+		const slug = formString(data, 'slug');
+		const raw = formString(data, 'target');
+		try {
+			const target = raw === '' ? null : raw;
+			const view = core.slos.setHaTarget(principal, slug, projectHaTargetInputSchema.parse({ target }));
+			return { success: `Saved: ${view.name} declares ${view.declared ?? 'no target'} and is ${view.effective ?? 'unplaced'}.` };
+		} catch (cause) {
+			return failure(cause);
+		}
+	},
+	registerProber: async ({ request, locals }) => {
+		const principal = locals.principal!;
+		const data = await request.formData();
+		try {
+			const name = formString(data, 'name');
+			const intervalSeconds = Number(formString(data, 'intervalSeconds') || 60);
+			const registration = core.externalProber.register(principal, { name, installId: null, intervalSeconds });
+			return {
+				success: `Prober registered. Copy the token now: it is not shown again.`,
+				proberToken: registration.token,
+				proberName: registration.prober.name
+			};
+		} catch (cause) {
+			return failure(cause);
+		}
+	},
+	revokeProber: async ({ request, locals }) => {
+		const principal = locals.principal!;
+		const data = await request.formData();
+		try {
+			const prober = core.externalProber.revoke(principal, formString(data, 'proberId'));
+			return { success: `${prober.name} revoked; its next report is refused.` };
 		} catch (cause) {
 			return failure(cause);
 		}

@@ -35,6 +35,8 @@
 	}));
 	const failover = $derived(live.data ?? data.failover);
 	const ingressById = $derived(new Map(failover.ingress.nodes.map((node) => [node.id, node])));
+	const proberToken = $derived((form as { proberToken?: string } | null)?.proberToken ?? null);
+	const proberName = $derived((form as { proberName?: string } | null)?.proberName ?? null);
 
 	const leaseTone: Record<FailoverStatusView['lease']['state'], Tone> = {
 		holder: 'success',
@@ -340,6 +342,72 @@
 		</Panel>
 	{/if}
 
+	<Panel
+		title="Effective HA levels"
+		icon={ShieldCheckIcon}
+		description="A project is only as redundant as its weakest live resource. Declaring a target makes drift visible as ha.effective_below_target."
+	>
+		{#if data.targets.targets.length === 0}
+			<EmptyState icon={ShieldCheckIcon} compact title="No projects" description="Create a project to declare a target." />
+		{:else}
+			<Table.Root>
+				<Table.Header class="bg-muted/45">
+					<Table.Row>
+						<Table.Head class="pl-4">Project</Table.Head>
+						<Table.Head>Declared</Table.Head>
+						<Table.Head>Effective</Table.Head>
+						<Table.Head>Gap</Table.Head>
+					</Table.Row>
+				</Table.Header>
+				<Table.Body>
+					{#each data.targets.targets as target (target.projectId)}
+						<Table.Row>
+							<Table.Cell class="pl-4">
+								<p class="text-sm font-medium">{target.name}</p>
+								<p class="font-mono text-xs text-muted-foreground">{target.slug}</p>
+							</Table.Cell>
+							<Table.Cell><Badge variant={target.declared ? 'outline' : 'neutral'}>{target.declared ?? 'undeclared'}</Badge></Table.Cell>
+							<Table.Cell><Badge variant={target.belowTarget ? 'warning' : 'neutral'}>{target.effective ?? 'not placed'}</Badge></Table.Cell>
+							<Table.Cell class="text-xs">
+								{#if target.belowTarget}
+									<span class="text-destructive">Below target</span>
+									{#each target.blockers as blocker (blocker)}
+										<p class="text-muted-foreground">{blocker}</p>
+									{/each}
+								{:else}
+									<span class="text-muted-foreground">No gap</span>
+								{/if}
+							</Table.Cell>
+						</Table.Row>
+					{/each}
+				</Table.Body>
+			</Table.Root>
+		{/if}
+		{#if data.canEditPolicies}
+			<form method="POST" action="?/saveHaTarget" class="mt-4 flex flex-wrap items-end gap-2">
+				<label class="text-xs">
+					<span class="mb-1 block text-muted-foreground">Project</span>
+					<select name="slug" class="h-9 min-w-44 rounded-md border bg-background px-2 text-sm" required>
+						{#each data.targets.targets as target (target.projectId)}
+							<option value={target.slug}>{target.name}</option>
+						{/each}
+					</select>
+				</label>
+				<label class="text-xs">
+					<span class="mb-1 block text-muted-foreground">Declared target</span>
+					<select name="target" class="h-9 rounded-md border bg-background px-2 text-sm">
+						<option value="">No target</option>
+						<option value="L0">L0 single</option>
+						<option value="L1">L1 recoverable</option>
+						<option value="L2">L2 failover</option>
+						<option value="L3">L3 active</option>
+					</select>
+				</label>
+				<Button type="submit" size="sm" variant="outline">Save target</Button>
+			</form>
+		{/if}
+	</Panel>
+
 	{#if data.canEditPolicies}
 		<PolicyPanel group="ingress" policies={data.policies} defaults={data.policyDefaults} {form}>
 			<div class="mb-5 grid gap-4 sm:grid-cols-3">
@@ -435,6 +503,123 @@
 					{/each}
 				</Table.Body>
 			</Table.Root>
+		{/if}
+	</Panel>
+
+	<Panel
+		title="Failover and drill timeline"
+		icon={HistoryIcon}
+		description="Every failover, switchover and drill, newest first, with the measured time to writable and the commits a drill lost."
+		count={data.timeline.items.length}
+		flush
+	>
+		{#if data.timeline.items.length === 0}
+			<div class="p-4">
+				<EmptyState icon={HistoryIcon} compact title="No failovers or drills" description="Promotions and drills appear here with their measured result." />
+			</div>
+		{:else}
+			<Table.Root>
+				<Table.Header class="bg-muted/45">
+					<Table.Row>
+						<Table.Head class="pl-4">When</Table.Head>
+						<Table.Head>What</Table.Head>
+						<Table.Head>Database</Table.Head>
+						<Table.Head>Result</Table.Head>
+						<Table.Head class="text-right">Time to writable</Table.Head>
+						<Table.Head class="pr-4 text-right">Lost commits</Table.Head>
+					</Table.Row>
+				</Table.Header>
+				<Table.Body>
+					{#each data.timeline.items as item (item.id)}
+						<Table.Row>
+							<Table.Cell class="pl-4 text-sm whitespace-nowrap" title={formatDateTime(item.startedAt)}>
+								{formatRelative(item.startedAt)}
+							</Table.Cell>
+							<Table.Cell>
+								<Badge variant={item.kind === 'drill' ? 'outline' : item.kind === 'switchover' ? 'info' : 'warning'}>
+									{item.kind}
+								</Badge>
+								{#if item.promotionSource}<p class="mt-0.5 text-xs text-muted-foreground">{item.promotionSource}</p>{/if}
+							</Table.Cell>
+							<Table.Cell class="text-sm">
+								<span class="font-mono">{item.databaseName ?? item.databaseId}</span>
+								{#if item.durability}<Badge variant="outline" class="ml-1">{item.durability}</Badge>{/if}
+								<p class="mt-0.5 text-xs text-muted-foreground">
+									{item.fromNodeName ?? item.fromNodeId ?? '—'} → {item.toNodeName ?? item.toNodeId ?? '—'}
+								</p>
+							</Table.Cell>
+							<Table.Cell>
+								<Badge variant={item.status === 'completed' || item.status === 'passed' ? 'success' : item.status === 'failed' ? 'danger' : 'neutral'}>
+									{item.status}
+								</Badge>
+								{#if item.arbiterTested !== null}
+									<p class="mt-0.5 text-xs text-muted-foreground">arbiter {item.arbiterTested ? 'tested' : 'not tested'}</p>
+								{/if}
+							</Table.Cell>
+							<Table.Cell class="text-right font-mono text-xs">
+								{item.timeToWritableMs === null ? '—' : `${(item.timeToWritableMs / 1000).toFixed(1)} s`}
+							</Table.Cell>
+							<Table.Cell class="pr-4 text-right font-mono text-xs">{item.lostCommits ?? '—'}</Table.Cell>
+						</Table.Row>
+					{/each}
+				</Table.Body>
+			</Table.Root>
+		{/if}
+	</Panel>
+
+	<Panel
+		title="External prober"
+		icon={ActivityIcon}
+		description="A tiny agent outside the fleet observes the public surface and posts what it saw. An outage that hides the control plane is still visible from here."
+	>
+		{#if !data.probers.enabled}
+			<p class="text-sm text-muted-foreground">Off. Enable <code class="font-mono">EXTERNAL_PROBER</code> to register a prober.</p>
+		{:else if data.probers.probers.length === 0}
+			<EmptyState icon={ActivityIcon} compact title="No probers registered" description="Register one below and run scripts/external-prober.ts outside the fleet." />
+		{:else}
+			<ul class="space-y-2">
+				{#each data.probers.probers as prober (prober.proberId)}
+					<li class="flex flex-wrap items-center justify-between gap-2 rounded-md border px-3 py-2">
+						<div>
+							<p class="flex items-center gap-2 text-sm font-medium">
+								{prober.name}
+								{#if prober.revokedAt}<Badge variant="neutral">revoked</Badge>
+								{:else if prober.stale}<Badge variant="warning">stale</Badge>
+								{:else}<Badge variant="success">reporting</Badge>{/if}
+							</p>
+							<p class="text-xs text-muted-foreground">
+								{prober.lastReportAt ? `Last report ${formatRelative(prober.lastReportAt)}` : 'Never reported'} · every {prober.intervalSeconds}s ·
+								{prober.counts.up} up / {prober.counts.degraded} degraded / {prober.counts.down} down
+							</p>
+						</div>
+						{#if data.canEditPolicies && !prober.revokedAt}
+							<form method="POST" action="?/revokeProber">
+								<input type="hidden" name="proberId" value={prober.proberId} />
+								<Button type="submit" size="sm" variant="outline">Revoke</Button>
+							</form>
+						{/if}
+					</li>
+				{/each}
+			</ul>
+		{/if}
+		{#if data.canEditPolicies && data.probers.enabled}
+			<form method="POST" action="?/registerProber" class="mt-4 flex flex-wrap items-end gap-2">
+				<label class="text-xs">
+					<span class="mb-1 block text-muted-foreground">Name</span>
+					<input name="name" required maxlength="100" class="h-9 rounded-md border bg-background px-2 text-sm" placeholder="london-1" />
+				</label>
+				<label class="text-xs">
+					<span class="mb-1 block text-muted-foreground">Every (seconds)</span>
+					<input name="intervalSeconds" type="number" min="10" max="3600" value="60" class="h-9 w-28 rounded-md border bg-background px-2 text-sm" />
+				</label>
+				<Button type="submit" size="sm" variant="outline">Register prober</Button>
+			</form>
+			{#if proberToken}
+				<p class="mt-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-xs">
+					Token for {proberName ?? 'the new prober'} (shown once):
+					<code class="mt-1 block break-all font-mono">{proberToken}</code>
+				</p>
+			{/if}
 		{/if}
 	</Panel>
 </div>

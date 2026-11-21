@@ -288,34 +288,36 @@ describe('database failover policy', () => {
 });
 
 describe('W15 foundation', () => {
-	test('SLO list is empty and its writes fail loudly until lane B implements them', async () => {
+	test('SLO objects are created and evaluated; a blind telemetry store is a note', async () => {
 		expect(core.slos.list(principal, project.slug)).toEqual([]);
-		await expect(
-			core.slos.upsert(
-				principal,
-				project.slug,
-				sloObjectInputSchema.parse({ name: 'availability', indicator: 'http_availability', target: 0.999, windowSeconds: 86_400 }),
-			),
-		).rejects.toMatchObject({ code: 'conflict', message: expect.stringContaining('not implemented') });
-		await expect(core.slos.evaluate(principal, project.slug)).rejects.toMatchObject({
-			code: 'conflict',
-			message: expect.stringContaining('not implemented'),
-		});
+		const created = await core.slos.upsert(
+			principal,
+			project.slug,
+			sloObjectInputSchema.parse({ name: 'availability', indicator: 'http_availability', target: 0.999, windowSeconds: 86_400 }),
+		);
+		expect(created.id).toStartWith('slo_');
+		expect(core.slos.list(principal, project.slug)).toHaveLength(1);
+		const [evaluation] = await core.slos.evaluate(principal, project.slug);
+		expect(evaluation!.sloId).toBe(created.id);
+		// This fixture has no ClickHouse: the evaluation says so rather than inventing a healthy ratio.
+		expect(evaluation!.note).toContain('telemetry');
+		expect(evaluation!.errorBudget.consumed).toBe(0);
+		core.slos.remove(principal, project.slug, created.id);
 	});
 
-	test('the external prober sink refuses reports it cannot store', async () => {
+	test('a registered prober posts with its token and a duplicate sequence is ignored', async () => {
 		expect(core.externalProber.enabled()).toBe(true);
+		const registration = core.externalProber.register(principal, { name: 'foundation', installId: null, intervalSeconds: 60 });
+		expect(registration.token).toStartWith('yoalp_');
 		const report = externalProberReportSchema.parse({
-			proberId: 'prb_1',
+			proberId: registration.prober.proberId,
 			sequence: 1,
 			sentAt: new Date(clock).toISOString(),
 			installId: null,
 			targets: [{ target: 'https://app.test/healthz', kind: 'https', status: 'up', checkedAt: new Date(clock).toISOString() }],
 		});
-		await expect(core.externalProber.report(report)).rejects.toMatchObject({
-			code: 'conflict',
-			message: expect.stringContaining('not implemented'),
-		});
+		expect((await core.externalProber.report(registration.token, report)).accepted).toBe(1);
+		expect((await core.externalProber.report(registration.token, report)).accepted).toBe(0);
 	});
 
 	test('SLO and prober writes are refused while their flags are off', async () => {
@@ -333,7 +335,7 @@ describe('W15 foundation', () => {
 			installId: null,
 			targets: [{ target: 'https://app.test/healthz', kind: 'https', status: 'up', checkedAt: new Date(clock).toISOString() }],
 		});
-		await expect(core.externalProber.report(report)).rejects.toMatchObject({ code: 'unavailable' });
+		await expect(core.externalProber.report('token', report)).rejects.toMatchObject({ code: 'unavailable' });
 		setFeature('SLO_OBJECTS', true);
 		setFeature('EXTERNAL_PROBER', true);
 	});

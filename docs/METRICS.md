@@ -82,6 +82,14 @@ telemetry store's TTL would make a running total go backwards.
   `_pool_avg_wait_ms`
 - Last hour: `yoal_database_transactions_1h{result}`, `yoal_database_tuples_1h{op}`,
   `yoal_database_blocks_1h{source}`, `yoal_database_deadlocks_1h`, `yoal_database_temp_bytes_1h`
+- Replication and durability (W15): `yoal_database_primary_generation`,
+  `yoal_database_durability_effective{durability}`, `yoal_database_sync_state{state}`,
+  `yoal_database_replica_status{node,node_id,status}`,
+  `yoal_database_replica_streaming{node,node_id}`,
+  `yoal_database_replica_lag_seconds{node,node_id}`,
+  `yoal_database_replica_lag_bytes{node,node_id}`,
+  `yoal_database_replica_is_sync{node,node_id}` (1 for the member the lease records as
+  synchronous), and `yoal_database_sync_member{node=""}` 1 when there is none.
 
 **Object storage** (labels `storage`, `storage_id`)
 
@@ -118,6 +126,22 @@ Brokers are not in the public fleet summary.
 - Disks: `yoal_volume_up{node,volume,kind,tier}`, `yoal_volume_size_bytes`,
   `yoal_volume_free_bytes` (D80). The names predate disks and stay; `volume` is the disk name and
   `tier` is `fast` or `bulk` ([STORAGE.md](./STORAGE.md)).
+- HA levels (W15): `yoal_ha_declared_level{project,project_id,level}`,
+  `yoal_ha_effective_level{...}`, `yoal_ha_effective_below_target{project,project_id}` (1 when the
+  weakest live resource is under the declaration; `ha.effective_below_target` alerts after 5 min),
+  `yoal_ha_level_blockers{project,project_id}`, and
+  `yoal_ha_level{kind,resource,level}` (0=L0 … 3=L3) per live resource.
+- Leases (W15): `yoal_control_lease_holder{holder}`, `yoal_control_lease_epoch`,
+  `yoal_control_lease_expires_timestamp_seconds` (present while a control-plane lease exists), and
+  per database `yoal_database_lease_holder{node,node_id}`,
+  `yoal_database_lease_generation`, `yoal_database_lease_epoch`,
+  `yoal_database_lease_observed_timestamp_seconds`, `yoal_database_generation`,
+  `yoal_database_member_epoch`. The database member report carries the lease epoch/generation but
+  not its expiry; the arbiter is the authority, so `observed_timestamp_seconds` is how fresh the
+  member's view is.
+- Steering (W15): `yoal_steering_active`, `yoal_steering_driver_info{driver,stacked}`,
+  `yoal_steering_findings{driver}`, `yoal_steering_healthy{driver}`,
+  `yoal_steering_ingress_node_ready{node,node_id,zone}`.
 - Public `/metrics` only: `yoal_http_requests_total{host}`, `yoal_http_errors_total`,
   `yoal_bytes_total` (last hour), and `yoal_database_*` / `yoal_storage_*` keyed by id.
 

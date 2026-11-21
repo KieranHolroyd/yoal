@@ -5958,12 +5958,13 @@ function buildServer(
 			description:
 				'Read the failover controller (read-only): whether automatic failover is on, the controller lease (epoch, holder), ' +
 				'nodes and how long each has been silent, the ingress record set, databases whose primary is lost with the replica a ' +
-				'promotion would pick, and recent failover events (replica moves, ingress withdrawals, database decisions). ' +
+				'promotion would pick, recent failover events (replica moves, ingress withdrawals, database decisions), and each ' +
+				'project’s declared HA target against its effective level (HA-PLAN W15). ' +
 				'Requires a platform admin role. MCP never changes placement or promotes anything (CLUSTERING §12.4).',
 			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
 			scopeChallenge: requires('project:read'),
 		},
-		async () => run(() => core.failover.status(principal)),
+		async () => run(() => ({ ...core.failover.status(principal), haTargets: core.slos.targets(principal) })),
 	);
 
 	tool(

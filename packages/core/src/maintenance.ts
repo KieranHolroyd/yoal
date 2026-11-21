@@ -218,6 +218,18 @@ export class MaintenanceService {
 		alertsFired.push(...(await this.kubernetesAlerts()));
 		alertsFired.push(...(await this.appVolumeAlerts()));
 		alertsFired.push(...(await this.quotaAlerts()));
+		// W15: effective-vs-declared HA levels and firing SLO burn alerts (flag-gated SLOs), then a
+		// registered external prober's health. Both are no-ops with their flags off.
+		try {
+			alertsFired.push(...(await this.ctx.slos.sweep()));
+		} catch (error) {
+			console.error('[maintenance] SLO sweep:', error);
+		}
+		try {
+			alertsFired.push(...(await this.ctx.externalProber.sweep()));
+		} catch (error) {
+			console.error('[maintenance] external prober sweep:', error);
+		}
 		// Daily trend points are idempotent: after the first sweep of a UTC day this is a no-op.
 		await this.ctx.usage.captureSnapshots();
 		// IAM rollup, request expiry, overdue reviews and service-account hygiene, once per UTC day.

@@ -30,6 +30,7 @@ export const systemAlertKinds = [
 	'link',
 	'relocation',
 	'server_error',
+	'ha',
 ] as const;
 export type SystemAlertKind = (typeof systemAlertKinds)[number];
 
@@ -181,6 +182,14 @@ export const systemAlertCatalog: SystemAlertInfo[] = [
 		description:
 			'The failover controller moved replica copies or changed ingress rotation, could not (no target, queue expired), needs a human for a lost node or database primary, or lost its lease.',
 		severity: 'info when it acted; warning when blocked; critical for a lost primary or lease',
+		thresholds: [],
+	},
+	{
+		kind: 'ha',
+		label: 'Observability and HA targets',
+		description:
+			'A project’s effective HA level is below its declared target, an SLO is burning its error budget, or a registered external prober stopped reporting (HA-PLAN W15).',
+		severity: 'warning for a level below target or a stale prober; warning or critical per SLO burn alert',
 		thresholds: [],
 	},
 	{

@@ -9,6 +9,17 @@ import { z } from 'zod';
  * fleet and reports what it saw, so an outage that hides the control plane is still observable.
  */
 
+/**
+ * Indicators the evaluator understands. An SLO may store another string (the shapes stay open for
+ * later sources), but evaluation reports that it has no data for it instead of pretending a target
+ * was met.
+ *
+ * - `http_availability`: the share of ingress requests that were not 5xx (4xx is a client error).
+ * - `database_writable`: the share of database samples where the server answered (`up`).
+ */
+export const sloIndicators = ['http_availability', 'database_writable'] as const;
+export type SloIndicator = (typeof sloIndicators)[number];
+
 /** One burn-rate alert: the classic long/short window pair (SRE workbook, multi-burn-rate). */
 export const sloBurnAlertSchema = z
 	.object({

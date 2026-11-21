@@ -13,6 +13,7 @@
 		"rotate-master-key.test.ts",
 		"uninstall.test.ts",
 		"yoal-alert.ts",
+		"external-prober.ts",
 		"install/**/*.ts",
 		"systemd/**/*.ts",
 		"release/**/*.ts",

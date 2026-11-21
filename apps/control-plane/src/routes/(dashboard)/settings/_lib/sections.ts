@@ -22,6 +22,7 @@ import LogsIcon from '@lucide/svelte/icons/logs';
 import MailIcon from '@lucide/svelte/icons/mail';
 import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
 import SparklesIcon from '@lucide/svelte/icons/sparkles';
+import TargetIcon from '@lucide/svelte/icons/target';
 import UserRoundIcon from '@lucide/svelte/icons/user-round';
 import UsersIcon from '@lucide/svelte/icons/users';
 import NetworkIcon from '@lucide/svelte/icons/network';
@@ -77,6 +78,7 @@ export type SectionId =
 	| 'assistant'
 	| 'telemetry'
 	| 'metrics'
+	| 'slo'
 	| 'errors'
 	| 'high-availability'
 	| 'storage'
@@ -360,6 +362,17 @@ export const SECTIONS: Section[] = [
 		href: '/(dashboard)/settings/metrics',
 		path: '/settings/metrics',
 		icon: ChartLineIcon,
+		ownerOnly: true
+	},
+	{
+		id: 'slo',
+		group: 'observability',
+		label: 'SLOs',
+		summary:
+			'Service-level objectives per project: success targets, error budgets and multi-window burn alerts, evaluated from telemetry.',
+		href: '/(dashboard)/settings/slo' as unknown as SectionHref,
+		path: '/settings/slo',
+		icon: TargetIcon,
 		ownerOnly: true
 	},
 	{
