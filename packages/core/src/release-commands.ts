@@ -194,8 +194,10 @@ export class ReleaseCommandScheduler {
 				const blocked = rows.some(
 					(other) => other.id !== row.id && other.workloadId === row.workloadId && other.nodeId !== null,
 				);
-				// Never handed to a node, so nothing can be running: safe to give up on.
-				if (!blocked && now - row.createdAt >= unleasedLimitMs)
+				// Never handed to a node, so nothing can be running: safe to give up on. The clock is
+				// `updatedAt`: for an unleased run that is when it was queued, or when the run it waited
+				// behind finished (see `finish`), so a wait in line never counts against it.
+				if (!blocked && now - row.updatedAt >= unleasedLimitMs)
 					this.finish(row, 'failed', now, null, `No node could run the release command within ${Math.round(unleasedLimitMs / 1000)} s: none of the nodes that hold this app's copies is online with an agent that declares "${RELEASE_PHASE_CAPABILITY}".`);
 				else this.lease(row, now);
 				continue;
@@ -469,6 +471,14 @@ export class ReleaseCommandScheduler {
 			.all();
 		// Another reporter (or an earlier expiry) closed this run first: it keeps its outcome.
 		if (changed.length === 0) return;
+		// A leased run ending frees the app's one lease: runs that waited behind it start their
+		// unleased clock now, so a single missed lease is not an instant failure.
+		if (row.nodeId)
+			this.ctx.db
+				.update(releaseCommandRuns)
+				.set({ updatedAt: now })
+				.where(and(eq(releaseCommandRuns.workloadId, row.workloadId), eq(releaseCommandRuns.status, 'queued'), isNull(releaseCommandRuns.nodeId)))
+				.run();
 		// The node drops the task from its desired state now, and the rollout reads the gate next tick.
 		if (row.nodeId) this.ctx.projects.bump(row.orgId);
 		const project = this.ctx.db.select({ slug: projects.slug }).from(projects).where(eq(projects.id, row.projectId)).get();
