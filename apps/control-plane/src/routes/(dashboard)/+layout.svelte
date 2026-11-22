@@ -666,7 +666,10 @@
 
 		<!-- The cloud shell (D236) docks at the bottom of every page and survives navigation. -->
 		{#if data.features.cloudShell}
-			<CloudShellDrawer />
+			<!-- Its terminal (ContainerShell) uses TanStack Query, like the pages. -->
+			<QueryClientProvider client={queryClient}>
+				<CloudShellDrawer />
+			</QueryClientProvider>
 		{/if}
 	</Sidebar.Inset>
 
