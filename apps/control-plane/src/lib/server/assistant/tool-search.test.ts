@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import * as z from 'zod';
-import { GUIDE_TOOL, SEARCH_TOOL } from './constants';
+import { ASSISTANT_ONLY_TOOLS, GUIDE_TOOL, SEARCH_TOOL } from './constants';
 import { CORE_TOOLS, DEFER_THRESHOLD, createToolbox, rankTools } from './tool-search';
 import type { AssistantTool } from './tools';
 
@@ -96,7 +96,7 @@ describe('createToolbox', () => {
 		const { readFileSync } = await import('node:fs');
 		const source = readFileSync(new URL('../mcp.ts', import.meta.url), 'utf8');
 		for (const name of CORE_TOOLS) {
-			if (name === GUIDE_TOOL) continue;
+			if (ASSISTANT_ONLY_TOOLS.has(name)) continue;
 			expect({ name, registered: source.includes(`'${name}'`) }).toMatchObject({
 				registered: true
 			});

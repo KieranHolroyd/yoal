@@ -12,11 +12,13 @@ import { ValidationError } from './validate.ts';
  * which keeps every restriction its unit gives it (no capabilities, no new privileges, read-only
  * root). Nothing runs on the host but `podman` and `systemctl` with fixed argv.
  *
- * Only `wld_…` ids with a rendered `.container` unit qualify: managed databases, storage and
- * brokers (`db_`, `st_`, `mq_`) hold platform credentials and are never opened here.
+ * Only `wld_…` ids (and people's own cloud shells, `csh_…`, D236) with a rendered `.container`
+ * unit qualify: managed databases, storage and brokers (`db_`, `st_`, `mq_`) hold platform
+ * credentials and are never opened here.
  */
 
-export const CONSOLE_WORKLOAD_ID = /^wld_[A-Za-z0-9]{1,64}(?:-r\d{1,3})?$/;
+/** A project container (`wld_…`, D127) or a person's cloud shell (`csh_…`, D236). */
+export const CONSOLE_WORKLOAD_ID = /^(?:wld_[A-Za-z0-9]{1,64}(?:-r\d{1,3})?|csh_[A-Za-z0-9]{1,64})$/;
 export const EXEC_ID = /^cx_[A-Za-z0-9]{24}$/;
 export const CONSOLE_SHELLS = ['auto', '/bin/bash', '/bin/sh', '/bin/ash'] as const;
 export type ConsoleShell = (typeof CONSOLE_SHELLS)[number];
@@ -199,7 +201,8 @@ export class ContainerConsole {
 		} catch {
 			throw new ValidationError('workload id is not valid URL encoding');
 		}
-		if (!CONSOLE_WORKLOAD_ID.test(id)) throw new ValidationError('the console only opens project containers (wld_…)');
+		if (!CONSOLE_WORKLOAD_ID.test(id))
+			throw new ValidationError('the console only opens project containers (wld_…) and cloud shells (csh_…)');
 		if (!existsSync(`${this.options.quadletDir}/${containerUnitName(id)}`))
 			throw new ConsoleError('This workload is not a container on this node.', 404);
 		return id;

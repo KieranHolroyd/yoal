@@ -291,10 +291,87 @@ jobs:
             "$IMAGE:$VERSION-linux-amd64" \
             "$IMAGE:$VERSION-linux-arm64"
 
+  # The cloud shell image (D236, docs/CLOUD-SHELL.md): the yoal CLI from this commit on Debian.
+  # A control plane of this version runs ghcr.io/<owner>/yoal-cloud-shell:<version> for every
+  # shell, so the release is not published until the tag exists.
+  cloud-shell-image:
+    name: Cloud shell image (${{ matrix.arch }})
+    runs-on: ubuntu-latest
+    needs: [test]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            platform: linux/amd64
+          - arch: arm64
+            platform: linux/arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image name and version
+        run: |
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/yoal-cloud-shell" >> "$GITHUB_ENV"
+
+      # The final stage runs apt and npm for the target architecture (QEMU for arm64); the CLI
+      # bundle itself is built natively.
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/cloud-shell/Dockerfile
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ env.IMAGE }}:${{ env.VERSION }}-linux-${{ matrix.arch }}
+          build-args: |
+            YOAL_VERSION=${{ env.VERSION }}
+            BUN_VERSION=${{ env.BUN_VERSION }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=cloud-shell-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=cloud-shell-${{ matrix.arch }}
+          sbom: true
+          provenance: true
+
+  cloud-shell-image-manifest:
+    name: Cloud shell image manifest
+    runs-on: ubuntu-latest
+    needs: [cloud-shell-image]
+    steps:
+      - name: Resolve image name and version
+        run: |
+          echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+          echo "IMAGE=ghcr.io/$(echo '${{ github.repository_owner }}' | tr '[:upper:]' '[:lower:]')/yoal-cloud-shell" >> "$GITHUB_ENV"
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish the multi-arch tag
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:$VERSION" \
+            --tag "$IMAGE:latest" \
+            "$IMAGE:$VERSION-linux-amd64" \
+            "$IMAGE:$VERSION-linux-arm64"
+
   publish:
     name: Sign and publish
     runs-on: ubuntu-latest
-    needs: [test, control-plane, agent, caddy, image-manifest]
+    needs: [test, control-plane, agent, caddy, image-manifest, cloud-shell-image-manifest]
     env:
       # Secrets cannot be referenced directly in `if:`; surface the choice as an env bool.
       HAS_MINISIGN: ${{ secrets.MINISIGN_SECRET_KEY != '' }}

@@ -95,6 +95,12 @@ export class MaintenanceService {
 		// W10: a sync-set change that timed out, and a sync database whose standby went away.
 		await this.ctx.databaseMembers.tick().catch((error: unknown) => console.error('[maintenance] database durability:', error));
 		this.ctx.databaseStudio.tick();
+		// Cloud shells (D236): stop idle and over-long shells and revoke their CLI keys.
+		try {
+			this.ctx.cloudShells.sweep();
+		} catch (error) {
+			console.error('[maintenance] cloud shells:', error);
+		}
 		// Fleet node updates (CLUSTERING §3.11): start the automatic rollout after the control plane
 		// updated itself, and fail a rollout whose flow is gone.
 		try {

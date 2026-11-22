@@ -177,6 +177,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	private readonly purgedBrokerPending = new Set<string>();
 	/** Purged Kubernetes machine ids not yet acknowledged by a heartbeat (docs/KUBERNETES.md). */
 	private readonly purgedKubernetesPending = new Set<string>();
+	private readonly purgedCloudShellPending = new Set<string>();
 	private retryAt = 0;
 	private pendingFailure = false;
 	private readonly now: () => number;
@@ -458,6 +459,15 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 		for (const id of ids) this.purgedKubernetesPending.delete(id);
 	}
 
+	/** Cloud shells whose home disk was deleted, for the next heartbeat's `purgedCloudShells` (D236). */
+	pendingPurgedCloudShells(): string[] {
+		return [...this.purgedCloudShellPending].sort();
+	}
+
+	acknowledgePurgedCloudShells(ids: readonly string[]): void {
+		for (const id of ids) this.purgedCloudShellPending.delete(id);
+	}
+
 	/** Purged database ids for the next heartbeat's `purgedDatabases`. */
 	pendingPurgedDatabases(): string[] {
 		return [...this.purgedPending].sort();
@@ -557,7 +567,9 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 		const storagePurgeFailed = await this.purgeManaged('storage', state.storagePurges ?? [], listedIds, signal);
 		const brokerPurgeFailed = await this.purgeManaged('broker', state.brokerPurges ?? [], listedIds, signal);
 		const kubernetesPurgeFailed = await this.purgeManaged('kubernetes', state.kubernetesPurges ?? [], listedIds, signal);
-		const purgeFailed = databasePurgeFailed || storagePurgeFailed || brokerPurgeFailed || kubernetesPurgeFailed;
+		const cloudShellPurgeFailed = await this.purgeManaged('cloud shell', state.cloudShellPurges ?? [], listedIds, signal);
+		const purgeFailed =
+			databasePurgeFailed || storagePurgeFailed || brokerPurgeFailed || kubernetesPurgeFailed || cloudShellPurgeFailed;
 
 		if (desired.length === 0) {
 			if (purgeFailed) this.scheduleRetry();
@@ -612,7 +624,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	 * its heartbeat is not purged twice. Returns true when a purge failed and needs a retry.
 	 */
 	private async purgeManaged(
-		kind: 'database' | 'storage' | 'broker' | 'kubernetes',
+		kind: 'database' | 'storage' | 'broker' | 'kubernetes' | 'cloud shell',
 		ids: readonly string[],
 		listedIds: ReadonlySet<string>,
 		signal: AbortSignal,
@@ -624,7 +636,9 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 					? this.purgedStoragePending
 					: kind === 'broker'
 						? this.purgedBrokerPending
-						: this.purgedKubernetesPending;
+						: kind === 'kubernetes'
+							? this.purgedKubernetesPending
+							: this.purgedCloudShellPending;
 		let failed = false;
 		for (const id of new Set(ids)) {
 			if (signal.aborted) return true;
@@ -1315,6 +1329,8 @@ export function workloadFingerprint(workload: WorkloadDesired): string {
 		...(workload.broker ? { broker: workload.broker } : {}),
 		// Kubernetes machines: minor, role, tier and API host are all rendered into the unit.
 		...(workload.kubernetes ? { kubernetes: workload.kubernetes } : {}),
+		// A cloud shell's disk size is rendered into its mount (D236).
+		...(workload.cloudShell ? { cloudShell: workload.cloudShell } : {}),
 		// A function's bindings, compatibility date and assets are part of the rendered workerd
 		// config, so a change must re-render and restart the host.
 		...(workload.function ? { function: workload.function } : {}),

@@ -120,6 +120,12 @@ const FUNCTION_UNIQUE_KEY_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
 const FUNCTION_ENV_PREFIX_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/;
 
 /** Raised for any malformed or unsafe request. Mapped to HTTP 400 by the server. */
+/** Cloud shell ids (D236); the prefix is reserved for the `cloudShell` profile. */
+export const CLOUD_SHELL_ID_PREFIX = 'csh_';
+export const CLOUD_SHELL_ID = /^csh_[A-Za-z0-9]{1,64}$/;
+/** Home disk sizes a cloud shell may ask for, in MiB. */
+export const CLOUD_SHELL_DISK_MB = { min: 256, max: 8192 } as const;
+
 export class ValidationError extends Error {
 	constructor(message: string) {
 		super(message);
@@ -283,6 +289,11 @@ export interface WorkloadDesired {
 	broker?: WorkloadBroker;
 	/** A managed Kubernetes machine (docs/KUBERNETES.md); image, flags and mounts are the helper's. */
 	kubernetes?: WorkloadKubernetes;
+	/**
+	 * A person's cloud shell (D236): a `csh_…` worker whose home is a loop-mounted ext4 disk of
+	 * `diskMb`. The disk's location, mount and sandbox are the helper's; only the size travels.
+	 */
+	cloudShell?: { diskMb: number };
 	/** Disk for the data dir (D169); resolved and verified against the helper's registry. */
 	volumeId?: string;
 	/** App volumes mounted into this workload (plan 07); ids and mount points only, never paths. */
@@ -766,7 +777,7 @@ export function assertBrokerId(value: unknown, label = 'broker id'): string {
 /** A managed-service id (`db_`, `st_` or `mq_`): the only ids whose data dir `purge` may delete. */
 export function assertManagedId(value: unknown, label = 'managed id'): string {
 	const id = assertId(value, label);
-	for (const prefix of [DATABASE_ID_PREFIX, STORAGE_ID_PREFIX, BROKER_ID_PREFIX, REGISTRY_ID_PREFIX, KUBERNETES_ID_PREFIX]) {
+	for (const prefix of [DATABASE_ID_PREFIX, STORAGE_ID_PREFIX, BROKER_ID_PREFIX, REGISTRY_ID_PREFIX, KUBERNETES_ID_PREFIX, CLOUD_SHELL_ID_PREFIX]) {
 		if (id.startsWith(prefix) && id.length > prefix.length) return id;
 	}
 	throw new ValidationError(
@@ -1493,6 +1504,26 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 	} else if (id.startsWith(REGISTRY_ID_PREFIX)) {
 		throw new ValidationError(`workload.id prefix "${REGISTRY_ID_PREFIX}" is reserved for the registry`);
 	}
+	let cloudShell: { diskMb: number } | undefined;
+	if (record.cloudShell !== undefined) {
+		const profile = assertRecord(record.cloudShell, 'workload.cloudShell');
+		const diskMb = assertInteger(profile.diskMb, 'workload.cloudShell.diskMb', CLOUD_SHELL_DISK_MB.min, CLOUD_SHELL_DISK_MB.max);
+		if (runtime !== 'container') throw new ValidationError('Cloud shells must use the container runtime');
+		if (!CLOUD_SHELL_ID.test(id)) throw new ValidationError(`Cloud shells need an id like "${CLOUD_SHELL_ID_PREFIX}…"`);
+		if (database || objectStorage || broker || registry || kubernetes)
+			throw new ValidationError('A cloud shell cannot have another managed profile');
+		if (record.ingress !== 'none') throw new ValidationError('Cloud shells are workers (ingress "none")');
+		if (secrets.length > 0) throw new ValidationError('Cloud shells take no secrets');
+		// The home disk is the only persistent mount; everything else about the shell is fixed.
+		for (const key of ['volumes', 'volumeId', 'runner', 'identity', 'addHosts', 'pooler', 'command'] as const)
+			if (record[key] !== undefined && !(Array.isArray(record[key]) && (record[key] as unknown[]).length === 0))
+				throw new ValidationError(`Cloud shells cannot set workload.${key}`);
+		if (record.dataSizeMb !== undefined && record.dataSizeMb !== null)
+			throw new ValidationError('Cloud shells keep their files on the home disk, not a data directory');
+		cloudShell = { diskMb };
+	} else if (id.startsWith(CLOUD_SHELL_ID_PREFIX)) {
+		throw new ValidationError(`workload.id prefix "${CLOUD_SHELL_ID_PREFIX}" is reserved for cloud shells`);
+	}
 
 	const dataSizeMb =
 		record.dataSizeMb === null || record.dataSizeMb === undefined
@@ -1541,6 +1572,7 @@ export function parseWorkload(value: unknown): WorkloadDesired {
 	if (broker) workload.broker = broker;
 	if (kubernetes) workload.kubernetes = kubernetes;
 	if (registry) workload.registry = registry;
+	if (cloudShell) workload.cloudShell = cloudShell;
 	if (record.ingress !== undefined) {
 		if (record.ingress !== 'none') throw new ValidationError('workload.ingress must be "none" when present');
 		if (database || objectStorage || broker || registry || kubernetes) throw new ValidationError('Managed services cannot be workers');

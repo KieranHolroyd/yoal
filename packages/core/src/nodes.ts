@@ -622,6 +622,7 @@ export class NodeService {
 			this.ctx.brokers.applyHeartbeat(node.id, input.workloads);
 			this.ctx.kubernetes.applyHeartbeat(node.id, input.workloads);
 			this.ctx.registry.applyHeartbeat(node.id, input.workloads);
+			this.ctx.cloudShells.applyHeartbeat(node.id, input.workloads);
 			this.ctx.databaseReplicas.applyWorkloadReports(node.id, input.workloads);
 		}
 		// Release-phase reports (H25): an outcome closes a run's lease; the edge's own counters are
@@ -676,6 +677,7 @@ export class NodeService {
 		if (input.purgedStorage?.length) this.ctx.storage.applyPurged(node.id, input.purgedStorage);
 		if (input.purgedBrokers?.length) this.ctx.brokers.applyPurged(node.id, input.purgedBrokers);
 		if (input.purgedKubernetes?.length) this.ctx.kubernetes.applyPurged(node.id, input.purgedKubernetes);
+		if (input.purgedCloudShells?.length) this.ctx.cloudShells.applyPurged(node.id, input.purgedCloudShells);
 		if (input.kubernetesStatus?.length) this.ctx.kubernetes.ingestStatus(node.id, input.kubernetesStatus);
 		this.ctx.kubernetes.applyComponentReport(node.id, input.kubernetes);
 		if (input.kubernetesBackupResults?.length) this.ctx.kubernetes.applyBackupResults(node.id, input.kubernetesBackupResults);
@@ -1384,6 +1386,11 @@ export class NodeService {
 			storagePurges: this.ctx.storage.purgesForNode(node.id),
 			brokerPurges: this.ctx.brokers.purgesForNode(node.id),
 			kubernetesPurges: this.ctx.kubernetes.purgesForNode(node.id),
+			// Reset cloud shells whose home disk this node deletes (D236); absent while empty.
+			...(() => {
+				const purges = this.ctx.cloudShells.purgesForNode(node.id);
+				return purges.length > 0 ? { cloudShellPurges: purges } : {};
+			})(),
 			kubernetesRoutes: this.ctx.kubernetes.routesForNode(node.id, isIngress, state.proxyAddress),
 			kubernetesManifests: this.ctx.kubernetes.manifestsForNode(node.id),
 			kubernetesComponentRequest: this.ctx.kubernetes.componentRequestForNode(node.id),

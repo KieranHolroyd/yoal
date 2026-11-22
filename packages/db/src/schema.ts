@@ -3521,3 +3521,24 @@ export const regionPromotionSteps = sqliteTable(
 		uniqueIndex('region_promotion_steps_resource_idx').on(t.promotionId, t.kind, t.resourceId),
 	],
 );
+
+/** A person's cloud shell in one org (D236, 0137): the node holding its home disk and its state. */
+export const cloudShells = sqliteTable(
+	'cloud_shells',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		userId: text('user_id').notNull(),
+		nodeId: text('node_id'),
+		status: text('status', { enum: ['stopped', 'starting', 'running', 'deleting'] }).notNull(),
+		diskMb: integer('disk_mb').notNull(),
+		accessKeyId: text('access_key_id'),
+		accessKeySealed: text('access_key_sealed'),
+		generation: integer('generation').notNull().default(0),
+		startedAt: integer('started_at'),
+		lastActiveAt: integer('last_active_at'),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+	},
+	(t) => [index('cloud_shells_node_idx').on(t.nodeId)],
+);

@@ -5,6 +5,7 @@ import type {
 	AssistantGuide,
 	AssistantPageContext
 } from '@yoal/contracts';
+import { ASSISTANT_CLOUD_SHELL_TOOL } from '@yoal/contracts';
 import { collectPageContext } from './page-context.js';
 
 /**
@@ -77,6 +78,8 @@ const MAX_CONVERSATIONS = 40;
 const MAX_MESSAGES = 200;
 const MAX_HISTORY = 20;
 const MAX_HISTORY_CHARS = 12_000;
+/** How much of a confirmed cloud shell command's output a later turn sees. */
+const CLOUD_SHELL_HISTORY_CHARS = 6_000;
 const CONFIRM_TTL_MS = 10 * 60_000;
 export const MAX_MESSAGE_CHARS = 8_000;
 
@@ -134,7 +137,10 @@ function historyContent(message: AssistantMessage): string {
 	for (const card of message.confirmations ?? []) {
 		const outcome =
 			card.status === 'done'
-				? `the user confirmed it and it completed: ${(card.result ?? 'Done.').replace(/\s+/g, ' ').slice(0, 400)}`
+				? card.tool === ASSISTANT_CLOUD_SHELL_TOOL
+					? // A command's output is what the follow-up is about: keep its lines (D237).
+						`the user confirmed it and it ran:\n${(card.result ?? '').slice(0, CLOUD_SHELL_HISTORY_CHARS)}`
+					: `the user confirmed it and it completed: ${(card.result ?? 'Done.').replace(/\s+/g, ' ').slice(0, 400)}`
 				: card.status === 'denied'
 					? 'the user cancelled it; nothing changed'
 					: card.status === 'error'

@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { readFileSync } from 'node:fs';
 import { ASSISTANT_SYSTEM } from './agents';
-import { GUIDE_TOOL } from './constants';
+import { ASSISTANT_ONLY_TOOLS, CLOUD_SHELL_TOOL } from './constants';
 
 const mcpSource = readFileSync(new URL('../mcp.ts', import.meta.url), 'utf8');
 // Pipelines tools are declared in ../mcp-pipelines.ts and registered by mcp.ts in a loop.
@@ -21,10 +21,15 @@ describe('assistant prompt', () => {
 		const named = new Set(
 			[...ASSISTANT_SYSTEM.matchAll(/\b[a-z]+(?:_[a-z]+)+\b/g)].map((match) => match[0])
 		);
-		named.delete(GUIDE_TOOL);
+		for (const name of ASSISTANT_ONLY_TOOLS) named.delete(name);
 		expect(named.size).toBeGreaterThan(10);
 		for (const name of named)
 			expect({ name, registered: registered.has(name) }).toMatchObject({ registered: true });
+	});
+
+	test('MCP clients never get the cloud shell tool (D237)', () => {
+		expect(registered.has(CLOUD_SHELL_TOOL)).toBe(false);
+		expect(mcpSource).not.toContain(`'${CLOUD_SHELL_TOOL}'`);
 	});
 
 	test('every permission-gated write tool exists', () => {

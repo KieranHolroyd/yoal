@@ -75,6 +75,17 @@ export const WHATS_NEW_ITEMS: readonly WhatsNewItem[] = [
 		},
 		href: '/settings/usage-analytics',
 		learnMore: 'https://github.com/yoal-dev/yoal/blob/main/docs/USAGE-ANALYTICS.md'
+	},
+	{
+		id: 'cloud-shell',
+		since: '0.16.13',
+		title: 'Cloud shell: a terminal on your servers with the CLI signed in',
+		summary:
+			'Infrastructure → Cloud shell opens a terminal in a small container on one of your nodes, with the yoal CLI already signed in and a 1 GiB home disk that keeps your files.',
+		body: 'Each person gets their own shell. It runs with the same sandbox as an app container, stops after 20 minutes without typing (the disk stays), and the CLI key it holds expires with it. Deployers and up can use it (cloudShell:use); the CLI is signed in only for roles that may create access keys. The dashboard assistant can run commands in your shell too, each one only after you confirm it. Nodes need this release before a shell can run on them. Turn it off with YOAL_FEATURE_CLOUD_SHELL=0.',
+		attention: 'info',
+		href: '/cloud-shell',
+		learnMore: 'https://github.com/yoal-dev/yoal/blob/main/docs/CLOUD-SHELL.md'
 	}
 ];
 

@@ -58,6 +58,8 @@ export class ReleaseState extends DesiredStatePart {
 			...this.ctx.kubernetes.desiredForNode(node.id),
 			// The platform registry (docs/REGISTRY.md G1) on its node.
 			...this.ctx.registry.desiredForNode(node.id),
+			// People's running cloud shells (D236).
+			...this.ctx.cloudShells.desiredForNode(node.id),
 		];
 		if (!featureEnabled(this.ctx.config, 'RELEASE_PHASE')) return all;
 		// HA-PLAN H25: readiness, drain and stop fields are rendered only while the flag is on (and

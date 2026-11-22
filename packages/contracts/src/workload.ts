@@ -23,6 +23,7 @@ import {
 	workloadPlacementSpecSchema,
 } from './release-phase.ts';
 import { containerAddHostSchema } from './endpoint.ts';
+import { workloadCloudShellSchema } from './cloud-shell.ts';
 
 /**
  * Tier 2 (process), tier 3 (container) and tier 4 (function) workloads (DESIGN §3.4, §3.4.1, D41,
@@ -591,6 +592,12 @@ export const workloadDesiredSchema = z.object({
 	kubernetes: workloadKubernetesSchema.optional(),
 	/** The platform registry (docs/REGISTRY.md G1): zot, rendered by the helper from this profile. */
 	registry: workloadRegistrySchema.optional(),
+	/**
+	 * A person's cloud shell (D236, docs/CLOUD-SHELL.md): `csh_…` ids only, always a worker. The
+	 * helper derives the home disk (a loop-mounted ext4 image of `diskMb`), its mount at
+	 * `/home/yoal` and the sandbox from it; nothing about the disk's location travels here.
+	 */
+	cloudShell: workloadCloudShellSchema.optional(),
 	/**
 	 * Managed services only: the disk the data dir lives on (D169; absent = the system disk). The
 	 * helper resolves the mount path from its own registry and fails the start if it is not mounted

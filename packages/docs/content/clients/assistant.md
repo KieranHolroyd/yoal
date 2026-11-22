@@ -104,11 +104,24 @@ sequenceDiagram
 
 It can also use one tool of its own, `guide_user`, to show a guided tour. A tour has up to eight steps. Each step can navigate to a dashboard path first, then spotlight an element by its `data-yoal-target` id or a CSS selector, with a short title and body. Ask it "where do I…" and it will usually point at the element rather than describe where it is.
 
+### Commands in your cloud shell
+
+If you may use a [cloud shell](/clients/cloud-shell), the assistant can also run commands in it with `run_in_cloud_shell`. The shell is yours: the `yoal` CLI there is signed in as you, so a command can do exactly what you could do from your own terminal. The assistant uses it when no other tool answers, for example a CLI command, a `dig` or `curl` from inside your install, or a `psql` query against a database you named.
+
+Every command needs your click. The card shows the whole command and the assistant's reason for running it. When you confirm:
+
+- your shell starts if it is stopped, which can take a minute the first time;
+- the command runs with bash in your home directory, with no input, so it cannot wait for a prompt;
+- it stops after its time limit (60 seconds unless the assistant asks for more, at most 5 minutes), and anything it started is stopped with it;
+- the output opens on the card, and **Ask Yoal to follow up** has the assistant read it.
+
+The command, the reason, the exit code and how long it took are recorded in the audit log as `cloud_shell.assistant.run`. MCP clients never get this tool.
+
 Each turn runs at most 12 model rounds and 24 tool calls by default. Both limits are set in **Settings → Assistant → Turn limits**.
 
 ## Confirmations
 
-Actions that deploy, promote or roll back, change access or workloads, create share links or presigned URLs, rotate or restore database credentials, restart services, send email, or send, redrive or run queue and function work stop for a click. The list covers every tool marked as destructive plus a fixed set, and includes `deploy_site`, `promote_deployment`, `rollback`, `set_access`, `create_share_link`, `presign_object`, `send_email`, `restore_database`, `update_database` and `invoke_function`. Other tools run as soon as the model calls them, under the same permission checks as the MCP server.
+Actions that deploy, promote or roll back, change access or workloads, create share links or presigned URLs, rotate or restore database credentials, restart services, send email, or send, redrive or run queue and function work stop for a click. The list covers every tool marked as destructive plus a fixed set, and includes `deploy_site`, `promote_deployment`, `rollback`, `set_access`, `create_share_link`, `presign_object`, `send_email`, `restore_database`, `update_database`, `invoke_function` and every `run_in_cloud_shell` command. Other tools run as soon as the model calls them, under the same permission checks as the MCP server.
 
 When the assistant proposes one of these actions, the chat shows a card with the tool name and its arguments.
 

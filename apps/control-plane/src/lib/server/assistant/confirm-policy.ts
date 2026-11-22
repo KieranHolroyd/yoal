@@ -67,7 +67,10 @@ export const CONFIRM_TOOLS: ReadonlySet<string> = new Set([
 	// access for a person, so the chat asks before the handler runs.
 	'create_service_account',
 	'bind_role',
-	'unbind_role'
+	'unbind_role',
+	// A command in the person's cloud shell can do anything their CLI and role can (D237); each one
+	// is shown on its own card.
+	'run_in_cloud_shell'
 ]);
 
 export function needsConfirmation(

@@ -20,6 +20,7 @@ import {
 	heartbeatSchema,
 	jobRunTriggers,
 	nodeCapabilities,
+	HEARTBEAT_CAPABILITIES_MAX,
 	nodeJoinSchema,
 	nodeTrustDesiredSchema,
 	objectStoreCredentialsSchema,
@@ -117,8 +118,8 @@ describe('flags and capabilities', () => {
 		expect(ENDPOINTS_GATEWAY_CAPABILITY).toBe('endpoints-gateway');
 		expect(RELEASE_PHASE_CAPABILITY).toBe('release-phase');
 		for (const capability of haWave1Capabilities) expect((nodeCapabilities as readonly string[]).includes(capability)).toBe(false);
-		// The heartbeat caps capabilities at 32; the static list plus the dynamic ones and these three fit.
-		expect(nodeCapabilities.length + 5 + haWave1Capabilities.length).toBeLessThanOrEqual(32);
+		// The heartbeat caps capabilities; the static list plus the dynamic ones and these three fit.
+		expect(nodeCapabilities.length + 5 + haWave1Capabilities.length).toBeLessThanOrEqual(HEARTBEAT_CAPABILITIES_MAX);
 	});
 
 	test('HA levels are the CLUSTERING §8.1 ladder', () => {

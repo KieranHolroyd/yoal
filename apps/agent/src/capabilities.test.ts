@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { ENDPOINTS_GATEWAY_CAPABILITY, FUNCTIONS_PYTHON_CAPABILITY, HA_EPOCH_CAPABILITY, INGRESS_SET_CAPABILITY, PROCESS_NODE_CAPABILITY, RELEASE_PHASE_CAPABILITY, nodeCapabilities } from '@yoal/contracts';
+import { ENDPOINTS_GATEWAY_CAPABILITY, FUNCTIONS_PYTHON_CAPABILITY, HA_EPOCH_CAPABILITY, HEARTBEAT_CAPABILITIES_MAX, INGRESS_SET_CAPABILITY, PROCESS_NODE_CAPABILITY, RELEASE_PHASE_CAPABILITY, nodeCapabilities } from '@yoal/contracts';
 import { advertisedCapabilities } from './main.ts';
 
 const dirs: string[] = [];
@@ -46,7 +46,7 @@ describe('advertisedCapabilities', () => {
 			INGRESS_SET_CAPABILITY,
 			HA_EPOCH_CAPABILITY,
 		]);
-		// The heartbeat schema caps the list at 32 entries.
-		expect(advertisedCapabilities(join(dir, 'missing'), noNode, true).length).toBeLessThanOrEqual(32);
+		// The heartbeat schema caps the list (HEARTBEAT_CAPABILITIES_MAX).
+		expect(advertisedCapabilities(join(dir, 'missing'), noNode, true).length).toBeLessThanOrEqual(HEARTBEAT_CAPABILITIES_MAX);
 	});
 });

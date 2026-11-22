@@ -29,6 +29,13 @@ export const systemPrincipals = {
 		// the database and workload resources it inspects.
 		permissions: ['database:read', 'deployment:read'],
 	},
+	'system:cloud-shell': {
+		name: 'system:cloud-shell',
+		description: "Stops idle cloud shells and revokes the access key each one's CLI signed in with.",
+		// It revokes only the key it minted for the shell (`AccessKeyService.revokeManaged`) and
+		// records its own audit rows; no org permission is needed for that.
+		permissions: [],
+	},
 	'system:rollout': {
 		name: 'system:rollout',
 		description: 'Puts the previous release back when a rollout fails.',

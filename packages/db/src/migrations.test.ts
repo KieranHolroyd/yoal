@@ -308,7 +308,7 @@ describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () =
 			 VALUES ('bt_local', 'org_1', 'local-main', 'local', '/var/lib/yoal/backups', 1, 1)`,
 		);
 
-		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql', '0123_ingress_drift.sql', '0124_shared_certificates.sql', '0125_control_epoch.sql', '0126_replica_durability.sql', '0127_replica_rewind.sql', '0128_sync_switchover_rewind.sql', '0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql']);
+		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql', '0123_ingress_drift.sql', '0124_shared_certificates.sql', '0125_control_epoch.sql', '0126_replica_durability.sql', '0127_replica_rewind.sql', '0128_sync_switchover_rewind.sql', '0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql']);
 
 		const rows = sqlite
 			.query<{ id: string; kind: string; store_kind: string | null; store_options_json: string; object_lock: number; immutable_retention_days: number | null; secret_sealed: string | null }, []>(
@@ -455,7 +455,7 @@ describe('HA Wave 4 migrations 0129–0130 (docs/build-plan/HA-WAVE-4.md)', () =
 			 VALUES ('dbf_old', 'db_old', 'nod_1', 'nod_2', 1, 'completed', 1)`,
 		);
 
-		expect(migrate(sqlite)).toEqual(['0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql']);
+		expect(migrate(sqlite)).toEqual(['0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql']);
 
 		expect(
 			sqlite
@@ -535,7 +535,7 @@ describe('HA Wave 4 migrations 0129–0130 (docs/build-plan/HA-WAVE-4.md)', () =
 		endpoint('n4', 'db2', 'primary', 'n3', 21000);
 		workload('w_direct', 'p_direct', 'container', 'n3');
 		attach('p_direct', 'db2');
-		expect(migrate(sqlite)).toEqual(['0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql']);
+		expect(migrate(sqlite)).toEqual(['0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql']);
 		const marked = sqlite
 			.query<{ id: string }, []>('SELECT id FROM workloads WHERE endpoints_gateway = 1 ORDER BY id')
 			.all()
@@ -667,7 +667,7 @@ describe('HA Wave 5 migration 0132 (docs/build-plan/HA-WAVE-5.md)', () => {
 		const databaseBefore = sqlite.query<Record<string, unknown>, []>('SELECT * FROM databases').all();
 		const controlBefore = sqlite.query<Record<string, unknown>, []>('SELECT * FROM control_state').all();
 
-		expect(migrate(sqlite)).toEqual(['0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql']);
+		expect(migrate(sqlite)).toEqual(['0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql']);
 
 		const after = sqlite.query<Record<string, unknown>, []>('SELECT * FROM nodes ORDER BY id').all();
 		expect(after).toEqual(before.map((row) => ({ ...row, region: 'default' })));
@@ -687,6 +687,29 @@ describe('HA Wave 5 migration 0132 (docs/build-plan/HA-WAVE-5.md)', () => {
 		).toThrow();
 		// 0135: existing join tokens allow no roles.
 		expect(columns(sqlite, 'node_join_tokens')).toContain('roles_json');
+		sqlite.close();
+	});
+});
+
+describe('cloud shell migration 0137 (D236)', () => {
+	test('one shell per person and org, except shells whose disk is being deleted', () => {
+		const sqlite = new Database(':memory:', { strict: true });
+		migrate(sqlite);
+		const insert = (id: string, user: string, status: string) =>
+			sqlite.run(
+				`INSERT INTO cloud_shells (id, org_id, user_id, node_id, status, disk_mb, created_at, updated_at)
+				 VALUES (?, 'org_1', ?, 'nod_1', ?, 1024, 1, 1)`,
+				[id, user, status],
+			);
+		insert('csh_a', 'u1', 'running');
+		expect(() => insert('csh_b', 'u1', 'stopped')).toThrow();
+		insert('csh_c', 'u2', 'stopped');
+		// A reset keeps the old row as `deleting` until its node reports the disk gone.
+		sqlite.run("UPDATE cloud_shells SET status = 'deleting' WHERE id = 'csh_a'");
+		insert('csh_d', 'u1', 'starting');
+		expect(() => insert('csh_e', 'u3', 'paused')).toThrow();
+		expect(() => sqlite.run("INSERT INTO cloud_shells (id, org_id, user_id, status, disk_mb, created_at, updated_at) VALUES ('csh_f', 'o', 'u4', 'stopped', 0, 1, 1)")).toThrow();
+		expect(sqlite.query<{ count: number }, []>('SELECT count(*) AS count FROM cloud_shells').get()).toEqual({ count: 3 });
 		sqlite.close();
 	});
 });

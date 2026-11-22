@@ -52,8 +52,11 @@ export type ContainerConsoleScope = (typeof containerConsoleScopes)[number];
 /** `GET /api/agent/container-console` (node bearer + console token): what the token allows. */
 export const containerConsoleActivationSchema = z.object({
 	v: z.literal(CONTAINER_CONSOLE_PROTOCOL_VERSION),
-	/** The desired workload id on this node (`wld_…` or `wld_…-r<n>`); the only one usable. */
-	workloadId: z.string().regex(/^wld_[A-Za-z0-9]+(?:-r\d{1,3})?$/),
+	/**
+	 * The desired workload id on this node (`wld_…` or `wld_…-r<n>`), or a person's cloud shell
+	 * (`csh_…`, D236); the only one usable.
+	 */
+	workloadId: z.string().regex(/^(?:wld_[A-Za-z0-9]+(?:-r\d{1,3})?|csh_[A-Za-z0-9]{1,64})$/),
 	projectId: z.string(),
 	userId: z.string(),
 	scopes: z.array(z.enum(containerConsoleScopes)).min(1),

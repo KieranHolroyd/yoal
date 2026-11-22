@@ -75,7 +75,7 @@ export const SECTIONS: DocsSection[] = [
 		id: 'clients',
 		title: 'CLI, API & agents',
 		icon: 'terminal',
-		pages: ['clients/cli', 'clients/rest-api', 'clients/mcp', 'clients/agent-docs', 'clients/assistant']
+		pages: ['clients/cli', 'clients/cloud-shell', 'clients/rest-api', 'clients/mcp', 'clients/agent-docs', 'clients/assistant']
 	},
 	{
 		id: 'cli',

@@ -19,6 +19,7 @@ import type { WorkloadService } from './workloads.ts';
 import type { DatabaseService } from './databases.ts';
 import type { DatabaseStudioService } from './database-studio.ts';
 import type { ContainerConsoleService } from './container-console.ts';
+import type { CloudShellService } from './cloud-shells.ts';
 import type { StorageService } from './storage-instances.ts';
 import type { BrokerService } from './brokers.ts';
 import type { KubernetesService } from './kubernetes.ts';
@@ -135,6 +136,8 @@ export interface CoreContext {
 	databaseStudio: DatabaseStudioService;
 	/** Container console: inspect, files and shells (D127). */
 	containerConsole: ContainerConsoleService;
+	/** Per-person cloud shells with the CLI signed in and a 1 GiB home disk (D236). */
+	cloudShells: CloudShellService;
 	storage: StorageService;
 	/** Managed queue brokers (D111). */
 	brokers: BrokerService;

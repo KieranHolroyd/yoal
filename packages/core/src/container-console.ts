@@ -34,6 +34,8 @@ export interface ContainerConsoleEndpoint {
 }
 
 interface TokenClaims {
+	/** `cs` for a person's cloud shell (D236); absent for a project container. */
+	k?: 'cs';
 	/** Desired workload id on the node. */
 	w: string;
 	n: string;
@@ -132,6 +134,40 @@ export class ContainerConsoleService {
 	}
 
 	/**
+	 * A console token for the caller's own cloud shell (D236). The shell is the person's, so every
+	 * scope comes along; `CloudShellService.consoleTarget` checks the permission, the credential
+	 * (a signed-in person) and that the shell is running, and notes the activity.
+	 */
+	cloudShellEndpoint(principal: Principal): ContainerConsoleEndpoint {
+		const target = this.ctx.cloudShells.consoleTarget(principal);
+		const node = this.ctx.db.select().from(nodes).where(eq(nodes.id, target.nodeId)).get();
+		if (!node) throw new NotFoundError('Node');
+		if (!capabilities(node.capabilitiesJson).includes(CONTAINER_CONSOLE_CAPABILITY))
+			throw new ConflictError(`Node ${node.name} runs an agent without the container console. Update the node first.`);
+		const scopes: ContainerConsoleScope[] = ['inspect', 'files', 'exec'];
+		const expiresAt = this.ctx.now() + CONTAINER_CONSOLE_TOKEN_TTL_MS;
+		const claims: TokenClaims = {
+			k: 'cs',
+			w: target.shellId,
+			n: target.nodeId,
+			o: target.orgId,
+			p: target.shellId,
+			u: target.userId,
+			s: scopes,
+			e: expiresAt,
+		};
+		return {
+			token: this.sign(claims),
+			host: containerConsoleHost(target.nodeId),
+			nodeId: target.nodeId,
+			desiredId: target.shellId,
+			projectId: target.shellId,
+			scopes,
+			expiresAt,
+		};
+	}
+
+	/**
 	 * Node-authenticated activation (`GET /api/agent/container-console`). Answers only for a valid,
 	 * unexpired token naming a container that is still placed on the calling node.
 	 */
@@ -140,6 +176,17 @@ export class ContainerConsoleService {
 		if (!claims) throw new CoreError('forbidden', 'The console token does not verify.', 403);
 		if (claims.n !== nodeId) throw new CoreError('forbidden', 'This console token is for another node.', 403);
 		if (claims.e <= this.ctx.now()) throw new CoreError('forbidden', 'The console token has expired.', 403);
+		if (claims.k === 'cs') {
+			this.ctx.cloudShells.verifyConsoleTarget(nodeId, { shellId: claims.w, orgId: claims.o, userId: claims.u });
+			return {
+				v: CONTAINER_CONSOLE_PROTOCOL_VERSION,
+				workloadId: claims.w,
+				projectId: claims.p,
+				userId: claims.u,
+				scopes: claims.s,
+				expiresAt: new Date(claims.e).toISOString(),
+			};
+		}
 		if (!this.enabled()) throw new ConflictError('The container console is disabled on this control plane.');
 		const project = this.ctx.db.select().from(projects).where(eq(projects.id, claims.p)).get() as ProjectRow | undefined;
 		if (!project || project.deletedAt || project.orgId !== claims.o) throw new NotFoundError('Project');
@@ -157,8 +204,10 @@ export class ContainerConsoleService {
 	}
 
 	/** Run the console front on nodes whose agent can, while the feature is on. */
-	desiredForNode(node: { capabilitiesJson: string | null }): NodeContainerConsoleDesired | null {
-		if (!this.enabled()) return null;
+	desiredForNode(node: { id: string; capabilitiesJson: string | null }): NodeContainerConsoleDesired | null {
+		// A cloud shell (D236) is reached through the same front, so a node running one opens it
+		// even while the container console itself is switched off.
+		if (!this.enabled() && !this.ctx.cloudShells.nodesWithShells().has(node.id)) return null;
 		if (!capabilities(node.capabilitiesJson).includes(CONTAINER_CONSOLE_CAPABILITY)) return null;
 		return { port: this.port() };
 	}
@@ -172,12 +221,15 @@ export class ContainerConsoleService {
 		isEdge: boolean,
 		publicAddressOf: (nodeId: string) => string | null,
 	): Array<{ host: string; upstream: string }> {
-		if (!this.enabled()) return [];
-		const targets = new Set<string>();
-		for (const row of this.ctx.db
-			.select({ nodeId: workloads.nodeId, runtime: workloads.runtime, runtimeName: workloads.runtimeName, id: workloads.id })
-			.from(workloads)
-			.all()) {
+		// Nodes running someone's cloud shell (D236) need the route even with no project container.
+		const targets = new Set<string>(this.ctx.cloudShells.nodesWithShells());
+		const containers = this.enabled()
+			? this.ctx.db
+					.select({ nodeId: workloads.nodeId, runtime: workloads.runtime, runtimeName: workloads.runtimeName, id: workloads.id })
+					.from(workloads)
+					.all()
+			: [];
+		for (const row of containers) {
 			if (effectiveRuntime(row) !== 'container') continue;
 			if (row.nodeId) targets.add(row.nodeId);
 			for (const replica of this.ctx.db.select().from(workloadReplicas).where(eq(workloadReplicas.workloadId, row.id)).all())

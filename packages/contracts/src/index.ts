@@ -51,6 +51,7 @@ export * from './database-replica-input.ts';
 export * from './database-replication.ts';
 export * from './failover.ts';
 export * from './container-console.ts';
+export * from './cloud-shell.ts';
 export * from './database-studio.ts';
 export * from './database-studio-principal.ts';
 export * from './database-backup.ts';

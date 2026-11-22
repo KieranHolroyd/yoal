@@ -30,6 +30,7 @@
 	import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
 	import ShipWheelIcon from '@lucide/svelte/icons/ship-wheel';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
+	import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
 	import UserRoundIcon from '@lucide/svelte/icons/user-round';
 	import WorkflowIcon from '@lucide/svelte/icons/workflow';
 	import ZapIcon from '@lucide/svelte/icons/zap';
@@ -93,6 +94,7 @@
 			| '/(dashboard)/pipelines'
 			| '/(dashboard)/registry'
 			| '/(dashboard)/nodes'
+			| '/(dashboard)/cloud-shell'
 			| '/(dashboard)/audit'
 			| '/(dashboard)/settings'
 			| '/(dashboard)/docs';
@@ -201,7 +203,14 @@
 			items: [
 				{ label: 'Nodes', href: '/(dashboard)/nodes', path: '/nodes', icon: ServerIcon },
 				{ label: 'Topology', href: '/(dashboard)/topology', path: '/topology', icon: NetworkIcon },
-				{ label: 'Fleet', href: '/(dashboard)/fleet', path: '/fleet', icon: ActivityIcon }
+				{ label: 'Fleet', href: '/(dashboard)/fleet', path: '/fleet', icon: ActivityIcon },
+				{
+					label: 'Cloud shell',
+					href: '/(dashboard)/cloud-shell',
+					path: '/cloud-shell',
+					icon: SquareTerminalIcon,
+					feature: 'cloudShell'
+				}
 			]
 		},
 		{

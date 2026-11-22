@@ -106,6 +106,8 @@ export const statements = {
 	logs: ['read'],
 	// Container console (D127): inspect a project's container, browse its files, open a shell.
 	container: ['inspect', 'files', 'exec'],
+	// Cloud shell (D236): open your own terminal on a node, with the CLI signed in as you.
+	cloudShell: ['use'],
 	// Container images (docs/REGISTRY.md): pull and push the org's registry repositories, delete
 	// tags, and manage credentials for external registries (R2).
 	image: ['pull', 'push', 'delete', 'credentials'],
@@ -157,6 +159,7 @@ const RESOURCE_SCOPES: Record<Resource, readonly ScopeType[]> = {
 	shareLink: ['org', 'project'],
 	logs: ['org', 'project', 'environment'],
 	container: ['org', 'project', 'environment', 'container'],
+	cloudShell: ['org'],
 	image: ['org', 'project', 'repository'],
 	metrics: ['org', 'project', 'environment'],
 	alert: ['org', 'project'],
@@ -196,6 +199,8 @@ const RISK_BY_ACTION: Record<string, Risk> = {
 	credentials: 'secret',
 	console: 'secret',
 	exec: 'secret',
+	// A cloud shell runs commands with the person's own access key (D236).
+	use: 'secret',
 	files: 'secret',
 	impersonate: 'secret',
 	'impersonate-user': 'secret',
@@ -250,6 +255,8 @@ const TOKEN_DENY: readonly Permission[] = [
 	'federation:delete',
 	'container:exec',
 	'container:files',
+	// The cloud shell is a dashboard surface for a signed-in person (D236).
+	'cloudShell:use',
 	'database:console',
 	'userPool:credentials',
 	'userPool:impersonate-user',

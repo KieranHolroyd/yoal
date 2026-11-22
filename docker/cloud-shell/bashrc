@@ -1,0 +1,16 @@
+
+# --- Yoal cloud shell (D236) ------------------------------------------------------------------
+if [ -n "${PS1:-}" ] && [ -z "${YOAL_CLOUD_SHELL_GREETED:-}" ]; then
+	export YOAL_CLOUD_SHELL_GREETED=1
+	__yoal_version="$(cat /etc/yoal-cloud-shell-release 2>/dev/null || echo dev)"
+	__yoal_cli="$(cat /etc/yoal-cli-version 2>/dev/null || echo unknown)"
+	printf '\033[1mYoal cloud shell\033[0m %s · yoal CLI %s · %s\n' "$__yoal_version" "$__yoal_cli" "${YOAL_URL:-no control plane set}"
+	if [ -n "${YOAL_TOKEN:-}" ]; then
+		printf 'The CLI is signed in as you. Try \033[1myoal projects\033[0m or \033[1myoal --help\033[0m.\n'
+	else
+		printf 'The CLI is not signed in (your role cannot create access keys). Sign in with \033[1myoal login\033[0m and a key from an admin.\n'
+	fi
+	__yoal_disk="$(df -h "$HOME" 2>/dev/null | awk 'NR==2 {print $3" of "$2" used"}')"
+	printf 'Files in %s are kept (%s); everything else resets when the shell stops.\n\n' "$HOME" "${__yoal_disk:-home disk}"
+	unset __yoal_version __yoal_cli __yoal_disk
+fi

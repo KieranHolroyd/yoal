@@ -23,6 +23,7 @@ describe('feature registry', () => {
 			'POOLER',
 			'DB_STUDIO',
 			'COMPOSE',
+			'CLOUD_SHELL',
 			'CONTAINER_CONSOLE',
 			'DB_TLS',
 			'ORG_NETWORKS',

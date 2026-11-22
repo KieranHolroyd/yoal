@@ -3,6 +3,7 @@
 	import CircleXIcon from '@lucide/svelte/icons/circle-x';
 	import ClockIcon from '@lucide/svelte/icons/clock';
 	import ShieldAlertIcon from '@lucide/svelte/icons/shield-alert';
+	import { ASSISTANT_CLOUD_SHELL_TOOL } from '@yoal/contracts';
 	import { assistant, type ConfirmationCard } from '#lib/assistant/assistant.svelte.js';
 	import { Button } from '#lib/components/ui/button/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
@@ -14,7 +15,10 @@
 	let { card, oncontinue }: { card: ConfirmationCard; oncontinue?: (text: string) => void } =
 		$props();
 
-	let showResult = $state(false);
+	/** A cloud shell command (D237): its output is the result, so it shows without a click. */
+	const shellCommand = $derived(card.tool === ASSISTANT_CLOUD_SHELL_TOOL);
+	// svelte-ignore state_referenced_locally
+	let showResult = $state(card.tool === ASSISTANT_CLOUD_SHELL_TOOL);
 
 	const fields = $derived(
 		Object.entries(card.args).map(([key, value]) => {
@@ -22,7 +26,9 @@
 			if (key === 'files' && Array.isArray(value)) text = `${value.length} file(s)`;
 			else if (typeof value === 'string') text = value;
 			else text = JSON.stringify(value) ?? String(value);
-			return { key, text: text.length > 200 ? `${text.slice(0, 200)}…` : text };
+			// The command is what the user approves: never shortened, shown as written.
+			const full = shellCommand && key === 'command';
+			return { key, full, text: !full && text.length > 200 ? `${text.slice(0, 200)}…` : text };
 		})
 	);
 
@@ -59,7 +65,14 @@
 				<dl class="grid grid-cols-[auto_1fr] gap-x-3 gap-y-0.5 rounded-md bg-muted/60 p-2 text-xs">
 					{#each fields as field (field.key)}
 						<dt class="text-muted-foreground">{field.key}</dt>
-						<dd class="min-w-0 font-mono break-all">{field.text}</dd>
+						{#if field.full}
+							<dd class="min-w-0">
+								<pre
+									class="max-h-60 overflow-auto font-mono break-all whitespace-pre-wrap">{field.text}</pre>
+							</dd>
+						{:else}
+							<dd class="min-w-0 font-mono break-all">{field.text}</dd>
+						{/if}
 					{/each}
 				</dl>
 			{/if}
@@ -70,7 +83,11 @@
 						>Confirm</Button
 					>
 					<Button size="sm" variant="outline" onclick={() => assistant.deny(card)}>Cancel</Button>
-					<span class="text-[11px] text-muted-foreground">Runs once, as you. Audited.</span>
+					<span class="text-[11px] text-muted-foreground"
+						>{shellCommand
+							? 'Runs once in your cloud shell, as you. The command is audited.'
+							: 'Runs once, as you. Audited.'}</span
+					>
 				</div>
 			{:else if card.status === 'running'}
 				<span class="inline-flex items-center gap-1.5 text-xs text-muted-foreground"
@@ -110,7 +127,9 @@
 							onclick={() =>
 								oncontinue(
 									card.status === 'done'
-										? `I confirmed "${card.title}". Check it worked and tell me what changed.`
+										? shellCommand
+											? 'I ran that command. What does the output tell us?'
+											: `I confirmed "${card.title}". Check it worked and tell me what changed.`
 										: `"${card.title}" failed. What went wrong and what should I do?`
 								)}>Ask Yoal to follow up</button
 						>

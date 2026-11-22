@@ -4,6 +4,7 @@ import { controlDesiredSchema, controlReportSchema } from './control-plane.ts';
 import * as z from 'zod';
 import { OFFLINE_DRILL_CAPABILITY, nodeOfflineDrillDesiredSchema } from './node-drill.ts';
 import { nodeContainerConsoleDesiredSchema } from './container-console.ts';
+import { CLOUD_SHELL_CAPABILITY } from './cloud-shell.ts';
 import { nodeStudioDesiredSchema } from './database-studio.ts';
 import { nodeHardwareSchema, nodeRoleSchema, nodeRoles, nodeZoneSchema } from './cluster.ts';
 import { wireguardPublicKeySchema, wireguardStateSchema, wireguardStatusSchema } from './overlay.ts';
@@ -383,6 +384,11 @@ export const desiredStateSchema = z.object({
 	brokerPurges: z.array(z.string()).default([]),
 	/** Purged Kubernetes machines whose data dir this node must delete, then report. */
 	kubernetesPurges: z.array(z.string()).default([]),
+	/**
+	 * Cloud shells reset or deleted (D236) whose home disk this node must delete, then report in
+	 * `purgedCloudShells`. Omitted while empty, so other nodes' desired state is unchanged.
+	 */
+	cloudShellPurges: z.array(z.string().regex(/^csh_[A-Za-z0-9]{1,64}$/)).optional(),
 	/** Public routes to Kubernetes API servers and cluster ingress (docs/KUBERNETES.md K7, K11). */
 	kubernetesRoutes: z.array(kubernetesRouteSchema).default([]),
 	/**
@@ -519,8 +525,18 @@ export const nodeCapabilities = [
 	'wg-subnets',
 	// Goes dark for a node offline drill (D235): no heartbeats or pulls, failing ingress probe.
 	OFFLINE_DRILL_CAPABILITY,
+	// Runs `cloudShell` workloads with their loop-mounted home disk, purges `cloudShellPurges`
+	// and opens console shells in `csh_` containers (D236).
+	CLOUD_SHELL_CAPABILITY,
 ] as const;
 export type NodeCapability = (typeof nodeCapabilities)[number];
+
+/**
+ * Most capability strings one heartbeat may carry. Was 32 until the cloud shell (D236) pushed a
+ * node with every optional component (Python, Kubernetes tiers, self-fencing) past it; a control
+ * plane updates before its nodes (D99), so it accepts the longer list before any agent sends one.
+ */
+export const HEARTBEAT_CAPABILITIES_MAX = 64;
 
 /** Most certificates one heartbeat reports (content apex + wildcard, platform host, custom domains). */
 export const HEARTBEAT_CERTS_MAX = 200;
@@ -535,7 +551,7 @@ export const heartbeatSchema = z.object({
 	 * What this agent build can do (`nodeCapabilities`). Lets the control plane refuse work an older
 	 * agent would silently ignore instead of waiting on it. Absent from agents that predate it.
 	 */
-	capabilities: z.array(z.string().min(1).max(64)).max(32).optional(),
+	capabilities: z.array(z.string().min(1).max(64)).max(HEARTBEAT_CAPABILITIES_MAX).optional(),
 	stats: z.object({
 		cpuPercent: z.number().nonnegative(),
 		memoryBytes: z.number().int().nonnegative(),
@@ -631,6 +647,8 @@ export const heartbeatSchema = z.object({
 	purgedBrokers: z.array(z.string()).optional(),
 	/** Kubernetes machine ids whose data dir was deleted after a `kubernetesPurges` entry. */
 	purgedKubernetes: z.array(z.string()).optional(),
+	/** Cloud shell ids whose home disk was deleted after a `cloudShellPurges` entry (D236). */
+	purgedCloudShells: z.array(z.string()).max(500).optional(),
 	/** The optional Kubernetes component (installed minors, working tiers); absent when not installed. */
 	kubernetes: kubernetesComponentReportSchema.optional(),
 	/** One status sample per cluster whose server machine runs here. */

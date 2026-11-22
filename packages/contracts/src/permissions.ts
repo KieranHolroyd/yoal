@@ -45,6 +45,7 @@ export const roles = {
 		'shareLink:create', 'shareLink:read', 'shareLink:revoke',
 		'logs:read', 'metrics:read',
 		'container:inspect', 'container:files', 'container:exec',
+		'cloudShell:use',
 		'image:pull', 'image:push', 'image:credentials',
 		'pipeline:read', 'pipeline:dispatch', 'pipeline:cancel',
 		'alert:read', 'alert:acknowledge',
@@ -85,6 +86,8 @@ export const defaultAgentScopes: readonly Permission[] = roles.deployer.filter(
 		// A shell and file reads inside a container are a human surface too (D127).
 		permission !== 'container:files' &&
 		permission !== 'container:exec' &&
+		// So is a cloud shell, which runs commands as the person (D236).
+		permission !== 'cloudShell:use' &&
 		// Starting a pipeline runs repository code with secrets: an explicit opt-in, like a shell.
 		permission !== 'pipeline:dispatch',
 );

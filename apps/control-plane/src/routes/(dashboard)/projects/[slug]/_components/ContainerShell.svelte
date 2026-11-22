@@ -51,10 +51,21 @@
 
 	let {
 		slug,
-		replica = $bindable<number | null>(null)
+		replica = $bindable<number | null>(null),
+		base: baseOverride,
+		simple = false,
+		note,
+		label = 'Container shell'
 	}: {
 		slug: string;
 		replica?: number | null;
+		/** Where the console calls go; defaults to this project's container console. */
+		base?: string;
+		/** One container, one shell, the image's user: no replica, shell or user pickers. */
+		simple?: boolean;
+		/** Replaces the footnote under the terminal. */
+		note?: string;
+		label?: string;
 	} = $props();
 
 	type Phase = 'loading' | 'idle' | 'opening' | 'live' | 'reconnecting' | 'ended' | 'error';
@@ -75,7 +86,7 @@
 	let resizeTimer: ReturnType<typeof setTimeout> | null = null;
 	let sending: Promise<unknown> = Promise.resolve();
 
-	const base = $derived(`/projects/${encodeURIComponent(slug)}/container`);
+	const base = $derived(baseOverride ?? `/projects/${encodeURIComponent(slug)}/container`);
 	const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value));
 	const replicaQuery = (value: number | null) => (value === null ? '' : `?replica=${value}`);
 
@@ -83,7 +94,7 @@
 		queryKey: ['container-targets', slug] as const,
 		queryFn: ({ signal }) =>
 			fetchJson<{ targets: ContainerTarget[] }>(`${base}/targets`, { signal }),
-		enabled: browser,
+		enabled: browser && !simple,
 		staleTime: 30_000
 	}));
 
@@ -363,23 +374,25 @@
 >
 	<div class="flex flex-wrap items-center justify-between gap-3">
 		<div class="flex flex-wrap items-center gap-3">
-			<ReplicaPicker targets={targetsQuery.data?.targets ?? []} bind:replica />
-			<label class="flex items-center gap-2 text-sm">
-				<span class="text-muted-foreground">Shell</span>
-				<NativeSelect.Root bind:value={shell} class="h-8">
-					<NativeSelect.Option value="auto">auto (bash, else sh)</NativeSelect.Option>
-					<NativeSelect.Option value="/bin/bash">/bin/bash</NativeSelect.Option>
-					<NativeSelect.Option value="/bin/sh">/bin/sh</NativeSelect.Option>
-					<NativeSelect.Option value="/bin/ash">/bin/ash</NativeSelect.Option>
-				</NativeSelect.Root>
-			</label>
-			<label class="flex items-center gap-2 text-sm">
-				<span class="text-muted-foreground">User</span>
-				<NativeSelect.Root bind:value={user} class="h-8">
-					<NativeSelect.Option value="default">image default</NativeSelect.Option>
-					<NativeSelect.Option value="root">root</NativeSelect.Option>
-				</NativeSelect.Root>
-			</label>
+			{#if !simple}
+				<ReplicaPicker targets={targetsQuery.data?.targets ?? []} bind:replica />
+				<label class="flex items-center gap-2 text-sm">
+					<span class="text-muted-foreground">Shell</span>
+					<NativeSelect.Root bind:value={shell} class="h-8">
+						<NativeSelect.Option value="auto">auto (bash, else sh)</NativeSelect.Option>
+						<NativeSelect.Option value="/bin/bash">/bin/bash</NativeSelect.Option>
+						<NativeSelect.Option value="/bin/sh">/bin/sh</NativeSelect.Option>
+						<NativeSelect.Option value="/bin/ash">/bin/ash</NativeSelect.Option>
+					</NativeSelect.Root>
+				</label>
+				<label class="flex items-center gap-2 text-sm">
+					<span class="text-muted-foreground">User</span>
+					<NativeSelect.Root bind:value={user} class="h-8">
+						<NativeSelect.Option value="default">image default</NativeSelect.Option>
+						<NativeSelect.Option value="root">root</NativeSelect.Option>
+					</NativeSelect.Root>
+				</label>
+			{/if}
 		</div>
 		<div class="flex items-center gap-2">
 			<span class="flex items-center gap-1.5 text-xs text-muted-foreground" aria-live="polite">
@@ -432,11 +445,15 @@
 			? 'flex-1'
 			: 'h-[min(70vh,640px)]'}"
 	>
-		<div bind:this={host} class="size-full" role="application" aria-label="Container shell"></div>
+		<div bind:this={host} class="size-full" role="application" aria-label={label}></div>
 	</div>
 	<p class="text-xs text-muted-foreground">
-		Runs inside the container with its own limits: no added capabilities, a read-only root
-		filesystem and the same network. Opening a shell is recorded in the audit log; what you type is
-		not.
+		{#if note}
+			{note}
+		{:else}
+			Runs inside the container with its own limits: no added capabilities, a read-only root
+			filesystem and the same network. Opening a shell is recorded in the audit log; what you type
+			is not.
+		{/if}
 	</p>
 </div>

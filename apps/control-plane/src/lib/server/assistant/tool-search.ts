@@ -1,5 +1,5 @@
 import * as z from 'zod';
-import { GUIDE_TOOL, SEARCH_TOOL } from './constants';
+import { CLOUD_SHELL_TOOL, GUIDE_TOOL, SEARCH_TOOL } from './constants';
 import type { AssistantTool } from './tools';
 
 /**
@@ -17,6 +17,8 @@ import type { AssistantTool } from './tools';
 /** Read tools most turns start from; everything else is one search away. */
 export const CORE_TOOLS: ReadonlySet<string> = new Set([
 	GUIDE_TOOL,
+	// Only offered to people who may use a cloud shell (D237); every call is confirmed.
+	CLOUD_SHELL_TOOL,
 	'whoami',
 	'search_docs',
 	'read_docs',

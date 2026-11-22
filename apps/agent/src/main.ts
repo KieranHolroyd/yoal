@@ -1769,6 +1769,7 @@ class AgentRuntime {
 		const purgedStorage = this.workloads.pendingPurgedStorage();
 		const purgedBrokers = this.workloads.pendingPurgedBrokers();
 		const purgedKubernetes = this.workloads.pendingPurgedKubernetes();
+		const purgedCloudShells = this.workloads.pendingPurgedCloudShells();
 		const kubernetesComponent = readKubernetesComponent();
 		const kubernetesStatus = this.kubernetes.pending();
 		const kubernetesComponentResult = this.kubernetes.pendingComponentResult();
@@ -1861,6 +1862,7 @@ class AgentRuntime {
 			...(purgedStorage.length > 0 ? { purgedStorage } : {}),
 			...(purgedBrokers.length > 0 ? { purgedBrokers } : {}),
 			...(purgedKubernetes.length > 0 ? { purgedKubernetes } : {}),
+			...(purgedCloudShells.length > 0 ? { purgedCloudShells } : {}),
 			...(kubernetesComponent ? { kubernetes: kubernetesComponent } : {}),
 			...(kubernetesStatus.length > 0 ? { kubernetesStatus } : {}),
 			...(kubernetesComponentResult ? { kubernetesComponentResult } : {}),
@@ -1922,6 +1924,7 @@ class AgentRuntime {
 		this.workloads.acknowledgePurgedStorage(purgedStorage);
 		this.workloads.acknowledgePurgedBrokers(purgedBrokers);
 		this.workloads.acknowledgePurgedKubernetes(purgedKubernetes);
+		this.workloads.acknowledgePurgedCloudShells(purgedCloudShells);
 		this.kubernetes.acknowledge(kubernetesStatus);
 		this.kubernetes.acknowledgeComponentResult(kubernetesComponentResult);
 		this.kubernetes.acknowledgeBackupResults(kubernetesBackupResults);

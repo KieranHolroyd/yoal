@@ -148,6 +148,11 @@ export interface CoreConfig {
 	 * gateway needs one route per node rather than one per session.
 	 */
 	studioPort?: number;
+	/**
+	 * Image every cloud shell runs (D236, `YOAL_CLOUD_SHELL_IMAGE`); unset uses
+	 * `ghcr.io/kieranholroyd/yoal-cloud-shell:<this release>`.
+	 */
+	cloudShellImage?: string;
 	/** Loopback port of each node's container console front (D127, `YOAL_CONTAINER_CONSOLE_PORT`). */
 	containerConsolePort?: number;
 	/**
@@ -280,6 +285,7 @@ export function coreConfigFromEnv(
 		databaseGatewayPort:
 			overrides.databaseGatewayPort ?? positiveInteger(env.YOAL_DATABASE_GATEWAY_PORT, 8082),
 		studioPort: overrides.studioPort ?? positiveInteger(env.YOAL_STUDIO_PORT, STUDIO_DEFAULT_PORT),
+		cloudShellImage: overrides.cloudShellImage ?? (env.YOAL_CLOUD_SHELL_IMAGE?.trim() || undefined),
 		containerConsolePort:
 			overrides.containerConsolePort ?? positiveInteger(env.YOAL_CONTAINER_CONSOLE_PORT, CONTAINER_CONSOLE_DEFAULT_PORT),
 		acmeChallengePort: overrides.acmeChallengePort ?? positiveInteger(env.YOAL_ACME_CHALLENGE_PORT, 8089),

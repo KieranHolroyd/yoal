@@ -190,3 +190,9 @@ export interface AssistantConfirmation {
 export type AssistantTestResult =
   | { ok: true; model: string; models: string[] }
   | { ok: false; message: string };
+
+/**
+ * The assistant-only tool that runs one confirmed command in the person's own cloud shell (D237).
+ * Never an MCP tool. Shared so the chat shows its command in full and its output as the result.
+ */
+export const ASSISTANT_CLOUD_SHELL_TOOL = 'run_in_cloud_shell';

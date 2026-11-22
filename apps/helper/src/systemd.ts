@@ -40,6 +40,7 @@ import {
 	poolerUnitName,
 	renderContainerEnvFile,
 	renderContainerUnit,
+	renderCloudShellUnit,
 	renderEnvFile,
 	functionNeedsOrgNetwork,
 	parseOrgSubnets,
@@ -60,6 +61,15 @@ import {
 	type UnitVolumeMount,
 } from './units.ts';
 import { NODE_LISTEN_CREDENTIAL, NODE_LISTEN_SOURCE } from './node-listen.ts';
+import {
+	CLOUD_SHELL_HOME,
+	CLOUD_SHELL_TMP_MB,
+	cloudShellDiskPaths,
+	ensureHomeDisk,
+	homeMountUnitName,
+	isMounted,
+	renderHomeMountUnit,
+} from './cloud-shell.ts';
 import {
 	MEMBER_STATUS_SQL,
 	REPLICATION_STATUS_SQL,
@@ -109,6 +119,7 @@ import {
 	DATABASE_ENGINES,
 	STORAGE_ENGINES,
 	STORAGE_ENV,
+	CLOUD_SHELL_ID,
 	ValidationError,
 	assertAbsolutePath,
 	assertDatabaseId,
@@ -343,6 +354,10 @@ export interface SystemdDriverOptions {
 	podmanPath?: string;
 	/** Absolute openssl used to generate per-database certificates (DB_TLS). */
 	opensslPath?: string;
+	/** Absolute mkfs.ext4 that formats a cloud shell's home disk image (D236). */
+	mkfsExt4Path?: string;
+	/** Whether a path is a mount of its own; injected in tests, where nothing is really mounted. */
+	isMounted?: (mountPoint: string, parent: string) => Promise<boolean>;
 	/** AppArmor profile for container workloads; null keeps the runtime default. */
 	apparmorProfile?: string | null;
 	/**
@@ -399,6 +414,8 @@ export class SystemdDriver {
 	private readonly journalctlPath: string;
 	private readonly podmanPath: string;
 	private readonly opensslPath: string;
+	private readonly mkfsExt4Path: string;
+	private readonly isMounted: (mountPoint: string, parent: string) => Promise<boolean>;
 	private readonly apparmorProfile: string | null;
 	private readonly containerSubids: SubidFiles | null;
 	private readonly databaseTlsGenerator: DatabaseTlsGenerator;
@@ -441,6 +458,8 @@ export class SystemdDriver {
 		);
 		this.podmanPath = assertAbsolutePath(options.podmanPath ?? '/usr/bin/podman', 'podmanPath');
 		this.opensslPath = assertAbsolutePath(options.opensslPath ?? '/usr/bin/openssl', 'opensslPath');
+		this.mkfsExt4Path = assertAbsolutePath(options.mkfsExt4Path ?? '/usr/sbin/mkfs.ext4', 'mkfsExt4Path');
+		this.isMounted = options.isMounted ?? isMounted;
 		this.apparmorProfile = options.apparmorProfile ?? null;
 		this.containerSubids = options.containerSubids ?? null;
 		this.databaseTlsGenerator = options.databaseTlsGenerator ?? generateDatabaseTls;
@@ -638,6 +657,7 @@ export class SystemdDriver {
 			);
 		if (workload.runtime === 'compose') return this.applyCompose(workload, activation);
 		if (workload.kubernetes) return this.applyKubernetes(workload, activation);
+		if (workload.cloudShell) return this.applyCloudShell(workload, activation);
 
 		// Resolve everything that can fail before writing a secret or a unit to disk.
 		let releaseDir: string | null = null;
@@ -1005,6 +1025,66 @@ export class SystemdDriver {
 			await this.ensureNetworkMembership(workload, networkName);
 		}
 
+		return this.status(workload.id);
+	}
+
+	/**
+	 * A person's cloud shell (D236). Make sure its home disk exists, write the disk's `.mount` unit
+	 * and the container unit that requires it, then mount the disk here (so a mount failure is this
+	 * apply's error, not a shell writing to the root disk) and queue the start: the first one pulls
+	 * the image. The env file carries only the control plane's URL and the CLI's key.
+	 */
+	private async applyCloudShell(workload: WorkloadDesired, activation: WorkloadActivation): Promise<HelperWorkloadStatus> {
+		const profile = workload.cloudShell!;
+		if (Object.keys(activation.files).length > 0) throw new ValidationError('Cloud shells take no activation files');
+		const disk = cloudShellDiskPaths(this.stateDir, workload.id);
+		const runtimeDir = join(this.runtimeDir, workload.id);
+		await fs.mkdir(this.runtimeDir, { recursive: true, mode: 0o755 });
+		await fs.mkdir(runtimeDir, { recursive: true, mode: 0o700 });
+		await fs.chmod(runtimeDir, 0o700).catch(() => undefined);
+		const envFile = join(runtimeDir, 'env');
+		await this.writeAtomic(
+			envFile,
+			renderContainerEnvFile({ ...workload.env, ...activation.env, HOME: CLOUD_SHELL_HOME }),
+			0o400,
+		);
+
+		let changed = false;
+		const networkName = workloadNetworkName(workload);
+		changed = (await this.ensureNetworkUnit(networkName)) || changed;
+		await this.ensureStateRoot();
+		await fs.mkdir(disk.dir, { recursive: true, mode: 0o700 });
+		const dirInfo = await fs.lstat(disk.dir);
+		if (!dirInfo.isDirectory() || dirInfo.isSymbolicLink()) throw new ValidationError(`${disk.dir} is not a directory`);
+		await ensureHomeDisk({ runner: this.runner, mkfsPath: this.mkfsExt4Path, image: disk.image, sizeMb: profile.diskMb, id: workload.id });
+		await fs.mkdir(disk.mountPoint, { recursive: true, mode: 0o755 });
+		const mountUnit = homeMountUnitName(disk.mountPoint);
+		changed =
+			(await this.writeIfChanged(
+				join(this.unitDir, mountUnit),
+				renderHomeMountUnit({ id: workload.id, image: disk.image, mountPoint: disk.mountPoint }),
+				0o644,
+			)) || changed;
+		if (this.containerSubids) await ensureContainerSubids(this.containerSubids);
+		const paths = this.unitPaths(workload.id);
+		const unit = renderCloudShellUnit({
+			workload,
+			envFile,
+			homeMount: disk.mountPoint,
+			homePath: CLOUD_SHELL_HOME,
+			tmpMb: CLOUD_SHELL_TMP_MB,
+			apparmorProfile: this.apparmorProfile,
+		});
+		changed = (await this.writeIfChanged(paths.container, unit, 0o644)) || changed;
+		changed = (await this.removeIfExists(paths.service)) || changed;
+		changed = (await this.removeIfExists(paths.socket)) || changed;
+		if (changed) await this.daemonReload();
+		await this.systemctl(['start', mountUnit]);
+		if (!(await this.isMounted(disk.mountPoint, disk.dir)))
+			throw new ValidationError(`The home disk of ${workload.id} did not mount at ${disk.mountPoint}; refusing to start it.`);
+		await this.systemctl(['reset-failed', serviceUnitName(workload.id)], { allowFailure: true });
+		await this.systemctl(['restart', '--no-block', serviceUnitName(workload.id)]);
+		await this.ensureNetworkMembership(workload, networkName);
 		return this.status(workload.id);
 	}
 
@@ -3140,6 +3220,12 @@ END $$;`];
 	async purge(id: string): Promise<void> {
 		assertManagedId(id, 'managed id');
 		await this.remove(id);
+		if (CLOUD_SHELL_ID.test(id)) {
+			// Never delete through a mount: the disk must be detached before its directory goes.
+			const disk = cloudShellDiskPaths(this.stateDir, id);
+			if (await this.isMounted(disk.mountPoint, disk.dir))
+				throw new ValidationError(`The home disk of ${id} is still mounted; the purge is retried.`);
+		}
 		// The data dir is under the state root or, for a disk-backed workload, `<mount>/yoal`
 		// (D78). Both are fixed shapes with the id as the basename; nothing else is ever removed.
 		const roots = [resolve(this.stateDir)];
@@ -3204,6 +3290,12 @@ END $$;`];
 		}
 		for (const path of [paths.service, paths.socket, paths.container, paths.pooler]) {
 			changed = (await this.removeIfExists(path)) || changed;
+		}
+		// A stopped cloud shell (D236) unmounts its home disk; the image file stays for next time.
+		if (CLOUD_SHELL_ID.test(id)) {
+			const mountUnit = homeMountUnitName(cloudShellDiskPaths(this.stateDir, id).mountPoint);
+			await this.systemctl(['stop', mountUnit], { allowFailure: true });
+			changed = (await this.removeIfExists(join(this.unitDir, mountUnit))) || changed;
 		}
 		if (changed) await this.daemonReload();
 		await fs.rm(join(this.runtimeDir, id), { recursive: true, force: true });

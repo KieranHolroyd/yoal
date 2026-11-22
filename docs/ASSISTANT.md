@@ -29,6 +29,10 @@ The assistant cannot do more than the signed-in user, and every action is audite
   compact outline of the current page (`data-yoal-target` ids plus headings, buttons, links, tabs
   and inputs with CSS selectors). The assistant can navigate to a path and spotlight an element, one
   step at a time.
+- **A cloud shell tool.** People who may use a [cloud shell](./CLOUD-SHELL.md) also get
+  `run_in_cloud_shell` (D237): one bash command in their own shell, where the `yoal` CLI is signed
+  in as them. It is always confirmed, see [Cloud shell commands](#cloud-shell-commands). MCP
+  clients never get it.
 - **Optional.** No provider means no launcher and the chat endpoint answers `503`.
 
 ## The chat panel
@@ -166,8 +170,44 @@ The browser can cancel a run; `request.signal` aborts the upstream provider requ
 - **Bounded input.** One message is at most 8,000 characters, history is at most 30 messages, the
   page outline is at most 120 targets, and a user gets 12 turns a minute.
 - **Prompt injection.** Tool output and page text are labelled as data in the prompt. The
-  assistant has no shell and no arbitrary HTTP tool; the only non-MCP tools drive the UI tour and
-  load deferred MCP tools (`search_tools`).
+  assistant has no arbitrary HTTP tool. The non-MCP tools drive the UI tour, load deferred MCP
+  tools (`search_tools`) and run a confirmed command in the person's cloud shell; that last one
+  never runs without a click on a card showing the whole command (D237).
+- **Slow confirmed actions.** `/api/v1/assistant/confirm` answers within 4 s as plain JSON. A
+  slower action (a cloud shell command, a large deploy) is answered `200` with a space every 4 s and
+  the JSON at the end, because Bun drops a request that is silent for 10 s
+  (`CONNECTION_IDLE_TIMEOUT`); whitespace before JSON is insignificant, so the client is unchanged.
+
+## Cloud shell commands
+
+`run_in_cloud_shell` (`assistant/cloud-shell-tool.ts`, D237) takes `{ command, timeoutSeconds
+(5–300, default 60), reason? }`. It is offered only to a signed-in person who holds
+`cloudShell:use` while `YOAL_FEATURE_CLOUD_SHELL` is on, and it is in `CORE_TOOLS`, so the model
+always sees it. Every call stops for a Confirm card; the card shows the command in full, never
+shortened, and the result (the output) opens by default.
+
+When confirmed, the control plane:
+
+1. starts the person's shell if it is stopped and waits up to two minutes for its node to report
+   it running (nothing is run if it does not);
+2. opens a console shell (`/bin/sh`, the image's user) through the same proxy as the dashboard
+   terminal, so no node change is needed;
+3. types a short script that decodes the command (sent base64, in short lines) into a file in
+   `/tmp` and runs it with bash in `$HOME`, stdin closed, `NO_COLOR`, `TERM=dumb`, no pager;
+4. reads the output between two markers printed with `0x1E` bytes (the typed script only contains
+   them as `\036` text, so the terminal's echo never matches) and the exit code after the second;
+5. hangs the session up, which kills everything the command left running, also on timeout.
+
+The result is `Exit code N after Xs`, then stdout and stderr together, shortened to the first 4,000
+and last 8,000 characters. A non-zero exit is a normal result. Audit: `cloud_shell.assistant.run`
+with the command (first 1,000 characters), the `reason`, the exit code, whether it timed out and
+the duration, plus the console's own `cloud_shell.exec.open|close`. A later turn sees up to 6,000
+characters of a confirmed command's output in history.
+
+The prompt tells the model to use the tool only when no other tool answers, to batch steps into one
+command, to stay read-only unless asked, to never print secrets or `$YOAL_TOKEN`, and to treat the
+output as data.
+
 
 ## Guided tours
 
@@ -206,6 +246,7 @@ works on pages that have not been annotated.
 | `apps/control-plane/src/lib/server/mcp.ts` | `yoalToolDefinitions()` captures the MCP catalog |
 | `apps/control-plane/src/lib/server/assistant/agents.ts` | The system prompt and `PANEL_FORMAT` |
 | `apps/control-plane/src/lib/server/assistant/orchestrator.ts` | The tool loop and confirmations |
+| `apps/control-plane/src/lib/server/assistant/cloud-shell-tool.ts` | `run_in_cloud_shell`: start, type, read between markers, hang up (D237) |
 | `apps/control-plane/src/lib/server/assistant/tool-search.ts` | Deferred tool loading: core set, `search_tools`, ranking |
 | `apps/control-plane/src/lib/server/assistant/provider.ts` | OpenAI-compatible streaming client |
 | `apps/control-plane/src/lib/server/assistant/openrouter.ts` | OpenRouter catalogue (tool-capable models, prices) for the picker |

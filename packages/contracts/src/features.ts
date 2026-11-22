@@ -109,6 +109,14 @@ export const FEATURE_FLAGS = {
 		description:
 			'Deploy a docker-compose file as a private group of containers with per-service routing (docs/COMPOSE.md). Set 0 to refuse new compose stacks.'
 	},
+	CLOUD_SHELL: {
+		name: 'CLOUD_SHELL',
+		// D236: a per-person terminal on a node with the CLI signed in and a 1 GiB home disk.
+		default: true,
+		area: 'workloads',
+		description:
+			'Cloud shell: a browser terminal per person that runs in a small container on a node, with the yoal CLI signed in and a 1 GiB home disk (D236). Set 0 to hide it and stop every running shell; the disks stay.'
+	},
 	CONTAINER_CONSOLE: {
 		name: 'CONTAINER_CONSOLE',
 		// D127: inspect, read-only files and shells for project containers. A kill switch.

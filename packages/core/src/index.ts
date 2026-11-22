@@ -64,6 +64,7 @@ import { WorkloadService } from './workloads.ts';
 import { DatabaseService } from './databases.ts';
 import { DatabaseStudioService } from './database-studio.ts';
 import { ContainerConsoleService } from './container-console.ts';
+import { CloudShellService } from './cloud-shells.ts';
 import { StorageService } from './storage-instances.ts';
 import { BrokerService } from './brokers.ts';
 import { KubernetesService } from './kubernetes.ts';
@@ -193,6 +194,7 @@ export * from './templates.ts';
 export * from './databases.ts';
 export * from './database-studio.ts';
 export * from './container-console.ts';
+export * from './cloud-shells.ts';
 export * from './storage-instances.ts';
 export * from './brokers.ts';
 export * from './kubernetes.ts';
@@ -283,6 +285,7 @@ export interface Core {
 	databases: DatabaseService;
 	databaseStudio: DatabaseStudioService;
 	containerConsole: ContainerConsoleService;
+	cloudShells: CloudShellService;
 	storage: StorageService;
 	brokers: BrokerService;
 	kubernetes: KubernetesService;
@@ -485,6 +488,7 @@ export function createCore(options: CoreOptions): Core {
 	ctx.databases = new DatabaseService(ctx);
 	ctx.databaseStudio = new DatabaseStudioService(ctx);
 	ctx.containerConsole = new ContainerConsoleService(ctx);
+	ctx.cloudShells = new CloudShellService(ctx);
 	ctx.storage = new StorageService(ctx);
 	ctx.brokers = new BrokerService(ctx);
 	ctx.kubernetes = new KubernetesService(ctx);
@@ -595,6 +599,7 @@ export function createCore(options: CoreOptions): Core {
 		databases: ctx.databases,
 		databaseStudio: ctx.databaseStudio,
 		containerConsole: ctx.containerConsole,
+		cloudShells: ctx.cloudShells,
 		storage: ctx.storage,
 		brokers: ctx.brokers,
 		kubernetes: ctx.kubernetes,

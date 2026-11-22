@@ -355,6 +355,30 @@ export class AccessKeyService {
 		return view({ ...row, revoked_at: now });
 	}
 
+	/**
+	 * Revoke a key the platform minted on a person's behalf and manages itself (a cloud shell's
+	 * CLI key, D236), without the caller's `accessKey:revoke`. Only an unrevoked user key in the
+	 * caller's org is touched; anything else is left alone and reported as false.
+	 */
+	revokeManaged(principal: Principal, id: string, reason: string): boolean {
+		const row = this.#sqlite
+			.query<AccessKeyRow, [string, string]>(
+				"SELECT * FROM access_keys WHERE id = ? AND org_id = ? AND principal_type = 'user'",
+			)
+			.get(id, principal.orgId);
+		if (!row || row.revoked_at !== null) return false;
+		this.#sqlite.run('UPDATE access_keys SET revoked_at = ? WHERE id = ?', [this.ctx.now(), id]);
+		this.ctx.audit.record({
+			principal,
+			action: 'access_key.revoke',
+			resource: 'access_key',
+			resourceId: id,
+			args: { principalType: row.principal_type, principalId: row.principal_id, name: row.name, start: row.start, reason },
+			result: 'ok',
+		});
+		return true;
+	}
+
 	// ---------------------------------------------------------------- verification
 
 	/**

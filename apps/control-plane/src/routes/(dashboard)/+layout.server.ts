@@ -136,7 +136,9 @@ export const load: LayoutServerLoad = ({ locals, url, cookies }) => {
 			brokers: features.BROKERS,
 			email: features.EMAIL,
 			/** Shown once a node has the optional component or the org has a cluster (docs/KUBERNETES.md §11). */
-			kubernetes: kubernetesAreaVisible(principal, features.KUBERNETES)
+			kubernetes: kubernetesAreaVisible(principal, features.KUBERNETES),
+			/** A person's own terminal with the CLI (D236), for roles holding `cloudShell:use`. */
+			cloudShell: features.CLOUD_SHELL && hasPermission(principal, 'cloudShell:use')
 		},
 		/** Optional in-dashboard assistant; hidden until an owner configures a provider. */
 		assistant: assistantStatus(),

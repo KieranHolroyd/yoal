@@ -1732,6 +1732,7 @@ export class WorkloadService {
 		if (this.ctx.brokers.isBrokerId(desiredId)) return this.ctx.brokers.activation(nodeId, desiredId);
 		if (this.ctx.kubernetes.isMachineId(desiredId)) return this.ctx.kubernetes.activation(nodeId, desiredId);
 		if (this.ctx.registry.isRegistryId(desiredId)) return this.ctx.registry.activation(nodeId, desiredId);
+		if (this.ctx.cloudShells.isShellId(desiredId)) return this.ctx.cloudShells.activation(nodeId, desiredId);
 		const { workloadId, replica } = parseWorkloadReplicaId(desiredId);
 		const row = this.ctx.db.select().from(workloads).where(eq(workloads.id, workloadId)).get();
 		if (!row) throw new NotFoundError('Workload');

@@ -976,6 +976,60 @@ export function renderContainerUnit(options: ContainerUnitOptions): string {
 	return `${lines.join('\n')}\n`;
 }
 
+/**
+ * Quadlet `.container` for a person's cloud shell (D236). The image's own entrypoint keeps the
+ * container alive; people reach it through the console's `podman exec` (D127). It gets the app
+ * sandbox (own user namespace, no capabilities, no new privileges, read-only root, /tmp tmpfs),
+ * publishes nothing, and its only persistent mount is the home disk, which systemd must have
+ * mounted first (`RequiresMountsFor=`), so it can never write to a bare mountpoint.
+ */
+export function renderCloudShellUnit(options: {
+	workload: WorkloadDesired;
+	envFile: string;
+	homeMount: string;
+	homePath: string;
+	tmpMb: number;
+	apparmorProfile?: string | null;
+}): string {
+	const { workload } = options;
+	const lines: string[] = [];
+	lines.push('[Unit]');
+	lines.push(`Description=Yoal cloud shell ${workload.id} (container)`);
+	lines.push('After=network-online.target');
+	lines.push('Wants=network-online.target');
+	lines.push(`RequiresMountsFor=${options.homeMount}`);
+	lines.push('StartLimitIntervalSec=60');
+	lines.push('StartLimitBurst=10');
+	lines.push('');
+	lines.push('[Container]');
+	lines.push(`ContainerName=yoal-workload-${workload.id}`);
+	lines.push(`Image=${workload.image!}`);
+	lines.push(`Network=${networkUnitName(workloadNetworkName(workload))}`);
+	lines.push(`EnvironmentFile=${options.envFile}`);
+	lines.push(`UserNS=${CONTAINER_USERNS}`);
+	// `U` hands the disk's root to the shell's user on each start (the `auto` range can move).
+	lines.push(`Volume=${options.homeMount}:${options.homePath}:Z,U`);
+	lines.push('DropCapability=all');
+	lines.push('NoNewPrivileges=true');
+	lines.push('ReadOnly=true');
+	lines.push(`Tmpfs=/tmp:rw,size=${options.tmpMb}m`);
+	lines.push('PodmanArgs=--hostname=cloud-shell');
+	pushApparmor(lines, options.apparmorProfile);
+	lines.push('');
+	lines.push('[Service]');
+	lines.push('Restart=on-failure');
+	lines.push('RestartSec=2');
+	// The first start pulls the image; the agent waits for the unit, not a port.
+	lines.push('TimeoutStartSec=900');
+	lines.push(`MemoryMax=${workload.memoryMb}M`);
+	lines.push(`CPUQuota=${cpuQuota(workload.cpus)}`);
+	lines.push(`Slice=${WORKLOAD_SLICE}`);
+	lines.push('');
+	lines.push('[Install]');
+	lines.push('WantedBy=default.target');
+	return `${lines.join('\n')}\n`;
+}
+
 export interface DatabaseUnitOptions {
 	workload: WorkloadDesired;
 	envFile: string;

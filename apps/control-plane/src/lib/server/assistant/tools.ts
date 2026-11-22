@@ -1,14 +1,24 @@
 import * as z from 'zod';
 import { assistantGuideSchema, type AssistantGuide, type Principal } from '@yoal/contracts';
 import { visibleTools, type YoalToolDefinition } from '../mcp';
+import { core } from '../core';
+import { handleContainerConsole } from '../container-console';
+import { cloudShellConsoleDeps } from '../cloud-shell-console';
 import { GUIDE_TOOL } from './constants';
+import {
+	CLOUD_SHELL_TOOL,
+	CLOUD_SHELL_TOOL_DESCRIPTION,
+	cloudShellToolSchema,
+	runCloudShellCommand
+} from './cloud-shell-tool';
 import { needsConfirmation, validateToolArgs } from './confirm-policy';
 import type { ProviderTool } from './provider';
 
 /**
  * The bridge between Yoal's MCP tool catalog and the assistant's model. Tool names, schemas and
- * behaviour are the MCP ones; only the transport differs. `guide_user` is the one assistant-only
- * tool: it drives the dashboard tour instead of touching the platform.
+ * behaviour are the MCP ones; only the transport differs. Two tools are assistant-only:
+ * `guide_user` drives the dashboard tour, and `run_in_cloud_shell` runs one confirmed command in
+ * the person's own cloud shell (D237). MCP clients never get the second.
  */
 
 export interface AssistantTool {
@@ -93,7 +103,46 @@ export function assistantTools(principal: Principal): AssistantTool[] {
 		}
 	});
 
+	if (cloudShellToolAvailable(principal))
+		tools.push({
+			name: CLOUD_SHELL_TOOL,
+			title: 'Run a command in your cloud shell',
+			description: CLOUD_SHELL_TOOL_DESCRIPTION,
+			// Always a Confirm card with the exact command (D237); also listed in CONFIRM_TOOLS.
+			destructive: true,
+			schema: cloudShellToolSchema,
+			run: async (args) => {
+				const parsed = validateToolArgs(CLOUD_SHELL_TOOL, cloudShellToolSchema, args);
+				if (!parsed.ok) return { ok: false, text: parsed.error };
+				const result = await runCloudShellCommand(principal, cloudShellToolSchema.parse(parsed.args), {
+					console: (call) => handleContainerConsole(cloudShellConsoleDeps, call),
+					shells: core.cloudShells,
+					audit: (who, auditArgs, ok) =>
+						core.audit.record({
+							principal: who,
+							action: 'cloud_shell.assistant.run',
+							resource: 'cloud_shell',
+							args: auditArgs,
+							result: ok ? 'ok' : 'error'
+						})
+				});
+				return { ok: result.ok, text: result.text };
+			}
+		});
+
 	return tools;
+}
+
+/**
+ * The cloud shell tool is offered to a signed-in person who may use a cloud shell, while the
+ * feature is on. The assistant always acts as the dashboard session, never a key or MCP token.
+ */
+export function cloudShellToolAvailable(principal: Principal): boolean {
+	return (
+		principal.credential === 'session' &&
+		core.cloudShells.enabled() &&
+		core.ctx.iam.can(principal, 'cloudShell:use', { type: 'org' })
+	);
 }
 
 export function toolFor(tools: AssistantTool[], name: string): AssistantTool | undefined {
