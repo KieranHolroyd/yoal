@@ -132,3 +132,39 @@ export async function isMounted(mountPoint: string, parent: string): Promise<boo
 	const [inner, outer] = await Promise.all([fs.stat(mountPoint).catch(() => null), fs.stat(parent).catch(() => null)]);
 	return Boolean(inner && outer && inner.dev !== outer.dev);
 }
+
+/**
+ * Grow an existing home disk to `sizeMb` (never shrink it). Offline only: the caller unmounts it
+ * first. `e2fsck -f` is what `resize2fs` asks for before it grows a filesystem; the image is then
+ * extended and the filesystem grown to fill it. When `resize2fs` fails, the image goes back to its
+ * old length, so the next apply sees the smaller disk and tries again; the files are untouched.
+ */
+export async function growHomeDisk(options: {
+	runner: CommandRunner;
+	e2fsckPath: string;
+	resize2fsPath: string;
+	image: string;
+	sizeMb: number;
+	id: string;
+}): Promise<{ grown: boolean; fromMb: number }> {
+	const info = await fs.lstat(options.image);
+	if (!info.isFile() || info.isSymbolicLink())
+		throw new ValidationError(`${options.image} is not a regular file; refusing to resize it`);
+	const target = options.sizeMb * 1024 * 1024;
+	const fromMb = Math.floor(info.size / (1024 * 1024));
+	if (target <= info.size) return { grown: false, fromMb };
+
+	const describe = (result: { code: number; stdout: string; stderr: string }) =>
+		result.stderr.trim() || result.stdout.trim() || 'no output';
+	// 0: clean; 1: errors corrected. Anything else leaves the disk as it was.
+	const check = await options.runner.run([options.e2fsckPath, '-f', '-p', options.image]);
+	if (check.code !== 0 && check.code !== 1)
+		throw new Error(`Could not grow the cloud shell disk for ${options.id}: e2fsck failed (${check.code}): ${describe(check)}`);
+	await fs.truncate(options.image, target);
+	const resize = await options.runner.run([options.resize2fsPath, options.image]);
+	if (resize.code !== 0) {
+		await fs.truncate(options.image, info.size).catch(() => undefined);
+		throw new Error(`Could not grow the cloud shell disk for ${options.id}: resize2fs failed (${resize.code}): ${describe(resize)}`);
+	}
+	return { grown: true, fromMb };
+}

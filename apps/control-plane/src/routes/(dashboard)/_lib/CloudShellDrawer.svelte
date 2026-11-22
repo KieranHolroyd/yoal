@@ -12,6 +12,8 @@
 	import PlayIcon from '@lucide/svelte/icons/play';
 	import PlusIcon from '@lucide/svelte/icons/plus';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
+	import RotateCwIcon from '@lucide/svelte/icons/rotate-cw';
+	import SettingsIcon from '@lucide/svelte/icons/settings';
 	import SquareIcon from '@lucide/svelte/icons/square';
 	import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
 	import * as AlertDialog from '#lib/components/ui/alert-dialog/index.js';
@@ -20,6 +22,7 @@
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
 	import { cloudShell, diskLabel, DRAWER_MIN_HEIGHT } from '#lib/cloud-shell/cloud-shell.svelte.js';
 	import ContainerShell from '../projects/[slug]/_components/ContainerShell.svelte';
+	import CloudShellSettingsDialog from './CloudShellSettingsDialog.svelte';
 
 	type Phase = 'loading' | 'idle' | 'opening' | 'live' | 'reconnecting' | 'ended' | 'error';
 
@@ -31,6 +34,7 @@
 	let section = $state<HTMLElement | null>(null);
 	let drawerHeight = $state(0);
 	let confirmReset = $state(false);
+	let settingsOpen = $state(false);
 	let resetting = $state(false);
 	let resetFailure = $state<string | null>(null);
 	/**
@@ -41,6 +45,8 @@
 	let now = $state(Date.now());
 
 	const shell = $derived(cloudShell.shell);
+	/** Saved settings that need something from the person (`start` ones apply by themselves). */
+	const waiting = $derived((shell?.pending ?? []).filter((item) => item.needs !== 'start'));
 	const showTerminal = $derived(opened && cloudShell.running);
 
 	onMount(() => {
@@ -157,6 +163,10 @@
 		if (shell.node)
 			parts.push(shell.node.online ? shell.node.name : `${shell.node.name} (offline)`);
 		parts.push(`${diskLabel(shell.diskMb)} home`);
+		if (cloudShell.running)
+			parts.push(
+				`${diskLabel(shell.memoryMb)}, ${shell.cpus} ${shell.cpus === 1 ? 'CPU' : 'CPUs'}`
+			);
 		if (cloudShell.running) {
 			parts.push(shell.cliSignedIn ? 'CLI signed in' : 'CLI signed out');
 			if (shell.stopsAt) parts.push(`idle stop ${minutesUntil(shell.stopsAt)}`);
@@ -255,6 +265,12 @@
 					{/snippet}
 				</DropdownMenu.Trigger>
 				<DropdownMenu.Content align="end" class="w-52">
+					{#if cloudShell.state?.enabled}
+						<DropdownMenu.Item onSelect={() => (settingsOpen = true)}>
+							<SettingsIcon />
+							Settings…
+						</DropdownMenu.Item>
+					{/if}
 					<DropdownMenu.Item onSelect={() => goto(resolve('/(dashboard)/cloud-shell'))}>
 						<InfoIcon />
 						Details and limits
@@ -296,6 +312,36 @@
 			</Button>
 		</div>
 	</header>
+
+	{#if waiting.length > 0}
+		<div
+			class="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1 border-b bg-warning/10 px-3 py-1.5 text-xs"
+		>
+			<span class="min-w-0 flex-1">
+				{#each waiting as item, index (item.message)}
+					{#if index > 0}<span class="text-muted-foreground"> · </span>{/if}{item.message}
+				{/each}
+			</span>
+			{#if waiting.some((item) => item.needs === 'restart')}
+				<Button
+					size="xs"
+					variant="outline"
+					disabled={cloudShell.busy !== null}
+					onclick={() => cloudShell.restart()}
+				>
+					{#if cloudShell.busy === 'restart'}<Spinner />{:else}<RotateCwIcon />{/if}
+					Restart now
+				</Button>
+			{/if}
+			{#if waiting.some((item) => item.needs === 'reset')}
+				<Button size="xs" variant="outline" onclick={() => (confirmReset = true)}>
+					<RotateCcwIcon />
+					Reset…
+				</Button>
+			{/if}
+			<Button size="xs" variant="ghost" onclick={() => (settingsOpen = true)}>Settings</Button>
+		</div>
+	{/if}
 
 	<div class="relative min-h-0 flex-1 overflow-hidden bg-[#0b0d10] text-[#e4e7eb] md:rounded-b-xl">
 		{#if showTerminal}
@@ -392,3 +438,5 @@
 		</AlertDialog.Footer>
 	</AlertDialog.Content>
 </AlertDialog.Root>
+
+<CloudShellSettingsDialog bind:open={settingsOpen} />

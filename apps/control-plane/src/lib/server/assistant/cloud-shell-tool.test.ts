@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { CloudShellState, Principal } from '@yoal/contracts';
+import { cloudShellDefaultSettings, type CloudShellState, type Principal } from '@yoal/contracts';
 import type { ContainerConsoleCall } from '../container-console';
 import {
 	cleanTerminalText,
@@ -17,9 +17,23 @@ function state(status: 'stopped' | 'starting' | 'running' | null): CloudShellSta
 	return {
 		enabled: true,
 		shell: status
-			? ({ id: 'csh_1', status, message: null, node: { id: 'node_1', name: 'edge', online: true } } as CloudShellState['shell'])
+			? ({ id: 'csh_1', status, message: null, pending: [], node: { id: 'node_1', name: 'edge', online: true } } as unknown as CloudShellState['shell'])
 			: null,
-		limits: { diskMb: 1024, memoryMb: 512, idleMinutes: 20 }
+		settings: { ...cloudShellDefaultSettings },
+		nodes: [],
+		limits: {
+			diskMb: 1024,
+			memoryMb: 512,
+			idleMinutes: 20,
+			minDiskMb: 256,
+			maxDiskMb: 8192,
+			minMemoryMb: 256,
+			maxMemoryMb: 4096,
+			maxCpus: 4,
+			minIdleMinutes: 5,
+			maxIdleMinutes: 240,
+			maxSessionHours: 12
+		}
 	};
 }
 

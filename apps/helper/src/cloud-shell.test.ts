@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import {
 	cloudShellDiskPaths,
 	ensureHomeDisk,
+	growHomeDisk,
 	homeMountUnitName,
 	renderHomeMountUnit,
 	systemdEscapePath,
@@ -132,6 +133,68 @@ describe('home disk', () => {
 	});
 });
 
+describe('growing a home disk', () => {
+	class ScriptedRunner implements CommandRunner {
+		calls: string[][] = [];
+		constructor(private readonly codes: Record<string, number> = {}) {}
+		async run(argv: string[]): Promise<RunResult> {
+			this.calls.push(argv);
+			const code = this.codes[argv[0]!.split('/').pop()!] ?? 0;
+			return { code, stdout: '', stderr: code ? 'bad superblock' : '' };
+		}
+	}
+	const paths = { e2fsckPath: '/usr/sbin/e2fsck', resize2fsPath: '/usr/sbin/resize2fs' };
+
+	async function image(sizeMb: number): Promise<string> {
+		const path = join(await tempDir(), 'home.ext4');
+		await fs.writeFile(path, '');
+		await fs.truncate(path, sizeMb * 1024 * 1024);
+		return path;
+	}
+
+	test('checks, extends and grows the filesystem, and does nothing when already that big', async () => {
+		const path = await image(1024);
+		const runner = new ScriptedRunner();
+		expect(await growHomeDisk({ runner, ...paths, image: path, sizeMb: 4096, id: CSH_ID })).toEqual({ grown: true, fromMb: 1024 });
+		expect(runner.calls).toEqual([
+			['/usr/sbin/e2fsck', '-f', '-p', path],
+			['/usr/sbin/resize2fs', path],
+		]);
+		expect((await fs.stat(path)).size).toBe(4096 * 1024 * 1024);
+		expect(await growHomeDisk({ runner, ...paths, image: path, sizeMb: 2048, id: CSH_ID })).toEqual({ grown: false, fromMb: 4096 });
+		expect(runner.calls).toHaveLength(2);
+	});
+
+	test('errors e2fsck corrected are fine; one it could not fix leaves the disk alone', async () => {
+		const corrected = await image(512);
+		await growHomeDisk({ runner: new ScriptedRunner({ e2fsck: 1 }), ...paths, image: corrected, sizeMb: 1024, id: CSH_ID });
+		expect((await fs.stat(corrected)).size).toBe(1024 * 1024 * 1024);
+
+		const broken = await image(512);
+		const runner = new ScriptedRunner({ e2fsck: 4 });
+		await expect(growHomeDisk({ runner, ...paths, image: broken, sizeMb: 1024, id: CSH_ID })).rejects.toThrow(/e2fsck failed \(4\)/);
+		expect(runner.calls).toHaveLength(1);
+		expect((await fs.stat(broken)).size).toBe(512 * 1024 * 1024);
+	});
+
+	test('a failed resize2fs puts the image back to its old length, so the next apply retries', async () => {
+		const path = await image(1024);
+		await expect(
+			growHomeDisk({ runner: new ScriptedRunner({ resize2fs: 1 }), ...paths, image: path, sizeMb: 2048, id: CSH_ID }),
+		).rejects.toThrow(/resize2fs failed/);
+		expect((await fs.stat(path)).size).toBe(1024 * 1024 * 1024);
+	});
+
+	test('never resizes through a symlink', async () => {
+		const dir = await tempDir();
+		const path = join(dir, 'home.ext4');
+		await fs.symlink('/etc/passwd', path);
+		await expect(growHomeDisk({ runner: new ScriptedRunner(), ...paths, image: path, sizeMb: 2048, id: CSH_ID })).rejects.toThrow(
+			/not a regular file/,
+		);
+	});
+});
+
 describe('cloud shell units', () => {
 	test('the container gets the app sandbox, the home disk and nothing published', () => {
 		const unit = renderCloudShellUnit({
@@ -147,6 +210,53 @@ describe('cloud shell units', () => {
 			expect(unit).toContain(line);
 		expect(unit).not.toContain('PublishPort');
 		expect(unit).not.toContain(':/data');
+	});
+
+	test('apply grows a smaller disk offline: container and mount stopped first, mounted again after', async () => {
+		const root = await tempDir();
+		const runner = new FakeRunner();
+		const stateDir = join(root, 'state');
+		const disk = cloudShellDiskPaths(stateDir, CSH_ID);
+		const mountUnit = homeMountUnitName(disk.mountPoint);
+		// Mounted until the driver stops the mount unit, and again once it starts it.
+		const mounted = async () => {
+			const last = runner.calls
+				.map((call) => call.slice(1).join(' '))
+				.filter((call) => call === `stop ${mountUnit}` || call === `start ${mountUnit}`)
+				.at(-1);
+			return last !== `stop ${mountUnit}`;
+		};
+		const driver = new SystemdDriver({
+			runner,
+			unitDir: join(root, 'units'),
+			quadletDir: join(root, 'quadlet'),
+			runtimeDir: join(root, 'run'),
+			stateDir,
+			releaseDirs: [join(root, 'releases')],
+			volumeRegistryFile: join(root, 'volumes.json'),
+			bunPath: '/usr/local/bin/bun',
+			isMounted: mounted,
+		});
+		await Promise.all([fs.mkdir(join(root, 'units')), fs.mkdir(join(root, 'quadlet'))]);
+		await fs.mkdir(disk.dir, { recursive: true });
+		await fs.writeFile(disk.image, '');
+		await fs.truncate(disk.image, 1024 * 1024 * 1024);
+		const activation: WorkloadActivation = { workloadId: CSH_ID, activationVersion: 'b'.repeat(64), env: {}, files: {} };
+
+		await driver.apply(parseWorkload(input({ cloudShell: { diskMb: 2048 } })), activation);
+		expect((await fs.stat(disk.image)).size).toBe(2048 * 1024 * 1024);
+		const calls = runner.calls.map((call) => call.join(' '));
+		const index = (prefix: string) => calls.findIndex((call) => call.includes(prefix));
+		expect(index(`stop yoal-workload-${CSH_ID}.service`)).toBeGreaterThan(-1);
+		expect(index(`stop ${mountUnit}`)).toBeGreaterThan(index(`stop yoal-workload-${CSH_ID}.service`));
+		expect(index('/usr/sbin/e2fsck -f -p')).toBeGreaterThan(index(`stop ${mountUnit}`));
+		expect(index('/usr/sbin/resize2fs')).toBeGreaterThan(index('/usr/sbin/e2fsck'));
+		expect(index(`start ${mountUnit}`)).toBeGreaterThan(index('/usr/sbin/resize2fs'));
+
+		// Same size again: nothing is stopped or checked.
+		runner.calls = [];
+		await driver.apply(parseWorkload(input({ cloudShell: { diskMb: 2048 } })), activation);
+		expect(runner.calls.some((call) => call[0]!.endsWith('e2fsck') || call.join(' ') === `/usr/bin/systemctl stop ${mountUnit}`)).toBe(false);
 	});
 
 	test('apply makes the disk, the mount and the unit; remove unmounts; purge refuses through a mount', async () => {

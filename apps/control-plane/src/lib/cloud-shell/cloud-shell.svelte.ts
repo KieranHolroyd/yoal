@@ -1,4 +1,4 @@
-import type { CloudShellState } from '@yoal/contracts';
+import type { CloudShellSettings, CloudShellSettingsInput, CloudShellState } from '@yoal/contracts';
 import { errorText, fetchJson } from '#lib/query.js';
 
 /**
@@ -21,7 +21,7 @@ interface DrawerPrefs {
 	height: number;
 }
 
-export type CloudShellAction = 'start' | 'stop' | 'reset';
+export type CloudShellAction = 'start' | 'stop' | 'reset' | 'restart' | 'settings';
 
 class CloudShellStore {
 	/** The drawer is showing. */
@@ -165,6 +165,45 @@ class CloudShellStore {
 
 	stop(): Promise<boolean> {
 		return this.#act('stop');
+	}
+
+	/** Stop and start again, so saved memory, CPU, idle-stop and disk settings apply now. */
+	async restart(): Promise<boolean> {
+		this.busy = 'restart';
+		try {
+			if (this.status === 'running' || this.status === 'starting') {
+				await fetchJson('/api/v1/cloud-shell/stop', {
+					method: 'POST',
+					fallback: 'Could not stop the cloud shell.'
+				});
+			}
+		} catch (error) {
+			this.failure = errorText(error);
+			this.busy = null;
+			return false;
+		}
+		this.busy = null;
+		return this.start();
+	}
+
+	/** Save some settings; the answer's `shell.pending` says what they wait for. */
+	async saveSettings(input: CloudShellSettingsInput): Promise<CloudShellSettings> {
+		this.busy = 'settings';
+		try {
+			const body = await fetchJson<{ settings: CloudShellSettings }>(
+				'/api/v1/cloud-shell/settings',
+				{
+					method: 'PUT',
+					headers: { 'content-type': 'application/json' },
+					body: JSON.stringify(input),
+					fallback: 'Could not save the cloud shell settings.'
+				}
+			);
+			await this.refresh();
+			return body.settings;
+		} finally {
+			this.busy = null;
+		}
 	}
 
 	reset(): Promise<boolean> {

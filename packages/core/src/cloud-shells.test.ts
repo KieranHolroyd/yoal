@@ -254,3 +254,82 @@ describe('cloud shell', () => {
 		expect(core.cloudShells.state(owner).shell!.message).toMatch(/did not start your cloud shell within 10 minutes/);
 	});
 });
+
+describe('cloud shell settings', () => {
+	const person = buildPrincipal({ kind: 'user', userId: 'user_5', orgId: 'org_1', role: 'owner' });
+	const caps = ['node-tasks', 'container-console', 'cloud-shell'];
+
+	test('defaults, validation and the node picker', () => {
+		heartbeat(caps);
+		const state = core.cloudShells.state(person);
+		expect(state.settings).toEqual({ nodeId: null, diskMb: 1024, memoryMb: 512, cpus: 1, idleMinutes: 20 });
+		expect(state.nodes).toEqual([
+			expect.objectContaining({ id: edgeId, name: 'edge', online: true, unavailable: null, canGrowDisk: false }),
+		]);
+		expect(failure(() => core.cloudShells.updateSettings(person, { diskMb: 1000 })).message).toMatch(/multiples of 256/);
+		expect(failure(() => core.cloudShells.updateSettings(person, { memoryMb: 65_536 })).status).toBe(422);
+		expect(failure(() => core.cloudShells.updateSettings(person, { nodeId: 'nod_missing' })).message).toMatch(/does not exist/);
+		expect(failure(() => core.cloudShells.updateSettings(person, { shell: 'zsh' })).status).toBe(422);
+		expect(failure(() => core.cloudShells.updateSettings(apiKey, { cpus: 2 })).status).toBe(403);
+		expect(failure(() => core.cloudShells.updateSettings(viewer, { cpus: 2 })).message).toMatch(/cloudShell:use/);
+	});
+
+	test('a start takes its memory, CPUs, idle stop and disk from the settings', async () => {
+		expect(core.cloudShells.updateSettings(person, { nodeId: edgeId, diskMb: 2048, memoryMb: 256, cpus: 2, idleMinutes: 5 })).toEqual({
+			nodeId: edgeId,
+			diskMb: 2048,
+			memoryMb: 256,
+			cpus: 2,
+			idleMinutes: 5,
+		});
+		const shell = core.cloudShells.start(person);
+		expect(shell).toMatchObject({ node: { id: edgeId }, diskMb: 2048, memoryMb: 256, cpus: 2, idleMinutes: 5, pending: [] });
+		const workload = (await desired()).workloads.find((item) => item.id === shell.id)!;
+		expect(workload).toMatchObject({ memoryMb: 256, cpus: 2, cloudShell: { diskMb: 2048 } });
+		// Its own idle stop, not the 20-minute default.
+		clock += 6 * 60_000;
+		core.cloudShells.sweep();
+		expect(core.cloudShells.state(person).shell!.status).toBe('stopped');
+	});
+
+	test('a disk grows only on a node that can grow it, and never shrinks', () => {
+		core.cloudShells.updateSettings(person, { diskMb: 4096 });
+		expect(core.cloudShells.state(person).shell!.pending).toEqual([
+			{ message: expect.stringMatching(/grows to 4 GiB once edge runs an agent that can grow disks/), needs: 'node-update' },
+		]);
+		expect(core.cloudShells.start(person).diskMb).toBe(2048);
+		core.cloudShells.stop(person);
+
+		heartbeat([...caps, 'cloud-shell-resize']);
+		expect(core.cloudShells.state(person).shell!.pending).toEqual([
+			{ message: expect.stringMatching(/grows to 4 GiB at the next start/), needs: 'start' },
+		]);
+		expect(core.cloudShells.start(person).diskMb).toBe(4096);
+
+		core.cloudShells.updateSettings(person, { diskMb: 1024, memoryMb: 512 });
+		const pending = core.cloudShells.state(person).shell!.pending;
+		expect(pending).toContainEqual({ message: expect.stringMatching(/grow but not shrink: reset the shell to start over with 1 GiB/), needs: 'reset' });
+		expect(pending).toContainEqual({ message: expect.stringMatching(/apply when you restart the shell/), needs: 'restart' });
+		core.cloudShells.stop(person);
+		expect(core.cloudShells.start(person)).toMatchObject({ diskMb: 4096, memoryMb: 512 });
+		core.cloudShells.stop(person);
+	});
+
+	test('refuses a start the node has no memory for', () => {
+		core.cloudShells.updateSettings(person, { memoryMb: 2048 });
+		expect(failure(() => core.cloudShells.start(person)).message).toMatch(/MiB of workload memory free/);
+		expect(core.cloudShells.state(person).shell!.status).toBe('stopped');
+		core.cloudShells.updateSettings(person, { memoryMb: 512 });
+	});
+
+	test('the settings survive a reset, and the next shell gets the smaller disk', () => {
+		core.cloudShells.updateSettings(person, { diskMb: 512 });
+		const old = core.cloudShells.state(person).shell!.id;
+		core.cloudShells.reset(person);
+		expect(core.cloudShells.state(person)).toMatchObject({ shell: null, settings: { diskMb: 512, nodeId: edgeId } });
+		const next = core.cloudShells.start(person);
+		expect(next.id).not.toBe(old);
+		expect(next).toMatchObject({ diskMb: 512, node: { id: edgeId }, pending: [] });
+		core.cloudShells.stop(person);
+	});
+});

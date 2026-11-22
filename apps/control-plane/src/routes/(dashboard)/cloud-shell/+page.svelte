@@ -19,6 +19,9 @@
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
 	import { cloudShell, diskLabel } from '#lib/cloud-shell/cloud-shell.svelte.js';
 	import ConfirmDialog, { confirmAction } from '../dashboards/_lib/ConfirmDialog.svelte';
+	import CloudShellSettingsDialog from '../_lib/CloudShellSettingsDialog.svelte';
+	import RotateCwIcon from '@lucide/svelte/icons/rotate-cw';
+	import SettingsIcon from '@lucide/svelte/icons/settings';
 	import EmptyState from '../_lib/EmptyState.svelte';
 	import PageHeader from '../_lib/PageHeader.svelte';
 	import type { PageProps } from './$types';
@@ -69,23 +72,36 @@
 		}
 	);
 
-	const limits = $derived(
-		current
-			? [
-					{ label: 'Memory', value: `${current.limits.memoryMb} MiB, 1 CPU` },
-					{ label: 'Home disk', value: `${disk} ext4, kept between sessions` },
-					{
-						label: 'Idle stop',
-						value: `After ${current.limits.idleMinutes} minutes without typing`
-					},
-					{
-						label: 'Session limit',
-						value: `${cloudShellLimits.maxSessionMs / 3_600_000} hours, then it stops`
-					},
-					{ label: 'System', value: 'Read-only, reset on every start; /tmp is memory-backed' }
-				]
-			: []
-	);
+	let settingsOpen = $state(false);
+	const waiting = $derived((shell?.pending ?? []).filter((item) => item.needs !== 'start'));
+
+	/** What the shell runs with: this run's values while it runs, else the saved settings. */
+	const limits = $derived.by(() => {
+		if (!current) return [];
+		const live =
+			shell && (shell.status === 'running' || shell.status === 'starting') ? shell : null;
+		const memoryMb = live?.memoryMb ?? current.settings.memoryMb;
+		const cpus = live?.cpus ?? current.settings.cpus;
+		const idleMinutes = live?.idleMinutes ?? current.settings.idleMinutes;
+		const node = current.settings.nodeId
+			? (current.nodes.find((item) => item.id === current.settings.nodeId)?.name ??
+				'a node that no longer exists')
+			: 'Automatic';
+		return [
+			{ label: 'Node for a new disk', value: node },
+			{ label: 'Memory', value: `${diskLabel(memoryMb)}, ${cpus} ${cpus === 1 ? 'CPU' : 'CPUs'}` },
+			{ label: 'Home disk', value: `${disk} ext4, kept between sessions` },
+			{
+				label: 'Idle stop',
+				value: `After ${idleMinutes >= 60 ? `${idleMinutes / 60} h` : `${idleMinutes} minutes`} without typing`
+			},
+			{
+				label: 'Session limit',
+				value: `${cloudShellLimits.maxSessionMs / 3_600_000} hours, then it stops`
+			},
+			{ label: 'System', value: 'Read-only, reset on every start; /tmp is memory-backed' }
+		];
+	});
 </script>
 
 <svelte:head>
@@ -108,6 +124,10 @@
 				Stop
 			</Button>
 		{/if}
+		<Button variant="outline" size="sm" onclick={() => (settingsOpen = true)}>
+			<SettingsIcon />
+			Settings
+		</Button>
 		{#if shell && shell.status !== 'deleting'}
 			<Button variant="ghost" size="sm" disabled={cloudShell.busy !== null} onclick={reset}>
 				<RotateCcwIcon />
@@ -146,6 +166,36 @@
 		{/if}
 		{#if cloudShell.failure}
 			<p class="text-sm text-destructive">{cloudShell.failure}</p>
+		{/if}
+		{#if waiting.length > 0}
+			<Alert.Root variant="warning">
+				<SettingsIcon />
+				<Alert.Title>Some settings are not in use yet</Alert.Title>
+				<Alert.Description>
+					<ul class="list-disc space-y-0.5 pl-4">
+						{#each waiting as item (item.message)}<li>{item.message}</li>{/each}
+					</ul>
+					<div class="mt-2 flex flex-wrap gap-2">
+						{#if waiting.some((item) => item.needs === 'restart')}
+							<Button
+								size="sm"
+								variant="outline"
+								disabled={cloudShell.busy !== null}
+								onclick={() => cloudShell.restart()}
+							>
+								{#if cloudShell.busy === 'restart'}<Spinner />{:else}<RotateCwIcon />{/if}
+								Restart now
+							</Button>
+						{/if}
+						{#if waiting.some((item) => item.needs === 'reset')}
+							<Button size="sm" variant="outline" onclick={reset}>
+								<RotateCcwIcon />
+								Reset disk…
+							</Button>
+						{/if}
+					</div>
+				</Alert.Description>
+			</Alert.Root>
 		{/if}
 
 		<div class="grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
@@ -223,7 +273,7 @@
 			</Card.Root>
 			<Card.Root>
 				<Card.Header>
-					<Card.Title>Limits</Card.Title>
+					<Card.Title>Settings and limits</Card.Title>
 					<Card.Description>
 						A small sandboxed container: no added capabilities, no published ports. Opening a shell
 						is audited; what you type is not.
@@ -243,3 +293,4 @@
 {/if}
 
 <ConfirmDialog />
+<CloudShellSettingsDialog bind:open={settingsOpen} />

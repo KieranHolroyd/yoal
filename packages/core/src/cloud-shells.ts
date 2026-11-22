@@ -1,7 +1,13 @@
 import { and, eq, inArray, ne } from 'drizzle-orm';
-import { cloudShells, nodes } from '@yoal/db';
+import { cloudShellSettings, cloudShells, nodes } from '@yoal/db';
 import {
 	CLOUD_SHELL_CAPABILITY,
+	CLOUD_SHELL_RESIZE_CAPABILITY,
+	cloudShellDefaultSettings,
+	cloudShellSettingsInputSchema,
+	cloudShellSettingsSchema,
+	type CloudShellNodeOption,
+	type CloudShellSettings,
 	CLOUD_SHELL_HOME,
 	CLOUD_SHELL_ID_PREFIX,
 	CLOUD_SHELL_IMAGE_REPOSITORY,
@@ -17,7 +23,7 @@ import {
 import { nodeHasCapability } from './capability-gate.ts';
 import { featureEnabled } from './config.ts';
 import type { CoreContext } from './context.ts';
-import { ConflictError, CoreError, NotFoundError } from './errors.ts';
+import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import { buildSystemPrincipal } from './iam/system.ts';
 import { newId, sha256Hex } from './util.ts';
 
@@ -29,6 +35,15 @@ const ACTIVE: CloudShellStatus[] = ['starting', 'running'];
 
 /** Nominal container port: a cloud shell is a worker, so nothing is published or probed. */
 const SHELL_PORT = 8080;
+
+/** Disk a node keeps free beyond a shell's home disk (its sparse image can fill up to its size). */
+const DISK_HEADROOM_MB = 1024;
+
+const MIB = 1024 * 1024;
+
+function diskLabel(mb: number): string {
+	return mb >= 1024 && mb % 1024 === 0 ? `${mb / 1024} GiB` : `${mb} MiB`;
+}
 
 /** What the console token for a cloud shell names (D236 on top of D127). */
 export interface CloudShellConsoleTarget {
@@ -76,12 +91,99 @@ export class CloudShellService {
 		return {
 			enabled: this.enabled(),
 			shell: row ? this.view(row) : null,
+			settings: this.settings(principal),
+			nodes: this.nodeOptions(),
 			limits: {
 				diskMb: cloudShellLimits.diskMb,
 				memoryMb: cloudShellLimits.memoryMb,
 				idleMinutes: Math.round(cloudShellLimits.idleMs / 60_000),
+				minDiskMb: cloudShellLimits.minDiskMb,
+				maxDiskMb: cloudShellLimits.maxDiskMb,
+				minMemoryMb: cloudShellLimits.minMemoryMb,
+				maxMemoryMb: cloudShellLimits.maxMemoryMb,
+				maxCpus: cloudShellLimits.maxCpus,
+				minIdleMinutes: cloudShellLimits.minIdleMinutes,
+				maxIdleMinutes: cloudShellLimits.maxIdleMinutes,
+				maxSessionHours: Math.round(cloudShellLimits.maxSessionMs / 3_600_000),
 			},
 		};
+	}
+
+	/** The caller's saved choices, or the defaults before they save any. */
+	settings(principal: Principal): CloudShellSettings {
+		return this.settingsFor(principal.orgId, principal.userId);
+	}
+
+	/**
+	 * Save some of the caller's choices. Memory, CPUs and the idle stop apply at the next start; a
+	 * bigger disk grows at the next start; a smaller disk or another node applies to the next new
+	 * shell, after a reset, because the files are on that disk on that node (`pending` says so).
+	 */
+	updateSettings(principal: Principal, input: unknown): CloudShellSettings {
+		this.requireUse(principal);
+		this.requirePerson(principal);
+		const parsed = cloudShellSettingsInputSchema.safeParse(input);
+		if (!parsed.success) throw new ValidationError(parsed.error.issues.map((issue) => issue.message).join('; '));
+		const next = cloudShellSettingsSchema.parse({ ...this.settings(principal), ...parsed.data });
+		if (next.nodeId !== null) {
+			const node = this.node(next.nodeId);
+			if (!node) throw new ValidationError('That node does not exist.');
+			if (!this.ctx.nodes.view(node).roles.includes('compute'))
+				throw new ValidationError(`${node.name} is not a compute node, so it cannot run a cloud shell.`);
+			if (!nodeHasCapability(node, CLOUD_SHELL_CAPABILITY))
+				throw new ValidationError(`${node.name} runs an agent without the cloud shell. Update the node first.`);
+		}
+		const now = this.ctx.now();
+		this.ctx.db
+			.insert(cloudShellSettings)
+			.values({ orgId: principal.orgId, userId: principal.userId, ...next, updatedAt: now })
+			.onConflictDoUpdate({
+				target: [cloudShellSettings.orgId, cloudShellSettings.userId],
+				set: { ...next, updatedAt: now },
+			})
+			.run();
+		this.ctx.audit.record({
+			principal,
+			action: 'cloud_shell.settings',
+			resource: 'cloud_shell',
+			resourceId: this.current(principal)?.id ?? 'none',
+			args: { ...next, node: next.nodeId ? (this.node(next.nodeId)?.name ?? null) : null },
+			result: 'ok',
+		});
+		return next;
+	}
+
+	/** Compute nodes that run cloud shells, with what is free on each, for the node picker. */
+	nodeOptions(): CloudShellNodeOption[] {
+		const counts = this.shellCounts();
+		const capacity = new Map(this.ctx.workloads.capacityInternal().map((item) => [item.nodeId, item]));
+		return this.ctx.db
+			.select()
+			.from(nodes)
+			.all()
+			.filter((node) => this.ctx.nodes.view(node).roles.includes('compute'))
+			.sort((a, b) => a.name.localeCompare(b.name))
+			.map((node) => {
+				const room = capacity.get(node.id);
+				const diskFreeMb =
+					room?.diskFreeBytes == null
+						? null
+						: Math.max(0, Math.floor((room.diskFreeBytes - room.reservedDiskBytes) / MIB));
+				return {
+					id: node.id,
+					name: node.name,
+					online: node.status === 'online',
+					unavailable: !nodeHasCapability(node, CLOUD_SHELL_CAPABILITY)
+						? 'Runs an agent without the cloud shell'
+						: node.status !== 'online'
+							? `The node is ${node.status}`
+							: null,
+					shells: counts.get(node.id) ?? 0,
+					diskFreeMb,
+					memoryFreeMb: this.memoryFreeMb(node.id),
+					canGrowDisk: nodeHasCapability(node, CLOUD_SHELL_RESIZE_CAPABILITY),
+				};
+			});
 	}
 
 	/**
@@ -97,6 +199,7 @@ export class CloudShellService {
 			this.touch(principal);
 			return this.view(row);
 		}
+		const settings = this.settings(principal);
 
 		let node = row?.nodeId ? this.node(row.nodeId) : undefined;
 		if (row && !node) {
@@ -112,8 +215,11 @@ export class CloudShellService {
 			if (!nodeHasCapability(node, CLOUD_SHELL_CAPABILITY))
 				throw new ConflictError(`Node ${node.name} runs an agent without the cloud shell. Update the node first.`);
 		}
+		let diskMb: number;
 		if (!row) {
-			node = this.pickNode();
+			node = settings.nodeId ? this.chosenNode(settings.nodeId) : this.pickNode(settings);
+			this.requireRoom(node, settings.diskMb, settings.memoryMb, null);
+			diskMb = settings.diskMb;
 			const now = this.ctx.now();
 			const id = newId(CLOUD_SHELL_ID_PREFIX);
 			try {
@@ -125,7 +231,7 @@ export class CloudShellService {
 						userId: principal.userId,
 						nodeId: node.id,
 						status: 'stopped',
-						diskMb: cloudShellLimits.diskMb,
+						diskMb,
 						createdAt: now,
 						updatedAt: now,
 					})
@@ -137,6 +243,11 @@ export class CloudShellService {
 				return this.view(winner);
 			}
 			row = this.row(id)!;
+		} else {
+			// The disk is on its node; it can grow there (when the node knows how), never shrink.
+			const grow = settings.diskMb > row.diskMb && nodeHasCapability(node!, CLOUD_SHELL_RESIZE_CAPABILITY);
+			diskMb = grow ? settings.diskMb : row.diskMb;
+			this.requireRoom(node!, diskMb - row.diskMb, settings.memoryMb, row.id);
 		}
 
 		const key = this.mintKey(principal);
@@ -151,6 +262,10 @@ export class CloudShellService {
 				accessKeyId: key?.id ?? null,
 				accessKeySealed: key ? this.ctx.secrets.seal(principal.orgId, key.value) : null,
 				message: null,
+				diskMb,
+				memoryMb: settings.memoryMb,
+				cpus: settings.cpus,
+				idleMinutes: settings.idleMinutes,
 				updatedAt: now,
 			})
 			.where(eq(cloudShells.id, row.id))
@@ -160,7 +275,14 @@ export class CloudShellService {
 			action: 'cloud_shell.start',
 			resource: 'cloud_shell',
 			resourceId: row.id,
-			args: { node: node!.name, cliSignedIn: Boolean(key) },
+			args: {
+				node: node!.name,
+				cliSignedIn: Boolean(key),
+				diskMb,
+				memoryMb: settings.memoryMb,
+				cpus: settings.cpus,
+				idleMinutes: settings.idleMinutes,
+			},
 			result: 'ok',
 		});
 		this.ctx.projects.bump(principal.orgId);
@@ -271,7 +393,7 @@ export class CloudShellService {
 				stopped += 1;
 				continue;
 			}
-			const idle = now - (row.lastActiveAt ?? row.startedAt ?? now) >= cloudShellLimits.idleMs;
+			const idle = now - (row.lastActiveAt ?? row.startedAt ?? now) >= this.idleMs(row);
 			const expired = now - (row.startedAt ?? now) >= cloudShellLimits.maxSessionMs;
 			if (enabled && !idle && !expired) continue;
 			const reason = !enabled ? 'disabled' : expired ? 'session limit' : 'idle';
@@ -309,8 +431,8 @@ export class CloudShellService {
 				release: null,
 				image: this.image(),
 				upstream: `127.0.0.1:${SHELL_PORT}`,
-				memoryMb: cloudShellLimits.memoryMb,
-				cpus: cloudShellLimits.cpus,
+				memoryMb: row.memoryMb ?? cloudShellLimits.memoryMb,
+				cpus: row.cpus ?? cloudShellLimits.cpus,
 				port: SHELL_PORT,
 				healthPath: '/',
 				socketActivation: false,
@@ -451,28 +573,126 @@ export class CloudShellService {
 		return { id: created.accessKey.id, value: created.key };
 	}
 
-	/** An online compute node with the capability, preferring the one with fewest shells. */
-	private pickNode(): NodeRow {
+	/** Shells (not being deleted) whose disk is on each node. */
+	private shellCounts(): Map<string, number> {
 		const counts = new Map<string, number>();
 		for (const row of this.ctx.db.select({ nodeId: cloudShells.nodeId }).from(cloudShells).where(ne(cloudShells.status, 'deleting')).all())
 			if (row.nodeId) counts.set(row.nodeId, (counts.get(row.nodeId) ?? 0) + 1);
-		const candidates = this.ctx.db
+		return counts;
+	}
+
+	/**
+	 * Memory left in a node's workload slice after its workloads and its running shells (shells
+	 * are not workload rows, so `capacityInternal` does not count them). `except` leaves one shell
+	 * out: the one being started again.
+	 */
+	private memoryFreeMb(nodeId: string, except: string | null = null): number {
+		const room = this.ctx.workloads.capacityInternal().find((item) => item.nodeId === nodeId);
+		if (!room) return 0;
+		let shells = 0;
+		for (const row of this.ctx.db
 			.select()
-			.from(nodes)
-			.all()
-			.filter(
-				(node) =>
-					node.status === 'online' &&
-					nodeHasCapability(node, CLOUD_SHELL_CAPABILITY) &&
-					this.ctx.nodes.view(node).roles.includes('compute'),
-			)
-			.sort((a, b) => (counts.get(a.id) ?? 0) - (counts.get(b.id) ?? 0) || a.name.localeCompare(b.name));
-		const chosen = candidates[0];
+			.from(cloudShells)
+			.where(and(eq(cloudShells.nodeId, nodeId), inArray(cloudShells.status, ACTIVE)))
+			.all())
+			if (row.id !== except) shells += row.memoryMb ?? cloudShellLimits.memoryMb;
+		return room.freeMemoryMb - shells;
+	}
+
+	/** Refuse a start the node has no room for: disk to grow into, or memory in its slice. */
+	private requireRoom(node: NodeRow, diskGrowthMb: number, memoryMb: number, except: string | null): void {
+		const option = this.nodeOptions().find((item) => item.id === node.id);
+		if (diskGrowthMb > 0 && option?.diskFreeMb != null && option.diskFreeMb - DISK_HEADROOM_MB < diskGrowthMb)
+			throw new ConflictError(
+				`${node.name} has ${diskLabel(option.diskFreeMb)} of disk free, not enough for ${diskLabel(diskGrowthMb)} more home disk and ${diskLabel(DISK_HEADROOM_MB)} to spare. Choose a smaller disk${except ? '' : ' or another node'} in the cloud shell settings.`,
+			);
+		const free = this.memoryFreeMb(node.id, except);
+		if (memoryMb > free)
+			throw new ConflictError(
+				`${node.name} has ${Math.max(0, free)} MiB of workload memory free, less than the ${memoryMb} MiB your cloud shell asks for. Choose less memory${except ? '' : ' or another node'} in the cloud shell settings.`,
+			);
+	}
+
+	/** The node a person chose for a new shell: it must be able to take one now. */
+	private chosenNode(nodeId: string): NodeRow {
+		const node = this.node(nodeId);
+		if (!node) throw new ConflictError('The node chosen in your cloud shell settings no longer exists. Choose another, or Automatic.');
+		const option = this.nodeOptions().find((item) => item.id === node.id);
+		if (!option) throw new ConflictError(`${node.name} is not a compute node. Choose another node, or Automatic.`);
+		if (option.unavailable)
+			throw new ConflictError(`Your cloud shell settings choose ${node.name}: ${option.unavailable.toLowerCase()}. Choose another node, or Automatic.`);
+		return node;
+	}
+
+	/** An online compute node with the capability and room for these settings, fewest shells first. */
+	private pickNode(settings: CloudShellSettings): NodeRow {
+		const options = this.nodeOptions().filter((item) => item.unavailable === null);
+		const fits = options.filter(
+			(item) =>
+				item.memoryFreeMb >= settings.memoryMb &&
+				(item.diskFreeMb === null || item.diskFreeMb - DISK_HEADROOM_MB >= settings.diskMb),
+		);
+		const chosen = fits.sort((a, b) => a.shells - b.shells || a.name.localeCompare(b.name))[0];
 		if (!chosen)
 			throw new ConflictError(
-				'No online compute node can run a cloud shell yet. Update a node to an agent that advertises "cloud-shell".',
+				options.length === 0
+					? 'No online compute node can run a cloud shell yet. Update a node to an agent that advertises "cloud-shell".'
+					: `No node has room for a ${diskLabel(settings.diskMb)} disk and ${settings.memoryMb} MiB of memory. Choose smaller settings.`,
 			);
-		return chosen;
+		return this.node(chosen.id)!;
+	}
+
+	private settingsFor(orgId: string, userId: string): CloudShellSettings {
+		const row = this.ctx.db
+			.select()
+			.from(cloudShellSettings)
+			.where(and(eq(cloudShellSettings.orgId, orgId), eq(cloudShellSettings.userId, userId)))
+			.get();
+		if (!row) return { ...cloudShellDefaultSettings };
+		return { nodeId: row.nodeId, diskMb: row.diskMb, memoryMb: row.memoryMb, cpus: row.cpus, idleMinutes: row.idleMinutes };
+	}
+
+	private idleMs(row: CloudShellRow): number {
+		return row.idleMinutes ? row.idleMinutes * 60_000 : cloudShellLimits.idleMs;
+	}
+
+	/** Saved settings this shell does not have yet, and what it takes for them to apply. */
+	private pending(row: CloudShellRow, node: NodeRow | undefined): CloudShellView['pending'] {
+		const settings = this.settingsFor(row.orgId, row.userId);
+		const out: CloudShellView['pending'] = [];
+		const active = ACTIVE.includes(row.status);
+		if (settings.nodeId && row.nodeId && settings.nodeId !== row.nodeId) {
+			const target = this.node(settings.nodeId)?.name ?? 'the node you chose';
+			out.push({
+				message: `Your disk is on ${node?.name ?? 'its old node'}. Reset the shell to move to ${target}; the files on the old disk are deleted.`,
+				needs: 'reset',
+			});
+		}
+		if (settings.diskMb < row.diskMb)
+			out.push({
+				message: `Your disk is ${diskLabel(row.diskMb)}. A disk can grow but not shrink: reset the shell to start over with ${diskLabel(settings.diskMb)}.`,
+				needs: 'reset',
+			});
+		else if (settings.diskMb > row.diskMb)
+			out.push(
+				node && !nodeHasCapability(node, CLOUD_SHELL_RESIZE_CAPABILITY)
+					? {
+							message: `Your disk grows to ${diskLabel(settings.diskMb)} once ${node.name} runs an agent that can grow disks.`,
+							needs: 'node-update',
+						}
+					: {
+							message: `Your disk grows to ${diskLabel(settings.diskMb)} ${active ? 'when you restart the shell' : 'at the next start'}.`,
+							needs: active ? 'restart' : 'start',
+						},
+			);
+		if (
+			active &&
+			((row.memoryMb ?? cloudShellLimits.memoryMb) !== settings.memoryMb ||
+				(row.cpus ?? cloudShellLimits.cpus) !== settings.cpus ||
+				(row.idleMinutes ?? cloudShellLimits.idleMs / 60_000) !== settings.idleMinutes)
+		)
+			out.push({ message: 'New memory, CPU and idle-stop settings apply when you restart the shell.', needs: 'restart' });
+		return out;
 	}
 
 	private activationVersion(row: CloudShellRow): string {
@@ -494,13 +714,16 @@ export class CloudShellService {
 		const iso = (value: number | null) => (value === null ? null : new Date(value).toISOString());
 		const stopsAt =
 			active && row.startedAt !== null
-				? Math.min((row.lastActiveAt ?? row.startedAt) + cloudShellLimits.idleMs, row.startedAt + cloudShellLimits.maxSessionMs)
+				? Math.min((row.lastActiveAt ?? row.startedAt) + this.idleMs(row), row.startedAt + cloudShellLimits.maxSessionMs)
 				: null;
 		return {
 			id: row.id,
 			status: row.status,
 			node: node ? { id: node.id, name: node.name, online: node.status === 'online' } : null,
 			diskMb: row.diskMb,
+			memoryMb: row.memoryMb ?? cloudShellLimits.memoryMb,
+			cpus: row.cpus ?? cloudShellLimits.cpus,
+			idleMinutes: row.idleMinutes ?? Math.round(cloudShellLimits.idleMs / 60_000),
 			home: CLOUD_SHELL_HOME,
 			image: this.image(),
 			cliSignedIn: active && row.accessKeyId !== null,
@@ -508,6 +731,7 @@ export class CloudShellService {
 			lastActiveAt: iso(row.lastActiveAt),
 			stopsAt: iso(stopsAt),
 			message: row.message ?? null,
+			pending: row.status === 'deleting' ? [] : this.pending(row, node),
 			createdAt: new Date(row.createdAt).toISOString(),
 		};
 	}

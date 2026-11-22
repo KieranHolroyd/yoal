@@ -3539,8 +3539,29 @@ export const cloudShells = sqliteTable(
 		lastActiveAt: integer('last_active_at'),
 		/** Why the last start failed (0138); cleared by the next start. */
 		message: text('message'),
+		/** What this run got, copied from the person's settings at start (0139); NULL = old defaults. */
+		memoryMb: integer('memory_mb'),
+		cpus: integer('cpus'),
+		idleMinutes: integer('idle_minutes'),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
 		updatedAt: integer('updated_at').notNull().$defaultFn(now),
 	},
 	(t) => [index('cloud_shells_node_idx').on(t.nodeId)],
+);
+
+/** A person's cloud shell choices in one org (0139); they survive a reset of the shell. */
+export const cloudShellSettings = sqliteTable(
+	'cloud_shell_settings',
+	{
+		orgId: text('org_id').notNull(),
+		userId: text('user_id').notNull(),
+		/** The node for a new disk; NULL lets the control plane pick. */
+		nodeId: text('node_id'),
+		diskMb: integer('disk_mb').notNull(),
+		memoryMb: integer('memory_mb').notNull(),
+		cpus: integer('cpus').notNull(),
+		idleMinutes: integer('idle_minutes').notNull(),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+	},
+	(t) => [primaryKey({ columns: [t.orgId, t.userId] })],
 );

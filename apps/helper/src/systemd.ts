@@ -66,6 +66,7 @@ import {
 	CLOUD_SHELL_TMP_MB,
 	cloudShellDiskPaths,
 	ensureHomeDisk,
+	growHomeDisk,
 	homeMountUnitName,
 	isMounted,
 	renderHomeMountUnit,
@@ -356,6 +357,9 @@ export interface SystemdDriverOptions {
 	opensslPath?: string;
 	/** Absolute mkfs.ext4 that formats a cloud shell's home disk image (D236). */
 	mkfsExt4Path?: string;
+	/** e2fsck and resize2fs that grow a cloud shell's disk; default: next to mkfs.ext4. */
+	e2fsckPath?: string;
+	resize2fsPath?: string;
 	/** Whether a path is a mount of its own; injected in tests, where nothing is really mounted. */
 	isMounted?: (mountPoint: string, parent: string) => Promise<boolean>;
 	/** AppArmor profile for container workloads; null keeps the runtime default. */
@@ -415,6 +419,8 @@ export class SystemdDriver {
 	private readonly podmanPath: string;
 	private readonly opensslPath: string;
 	private readonly mkfsExt4Path: string;
+	private readonly e2fsckPath: string;
+	private readonly resize2fsPath: string;
 	private readonly isMounted: (mountPoint: string, parent: string) => Promise<boolean>;
 	private readonly apparmorProfile: string | null;
 	private readonly containerSubids: SubidFiles | null;
@@ -459,6 +465,9 @@ export class SystemdDriver {
 		this.podmanPath = assertAbsolutePath(options.podmanPath ?? '/usr/bin/podman', 'podmanPath');
 		this.opensslPath = assertAbsolutePath(options.opensslPath ?? '/usr/bin/openssl', 'opensslPath');
 		this.mkfsExt4Path = assertAbsolutePath(options.mkfsExt4Path ?? '/usr/sbin/mkfs.ext4', 'mkfsExt4Path');
+		const e2fsprogs = dirname(this.mkfsExt4Path);
+		this.e2fsckPath = assertAbsolutePath(options.e2fsckPath ?? join(e2fsprogs, 'e2fsck'), 'e2fsckPath');
+		this.resize2fsPath = assertAbsolutePath(options.resize2fsPath ?? join(e2fsprogs, 'resize2fs'), 'resize2fsPath');
 		this.isMounted = options.isMounted ?? isMounted;
 		this.apparmorProfile = options.apparmorProfile ?? null;
 		this.containerSubids = options.containerSubids ?? null;
@@ -1056,9 +1065,25 @@ export class SystemdDriver {
 		await fs.mkdir(disk.dir, { recursive: true, mode: 0o700 });
 		const dirInfo = await fs.lstat(disk.dir);
 		if (!dirInfo.isDirectory() || dirInfo.isSymbolicLink()) throw new ValidationError(`${disk.dir} is not a directory`);
-		await ensureHomeDisk({ runner: this.runner, mkfsPath: this.mkfsExt4Path, image: disk.image, sizeMb: profile.diskMb, id: workload.id });
+		const made = await ensureHomeDisk({ runner: this.runner, mkfsPath: this.mkfsExt4Path, image: disk.image, sizeMb: profile.diskMb, id: workload.id });
 		await fs.mkdir(disk.mountPoint, { recursive: true, mode: 0o755 });
 		const mountUnit = homeMountUnitName(disk.mountPoint);
+		// A bigger disk than the image (the person chose one): grow it offline. The container is
+		// restarted below anyway, so stopping it and unmounting the disk first costs nothing extra.
+		if (!made.created && (await fs.stat(disk.image)).size < profile.diskMb * 1024 * 1024) {
+			await this.systemctl(['stop', serviceUnitName(workload.id)], { allowFailure: true });
+			await this.systemctl(['stop', mountUnit], { allowFailure: true });
+			if (await this.isMounted(disk.mountPoint, disk.dir))
+				throw new ValidationError(`The home disk of ${workload.id} is still mounted; refusing to resize it.`);
+			await growHomeDisk({
+				runner: this.runner,
+				e2fsckPath: this.e2fsckPath,
+				resize2fsPath: this.resize2fsPath,
+				image: disk.image,
+				sizeMb: profile.diskMb,
+				id: workload.id,
+			});
+		}
 		changed =
 			(await this.writeIfChanged(
 				join(this.unitDir, mountUnit),

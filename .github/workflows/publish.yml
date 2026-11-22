@@ -300,6 +300,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/build-push-action@v6
+        env:
+          # No build-record artifact on the run: the publish job downloads release artifacts only.
+          DOCKER_BUILD_RECORD_UPLOAD: false
         with:
           context: .
           file: docker/cloud-shell/Dockerfile
@@ -359,9 +362,12 @@ jobs:
         with:
           bun-version: ${{ env.BUN_VERSION }}
 
+      # Only the release tarballs: docker/build-push-action also uploads `*.dockerbuild` build
+      # records to the run, and downloading those failed v0.16.13's publish.
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: yoal-*
           merge-multiple: true
 
       - name: Write and sign the manifest

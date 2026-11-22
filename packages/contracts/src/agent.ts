@@ -4,7 +4,7 @@ import { controlDesiredSchema, controlReportSchema } from './control-plane.ts';
 import * as z from 'zod';
 import { OFFLINE_DRILL_CAPABILITY, nodeOfflineDrillDesiredSchema } from './node-drill.ts';
 import { nodeContainerConsoleDesiredSchema } from './container-console.ts';
-import { CLOUD_SHELL_CAPABILITY } from './cloud-shell.ts';
+import { CLOUD_SHELL_CAPABILITY, CLOUD_SHELL_RESIZE_CAPABILITY } from './cloud-shell.ts';
 import { nodeStudioDesiredSchema } from './database-studio.ts';
 import { nodeHardwareSchema, nodeRoleSchema, nodeRoles, nodeZoneSchema } from './cluster.ts';
 import { wireguardPublicKeySchema, wireguardStateSchema, wireguardStatusSchema } from './overlay.ts';
@@ -528,6 +528,8 @@ export const nodeCapabilities = [
 	// Runs `cloudShell` workloads with their loop-mounted home disk, purges `cloudShellPurges`
 	// and opens console shells in `csh_` containers (D236).
 	CLOUD_SHELL_CAPABILITY,
+	// Grows an existing cloud shell home disk to a larger `cloudShell.diskMb`.
+	CLOUD_SHELL_RESIZE_CAPABILITY,
 ] as const;
 export type NodeCapability = (typeof nodeCapabilities)[number];
 
