@@ -55,7 +55,9 @@
 		base: baseOverride,
 		simple = false,
 		note,
-		label = 'Container shell'
+		label = 'Container shell',
+		panel = false,
+		phase = $bindable<Phase>('loading')
 	}: {
 		slug: string;
 		replica?: number | null;
@@ -66,12 +68,18 @@
 		/** Replaces the footnote under the terminal. */
 		note?: string;
 		label?: string;
+		/**
+		 * Only the terminal, filling its parent: the cloud shell drawer draws its own toolbar and
+		 * drives the session through `restart` and `end`, reading `phase`.
+		 */
+		panel?: boolean;
+		/** The session's state, for a parent that shows it (bind:phase). */
+		phase?: Phase;
 	} = $props();
 
 	type Phase = 'loading' | 'idle' | 'opening' | 'live' | 'reconnecting' | 'ended' | 'error';
 
 	let host = $state<HTMLDivElement | null>(null);
-	let phase = $state<Phase>('loading');
 	let message = $state<string | null>(null);
 	let fullscreen = $state(false);
 	let shell = $state<ContainerShell>('auto');
@@ -193,7 +201,7 @@
 		};
 	});
 
-	async function open(): Promise<void> {
+	export async function open(): Promise<void> {
 		if (!term) return;
 		phase = 'opening';
 		message = null;
@@ -270,7 +278,7 @@
 		term?.write(`\r\n\x1b[2m[${reason ?? 'session ended'}]\x1b[0m\r\n`);
 	}
 
-	async function end(): Promise<void> {
+	export async function end(): Promise<void> {
 		const session = current;
 		if (!session) return;
 		events?.close();
@@ -284,7 +292,7 @@
 		term?.write('\r\n\x1b[2m[session closed]\x1b[0m\r\n');
 	}
 
-	async function restart(): Promise<void> {
+	export async function restart(): Promise<void> {
 		if (current && (phase === 'live' || phase === 'reconnecting')) await end();
 		await open();
 	}
@@ -367,93 +375,118 @@
 	}}
 />
 
-<div
-	class={fullscreen
-		? 'fixed inset-0 z-50 flex flex-col gap-3 bg-background p-3'
-		: 'flex flex-col gap-3'}
->
-	<div class="flex flex-wrap items-center justify-between gap-3">
-		<div class="flex flex-wrap items-center gap-3">
-			{#if !simple}
-				<ReplicaPicker targets={targetsQuery.data?.targets ?? []} bind:replica />
-				<label class="flex items-center gap-2 text-sm">
-					<span class="text-muted-foreground">Shell</span>
-					<NativeSelect.Root bind:value={shell} class="h-8">
-						<NativeSelect.Option value="auto">auto (bash, else sh)</NativeSelect.Option>
-						<NativeSelect.Option value="/bin/bash">/bin/bash</NativeSelect.Option>
-						<NativeSelect.Option value="/bin/sh">/bin/sh</NativeSelect.Option>
-						<NativeSelect.Option value="/bin/ash">/bin/ash</NativeSelect.Option>
-					</NativeSelect.Root>
-				</label>
-				<label class="flex items-center gap-2 text-sm">
-					<span class="text-muted-foreground">User</span>
-					<NativeSelect.Root bind:value={user} class="h-8">
-						<NativeSelect.Option value="default">image default</NativeSelect.Option>
-						<NativeSelect.Option value="root">root</NativeSelect.Option>
-					</NativeSelect.Root>
-				</label>
-			{/if}
-		</div>
-		<div class="flex items-center gap-2">
-			<span class="flex items-center gap-1.5 text-xs text-muted-foreground" aria-live="polite">
-				{#if phase === 'opening' || phase === 'reconnecting'}
-					<Spinner class="size-3" />
-				{:else}
-					<span class="size-1.5 rounded-full {statusDot}"></span>
-				{/if}
-				{statusLabel}
-			</span>
-			{#if phase === 'live' || phase === 'reconnecting'}
-				<Button variant="outline" size="sm" onclick={end}>
-					<SquareIcon />
-					End
-				</Button>
-				<Button
-					variant="outline"
-					size="sm"
-					onclick={restart}
-					title="Close this shell and open a new one with these settings"
-				>
-					<PlusIcon />
-					New
-				</Button>
-			{:else if phase !== 'loading' && phase !== 'opening'}
-				<Button size="sm" onclick={open}>
-					<PlayIcon />
-					Start shell
-				</Button>
-			{/if}
-			<Button
-				variant="ghost"
-				size="icon-sm"
-				onclick={() => (fullscreen = !fullscreen)}
-				title={fullscreen ? 'Exit full screen (Shift+Esc)' : 'Full screen'}
+{#if panel}
+	<div class="relative flex size-full min-h-0 flex-col bg-[#0b0d10]">
+		{#if message}
+			<p
+				class="border-b border-white/10 px-3 py-1.5 text-xs {phase === 'error'
+					? 'text-[#f2777a]'
+					: 'text-[#9aa1ab]'}"
 			>
-				{#if fullscreen}<Minimize2Icon />{:else}<Maximize2Icon />{/if}
-			</Button>
-		</div>
-	</div>
-
-	{#if message}
-		<p class="text-sm {phase === 'error' ? 'text-destructive' : 'text-muted-foreground'}">
-			{message}
-		</p>
-	{/if}
-
-	<div
-		class="min-h-0 overflow-hidden rounded-xl border bg-[#0b0d10] p-2 shadow-xs {fullscreen
-			? 'flex-1'
-			: 'h-[min(70vh,640px)]'}"
-	>
-		<div bind:this={host} class="size-full" role="application" aria-label={label}></div>
-	</div>
-	<p class="text-xs text-muted-foreground">
-		{#if note}
-			{note}
-		{:else}
-			Runs inside the container with its own limits: no added capabilities, a read-only root
-			filesystem and the same network. Opening a shell is recorded in the audit log; what you type
-			is not.
+				{message}
+			</p>
 		{/if}
-	</p>
-</div>
+		<div class="min-h-0 flex-1 py-1.5 pr-1 pl-3">
+			<div bind:this={host} class="size-full" role="application" aria-label={label}></div>
+		</div>
+		{#if phase === 'ended' || phase === 'error'}
+			<div class="absolute right-3 bottom-3">
+				<Button size="sm" variant="secondary" onclick={open}>
+					<PlayIcon />
+					New session
+				</Button>
+			</div>
+		{/if}
+	</div>
+{:else}
+	<div
+		class={fullscreen
+			? 'fixed inset-0 z-50 flex flex-col gap-3 bg-background p-3'
+			: 'flex flex-col gap-3'}
+	>
+		<div class="flex flex-wrap items-center justify-between gap-3">
+			<div class="flex flex-wrap items-center gap-3">
+				{#if !simple}
+					<ReplicaPicker targets={targetsQuery.data?.targets ?? []} bind:replica />
+					<label class="flex items-center gap-2 text-sm">
+						<span class="text-muted-foreground">Shell</span>
+						<NativeSelect.Root bind:value={shell} class="h-8">
+							<NativeSelect.Option value="auto">auto (bash, else sh)</NativeSelect.Option>
+							<NativeSelect.Option value="/bin/bash">/bin/bash</NativeSelect.Option>
+							<NativeSelect.Option value="/bin/sh">/bin/sh</NativeSelect.Option>
+							<NativeSelect.Option value="/bin/ash">/bin/ash</NativeSelect.Option>
+						</NativeSelect.Root>
+					</label>
+					<label class="flex items-center gap-2 text-sm">
+						<span class="text-muted-foreground">User</span>
+						<NativeSelect.Root bind:value={user} class="h-8">
+							<NativeSelect.Option value="default">image default</NativeSelect.Option>
+							<NativeSelect.Option value="root">root</NativeSelect.Option>
+						</NativeSelect.Root>
+					</label>
+				{/if}
+			</div>
+			<div class="flex items-center gap-2">
+				<span class="flex items-center gap-1.5 text-xs text-muted-foreground" aria-live="polite">
+					{#if phase === 'opening' || phase === 'reconnecting'}
+						<Spinner class="size-3" />
+					{:else}
+						<span class="size-1.5 rounded-full {statusDot}"></span>
+					{/if}
+					{statusLabel}
+				</span>
+				{#if phase === 'live' || phase === 'reconnecting'}
+					<Button variant="outline" size="sm" onclick={end}>
+						<SquareIcon />
+						End
+					</Button>
+					<Button
+						variant="outline"
+						size="sm"
+						onclick={restart}
+						title="Close this shell and open a new one with these settings"
+					>
+						<PlusIcon />
+						New
+					</Button>
+				{:else if phase !== 'loading' && phase !== 'opening'}
+					<Button size="sm" onclick={open}>
+						<PlayIcon />
+						Start shell
+					</Button>
+				{/if}
+				<Button
+					variant="ghost"
+					size="icon-sm"
+					onclick={() => (fullscreen = !fullscreen)}
+					title={fullscreen ? 'Exit full screen (Shift+Esc)' : 'Full screen'}
+				>
+					{#if fullscreen}<Minimize2Icon />{:else}<Maximize2Icon />{/if}
+				</Button>
+			</div>
+		</div>
+
+		{#if message}
+			<p class="text-sm {phase === 'error' ? 'text-destructive' : 'text-muted-foreground'}">
+				{message}
+			</p>
+		{/if}
+
+		<div
+			class="min-h-0 overflow-hidden rounded-xl border bg-[#0b0d10] p-2 shadow-xs {fullscreen
+				? 'flex-1'
+				: 'h-[min(70vh,640px)]'}"
+		>
+			<div bind:this={host} class="size-full" role="application" aria-label={label}></div>
+		</div>
+		<p class="text-xs text-muted-foreground">
+			{#if note}
+				{note}
+			{:else}
+				Runs inside the container with its own limits: no added capabilities, a read-only root
+				filesystem and the same network. Opening a shell is recorded in the audit log; what you type
+				is not.
+			{/if}
+		</p>
+	</div>
+{/if}

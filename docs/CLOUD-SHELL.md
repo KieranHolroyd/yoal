@@ -14,12 +14,12 @@ on the node itself. A cloud shell is a tenant container like an app's, with the 
 
 | Piece | Where |
 |---|---|
-| One row per person and org | `cloud_shells` (migration 0137): node, status, disk size, the CLI key (id + sealed value), generation, started/last-active times |
+| One row per person and org | `cloud_shells` (migrations 0137, 0138): node, status, disk size, the last start failure, the CLI key (id + sealed value), generation, started/last-active times |
 | Service | `CloudShellService` (`packages/core/src/cloud-shells.ts`, `core.cloudShells`) |
 | Contracts | `packages/contracts/src/cloud-shell.ts`: limits, `workloadCloudShellSchema`, views |
 | Node side | helper `applyCloudShell` (`apps/helper/src/systemd.ts`), `apps/helper/src/cloud-shell.ts` (disk, mount unit, path escaping), `renderCloudShellUnit` (`apps/helper/src/units.ts`) |
-| Image | `docker/cloud-shell/`, published by `release.yml` as `ghcr.io/<owner>/yoal-cloud-shell:<version>` |
-| Dashboard | Infrastructure → **Cloud shell** (`/cloud-shell`) |
+| Image | `docker/cloud-shell/`, published by `publish.yml` (before the release itself) as `ghcr.io/<owner>/yoal-cloud-shell:<version>` |
+| Dashboard | The **Cloud shell** header button and bottom drawer (`(dashboard)/_lib/CloudShellDrawer.svelte`, store `lib/cloud-shell/cloud-shell.svelte.ts`); details page `/cloud-shell` |
 
 Statuses: `stopped` → `starting` (in desired state, container not reported yet) → `running` (the
 node reported the container running) → `stopped`. A reset sets `deleting` until the node reports the
@@ -43,6 +43,14 @@ compute node that advertises `cloud-shell`, preferring the one with fewest shell
 the disk from then on, because the shell can only run where its files are. Each start bumps the
 generation, mints a new CLI key (below) and puts the shell in the node's desired state as a
 container workload with the `cloudShell` profile, `ingress: 'none'`, and the image above.
+
+**Failed start.** A shell whose container the node reports failed, or restarting
+`cloudShellLimits.startRestartLimit` (5) times while starting, is stopped at once; one still not
+running `startTimeoutMs` (10 minutes) after a start is stopped by the sweep. Either way the key is
+revoked, the stop is audited as an error with reason `start failed`, and the row keeps a `message`
+(0138) that the page and the assistant show, naming the image and the unit to read on the node. The
+page does not auto-start a shell whose last start failed; the next start clears the message. The
+usual cause is an image the node cannot pull.
 
 **Stop** (button, idle sweep, session limit, or the feature flag turned off). The maintenance loop
 (every 60 s) stops idle and over-long shells. Stopping revokes the CLI key and takes the workload out
@@ -138,7 +146,7 @@ only one the person confirms on a card showing the whole command (D237).
 The CLI does not open a cloud shell either; it already runs where the person is.
 
 Audit: `cloud_shell.start`, `cloud_shell.stop` (with the reason: stopped, idle, session limit,
-disabled, reset), `cloud_shell.reset`, `cloud_shell.exec.open|exec.close|files.read|files.download`,
+disabled, reset, start failed), `cloud_shell.reset`, `cloud_shell.exec.open|exec.close|files.read|files.download`,
 and the key's own `access_key.create` and `access_key.revoke`. Keystrokes and output are never
 recorded.
 
@@ -146,7 +154,7 @@ recorded.
 
 | Surface | What |
 |---|---|
-| Dashboard | Infrastructure → Cloud shell: status, node, disk, CLI state; Start, Stop, Reset disk; the terminal |
+| Dashboard | A **Cloud shell** button at the top right of every page (Ctrl+`) opens a resizable bottom drawer with the terminal, status and Start, Stop, New session and Reset disk. The drawer lives in the dashboard layout, so the session survives navigation; hiding it keeps the shell running. Opening it starts a stopped shell, but restoring it after a reload, or after a failed start, never does. `/cloud-shell` shows the node, disk and limits and opens the drawer |
 | REST | `GET /api/v1/cloud-shell`; `POST /api/v1/cloud-shell/start|stop|reset` (session) |
 | Console | `/cloud-shell/console/exec…`, `files…` (session; same shapes as the container console) |
 | Assistant | `run_in_cloud_shell` (D237, [ASSISTANT.md](./ASSISTANT.md#cloud-shell-commands)): one command per Confirm click, run as the person in their own shell |
@@ -157,7 +165,10 @@ recorded.
 The control plane must be on this release first (it accepts heartbeats with up to
 `HEARTBEAT_CAPABILITIES_MAX` = 64 capabilities; a fully featured node now exceeds the old 32). Nodes
 advertise `cloud-shell` once they run it, and only those nodes are picked. The release workflow
-publishes the image before the release itself, so the tag a control plane asks for exists.
+(`publish.yml`, jobs `cloud-shell-image` and `cloud-shell-image-manifest`) pushes the image before
+it publishes the release, so the tag a control plane asks for exists. It does not run from
+`release.yml`: that workflow only runs on a tag push, and the tag `publish.yml` creates with
+`GITHUB_TOKEN` starts no other workflow. 0.16.12 shipped without its image for that reason.
 
 Not built: choosing the node or disk size per person, a larger disk for some roles, snapshots of
 the home disk, moving a disk to another node, and opening the shell from the CLI.

@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { resolve } from '$app/paths';
+	import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
 	import BellRingIcon from '@lucide/svelte/icons/bell-ring';
 	import MailIcon from '@lucide/svelte/icons/mail';
 	import MessageSquareTextIcon from '@lucide/svelte/icons/message-square-text';
@@ -16,6 +17,7 @@
 	import { Checkbox } from '#lib/components/ui/checkbox/index.js';
 	import * as Field from '#lib/components/ui/field/index.js';
 	import { Input } from '#lib/components/ui/input/index.js';
+	import * as NativeSelect from '#lib/components/ui/native-select/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
 	import EmptyState from '../../_lib/EmptyState.svelte';
 	import Panel from '../../_lib/Panel.svelte';
@@ -34,6 +36,24 @@
 	let smsOpen = $state(false);
 	let alertsOpen = $state(false);
 	let testing = $state<'email' | 'alert' | null>(null);
+
+	/** Platform mail's sender (D238): Yoal Email from a chosen domain, or the SMTP relay. */
+	const sender = $derived(data.platformSender);
+	let senderChoice = $state('');
+	let savingSender = $state(false);
+	// Follow the saved choice whenever the page data changes (after a save, or another admin's).
+	$effect.pre(() => {
+		senderChoice = sender.choice;
+	});
+	const viaMail = $derived(sender.route.via === 'mail');
+	/** Email works for alerts and sign-in when either path is there. */
+	const emailWorks = $derived(viaMail || data.email.configured);
+
+	async function saveSender() {
+		savingSender = true;
+		await runAction('?/savePlatformSender', { sender: senderChoice });
+		savingSender = false;
+	}
 
 	/** Installed host (root helper) or a dev server (local settings file). */
 	const canEdit = $derived(data.availability === 'ready' || data.availability === 'local');
@@ -60,8 +80,9 @@
 	function removeEmail() {
 		askConfirm({
 			title: 'Remove the SMTP settings?',
-			description:
-				'Yoal stops sending email: sign-in links, invitations and email alerts are only written to the server log until you set it up again. Passkey and GitHub sign-in keep working.',
+			description: viaMail
+				? 'Yoal Email keeps sending platform mail, but while the mail node is down sign-in links, invitations and email alerts are only written to the server log. Passkey and GitHub sign-in keep working.'
+				: 'Yoal stops sending email: sign-in links, invitations and email alerts are only written to the server log until you set it up again. Passkey and GitHub sign-in keep working.',
 			confirmLabel: 'Remove',
 			tone: 'danger',
 			action: '?/removeEmail'
@@ -111,14 +132,92 @@
 	<Panel
 		title="Outbound email"
 		icon={MailIcon}
-		description="Yoal's own mail: sign-in links, invitations and email alerts. Organisations send through the mail server in Email instead. Any SMTP server works; Amazon SES is the tested default."
+		description="Yoal's own mail: sign-in links, invitations, password resets and email alerts. Once Email has a mail node it goes through Yoal Email from the domain you pick here, with the SMTP relay as the fallback. Any SMTP server works as the relay; Amazon SES is the tested default."
 	>
 		{#snippet actions()}
 			<StatusBadge
-				status={data.email.configured ? 'active' : 'unverified'}
-				label={data.email.configured ? 'Configured' : 'Not set up'}
+				status={emailWorks ? 'active' : 'unverified'}
+				label={viaMail ? 'Yoal Email' : data.email.configured ? 'SMTP relay' : 'Not set up'}
 			/>
 		{/snippet}
+		<section class="mb-6 space-y-3 border-b pb-6" aria-labelledby="platform-sender-heading">
+			<h3 id="platform-sender-heading" class="text-xs font-medium text-muted-foreground">
+				Send from
+			</h3>
+			{#if sender.mail.nodeSet}
+				<div class="flex flex-wrap items-center gap-2">
+					<NativeSelect.Root
+						id="platform-sender"
+						aria-labelledby="platform-sender-heading"
+						class="max-w-full sm:w-96"
+						bind:value={senderChoice}
+						disabled={!data.canChooseSender || savingSender}
+					>
+						<NativeSelect.OptGroup label="Yoal Email">
+							{#each sender.options as option (option.value)}
+								<NativeSelect.Option value={option.value}
+									>{option.address}{option.kind === 'platform'
+										? ' (platform mail domain)'
+										: ''}</NativeSelect.Option
+								>
+							{/each}
+						</NativeSelect.OptGroup>
+						<NativeSelect.Option
+							value="relay"
+							disabled={!data.email.configured && sender.choice !== 'relay'}
+							>SMTP relay only</NativeSelect.Option
+						>
+					</NativeSelect.Root>
+					{#if data.canChooseSender}
+						<Button
+							size="sm"
+							onclick={saveSender}
+							disabled={savingSender || senderChoice === sender.choice}
+						>
+							{#if savingSender}<Spinner />{/if}Save
+						</Button>
+					{/if}
+				</div>
+				<p class="text-sm text-muted-foreground">
+					{#if viaMail && sender.route.via === 'mail'}
+						Sending through Yoal Email from <span class="font-mono">{sender.route.from}</span>{data
+							.email.configured
+							? '. If the mail node is down, mail goes through the SMTP relay instead.'
+							: '. There is no SMTP relay, so if the mail node is down, mail is only written to the server log.'}
+					{:else if sender.choice === 'relay'}
+						Sending through the SMTP relay. Yoal Email is not used for platform mail.
+					{:else}
+						Yoal Email can't take mail right now ({sender.mail.reason}), so it goes {data.email
+							.configured
+							? 'through the SMTP relay'
+							: 'to the server log only'} until it can.
+					{/if}
+				</p>
+				{#if sender.problem}
+					<Alert.Root variant="warning">
+						<TriangleAlertIcon />
+						<Alert.Description
+							>{sender.problem} Mail goes from no-reply@{sender.mail.mailDomain} until you pick another
+							domain.</Alert.Description
+						>
+					</Alert.Root>
+				{/if}
+				{#if !data.canChooseSender}
+					<p class="text-xs text-muted-foreground">Only a platform admin can change this.</p>
+				{/if}
+			{:else}
+				<div class="flex flex-wrap items-center justify-between gap-2">
+					<p class="text-sm text-muted-foreground">
+						{data.email.configured ? 'The SMTP relay below.' : 'Nothing yet.'} Choose a mail node in
+						Email to send platform mail through Yoal Email from your own verified domains.
+					</p>
+					<Button size="sm" variant="outline" href={resolve('/(dashboard)/email/server')}
+						>Mail server<ArrowRightIcon /></Button
+					>
+				</div>
+			{/if}
+		</section>
+		<h3 class="mb-3 text-xs font-medium text-muted-foreground">SMTP relay</h3>
 		{#if data.email.configured}
 			<dl class="grid gap-x-8 gap-y-4 text-sm sm:grid-cols-3">
 				<div class="space-y-1">
@@ -140,18 +239,22 @@
 			<EmptyState
 				icon={MailIcon}
 				compact
-				title="Email is not set up"
-				description="Until it is, sign-in links and invitations are only written to the server log (journalctl -u yoal-control-plane)."
+				title={viaMail ? 'No SMTP relay' : 'Email is not set up'}
+				description={viaMail
+					? 'Optional while Yoal Email sends platform mail: without a relay, mail is only written to the server log when the mail node is down.'
+					: 'Until it is, sign-in links and invitations are only written to the server log (journalctl -u yoal-control-plane).'}
 			>
 				{#if canEdit}
-					<Button onclick={() => (emailOpen = true)} disabled={!ready}
-						><MailIcon />Set up email</Button
+					<Button
+						variant={viaMail ? 'outline' : 'default'}
+						onclick={() => (emailOpen = true)}
+						disabled={!ready}><MailIcon />Set up SMTP relay</Button
 					>
 				{/if}
 			</EmptyState>
 		{/if}
 		{#snippet footer()}
-			{#if data.email.configured}
+			{#if emailWorks}
 				<div class="flex w-full flex-wrap items-center gap-2">
 					<Button
 						variant="outline"
@@ -162,7 +265,7 @@
 						{#if testing === 'email'}<Spinner />{:else}<SendIcon />{/if}
 						Send test{data.adminEmail ? ` to ${data.adminEmail}` : ''}
 					</Button>
-					{#if canEdit}
+					{#if canEdit && data.email.configured}
 						<Button variant="outline" size="sm" onclick={() => (emailOpen = true)} disabled={!ready}
 							><SettingsIcon />Edit</Button
 						>
@@ -504,11 +607,11 @@
 				autocomplete="email"
 				value={alerts.YOAL_ALERT_EMAIL ?? ''}
 				placeholder={data.adminEmail ?? 'ops@example.com'}
-				disabled={!data.email.configured}
+				disabled={!emailWorks}
 				aria-invalid={fieldErrors.email ? 'true' : undefined}
 			/>
 			{#if fieldErrors.email}<Field.Error>{fieldErrors.email}</Field.Error>
-			{:else if !data.email.configured}<Field.Description
+			{:else if !emailWorks}<Field.Description
 					>Set up outbound email first.</Field.Description
 				>{/if}
 		</Field.Field>

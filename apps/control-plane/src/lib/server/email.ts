@@ -1,12 +1,9 @@
-import { ConsoleEmailTransport, SmtpEmailTransport, type EmailTransport } from '@yoal/core';
-import { smtp } from './config';
+import type { EmailTransport } from '@yoal/core';
+import { platformMail } from './platform-mail';
 
-let transport: EmailTransport | undefined;
-
+/** Yoal Email when a mail node can take it, else the SMTP relay, else the journal (D238). */
 function emailTransport(): EmailTransport {
-	if (transport) return transport;
-	transport = smtp ? new SmtpEmailTransport(smtp) : new ConsoleEmailTransport();
-	return transport;
+	return platformMail;
 }
 
 /**
@@ -19,6 +16,7 @@ export async function sendMagicLinkEmail(email: string, url: string): Promise<vo
 	await emailTransport().send({
 		to: email,
 		subject: 'Sign into your cloud',
+		tags: { yoal: 'sign-in' },
 		text: `Sign into your cloud: ${url}\n\nThis link expires in ${MAGIC_LINK_TTL_SECONDS / 60} minutes. If you didn't request it, ignore this email.`
 	});
 }
@@ -32,6 +30,7 @@ export async function sendPasswordResetEmail(
 	await emailTransport().send({
 		to: email,
 		subject: 'Reset your Yoal password',
+		tags: { yoal: 'password-reset' },
 		text:
 			`Someone asked to reset the password for ${email} on Yoal. To choose a new password, open:\n\n${url}\n\n` +
 			`The link works once and expires in ${Math.round(ttlSeconds / 60)} minutes. Resetting signs you out everywhere. ` +
@@ -43,6 +42,7 @@ export async function sendInviteEmail(email: string, orgName: string, url: strin
 	await emailTransport().send({
 		to: email,
 		subject: `You're invited to ${orgName} on Yoal`,
+		tags: { yoal: 'invite' },
 		text: `Join ${orgName} on Yoal: ${url}`
 	});
 }

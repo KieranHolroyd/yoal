@@ -24,8 +24,12 @@ export const load: PageServerLoad = ({ locals }) => {
 		reverseDns:
 			server.settings.nodeId && ip ? checkReverseDns(ip, server.settings.hostnames.helo) : null,
 		reverseIp: ip,
-		/** D22: sign-in links, invites and alerts go through the platform SMTP relay, set in Notifications. */
+		/**
+		 * Sign-in links, invites and alerts: Yoal Email from the sender chosen in Notifications when
+		 * the mail node can take them, else the platform SMTP relay (D238, D22).
+		 */
 		platformMail: {
+			route: core.email.platformMailRoute(),
 			relay: relay.configured
 				? {
 						host: relay.values.YOAL_SMTP_HOST ?? '',

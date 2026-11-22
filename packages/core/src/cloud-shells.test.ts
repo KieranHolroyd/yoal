@@ -229,4 +229,28 @@ describe('cloud shell', () => {
 			features.CLOUD_SHELL = true;
 		}
 	});
+
+	test('a container that keeps exiting stops the start with the reason, until the next start', async () => {
+		const caps = ['node-tasks', 'container-console', 'cloud-shell'];
+		const id = core.cloudShells.start(owner).id;
+		heartbeat(caps, { workloads: [{ id, status: 'starting', restarts: 2 }] });
+		expect(core.cloudShells.state(owner).shell).toMatchObject({ status: 'starting', message: null });
+		heartbeat(caps, { workloads: [{ id, status: 'starting', restarts: cloudShellLimits.startRestartLimit }] });
+		const failed = core.cloudShells.state(owner).shell!;
+		expect(failed).toMatchObject({ status: 'stopped', cliSignedIn: false });
+		expect(failed.message).toContain(`exited ${cloudShellLimits.startRestartLimit} times`);
+		expect(failed.message).toContain('yoal-cloud-shell');
+		expect((await desired()).workloads.some((item) => item.id === id)).toBe(false);
+
+		expect(core.cloudShells.start(owner)).toMatchObject({ id, status: 'starting', message: null });
+	});
+
+	test('a shell that never starts is stopped after the start timeout', () => {
+		expect(core.cloudShells.state(owner).shell!.status).toBe('starting');
+		clock += cloudShellLimits.startTimeoutMs - 60_000;
+		expect(core.cloudShells.sweep()).toEqual({ stopped: 0 });
+		clock += 2 * 60_000;
+		expect(core.cloudShells.sweep()).toEqual({ stopped: 1 });
+		expect(core.cloudShells.state(owner).shell!.message).toMatch(/did not start your cloud shell within 10 minutes/);
+	});
 });

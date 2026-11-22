@@ -108,6 +108,55 @@ export async function notifyIam(notifiers: readonly Notifier[], notification: Ia
 	}
 }
 
+/** What `PlatformMailTransport` needs from `EmailService` (structural, so tests can fake it). */
+export interface PlatformMailSender {
+	platformMailRoute(): { from: string } | null;
+	sendPlatformMail(message: EmailMessage): Promise<{ messageId: string; from: string }>;
+}
+
+/** Where one platform message went: queued on the mail node, or handed to the relay. */
+export type PlatformMailDelivery =
+	| { via: 'mail'; from: string; messageId: string }
+	| { via: 'relay'; fallbackReason: string | null };
+
+/**
+ * The platform's own mail (sign-in links, invites, password resets, alerts; D238): through Yoal
+ * Email when the operator has set up a mail node and the platform sender route allows it, else the
+ * SMTP relay (D22) or, without one, the journal. Any failure to queue on the mail node (suppressed
+ * address, a database error) falls back to the relay, so these messages never depend on the mail
+ * node alone. `attach` is called once the core exists, because the core is built with this
+ * transport as its `email`.
+ */
+export class PlatformMailTransport implements EmailTransport {
+	private sender: PlatformMailSender | null = null;
+	constructor(readonly relay: EmailTransport) {}
+
+	attach(sender: PlatformMailSender): void {
+		this.sender = sender;
+	}
+
+	async send(message: EmailMessage): Promise<void> {
+		await this.deliver(message);
+	}
+
+	/** `send` that also says which way the message went (the Notifications page's test). */
+	async deliver(message: EmailMessage): Promise<PlatformMailDelivery> {
+		let fallbackReason: string | null = null;
+		if (this.sender?.platformMailRoute()) {
+			try {
+				const queued = await this.sender.sendPlatformMail(message);
+				return { via: 'mail', ...queued };
+			} catch (error) {
+				fallbackReason = error instanceof Error ? error.message : String(error);
+				console.error(`[email] Yoal Email could not take platform mail, using the relay: ${fallbackReason}`);
+			}
+		}
+		const { tags: _tags, ...relayed } = message;
+		await this.relay.send(relayed);
+		return { via: 'relay', fallbackReason };
+	}
+}
+
 /** Log transport for development; never used in production. */
 export class ConsoleEmailTransport implements EmailTransport {
 	async send(message: EmailMessage): Promise<void> {
@@ -139,6 +188,7 @@ export class EmailNotifier implements Notifier {
 					to: recipient,
 					subject: `[Yoal ${alert.severity}] ${alert.title}`,
 					text: alert.detail,
+					tags: { yoal: 'alert' },
 				}),
 			),
 		);

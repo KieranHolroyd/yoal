@@ -150,6 +150,7 @@ export class CloudShellService {
 				lastActiveAt: now,
 				accessKeyId: key?.id ?? null,
 				accessKeySealed: key ? this.ctx.secrets.seal(principal.orgId, key.value) : null,
+				message: null,
 				updatedAt: now,
 			})
 			.where(eq(cloudShells.id, row.id))
@@ -259,6 +260,17 @@ export class CloudShellService {
 		let stopped = 0;
 		const enabled = this.enabled();
 		for (const row of this.ctx.db.select().from(cloudShells).where(inArray(cloudShells.status, ACTIVE)).all()) {
+			if (enabled && row.status === 'starting' && now - (row.startedAt ?? now) >= cloudShellLimits.startTimeoutMs) {
+				const node = row.nodeId ? this.node(row.nodeId) : undefined;
+				this.stopRow(
+					row,
+					buildSystemPrincipal('system:cloud-shell', row.orgId),
+					'start failed',
+					`${node?.name ?? 'Its node'} did not start your cloud shell within ${cloudShellLimits.startTimeoutMs / 60_000} minutes${node && node.status !== 'online' ? ` (the node is ${node.status})` : ''}. Try starting it again; if it keeps failing, an operator can read \`journalctl -u yoal-workload-${row.id}\` on that node.`,
+				);
+				stopped += 1;
+				continue;
+			}
 			const idle = now - (row.lastActiveAt ?? row.startedAt ?? now) >= cloudShellLimits.idleMs;
 			const expired = now - (row.startedAt ?? now) >= cloudShellLimits.maxSessionMs;
 			if (enabled && !idle && !expired) continue;
@@ -333,15 +345,33 @@ export class CloudShellService {
 			.run();
 	}
 
-	/** A starting shell is running once its node says its container is. */
-	applyHeartbeat(nodeId: string, reports: Array<{ id: string; status: string }>): void {
+	/**
+	 * A starting shell is running once its node says its container is. One whose container failed,
+	 * or keeps exiting (an image that cannot be pulled, say), is stopped with the reason, instead
+	 * of saying "starting" until the idle timer gives up on it.
+	 */
+	applyHeartbeat(nodeId: string, reports: Array<{ id: string; status: string; restarts?: number }>): void {
 		for (const report of reports) {
-			if (!this.isShellId(report.id) || report.status !== 'running') continue;
-			this.ctx.db
-				.update(cloudShells)
-				.set({ status: 'running', updatedAt: this.ctx.now() })
-				.where(and(eq(cloudShells.id, report.id), eq(cloudShells.nodeId, nodeId), eq(cloudShells.status, 'starting')))
-				.run();
+			if (!this.isShellId(report.id)) continue;
+			if (report.status === 'running') {
+				this.ctx.db
+					.update(cloudShells)
+					.set({ status: 'running', updatedAt: this.ctx.now() })
+					.where(and(eq(cloudShells.id, report.id), eq(cloudShells.nodeId, nodeId), eq(cloudShells.status, 'starting')))
+					.run();
+				continue;
+			}
+			const restarts = report.restarts ?? 0;
+			if (report.status !== 'failed' && restarts < cloudShellLimits.startRestartLimit) continue;
+			const row = this.row(report.id);
+			if (!row || row.nodeId !== nodeId || row.status !== 'starting') continue;
+			const node = this.node(nodeId);
+			this.stopRow(
+				row,
+				buildSystemPrincipal('system:cloud-shell', row.orgId),
+				'start failed',
+				`${node?.name ?? 'The node'} could not start your cloud shell: its container ${report.status === 'failed' ? 'failed to start' : `exited ${restarts} times in a row`}. The usual cause is that the node cannot pull the image ${this.image()}. An operator can read \`journalctl -u yoal-workload-${row.id}\` on that node.`,
+			);
 		}
 	}
 
@@ -378,7 +408,7 @@ export class CloudShellService {
 
 	// --- internals ------------------------------------------------------------------------
 
-	private stopRow(row: CloudShellRow, actor: Principal, reason: string): void {
+	private stopRow(row: CloudShellRow, actor: Principal, reason: string, message: string | null = null): void {
 		if (row.accessKeyId) {
 			try {
 				this.ctx.accessKeys.revokeManaged(
@@ -393,7 +423,7 @@ export class CloudShellService {
 		}
 		this.ctx.db
 			.update(cloudShells)
-			.set({ status: 'stopped', accessKeyId: null, accessKeySealed: null, updatedAt: this.ctx.now() })
+			.set({ status: 'stopped', accessKeyId: null, accessKeySealed: null, message, updatedAt: this.ctx.now() })
 			.where(eq(cloudShells.id, row.id))
 			.run();
 		this.ctx.audit.record({
@@ -401,8 +431,9 @@ export class CloudShellService {
 			action: 'cloud_shell.stop',
 			resource: 'cloud_shell',
 			resourceId: row.id,
-			args: { reason, userId: row.userId },
-			result: 'ok',
+			args: { reason, userId: row.userId, ...(message ? { message } : {}) },
+			result: message ? 'error' : 'ok',
+			...(message ? { error: message } : {}),
 		});
 		this.ctx.projects.bump(row.orgId);
 	}
@@ -476,6 +507,7 @@ export class CloudShellService {
 			startedAt: active ? iso(row.startedAt) : null,
 			lastActiveAt: iso(row.lastActiveAt),
 			stopsAt: iso(stopsAt),
+			message: row.message ?? null,
 			createdAt: new Date(row.createdAt).toISOString(),
 		};
 	}

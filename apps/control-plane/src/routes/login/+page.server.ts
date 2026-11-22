@@ -1,6 +1,7 @@
 import { redirect } from '@sveltejs/kit';
 import { openSignup, platformOrigin, smtp } from '#lib/server/config.js';
 import { githubSignIn, gitlabSignIn } from '#lib/server/auth.js';
+import { core } from '#lib/server/core.js';
 import { sqlite } from '#lib/server/db.js';
 import { needsSetup } from '#lib/server/setup.js';
 import { safeRedirect } from '#lib/redirect.js';
@@ -17,7 +18,7 @@ export const load: PageServerLoad = ({ url }) => {
 		redirect: redirectTo,
 		github: githubSignIn,
 		gitlab: gitlabSignIn,
-		/** Without SMTP, magic links go to the server log (ConsoleEmailTransport). */
-		emailToLog: !smtp
+		/** Without Yoal Email (D238) or SMTP, magic links go to the server log (ConsoleEmailTransport). */
+		emailToLog: !smtp && !core.email.platformMailRoute()
 	};
 };

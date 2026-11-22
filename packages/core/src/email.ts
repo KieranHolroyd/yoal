@@ -143,6 +143,7 @@ const SETTINGS = {
 	generation: 'email.generation',
 	domain: 'email.mail_domain',
 	platformDkim: 'email.platform_dkim',
+	platformSender: 'email.platform_sender',
 } as const;
 /**
  * The platform's own sender on the mail node (sandbox verification mail): `no-reply@<mail domain>`,
@@ -152,6 +153,8 @@ const SETTINGS = {
 const PLATFORM_MAIL_ORG = '*';
 const PLATFORM_KEY_ORG = 'platform';
 const PLATFORM_SENDER_LOCAL = 'no-reply';
+/** A mail node whose agent hasn't checked in for this long is treated as down for platform mail. */
+const MAIL_NODE_STALE_MS = 60_000;
 const RETENTION_DAYS = 30;
 const DAY_MS = 86_400_000;
 /** A claimed outbox row the agent never acknowledged is handed out again after this. */
@@ -165,6 +168,39 @@ const DEFAULT_ENV_PREFIX = 'SMTP';
 
 /** Where the mail domain came from: the dashboard setting, `YOAL_MAIL_DOMAIN`, or the content domain. */
 export type MailDomainSource = 'custom' | 'env' | 'content';
+
+/**
+ * How the platform's own mail (sign-in links, invites, alerts) leaves (EMAIL.md §10, D238):
+ * `auto` sends through Yoal Email from `no-reply@<mail domain>` whenever the mail node can take it,
+ * else through the SMTP relay; an email domain id does the same from `no-reply@` that org domain;
+ * `relay` always uses the relay. Stored as this string in `email.platform_sender`; absent is `auto`.
+ */
+export type PlatformSenderChoice = 'auto' | 'relay' | (string & {});
+
+/** Where one platform message goes right now: the mail node from `from`, logged under `orgId`. */
+export interface PlatformMailRoute {
+	orgId: string;
+	from: string;
+	domain: string;
+	kind: 'platform' | 'org';
+}
+
+export interface PlatformSenderView {
+	choice: PlatformSenderChoice;
+	/** What the domain chooser offers: the platform's mail domain (`auto`), then the org's verified sending domains. */
+	options: Array<{ value: string; domain: string; address: string; kind: 'platform' | 'org' }>;
+	mail: {
+		/** Whether Yoal Email can take platform mail now; `reason` says why not. */
+		available: boolean;
+		reason: string | null;
+		nodeSet: boolean;
+		mailDomain: string;
+	};
+	/** Where the next platform message goes: the mail node, or the SMTP relay (D22). */
+	route: { via: 'mail'; from: string } | { via: 'relay' };
+	/** The chosen domain can't be used (removed, unverified, receive-only, its org paused), so the platform domain stands in. */
+	problem: string | null;
+}
 
 /**
  * Mail hostnames (`mx1.`, `mx.`, `smtp.`, `bounces.`, `_spf.`) hang off one domain: a custom one
@@ -435,6 +471,122 @@ export class EmailService {
 		};
 	}
 
+	// ------------------------------------------------------------------ platform mail (D238)
+
+	private platformSenderChoice(): PlatformSenderChoice {
+		return this.setting(SETTINGS.platformSender) ?? 'auto';
+	}
+
+	/** Why Yoal Email can't take platform mail right now, or null when it can. */
+	private platformMailBlocker(): string | null {
+		if (!featureEnabled(this.ctx.config, 'EMAIL')) return 'Email is turned off on this platform (YOAL_FEATURE_EMAIL=0).';
+		const settings = this.settings();
+		if (!settings.nodeId) return 'No mail node is chosen (Email → Mail server).';
+		if (settings.paused) return 'Sending is paused platform-wide (Email → Mail server).';
+		const node = this.ctx.db.select({ name: nodes.name, status: nodes.status, lastHeartbeatAt: nodes.lastHeartbeatAt }).from(nodes).where(eq(nodes.id, settings.nodeId)).get();
+		if (!node) return 'The mail node no longer exists.';
+		if (node.status !== 'online' || node.lastHeartbeatAt === null || this.ctx.now() - node.lastHeartbeatAt > MAIL_NODE_STALE_MS)
+			return `The mail node "${node.name}" is offline.`;
+		return null;
+	}
+
+	/** The chosen org domain when it can send for the platform, else why not. */
+	private chosenOrgDomain(id: string): { row: EmailDomainRow; problem: null } | { row: EmailDomainRow | null; problem: string } {
+		const row = this.ctx.db.select().from(emailDomains).where(eq(emailDomains.id, id)).get() ?? null;
+		if (!row) return { row, problem: 'The chosen sending domain was removed.' };
+		if (row.status !== 'verified') return { row, problem: `${row.name} is not verified.` };
+		if (!row.sending) return { row, problem: `${row.name} has sending turned off.` };
+		if (this.peekOrg(row.orgId).state === 'paused') return { row, problem: `Sending is paused for the organisation that owns ${row.name}.` };
+		return { row, problem: null };
+	}
+
+	/**
+	 * Where the next platform message goes (D238): null means the SMTP relay. A chosen org domain
+	 * that can't send falls back to the platform's own sender, never to another org's domain. Mail
+	 * from an org's domain is logged under that org (the mail node only signs an org's domain for
+	 * that org); mail from the platform sender is logged under the platform (`'*'`).
+	 */
+	platformMailRoute(): PlatformMailRoute | null {
+		const choice = this.platformSenderChoice();
+		if (choice === 'relay' || this.platformMailBlocker() !== null) return null;
+		if (choice !== 'auto') {
+			const chosen = this.chosenOrgDomain(choice);
+			if (chosen.problem === null)
+				return { orgId: chosen.row.orgId, domain: chosen.row.name, from: `${PLATFORM_SENDER_LOCAL}@${chosen.row.name}`, kind: 'org' };
+		}
+		const domain = this.mailDomain();
+		return { orgId: PLATFORM_MAIL_ORG, domain, from: `${PLATFORM_SENDER_LOCAL}@${domain}`, kind: 'platform' };
+	}
+
+	/** The Notifications page's view of the platform sender: the choice, what it offers and where mail goes now. */
+	platformSenderView(principal: Principal): PlatformSenderView {
+		const choice = this.platformSenderChoice();
+		const settings = this.settings();
+		const reason = this.platformMailBlocker();
+		const options: PlatformSenderView['options'] = [
+			{ value: 'auto', domain: settings.mailDomain, address: `${PLATFORM_SENDER_LOCAL}@${settings.mailDomain}`, kind: 'platform' },
+		];
+		const own = this.ctx.db
+			.select()
+			.from(emailDomains)
+			.where(and(eq(emailDomains.orgId, principal.orgId), eq(emailDomains.status, 'verified'), eq(emailDomains.sending, true)))
+			.all()
+			.sort((a, b) => a.name.localeCompare(b.name));
+		for (const row of own) options.push({ value: row.id, domain: row.name, address: `${PLATFORM_SENDER_LOCAL}@${row.name}`, kind: 'org' });
+		let problem: string | null = null;
+		if (choice !== 'auto' && choice !== 'relay') {
+			const chosen = this.chosenOrgDomain(choice);
+			problem = chosen.problem;
+			// Keep a choice made from another org, or one that stopped verifying, visible in the chooser.
+			if (!options.some((option) => option.value === choice))
+				options.push({
+					value: choice,
+					domain: chosen.row?.name ?? 'removed domain',
+					address: chosen.row ? `${PLATFORM_SENDER_LOCAL}@${chosen.row.name}` : '—',
+					kind: 'org',
+				});
+		}
+		const route = this.platformMailRoute();
+		return {
+			choice,
+			options,
+			mail: { available: reason === null, reason, nodeSet: settings.nodeId !== null, mailDomain: settings.mailDomain },
+			route: route ? { via: 'mail', from: route.from } : { via: 'relay' },
+			problem,
+		};
+	}
+
+	/**
+	 * Choose how platform mail leaves (D238). Platform admins only. An org domain must be one of the
+	 * admin's own org's verified sending domains, so nobody can send platform mail as another tenant.
+	 */
+	setPlatformSender(principal: Principal, raw: unknown): PlatformSenderView {
+		if (!this.ctx.platformIam.canAdminister(principal)) throw new CoreError('forbidden', 'Only a platform admin role can choose how platform mail is sent.', 403);
+		const choice = typeof raw === 'string' ? raw.trim() : '';
+		if (!choice) throw new ValidationError('Choose how platform mail is sent.');
+		if (choice !== 'auto' && choice !== 'relay') {
+			const row = this.ctx.db.select().from(emailDomains).where(and(eq(emailDomains.id, choice), eq(emailDomains.orgId, principal.orgId))).get();
+			if (!row) throw new ValidationError('Choose one of your organisation\'s sending domains.');
+			const chosen = this.chosenOrgDomain(choice);
+			if (chosen.problem) throw new ValidationError(chosen.problem);
+		}
+		this.setSetting(SETTINGS.platformSender, choice === 'auto' ? null : choice);
+		this.ctx.audit.record({ principal, action: 'email.platform_sender.update', resource: 'email', resourceId: 'platform', args: { choice }, result: 'ok' });
+		return this.platformSenderView(principal);
+	}
+
+	/**
+	 * Queue one platform message on the mail node from the current route (D238). Throws when the
+	 * route is the relay; `PlatformMailTransport` catches that and every other failure and uses the
+	 * relay instead, so a sign-in link never depends on the mail node alone.
+	 */
+	async sendPlatformMail(message: { to: string; subject: string; text: string; html?: string; tags?: Record<string, string> }): Promise<{ messageId: string; from: string }> {
+		const route = this.platformMailRoute();
+		if (!route) throw new CoreError('platform_mail_unavailable', this.platformMailBlocker() ?? 'Platform mail is set to use the SMTP relay.', 409);
+		const messageId = await this.queuePlatformMail(route.orgId, message, message.tags ?? { yoal: 'platform' }, route.domain);
+		return { messageId, from: route.from };
+	}
+
 	private inZone(name: string): boolean {
 		return !!this.cloudflare && !!this.zoneName && (name === this.zoneName || name.endsWith(`.${this.zoneName}`));
 	}
@@ -562,6 +714,8 @@ export class EmailService {
 	}
 
 	private async checkReputation(orgId: string): Promise<void> {
+		// Platform mail (D238) is logged under '*', which has no sending state to pause.
+		if (orgId === PLATFORM_MAIL_ORG) return;
 		const row = this.orgRow(orgId);
 		if (row.state === 'paused') return;
 		const { bounceRate, complaintRate, windowMessages } = this.reputation(orgId);
@@ -1407,18 +1561,25 @@ export class EmailService {
 	 * that org's activity and its bounces suppress there. Policy is the platform's: only the
 	 * suppression lists apply, not the org's sandbox, quota or sending domains.
 	 */
-	private async queuePlatformMail(orgId: string, message: { to: string; subject: string; text: string }, tags: Record<string, string>): Promise<string> {
+	private async queuePlatformMail(
+		orgId: string,
+		message: { to: string; subject: string; text: string; html?: string },
+		tags: Record<string, string>,
+		/** The sending domain; the platform's mail domain when left out (D170). */
+		domain?: string,
+	): Promise<string> {
 		const to = normalizeAddress(message.to);
 		if (this.isSuppressed(orgId, to))
 			throw new CoreError('recipient_suppressed', `${to} is on the suppression list after a bounce or complaint. Remove it from the list first.`, 422);
 		this.platformDkim();
-		const from = `${PLATFORM_SENDER_LOCAL}@${this.mailDomain()}`;
+		const from = `${PLATFORM_SENDER_LOCAL}@${domain ?? this.mailDomain()}`;
 		const messageId = `${EMAIL_MESSAGE_ID_PREFIX}${newId().slice(0, 32)}`;
 		const input = emailSendSchema.parse({
 			from: { name: 'Yoal', address: from },
 			to: [to],
 			subject: message.subject,
 			text: message.text,
+			...(message.html ? { html: message.html } : {}),
 			headers: { 'Auto-Submitted': 'auto-generated' },
 			tags,
 		});
@@ -1817,7 +1978,7 @@ export class EmailService {
 						],
 					};
 		try {
-			await transport.send({ to, subject: message.subject, text: message.text.filter(Boolean).join('\n\n') });
+			await transport.send({ to, subject: message.subject, text: message.text.filter(Boolean).join('\n\n'), tags: { yoal: 'access-request' } });
 			return true;
 		} catch (error) {
 			console.error(`[email] could not tell ${to} about access request ${row.id}:`, error instanceof Error ? error.message : error);

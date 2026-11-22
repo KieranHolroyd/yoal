@@ -277,19 +277,23 @@
 	<Panel
 		title="Platform mail"
 		icon={MailIcon}
-		description="Mail Yoal sends for itself, apart from what organisations send. It is kept on its own path so sign-in links and alerts still arrive when the mail node is down or its IP is listed (D22)."
+		description="Mail Yoal sends for itself, apart from what organisations send. Sign-in links and alerts go through this mail node from the sender chosen in Settings → Notifications, and through the SMTP relay whenever the node can't take them (D238)."
 	>
 		{#snippet actions()}
 			<StatusBadge
-				status={relay ? 'active' : 'unverified'}
-				tone={relay ? 'success' : 'warning'}
-				label={relay ? 'Relay set' : 'No relay'}
+				status={relay || data.platformMail.route ? 'active' : 'unverified'}
+				tone={relay || data.platformMail.route ? 'success' : 'warning'}
+				label={data.platformMail.route ? 'Yoal Email' : relay ? 'Relay set' : 'No relay'}
 			/>
 		{/snippet}
 		<DetailList>
 			<dt>Sign-in links, invitations, alerts</dt>
 			<dd class="text-xs">
-				{#if relay}
+				{#if data.platformMail.route}
+					This mail node, from <span class="font-mono">{data.platformMail.route.from}</span>{relay
+						? '; the SMTP relay if the node is down'
+						: '; the server log if the node is down (no SMTP relay)'}
+				{:else if relay}
 					SMTP relay <span class="font-mono">{relay.host}:{relay.port}</span>{relay.from
 						? `, from ${relay.from}`
 						: ''}
@@ -322,7 +326,7 @@
 				<span>The relay is any SMTP server; Amazon SES is the tested default.</span>
 				{#if data.platformMail.canEdit}
 					<Button variant="outline" size="sm" href={resolve('/(dashboard)/settings/notifications')}>
-						{relay ? 'Edit relay' : 'Set up relay'}<ArrowRightIcon />
+						{relay ? 'Sender and relay' : 'Choose sender, set up relay'}<ArrowRightIcon />
 					</Button>
 				{:else}
 					<span

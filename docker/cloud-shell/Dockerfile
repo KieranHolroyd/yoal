@@ -10,7 +10,7 @@
 # pointed there below). The control plane sets YOAL_URL and, when the person's role may create
 # access keys, a short-lived YOAL_TOKEN, so `yoal` is signed in from the first prompt.
 #
-# Published by .github/workflows/release.yml as ghcr.io/<owner>/yoal-cloud-shell:<version>, the
+# Published by .github/workflows/publish.yml as ghcr.io/<owner>/yoal-cloud-shell:<version>, the
 # tag the control plane of that version asks for (override with YOAL_CLOUD_SHELL_IMAGE).
 
 ARG BUN_VERSION=1.4.4

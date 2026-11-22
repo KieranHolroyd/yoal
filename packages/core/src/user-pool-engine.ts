@@ -4169,7 +4169,7 @@ export function createUserPoolMailer(ctx: CoreContext): UserPoolMailer {
 			const transport = ctx.config.email;
 			if (transport) {
 				try {
-					await transport.send({ to: message.to, subject: message.subject, text: message.text });
+					await transport.send({ to: message.to, subject: message.subject, text: message.text, tags: { yoal: `user-pool-${message.purpose}` } });
 					return;
 				} catch {
 					// Fall through to the mail node; the caller only sees a generic failure.

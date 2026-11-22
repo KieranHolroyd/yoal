@@ -159,6 +159,11 @@ async function ensureRunning(
 	for (;;) {
 		state = deps.shells.state(principal);
 		if (state.shell?.status === 'running') return { started, node: state.shell.node?.name ?? null };
+		// The node gave up on the start (docs/CLOUD-SHELL.md §2): say why instead of waiting it out.
+		if (state.shell?.status === 'stopped' && state.shell.message)
+			throw new Error(`${state.shell.message} Nothing was run.`);
+		if (!state.shell || state.shell.status === 'stopped' || state.shell.status === 'deleting')
+			throw new Error('Your cloud shell stopped before it was running. Nothing was run.');
 		if (now() >= deadline)
 			throw new Error(
 				'Your cloud shell is still starting (the first start downloads its image). Nothing was run; try again in a minute.'

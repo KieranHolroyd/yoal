@@ -17,7 +17,7 @@ export const CLOUD_SHELL_CAPABILITY = 'cloud-shell';
 export const CLOUD_SHELL_ID_PREFIX = 'csh_';
 export const cloudShellIdPattern = /^csh_[a-f0-9]{32}$/;
 
-/** The default image repository; the tag is the control plane's version (release.yml publishes it). */
+/** The default image repository; the tag is the control plane's version (publish.yml publishes it). */
 export const CLOUD_SHELL_IMAGE_REPOSITORY = 'ghcr.io/kieranholroyd/yoal-cloud-shell';
 
 /** Where the disk is mounted inside the shell, and the shell user's `$HOME`. */
@@ -39,6 +39,10 @@ export const cloudShellLimits = {
 	keyTtlSeconds: 12 * 60 * 60 + 15 * 60,
 	/** Activity is written at most this often (every keystroke reaches the control plane). */
 	touchEveryMs: 30_000,
+	/** A shell still not running this long after a start is stopped as failed. */
+	startTimeoutMs: 10 * 60_000,
+	/** A starting shell whose container has restarted this often is stopped as failed. */
+	startRestartLimit: 5,
 } as const;
 
 /** The workload profile: the helper derives the disk, mounts, user and sandbox from it. */
@@ -64,6 +68,8 @@ export const cloudShellViewSchema = z.object({
 	lastActiveAt: z.string().nullable(),
 	/** When the idle timer stops it, while running. */
 	stopsAt: z.string().nullable(),
+	/** Why the last start failed; null after a start that worked or before any. */
+	message: z.string().nullable(),
 	createdAt: z.string(),
 });
 export type CloudShellView = z.infer<typeof cloudShellViewSchema>;

@@ -553,9 +553,9 @@ entry that opens Mail server, and Settings → Notifications keeps the platform 
   pending requests with their use case and volume, approve (with limits) or deny (with a reason),
   and the decided history.
 - **Mail server** (`/email/server`, platform admin, Platform group): §3.3, plus the live reverse DNS
-  check and a *Platform mail* panel saying how sign-in links, invites and alerts (the D22 relay, or
-  the journal when none is set), sandbox verification links (the mail node, D170) and org mail go
-  out, with a link to the relay settings. It was Settings → Email, which now redirects here.
+  check and a *Platform mail* panel saying how sign-in links, invites and alerts (the mail node from
+  the chosen sender, else the D22 relay, else the journal; §10), sandbox verification links (the
+  mail node, D170) and org mail go out, with a link to the sender and relay settings. It was Settings → Email, which now redirects here.
 - **Suppressions.**
 - **Routes.**
 - **Webhooks.**
@@ -570,12 +570,36 @@ which is the telemetry pattern.
 
 ---
 
-## 10. Platform mail stays on D22
+## 10. Platform mail: Yoal Email first, the SMTP relay as fallback (D238)
 
-Sign-in links, invites and alerts keep the platform's own SMTP settings (`YOAL_SMTP_*`, normally
-SES). The alert path must work while the mail node is down or the IP is listed. Once Email is
-healthy, an owner *may* point `YOAL_SMTP_*` at `smtp.<mailDomain>` with a platform credential;
-Email → Mail server shows which path each kind of platform mail takes (§9).
+Sign-in links, invitations, password resets, step-up codes, access-request decisions, pool mail and
+email alerts all leave through one transport, `PlatformMailTransport` (`packages/core/src/notify.ts`,
+built in `apps/control-plane/src/lib/server/platform-mail.ts` and the core's `config.email`).
+
+- **Once Email has a mail node, platform mail goes through Yoal Email.** Each message is queued in
+  the outbox with `Auto-Submitted: auto-generated` and a `yoal` tag naming its kind (`sign-in`,
+  `password-reset`, `invite`, `alert`, `access-request`, `user-pool-<purpose>`, `platform-test`).
+- **The sender is chosen in Settings → Notifications** (Outbound email → *Send from*), stored in the
+  setting `email.platform_sender` (platform admins only, audited as `email.platform_sender.update`):
+  - *`no-reply@<mailDomain>` (the default, `auto`)*: the platform sender of §4.3, signed with the
+    platform DKIM key and logged under the platform (`orgId '*'`, which has no sending state, so it
+    is never auto-paused). Its bounces feed the platform suppression list.
+  - *`no-reply@<domain>` for one of the admin's own org's verified sending domains*: signed with that
+    domain's key and logged under that org, so it shows in that org's activity. Another tenant's
+    domain can't be chosen. If the chosen domain stops verifying, has sending turned off, is removed
+    or its org is paused, mail goes from `no-reply@<mailDomain>` and the page says why.
+  - *SMTP relay only* (`relay`): Yoal Email is never used for platform mail.
+- **The relay stays the fallback.** A message goes to the SMTP relay (`YOAL_SMTP_*`, D22), or to the
+  journal without one, when the choice is `relay`, `EMAIL` is off, no mail node is set, sending is
+  paused platform-wide, the mail node hasn't sent a heartbeat for a minute, or queueing fails (for
+  example a suppressed recipient). Queueing is a local write, so a mail node that is online but
+  can't deliver is not detected: its messages wait in the outbox like org mail. An install that
+  must not depend on that pins *SMTP relay only*.
+- **Sandbox verification mail is unchanged** (§4.3, D170): always the platform sender, logged under
+  the org it verifies for.
+- **Send test** on the Notifications page sends the way real platform mail goes right now and says
+  which path it took. Saving relay settings still sends a test through the relay itself.
+- Email → Mail server's *Platform mail* panel shows the current path for each kind of mail (§9).
 
 ---
 
@@ -642,6 +666,12 @@ These are summaries; the rows in [DECISIONS.md](./DECISIONS.md) are authoritativ
   platform list for cross-org hard bounces. Orgs start in sandbox (orgs set up by a platform admin excepted)
   and pause automatically at an 8 % bounce rate or 0.3 % complaint rate. *Rejected:* trusting every
   org on a shared IP.
+- **D238 (amends D22, D114).** Platform mail goes through Yoal Email once a mail node is set, from
+  `no-reply@` the platform mail domain or one of the admin's own org's verified sending domains
+  (chosen in Settings → Notifications), and falls back to the SMTP relay whenever the mail node
+  can't take it. *Why:* the user wants the platform's own mail sent by the platform's own MTA when
+  it is set up. *Rejected:* keeping platform mail on the relay only (D22 as written); sending from
+  any tenant's domain.
 - **D120.** Email events live in SQLite (30-day message log and the rate counters, so the product
   works without ClickHouse) and in ClickHouse when installed. Tenant webhooks use Standard Webhooks
   signing. *Rejected:* ClickHouse as a hard dependency.

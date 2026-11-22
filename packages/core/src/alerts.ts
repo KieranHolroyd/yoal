@@ -1452,7 +1452,7 @@ export class AlertService {
 				continue;
 			}
 			delivery[`email:${to}`] = await withTimeout(
-				transport.send({ to, subject: `[Yoal ${alert.status === 'resolved' ? 'resolved' : alert.severity}] ${alert.title}`, text: alert.detail }),
+				transport.send({ to, subject: `[Yoal ${alert.status === 'resolved' ? 'resolved' : alert.severity}] ${alert.title}`, text: alert.detail, tags: { yoal: 'alert' } }),
 			);
 		}
 		const missing = spec.channels.filter((name) => !this.ctx.notifiers.some((notifier) => notifier.name === name));

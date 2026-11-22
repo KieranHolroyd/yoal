@@ -1,13 +1,11 @@
 import { readFileSync } from 'node:fs';
 import { building } from '$app/env';
 import {
-	ConsoleEmailTransport,
 	EmailNotifier,
 	LocalObjectStore,
 	R2ObjectStore,
 	SmsNotifier,
 	createObjectStore,
-	SmtpEmailTransport,
 	TelemetryStore,
 	TwilioSmsTransport,
 	chatNotifiersFromEnv,
@@ -34,7 +32,6 @@ import {
 	contentDomain,
 	r2,
 	siteCookieSecret,
-	smtp,
 	twilio,
 	webhookUrl,
 	webhookSecret,
@@ -43,6 +40,7 @@ import {
 import { db, sqlite } from './db';
 import { platformVersion } from './version';
 import { pushNotifier } from './push';
+import { platformMail } from './platform-mail';
 import { updateSource } from './self-update';
 
 /**
@@ -78,7 +76,8 @@ const objectStore =
 					)
 				: new LocalObjectStore(`${dataDir}/objects`, platformOrigin, objectStoreSecret);
 
-const emailTransport = smtp ? new SmtpEmailTransport(smtp) : new ConsoleEmailTransport();
+// Yoal Email when a mail node can take it, else the SMTP relay (D238); attached to the core below.
+const emailTransport = platformMail;
 const notifiers: Notifier[] = [];
 if (alertEmail) notifiers.push(new EmailNotifier(emailTransport, alertEmail));
 if (webhookUrl) notifiers.push(webhookNotifierFor(webhookUrl, { secret: webhookSecret }));
@@ -130,6 +129,8 @@ export const core = createCore({
 		features
 	})
 });
+
+platformMail.attach(core.email);
 
 export { objectStore };
 

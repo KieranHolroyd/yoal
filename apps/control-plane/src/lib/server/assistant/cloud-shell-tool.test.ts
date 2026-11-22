@@ -17,7 +17,7 @@ function state(status: 'stopped' | 'starting' | 'running' | null): CloudShellSta
 	return {
 		enabled: true,
 		shell: status
-			? ({ id: 'csh_1', status, node: { id: 'node_1', name: 'edge', online: true } } as CloudShellState['shell'])
+			? ({ id: 'csh_1', status, message: null, node: { id: 'node_1', name: 'edge', online: true } } as CloudShellState['shell'])
 			: null,
 		limits: { diskMb: 1024, memoryMb: 512, idleMinutes: 20 }
 	};
@@ -154,6 +154,17 @@ describe('cloud shell tool', () => {
 		let clock = 0;
 		const run = { ...deps(fake.console, ['stopped', 'starting']), now: () => (clock += 30_000) };
 		await expect(runCloudShellCommand(principal, { command: 'true', timeoutSeconds: 30 }, run)).rejects.toThrow(/still starting/);
+		expect(fake.calls).toEqual([]);
+	});
+
+	test('a start the node gave up on is reported with its reason', async () => {
+		const fake = fakeConsole(() => ({ output: '', code: 0 }));
+		const failed = state('stopped');
+		failed.shell!.message = 'edge could not start your cloud shell: its container exited 5 times in a row.';
+		const run = { ...deps(fake.console, ['stopped']), shells: { state: () => failed, start: () => undefined } };
+		await expect(runCloudShellCommand(principal, { command: 'true', timeoutSeconds: 30 }, run)).rejects.toThrow(
+			/exited 5 times in a row\. Nothing was run/
+		);
 		expect(fake.calls).toEqual([]);
 	});
 

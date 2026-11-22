@@ -3537,6 +3537,8 @@ export const cloudShells = sqliteTable(
 		generation: integer('generation').notNull().default(0),
 		startedAt: integer('started_at'),
 		lastActiveAt: integer('last_active_at'),
+		/** Why the last start failed (0138); cleared by the next start. */
+		message: text('message'),
 		createdAt: integer('created_at').notNull().$defaultFn(now),
 		updatedAt: integer('updated_at').notNull().$defaultFn(now),
 	},

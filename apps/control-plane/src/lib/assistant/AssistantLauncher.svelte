@@ -28,7 +28,10 @@
 
 <div id="yoal-assistant">
 	{#if !assistant.open}
-		<div class="fixed right-4 bottom-4 z-40 md:right-6 md:bottom-6">
+		<!-- Lifted above the cloud shell drawer while it is open (--yoal-cloud-shell-height). -->
+		<div
+			class="fixed right-4 bottom-[calc(1rem+var(--yoal-cloud-shell-height,0px))] z-40 transition-[bottom] duration-200 md:right-6 md:bottom-[calc(1.5rem+var(--yoal-cloud-shell-height,0px))]"
+		>
 			<Button
 				size="lg"
 				class="relative h-11 gap-2 rounded-full px-4 shadow-lg shadow-brand/20"

@@ -12,6 +12,11 @@ export interface EmailMessage {
 	subject: string;
 	text: string;
 	html?: string;
+	/**
+	 * Labels for Yoal Email's message log when the platform sends through the mail node
+	 * (`yoal: <kind>`); an SMTP relay ignores them.
+	 */
+	tags?: Record<string, string>;
 }
 
 /** SES SMTP in v1 (D22); the interface keeps webhooks and future transports symmetric. */

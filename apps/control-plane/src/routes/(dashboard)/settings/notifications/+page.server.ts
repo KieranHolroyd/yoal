@@ -1,6 +1,7 @@
 import { fail } from '@sveltejs/kit';
 import { PLATFORM_CONFIG_SECTIONS, parseSmsRecipients } from '@yoal/contracts';
 import { core } from '#lib/server/core.js';
+import { platformMail } from '#lib/server/platform-mail.js';
 import {
 	currentSection,
 	testSms,
@@ -8,7 +9,13 @@ import {
 	testTwilio,
 	testWebhook
 } from '#lib/server/platform-config.js';
-import { formBoolean, formRawString, formString } from '../../_lib/errors.js';
+import {
+	failStatus,
+	formBoolean,
+	formRawString,
+	formString,
+	toFormFailure
+} from '../../_lib/errors.js';
 import {
 	collect,
 	configState,
@@ -25,6 +32,9 @@ export const load: PageServerLoad = ({ locals }) => {
 	return {
 		...configState(),
 		email: currentSection('email'),
+		/** Where platform mail goes: Yoal Email from a chosen domain, or the SMTP relay (D238). */
+		platformSender: core.email.platformSenderView(locals.principal!),
+		canChooseSender: core.ctx.platformIam.canAdminister(locals.principal!),
 		sms: currentSection('sms'),
 		alerts: currentSection('alerts'),
 		/** Discord, Slack, Telegram, ntfy (see _chat.server.ts). */
@@ -166,23 +176,66 @@ export const actions: Actions = {
 			'Removing the SMTP settings.'
 		),
 
+	savePlatformSender: async ({ request, locals }) => {
+		const principal = requireOwnerPage(locals);
+		const data = await request.formData();
+		try {
+			const view = core.email.setPlatformSender(principal, formString(data, 'sender'));
+			return {
+				success:
+					view.route.via === 'mail'
+						? `Platform mail now goes through Yoal Email from ${view.route.from}.`
+						: 'Platform mail now goes through the SMTP relay.'
+			};
+		} catch (error) {
+			return fail(failStatus(error), toFormFailure(error));
+		}
+	},
+
+	/** Sends the way real platform mail goes right now: Yoal Email, else the SMTP relay (D238). */
 	testEmail: async ({ locals }) => {
 		requireOwnerPage(locals);
 		const to = locals.user?.email;
-		if (!process.env.YOAL_SMTP_HOST) return fail(409, { message: 'Email is not configured yet.' });
 		if (!to) return fail(400, { message: 'Your account has no email address.' });
-		const result = await testSmtp(
-			smtpOptions({
-				YOAL_SMTP_HOST: process.env.YOAL_SMTP_HOST,
-				YOAL_SMTP_PORT: process.env.YOAL_SMTP_PORT ?? '587',
-				YOAL_SMTP_USER: process.env.YOAL_SMTP_USER ?? '',
-				YOAL_SMTP_FROM: process.env.YOAL_SMTP_FROM ?? '',
-				YOAL_SMTP_SECURE: process.env.YOAL_SMTP_SECURE ?? ''
-			}),
-			to
-		);
-		if (!result.ok) return fail(502, { message: `Test email failed: ${result.error}` });
-		return { success: `Test email sent to ${to}.` };
+		const viaMail = core.email.platformMailRoute() !== null;
+		if (!viaMail && !process.env.YOAL_SMTP_HOST)
+			return fail(409, { message: 'Email is not configured yet.' });
+		if (!viaMail) {
+			const result = await testSmtp(
+				smtpOptions({
+					YOAL_SMTP_HOST: process.env.YOAL_SMTP_HOST!,
+					YOAL_SMTP_PORT: process.env.YOAL_SMTP_PORT ?? '587',
+					YOAL_SMTP_USER: process.env.YOAL_SMTP_USER ?? '',
+					YOAL_SMTP_FROM: process.env.YOAL_SMTP_FROM ?? '',
+					YOAL_SMTP_SECURE: process.env.YOAL_SMTP_SECURE ?? ''
+				}),
+				to
+			);
+			if (!result.ok) return fail(502, { message: `Test email failed: ${result.error}` });
+			return { success: `Test email sent to ${to} through the SMTP relay.` };
+		}
+		try {
+			const delivery = await platformMail.deliver({
+				to,
+				subject: 'Yoal test email',
+				text: `This is a test of Yoal's platform mail, sent by ${to}. Sign-in links, invitations and email alerts arrive the same way.`,
+				tags: { yoal: 'platform-test' }
+			});
+			if (delivery.via === 'mail')
+				return {
+					success: `Test email queued on the mail node from ${delivery.from} to ${to}. It may take a minute to arrive.`
+				};
+			const reason = delivery.fallbackReason ?? 'unavailable';
+			if (!process.env.YOAL_SMTP_HOST)
+				return fail(502, {
+					message: `Yoal Email couldn't take the test (${reason}) and there is no SMTP relay, so it was only written to the server log.`
+				});
+			return {
+				success: `Yoal Email couldn't take it (${reason}), so the test went to ${to} through the SMTP relay.`
+			};
+		} catch (error) {
+			return fail(502, { message: `Test email failed: ${(error as Error).message}` });
+		}
 	},
 
 	saveSms: async ({ request, locals }) => {
@@ -254,7 +307,7 @@ export const actions: Actions = {
 			delete set.YOAL_ALERT_WEBHOOK_SECRET;
 			if (process.env.YOAL_ALERT_WEBHOOK_SECRET) unset.push('YOAL_ALERT_WEBHOOK_SECRET');
 		}
-		if (set.YOAL_ALERT_EMAIL && !process.env.YOAL_SMTP_HOST)
+		if (set.YOAL_ALERT_EMAIL && !process.env.YOAL_SMTP_HOST && !core.email.platformMailRoute())
 			return fail(400, {
 				message: 'Set up outbound email first; alert emails are sent through it.',
 				fieldErrors: { email: 'Email is not configured.' }

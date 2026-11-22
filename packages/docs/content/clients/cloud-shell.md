@@ -10,7 +10,11 @@ The cloud shell is your own terminal in the browser. It runs in a small containe
 
 ## Open it
 
-Go to **Infrastructure → Cloud shell**. Opening the page starts your shell if it is not running. The first start picks a server and can take a minute while that server downloads the shell's image. After that, a start takes a few seconds.
+Click **Cloud shell** at the top right of any dashboard page, or press **Ctrl+`**. The terminal opens in a drawer at the bottom of the page and starts your shell if it is not running. The first start picks a server and can take a minute while that server downloads the shell's image. After that, a start takes a few seconds.
+
+The drawer stays connected while you move between pages. Drag its top edge to make it taller or shorter, or double-click the edge to maximise it. Hiding it (the arrow at its top right, or **Ctrl+`** again) keeps the shell running. **New session** closes the current terminal session and opens a fresh one in the same shell; **Stop** stops the shell. The **⋯** menu has **Reset disk** and a link to the details page (`/cloud-shell`), which shows the server, the disk and the limits.
+
+If a start fails, the drawer says why and offers **Try again**. It does not retry on its own.
 
 When the terminal shows a prompt, try:
 

@@ -30,7 +30,6 @@
 	import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
 	import ShipWheelIcon from '@lucide/svelte/icons/ship-wheel';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
-	import SquareTerminalIcon from '@lucide/svelte/icons/square-terminal';
 	import UserRoundIcon from '@lucide/svelte/icons/user-round';
 	import WorkflowIcon from '@lucide/svelte/icons/workflow';
 	import ZapIcon from '@lucide/svelte/icons/zap';
@@ -54,6 +53,8 @@
 	import { pane as slidePane } from '#lib/nav/pane-transition.js';
 	import { provideSubnavLocal } from '#lib/nav/subnav-local.svelte.js';
 	import SubnavPane from '#lib/nav/SubnavPane.svelte';
+	import CloudShellButton from './_lib/CloudShellButton.svelte';
+	import CloudShellDrawer from './_lib/CloudShellDrawer.svelte';
 	import { subnavFor } from './_lib/subnav.js';
 
 	let { data, children }: LayoutProps = $props();
@@ -94,7 +95,6 @@
 			| '/(dashboard)/pipelines'
 			| '/(dashboard)/registry'
 			| '/(dashboard)/nodes'
-			| '/(dashboard)/cloud-shell'
 			| '/(dashboard)/audit'
 			| '/(dashboard)/settings'
 			| '/(dashboard)/docs';
@@ -203,14 +203,7 @@
 			items: [
 				{ label: 'Nodes', href: '/(dashboard)/nodes', path: '/nodes', icon: ServerIcon },
 				{ label: 'Topology', href: '/(dashboard)/topology', path: '/topology', icon: NetworkIcon },
-				{ label: 'Fleet', href: '/(dashboard)/fleet', path: '/fleet', icon: ActivityIcon },
-				{
-					label: 'Cloud shell',
-					href: '/(dashboard)/cloud-shell',
-					path: '/cloud-shell',
-					icon: SquareTerminalIcon,
-					feature: 'cloudShell'
-				}
+				{ label: 'Fleet', href: '/(dashboard)/fleet', path: '/fleet', icon: ActivityIcon }
 			]
 		},
 		{
@@ -296,6 +289,8 @@
 		}
 		const top = nav.find((item) => item.path === `/${segments[0] ?? ''}`);
 		const out: { label: string; route?: CrumbRoute; mono?: boolean }[] = [];
+		// The cloud shell lives in the header and its drawer, not the sidebar.
+		if (segments[0] === 'cloud-shell') return [{ label: 'Cloud shell' }];
 		if (top) out.push({ label: top.label, route: segments.length > 1 ? top.href : undefined });
 		// Registry repositories are paths (`org/name`): one crumb, not one per segment.
 		if (top?.path === '/registry' && segments.length > 1) {
@@ -597,6 +592,9 @@
 				>
 					<GlobeIcon />*.{data.contentDomain}
 				</Badge>
+				{#if data.features.cloudShell}
+					<CloudShellButton />
+				{/if}
 			</div>
 		</header>
 
@@ -665,6 +663,11 @@
 				<span class="font-mono">{data.platform.origin}</span>
 			</div>
 		</footer>
+
+		<!-- The cloud shell (D236) docks at the bottom of every page and survives navigation. -->
+		{#if data.features.cloudShell}
+			<CloudShellDrawer />
+		{/if}
 	</Sidebar.Inset>
 
 	{#if data.assistant.enabled}
