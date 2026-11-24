@@ -308,7 +308,7 @@ describe('HA Wave 1 migrations 0118–0121 (docs/build-plan/HA-WAVE-1.md)', () =
 			 VALUES ('bt_local', 'org_1', 'local-main', 'local', '/var/lib/yoal/backups', 1, 1)`,
 		);
 
-		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql', '0123_ingress_drift.sql', '0124_shared_certificates.sql', '0125_control_epoch.sql', '0126_replica_durability.sql', '0127_replica_rewind.sql', '0128_sync_switchover_rewind.sql', '0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql', '0138_cloud_shell_message.sql', '0139_cloud_shell_settings.sql', '0140_overlay_mesh.sql']);
+		expect(migrate(sqlite)).toEqual([...wave1, '0122_ingress_certificates.sql', '0123_ingress_drift.sql', '0124_shared_certificates.sql', '0125_control_epoch.sql', '0126_replica_durability.sql', '0127_replica_rewind.sql', '0128_sync_switchover_rewind.sql', '0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql', '0138_cloud_shell_message.sql', '0139_cloud_shell_settings.sql', '0140_overlay_mesh.sql', '0141_database_public_access.sql']);
 
 		const rows = sqlite
 			.query<{ id: string; kind: string; store_kind: string | null; store_options_json: string; object_lock: number; immutable_retention_days: number | null; secret_sealed: string | null }, []>(
@@ -455,7 +455,7 @@ describe('HA Wave 4 migrations 0129–0130 (docs/build-plan/HA-WAVE-4.md)', () =
 			 VALUES ('dbf_old', 'db_old', 'nod_1', 'nod_2', 1, 'completed', 1)`,
 		);
 
-		expect(migrate(sqlite)).toEqual(['0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql', '0138_cloud_shell_message.sql', '0139_cloud_shell_settings.sql', '0140_overlay_mesh.sql']);
+		expect(migrate(sqlite)).toEqual(['0129_db_failover_policy.sql', '0130_drills_slo.sql', '0131_node_drills.sql', '0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql', '0138_cloud_shell_message.sql', '0139_cloud_shell_settings.sql', '0140_overlay_mesh.sql', '0141_database_public_access.sql']);
 
 		expect(
 			sqlite
@@ -535,7 +535,7 @@ describe('HA Wave 4 migrations 0129–0130 (docs/build-plan/HA-WAVE-4.md)', () =
 		endpoint('n4', 'db2', 'primary', 'n3', 21000);
 		workload('w_direct', 'p_direct', 'container', 'n3');
 		attach('p_direct', 'db2');
-		expect(migrate(sqlite)).toEqual(['0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql', '0138_cloud_shell_message.sql', '0139_cloud_shell_settings.sql', '0140_overlay_mesh.sql']);
+		expect(migrate(sqlite)).toEqual(['0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql', '0138_cloud_shell_message.sql', '0139_cloud_shell_settings.sql', '0140_overlay_mesh.sql', '0141_database_public_access.sql']);
 		const marked = sqlite
 			.query<{ id: string }, []>('SELECT id FROM workloads WHERE endpoints_gateway = 1 ORDER BY id')
 			.all()
@@ -667,7 +667,7 @@ describe('HA Wave 5 migration 0132 (docs/build-plan/HA-WAVE-5.md)', () => {
 		const databaseBefore = sqlite.query<Record<string, unknown>, []>('SELECT * FROM databases').all();
 		const controlBefore = sqlite.query<Record<string, unknown>, []>('SELECT * FROM control_state').all();
 
-		expect(migrate(sqlite)).toEqual(['0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql', '0138_cloud_shell_message.sql', '0139_cloud_shell_settings.sql', '0140_overlay_mesh.sql']);
+		expect(migrate(sqlite)).toEqual(['0132_regions.sql', '0133_attachment_gateway_marker.sql', '0134_ha_drills.sql', '0135_join_token_roles.sql', '0136_region_promotion_break_glass.sql', '0137_cloud_shells.sql', '0138_cloud_shell_message.sql', '0139_cloud_shell_settings.sql', '0140_overlay_mesh.sql', '0141_database_public_access.sql']);
 
 		const after = sqlite.query<Record<string, unknown>, []>('SELECT * FROM nodes ORDER BY id').all();
 		expect(after).toEqual(before.map((row) => ({ ...row, region: 'default' })));

@@ -43,6 +43,7 @@ import type { CoreContext } from './context.ts';
 import type { DatabaseRow } from './databases.ts';
 import type { EndpointService } from './endpoints.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
+import { refuseIfMcpDenied } from './iam/mcp-gate.ts';
 import { buildSystemPrincipal } from './iam/system.ts';
 import { parseJson } from './util.ts';
 
@@ -81,8 +82,8 @@ export class DatabasePublicAccessService {
 	enable(principal: Principal, name: string, raw: unknown): DatabasePublicAccessView {
 		const db = this.ctx.databases.requireRow(principal, name);
 		this.ctx.databases.requireDatabasePermission(principal, 'database:expose', db);
-		if (principal.kind === 'mcp')
-			throw new CoreError('forbidden', 'Public database access is never changed over MCP. Use the dashboard or the CLI.', 403);
+		// The catalog keeps `database:expose` off MCP (D241); refuse it even if a token's grant carries it.
+		refuseIfMcpDenied(principal, 'database:expose', 'Public database access is never changed over MCP. Use the dashboard or the CLI.');
 		if (!featureEnabled(this.ctx.config, 'DB_PUBLIC_ACCESS'))
 			throw new CoreError('feature_disabled', 'Public database access is turned off on this install (YOAL_FEATURE_DB_PUBLIC_ACCESS).', 403);
 		const protocol = publicAccessProtocol(db.engine);
