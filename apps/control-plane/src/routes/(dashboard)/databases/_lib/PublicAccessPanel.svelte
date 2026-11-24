@@ -18,6 +18,7 @@
 	import * as NativeSelect from '#lib/components/ui/native-select/index.js';
 	import { Spinner } from '#lib/components/ui/spinner/index.js';
 	import * as Table from '#lib/components/ui/table/index.js';
+	import * as ToggleGroup from '#lib/components/ui/toggle-group/index.js';
 	import Panel from '../../_lib/Panel.svelte';
 	import CopyValue from '../../_lib/service/CopyValue.svelte';
 	import { formatDateTime, formatRelative } from '../../_lib/format.js';
@@ -101,9 +102,12 @@
 	async function save() {
 		saving = true;
 		const config = {
-			rules: rules
-				.filter((rule) => rule.cidr.trim())
-				.map((rule) => ({ cidr: rule.cidr.trim(), label: rule.label.trim() })),
+			// Everyone replaces the list, so leftover rows can't block the save.
+			rules: anywhere
+				? []
+				: rules
+						.filter((rule) => rule.cidr.trim())
+						.map((rule) => ({ cidr: rule.cidr.trim(), label: rule.label.trim() })),
 			allowAnywhere: anywhere,
 			credentials: postgres ? chosen : [],
 			expiresAt: expiresAt(),
@@ -171,7 +175,7 @@
 					<dt>Sources</dt>
 					<dd class="text-xs">
 						{#if access.allowAnywhere}
-							<span class="text-warning">Any address</span>
+							<span class="text-warning">Everyone (any address)</span>
 						{:else}
 							{#each access.rules as rule (rule.cidr)}
 								<div>
@@ -223,55 +227,69 @@
 				<div class="space-y-3 rounded-lg border bg-muted/30 p-3">
 					<div class="space-y-2">
 						<p class="text-sm font-medium">Allowed sources</p>
-						{#each rules as rule, index (index)}
-							{@const hint = cidrHint(rule.cidr)}
-							<div class="flex flex-wrap items-start gap-2">
-								<div class="min-w-0 flex-1 space-y-1">
-									<Input
-										bind:value={rule.cidr}
-										placeholder="203.0.113.0/24"
-										aria-label="CIDR"
-										class="h-8 font-mono"
-										disabled={anywhere}
-									/>
-									{#if hint}<p class="text-[11px] text-destructive">{hint}</p>{/if}
-								</div>
-								<Input
-									bind:value={rule.label}
-									placeholder="Label (office, CI…)"
-									aria-label="Label"
-									class="h-8 w-44"
-									maxlength={80}
-									disabled={anywhere}
-								/>
-								<Button
-									variant="ghost"
-									size="icon-sm"
-									aria-label="Remove source"
-									onclick={() => (rules = rules.filter((_, at) => at !== index))}
-								>
-									<TrashIcon />
-								</Button>
-							</div>
-						{/each}
-						<Button
+						<ToggleGroup.Root
+							type="single"
 							variant="outline"
-							size="xs"
-							onclick={() => (rules = [...rules, { cidr: '', label: '' }])}
-							disabled={anywhere || rules.length >= 50}
+							size="sm"
+							value={anywhere ? 'everyone' : 'listed'}
+							onValueChange={(value) => value && (anywhere = value === 'everyone')}
+							aria-label="Allowed sources"
 						>
-							<PlusIcon class="size-3.5" />Add source
-						</Button>
-						{#if access.anywhereAvailable}
-							<label class="flex items-center gap-2 text-sm">
-								<Checkbox bind:checked={anywhere} />Allow any address
-							</label>
-							{#if anywhere}
-								<Notice tone="warning">
-									Anyone on the internet can reach the login prompt. TLS, the role list and the
-									failed-login ban still apply, but a leaked password is then enough to get in.
-								</Notice>
+							<ToggleGroup.Item value="listed">Specific addresses</ToggleGroup.Item>
+							<ToggleGroup.Item value="everyone" disabled={!access.anywhereAvailable && !anywhere}
+								>Everyone</ToggleGroup.Item
+							>
+						</ToggleGroup.Root>
+						{#if anywhere}
+							<Notice tone="warning">
+								No address check: any IPv4 or IPv6 address can reach the login prompt. TLS, the role
+								list and the failed-login ban still apply, but a leaked password is then enough to get
+								in.
+							</Notice>
+						{:else}
+							{#if !access.anywhereAvailable}
+								<p class="text-[11px] text-muted-foreground">
+									Everyone is off on this install. An operator turns it on with
+									<span class="font-mono">YOAL_FEATURE_DB_PUBLIC_ANYWHERE=1</span>.
+								</p>
 							{/if}
+							{#each rules as rule, index (index)}
+								{@const hint = cidrHint(rule.cidr)}
+								<div class="flex flex-wrap items-start gap-2">
+									<div class="min-w-0 flex-1 space-y-1">
+										<Input
+											bind:value={rule.cidr}
+											placeholder="203.0.113.0/24"
+											aria-label="CIDR"
+											class="h-8 font-mono"
+										/>
+										{#if hint}<p class="text-[11px] text-destructive">{hint}</p>{/if}
+									</div>
+									<Input
+										bind:value={rule.label}
+										placeholder="Label (office, CI…)"
+										aria-label="Label"
+										class="h-8 w-44"
+										maxlength={80}
+									/>
+									<Button
+										variant="ghost"
+										size="icon-sm"
+										aria-label="Remove source"
+										onclick={() => (rules = rules.filter((_, at) => at !== index))}
+									>
+										<TrashIcon />
+									</Button>
+								</div>
+							{/each}
+							<Button
+								variant="outline"
+								size="xs"
+								onclick={() => (rules = [...rules, { cidr: '', label: '' }])}
+								disabled={rules.length >= 50}
+							>
+								<PlusIcon class="size-3.5" />Add source
+							</Button>
 						{/if}
 					</div>
 

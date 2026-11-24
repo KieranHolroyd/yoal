@@ -178,7 +178,7 @@ Saving the configuration replaces the previous one. Turning access on, or changi
 
 - Ranges must be reachable from the internet. Private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), carrier-grade NAT, loopback, link-local, multicast and reserved ranges are refused, in both IPv4 and IPv6.
 - A range can't be broader than `/8` (IPv4) or `/32` (IPv6), and its host bits must be zero: write `203.0.113.0/24`, not `203.0.113.7/24`.
-- To admit any address, an operator must first set `YOAL_FEATURE_DB_PUBLIC_ANYWHERE=1`. You then tick **Allow any address**. TLS, the role list and the failed-login ban still apply, but a leaked password is then enough to get in. Use it only when your client has no fixed addresses.
+- To skip the address check, choose **Everyone** under **Allowed sources** instead of **Specific addresses**. It admits any IPv4 or IPv6 address, and it stays greyed out until an operator sets `YOAL_FEATURE_DB_PUBLIC_ANYWHERE=1`. TLS, the role list and the failed-login ban still apply, but a leaked password is then enough to get in. Use it only when your client has no fixed addresses.
 
 ### What the proxy enforces
 
