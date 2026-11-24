@@ -90,14 +90,20 @@
 	/** Set by Create function when the attached bundle failed validation. */
 	const rejected = $derived(page.url.searchParams.get('rejected'));
 	const view = $derived(data.view);
+	/**
+	 * The address bar's URL. `setTab` navigates shallowly, which only moves `page.shallow.url`;
+	 * `page.url` keeps the URL of the last real load, so reading it after an action's
+	 * `invalidateAll` would snap the tab back to the default.
+	 */
+	const currentUrl = $derived(page.shallow?.url ?? page.url);
 	/** Follows `?tab=` on navigation (back/forward, plain links); `setTab` overrides it in place. */
 	let tab = $derived<FunctionTab>(
-		readTab(page.url.searchParams.get('tab'), FUNCTION_TABS, FUNCTION_DEFAULT_TAB)
+		readTab(currentUrl.searchParams.get('tab'), FUNCTION_TABS, FUNCTION_DEFAULT_TAB)
 	);
 
 	function setTab(next: FunctionTab) {
 		tab = next;
-		const url = new URL(page.url.href);
+		const url = new URL(currentUrl.href);
 		if (next === FUNCTION_DEFAULT_TAB) url.searchParams.delete('tab');
 		else url.searchParams.set('tab', next);
 		// eslint-disable-next-line svelte/no-navigation-without-resolve -- same route, only `?tab` changes

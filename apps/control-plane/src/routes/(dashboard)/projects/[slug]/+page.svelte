@@ -112,8 +112,14 @@
 
 	type Deployment = (typeof data.deployments)[number];
 
+	/**
+	 * The address bar's URL. `setTab` navigates shallowly, which only moves `page.shallow.url`;
+	 * `page.url` keeps the URL of the last real load, so reading it after an action's
+	 * `invalidateAll` would snap the tab back to the default.
+	 */
+	const currentUrl = $derived(page.shallow?.url ?? page.url);
 	/** Follows `?tab=` on navigation (back/forward, plain links); `setTab` overrides it in place. */
-	let tab = $derived<ProjectTab>(readProjectTab(page.url.searchParams.get('tab')));
+	let tab = $derived<ProjectTab>(readProjectTab(currentUrl.searchParams.get('tab')));
 	let logSource = $state<'runtime' | 'build'>(
 		page.url.searchParams.get('logSource') === 'build' ? 'build' : 'runtime'
 	);
@@ -215,8 +221,8 @@
 	/** Switch sections in place, keeping `?tab=` deep-linkable. */
 	function setTab(next: ProjectTab) {
 		tab = next;
-		if (page.url.searchParams.get('tab') === next) return;
-		const url = new URL(page.url.href);
+		if (currentUrl.searchParams.get('tab') === next) return;
+		const url = new URL(currentUrl.href);
 		url.searchParams.set('tab', next);
 		// eslint-disable-next-line svelte/no-navigation-without-resolve -- same route, only `?tab` changes
 		void goto(url, { shallow: true, replace: true });
