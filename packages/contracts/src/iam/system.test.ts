@@ -7,7 +7,7 @@ describe('system principals', () => {
 	 * Internal actors that only record audit rows and call no permissioned service. Their empty
 	 * permission list is the point: granting one would be a lie about what they can do.
 	 */
-	const AUDIT_ONLY: ReadonlySet<string> = new Set(['system:usage-analytics', 'system:whats-new', 'system:cloud-shell']);
+	const AUDIT_ONLY: ReadonlySet<string> = new Set(['system:usage-analytics', 'system:whats-new', 'system:cloud-shell', 'system:public-access']);
 
 	test('every spec has a permission list from the catalog', () => {
 		for (const name of Object.keys(systemPrincipals) as Array<keyof typeof systemPrincipals>) {

@@ -46,6 +46,7 @@ export * from './cron.ts';
 export * from './function.ts';
 export * from './env.ts';
 export * from './database.ts';
+export * from './database-public-access.ts';
 export * from './database-replica.ts';
 export * from './database-replica-input.ts';
 export * from './database-replication.ts';

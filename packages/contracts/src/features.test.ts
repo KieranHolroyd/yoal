@@ -26,6 +26,8 @@ describe('feature registry', () => {
 			'CLOUD_SHELL',
 			'CONTAINER_CONSOLE',
 			'DB_TLS',
+			'DB_PUBLIC_ACCESS',
+			'DB_PUBLIC_ANYWHERE',
 			'ORG_NETWORKS',
 			'MULTI_NODE_REPLICAS',
 			'WORKLOAD_MOVES',
@@ -124,7 +126,8 @@ describe('feature registry', () => {
 			'PITR_REWIND',
 			'SLO_OBJECTS',
 			'EXTERNAL_PROBER',
-			'REGIONS'
+			'REGIONS',
+			'DB_PUBLIC_ANYWHERE'
 		]);
 		expect(FEATURE_FLAGS.ENDPOINTS_GATEWAY.description).toContain('H24');
 		expect(FEATURE_FLAGS.RELEASE_PHASE.description).toContain('H25');

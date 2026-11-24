@@ -1031,3 +1031,57 @@ describe('ingress health, lame duck, PROXY and trusted proxies (HA-PLAN H19)', (
 		expect(JSON.stringify(value)).not.toContain('/.well-known/yoal/health');
 	});
 });
+
+describe('public database certificates (D241)', () => {
+	const listener = (host: string, port: number) => ({
+		id: `db_${port}`,
+		port,
+		protocol: 'postgres' as const,
+		host,
+		certificateNames: [host, '*.db.example.com'],
+		allow: ['203.0.113.0/24'],
+		users: ['app'],
+		upstreamPort: 15_432,
+		maxConnections: 20,
+		expiresAt: null,
+		version: 1,
+	});
+	const withListeners = () => ({ ...state(), publicDatabases: [listener('app-org1.db.example.com', 24_000), listener('cache-org1.db.example.com', 24_001)] });
+	const build = (tls: { email: string; cloudflareApiToken?: string | null; subjects: string[] }) =>
+		buildCaddyConfig({
+			state: withListeners(),
+			listen: [':8080'],
+			dataDir: '/data',
+			agentSocket: '/run/yoal-agent/agent.sock',
+			caddyAdminSocket: '/var/lib/caddy/admin.sock',
+			tls: tls as never,
+		});
+	const tlsApp = (value: Json) => (value.apps as Json).tls as Json;
+
+	test('with DNS-01, one *.db wildcard is automated', () => {
+		const tls = tlsApp(build({ email: 'ops@example.com', cloudflareApiToken: 'cf-token', subjects: ['*.example.com', 'example.com'] }));
+		expect((tls.certificates as Json).automate).toContain('*.db.example.com');
+		expect((tls.certificates as Json).automate).not.toContain('app-org1.db.example.com');
+		const policy = ((tls.automation as Json).policies as Json[]).find((item) => (item.subjects as string[]).includes('*.db.example.com'));
+		expect(JSON.stringify(policy)).toContain('cloudflare');
+	});
+
+	test('without DNS-01, each host gets its own certificate over HTTP-01', () => {
+		const tls = tlsApp(build({ email: 'ops@example.com', cloudflareApiToken: null, subjects: ['example.com'] }));
+		const automate = (tls.certificates as Json).automate as string[];
+		expect(automate).toEqual(expect.arrayContaining(['app-org1.db.example.com', 'cache-org1.db.example.com']));
+		expect(automate).not.toContain('*.db.example.com');
+	});
+
+	test('nothing is added without listeners', () => {
+		const plain = buildCaddyConfig({
+			state: state(),
+			listen: [':8080'],
+			dataDir: '/data',
+			agentSocket: '/run/yoal-agent/agent.sock',
+			caddyAdminSocket: '/var/lib/caddy/admin.sock',
+			tls: { email: 'ops@example.com', cloudflareApiToken: 'cf-token', subjects: ['*.example.com'] } as never,
+		});
+		expect(JSON.stringify(plain)).not.toContain('.db.example.com');
+	});
+});

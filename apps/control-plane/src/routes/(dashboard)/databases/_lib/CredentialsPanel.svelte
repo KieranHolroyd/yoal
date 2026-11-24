@@ -70,7 +70,8 @@
 	let createOpen = $state(false);
 	let createRole = $state<string>('app');
 
-	let revealed = $state<DatabaseCredentialReveal | null>(null);
+	// `publicUrl` arrives while public access lets this role in (D241).
+	let revealed = $state<(DatabaseCredentialReveal & { publicUrl?: string | null }) | null>(null);
 	let revealingId = $state<string | null>(null);
 
 	async function reveal(credential: DatabaseCredentialView) {
@@ -162,6 +163,17 @@
 				<dd><CopyValue value={revealed.password} label="password" secret /></dd>
 				<dt>URL · process apps</dt>
 				<dd><CopyValue value={url.value} label="URL" display={url.display} secret /></dd>
+				{#if revealed.publicUrl}
+					<dt>URL · outside Yoal</dt>
+					<dd>
+						<CopyValue
+							value={revealed.publicUrl}
+							label="public URL"
+							display={revealed.publicUrl.replace(`:${encodeURIComponent(revealed.password)}@`, ':••••••••@')}
+							secret
+						/>
+					</dd>
+				{/if}
 			</DetailList>
 			<p class="mt-2 text-xs text-muted-foreground">
 				This read was audited. Attached apps get the value as env; you rarely need to copy it.

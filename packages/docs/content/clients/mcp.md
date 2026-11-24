@@ -179,7 +179,7 @@ You don't need to name tools. Ask in plain language and the agent picks them. Th
 
 ## Tool catalogue
 
-There are 236 tools. The permission column lists every scope a call checks, and a note in parentheses says when a second one applies. Tools that ask you to confirm are marked as such. Some tools appear only while their feature is on: Email, Jobs, point-in-time recovery, Blueprints, the container console and Kubernetes are on by default, and SLOs are off by default (see [configuration](/self-hosting/configuration)).
+There are 237 tools. The permission column lists every scope a call checks, and a note in parentheses says when a second one applies. Tools that ask you to confirm are marked as such. Some tools appear only while their feature is on: Email, Jobs, point-in-time recovery, Blueprints, the container console and Kubernetes are on by default, and SLOs are off by default (see [configuration](/self-hosting/configuration)).
 
 ### Documentation
 
@@ -305,6 +305,7 @@ Creating, editing and deleting a job also needs `deployment:create`, and reading
 | `list_databases` | List managed databases with status, node, size and attachments | `database:read` |
 | `get_database` | Show one database: limits, attachments, largest tables and last-hour health | `database:read` |
 | `get_database_logs` | Show recent container log lines. Pass a cursor to poll for new ones | `database:read`, `logs:read` |
+| `get_database_public_access` | Show whether a database is reachable from outside Yoal: status, host and port, allowed CIDRs, Postgres roles, expiry, per-ingress state and recent refusals. Read-only: enabling, widening or turning it off is dashboard and CLI only | `database:read` |
 | `create_database` | Create a PostgreSQL, MySQL, MariaDB, MongoDB, Valkey, Redis or ClickHouse database, optionally attached to a project | `database:create` (and `project:update` with `project`) |
 | `attach_database` | Attach a database to a project, optionally connecting as a named credential. The app restarts with its connection variables | `database:update`, `project:update` |
 | `detach_database` | Detach a database from a project. The database and its data are untouched | `database:update`, `project:update` |

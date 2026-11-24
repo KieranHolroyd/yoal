@@ -38,6 +38,15 @@ const tones: Record<string, Tone> = {
 	promoting: 'warning',
 	repointing: 'warning',
 	completed: 'success',
+	// Public database access (D241): the database's status and each ingress listener.
+	degraded: 'warning',
+	unsupported: 'neutral',
+	listening: 'success',
+	'firewall-pending': 'info',
+	'no-certificate': 'warning',
+	'bind-failed': 'danger',
+	unreachable: 'danger',
+	'helper-outdated': 'warning',
 	production: 'brand'
 };
 

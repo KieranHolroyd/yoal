@@ -52,6 +52,7 @@ import type { TemplateService } from './templates.ts';
 import type { AlertService } from './alerts.ts';
 import type { TopologyService } from './topology.ts';
 import type { ServiceEndpointService } from './service-endpoints.ts';
+import type { DatabasePublicAccessService } from './database-public-access.ts';
 import type { NodeCaService } from './node-ca.ts';
 import type { ShareService } from './shares.ts';
 import type { RegistryCredentialService } from './registry-credentials.ts';
@@ -197,6 +198,8 @@ export interface CoreContext {
 	registry: RegistryService;
 	/** Managed database replicas (CLUSTERING §9.2, C7). */
 	databaseReplicas: DatabaseReplicaService;
+	/** Public database access from outside Yoal (docs/DATABASES.md §19, D241). */
+	databasePublicAccess: DatabasePublicAccessService;
 	/** Bucket replication (CLUSTERING §10.2, C9). */
 	storageReplication: StorageReplicationService;
 	/** Ingress HA status (CLUSTERING §7, C5). */

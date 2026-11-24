@@ -81,6 +81,7 @@ import type {
 	KubernetesGenerateResult,
 } from './kubernetes-write.ts';
 import { readGenerateEvents } from './kubernetes-write.ts';
+import type { DatabasePublicAccessInput, DatabasePublicAccessView } from './commands/db-public-access.ts';
 import { readSse } from './sse.ts';
 import type { EventDeliveryView, EventRuleCreateInput, EventRuleUpdateInput, EventRuleView } from './events.ts';
 import type { AuditEntryView, LogDrainCreateInput, LogDrainTestResult, LogDrainUpdateInput, LogDrainView } from './log-drains.ts';
@@ -2784,6 +2785,36 @@ export class ApiClient {
 		if (!credentials || typeof credentials.url !== 'string')
 			throw new CliError('The platform returned an unexpected credentials response.', { code: 'protocol' });
 		return { credentials: credentials as unknown as DatabaseCredentials, raw };
+	}
+
+	// Public access from outside Yoal (docs/DATABASES.md §19, D241). The view carries no secret.
+	private publicAccessPath(name: string): string {
+		return `/api/v1/databases/${encodeURIComponent(name)}/public-access`;
+	}
+
+	private publicAccessView(raw: unknown): DatabasePublicAccessView {
+		const view = asRecord(asRecord(raw)?.publicAccess);
+		if (!view || typeof view.enabled !== 'boolean')
+			throw new CliError('The platform returned an unexpected public access response.', { code: 'protocol' });
+		return view as unknown as DatabasePublicAccessView;
+	}
+
+	async databasePublicAccess(name: string): Promise<{ publicAccess: DatabasePublicAccessView; raw: unknown }> {
+		const raw = await this.request('GET', this.publicAccessPath(name));
+		return { publicAccess: this.publicAccessView(raw), raw };
+	}
+
+	async enableDatabasePublicAccess(
+		name: string,
+		input: DatabasePublicAccessInput,
+	): Promise<{ publicAccess: DatabasePublicAccessView; raw: unknown }> {
+		const raw = await this.request('PUT', this.publicAccessPath(name), { body: input });
+		return { publicAccess: this.publicAccessView(raw), raw };
+	}
+
+	async disableDatabasePublicAccess(name: string): Promise<{ publicAccess: DatabasePublicAccessView; raw: unknown }> {
+		const raw = await this.request('DELETE', this.publicAccessPath(name));
+		return { publicAccess: this.publicAccessView(raw), raw };
 	}
 
 	// Named credentials (docs/DATABASES.md §16): metadata everywhere except the audited reveal.

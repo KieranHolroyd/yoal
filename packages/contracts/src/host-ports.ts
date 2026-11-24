@@ -2,6 +2,7 @@ import { BROKER_PORT_MAX, BROKER_PORT_MIN } from './broker.ts';
 import { CONTAINER_CONSOLE_DEFAULT_PORT } from './container-console.ts';
 import { DATABASE_POOLER_PORT_MAX, DATABASE_POOLER_PORT_MIN, DATABASE_PORT_MAX, DATABASE_PORT_MIN } from './database.ts';
 import { STUDIO_DEFAULT_PORT } from './database-studio.ts';
+import { PUBLIC_DATABASE_PORT_MAX, PUBLIC_DATABASE_PORT_MIN } from './database-public-access.ts';
 import { endpointPortRange, readEndpointPortRange } from './endpoint.ts';
 import { FUNCTION_ANALYTICS_PORT } from './function.ts';
 import { IDENTITY_DEFAULT_PORT } from './identity.ts';
@@ -56,6 +57,7 @@ export const PLATFORM_HOST_PORTS: readonly ReservedPortRange[] = [
 	{ min: STORAGE_PORT_MIN, max: STORAGE_PORT_MAX, owner: 'managed object storage and link tests' },
 	{ min: endpointPortRange.min, max: endpointPortRange.max, owner: 'service endpoints' },
 	{ min: KUBERNETES_API_PORT_MIN, max: KUBERNETES_INGRESS_PORT_MAX, owner: 'Kubernetes clusters' },
+	{ min: PUBLIC_DATABASE_PORT_MIN, max: PUBLIC_DATABASE_PORT_MAX, owner: 'public database access' },
 	{ min: COMPOSE_HOST_PORT_MIN, max: COMPOSE_HOST_PORT_MAX, owner: 'compose service routes' },
 ];
 

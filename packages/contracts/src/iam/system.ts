@@ -36,6 +36,12 @@ export const systemPrincipals = {
 		// records its own audit rows; no org permission is needed for that.
 		permissions: [],
 	},
+	'system:public-access': {
+		name: 'system:public-access',
+		description: 'Turns off database public access whose expiry has passed (D241).',
+		// It updates the row directly and records its own audit row; no org permission is needed.
+		permissions: [],
+	},
 	'system:rollout': {
 		name: 'system:rollout',
 		description: 'Puts the previous release back when a rollout fails.',

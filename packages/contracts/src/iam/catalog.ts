@@ -93,7 +93,8 @@ export const statements = {
 	domain: ['create', 'read', 'delete'],
 	secret: ['create', 'read-metadata', 'update', 'delete'],
 	build: ['create', 'read', 'cancel'],
-	database: ['create', 'read', 'update', 'delete', 'credentials', 'console'],
+	// `expose`: public access from outside Yoal (D241).
+	database: ['create', 'read', 'update', 'delete', 'credentials', 'console', 'expose'],
 	storage: ['create', 'read', 'update', 'delete', 'credentials'],
 	broker: ['create', 'read', 'update', 'delete', 'credentials'],
 	// Managed Kubernetes (docs/KUBERNETES.md): the cluster resource, plus the in-cluster groups a
@@ -226,6 +227,8 @@ const RISK_OVERRIDE: Partial<Record<Permission, Risk>> = {
 	'kubernetes:view': 'read',
 	'kubernetes:edit': 'write',
 	'kubernetes:admin': 'secret',
+	// Opening a database to the internet (D241): step-up like a secret, never over MCP.
+	'database:expose': 'secret',
 };
 
 /** Step-up level, when the risk default isn't right. Ownership changes are `always` (STEP-UP §4). */
@@ -301,6 +304,8 @@ const MCP_DENY: readonly Permission[] = [
 	'audit:export',
 	'org:delete',
 	'org:transfer',
+	// A model never opens a database to the internet (D241, D29).
+	'database:expose',
 ];
 
 /** The Risky actions each permission inherits when nothing more specific is set. */

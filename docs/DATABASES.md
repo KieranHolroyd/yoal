@@ -110,7 +110,8 @@ query path (Prisma uses `url = _POOL_URL`, `directUrl = _URL`).
   in `DatabaseView`, and the URL itself is decrypted only by `GET /databases/:name/public-url`
   (`database:credentials`), which is audited as `database.public-url.reveal`. Setting or clearing
   it needs `database:update` and is audited. It never enters desired state, agent memory, logs,
-  MCP or the audit arguments.
+  MCP or the audit arguments. Yoal's own exposure, with allowlists and TLS, is public access (§19,
+  D241); this secret remains for a proxy or tunnel Yoal does not run.
 - Named credentials (§16) are revealed one at a time by
   `GET /api/v1/databases/:name/credentials/named/:id` (dashboard row menu, `yoal db credentials
   reveal`), gated the same way and audited as `database.credentials.reveal`. Listing, creating,
@@ -709,3 +710,118 @@ Postgres only, `async` only (sync is refused: there is no downgrade path yet), a
   self-fencing (`installAutoPromotion()`, HA-PLAN F1); self-fencing is not built, so it is never
   registered today.
 - Moves and Postgres major upgrades are refused while replicas exist.
+
+## 19. Public access (D241)
+
+Status: **built, 2026-11-24, unit-tested only.** Not yet run on a real ingress (nftables table, Caddy `*.db` issuance, a real client over the internet).
+
+Apps that run outside Yoal (a laptop, a CI runner, a Vercel or Fly app, a BI tool) can reach a
+managed database over the internet through a TLS-terminating proxy that Yoal runs on its ingress
+nodes. It is off for every database until someone with `database:expose` turns it on, and it only
+ever lets in the addresses, and for Postgres the roles, listed on the database. The database itself
+still binds loopback only (D56): the proxy is the agent, not Postgres.
+
+### 19.1 Shape
+
+```
+client ──TLS──▶ <name>-<org8>.db.<contentDomain>:<port>      (DNS-only A record → ingress nodes)
+          │ nftables `inet yoal-public-db`: only the database's CIDRs reach <port>, the rest of
+          │ 24000–24999 is dropped before the agent sees a packet
+          ▼
+     agent public listener ── checks the source again, rate limits, terminates TLS (wildcard
+          │                   `*.db.<contentDomain>`), Postgres: role allowlist, auth-failure ban
+          ▼
+     127.0.0.1:<hostPort>          database on this ingress node
+     127.0.0.1:<endpoint port>     database on another node: a C2 service endpoint (pinned or
+                                   install-CA mTLS over the overlay, CLUSTERING §4.3)
+```
+
+- **Port.** One per database, install-wide, from `24000–24999` (`PUBLIC_DATABASE_PORT_MIN/MAX`),
+  lowest free first, kept while the database exists so a re-enable gets the same URL. Every ingress
+  node listens on it. The range is a platform range (`PLATFORM_HOST_PORTS`); apps may not use it.
+- **Host.** `<name>-<org8>.db.<contentDomain>`, like Kubernetes API hosts (`.k8s.`, D228). The
+  record `*.db.<contentDomain>` is an A record to the ingress nodes, **DNS-only**: Cloudflare's
+  proxy does not carry database protocols. Settings → Domains lists it.
+- **Certificate.** `*.db.<contentDomain>` over DNS-01 when Cloudflare is configured, else one
+  certificate per host over HTTP-01 (the record already points at the ingress). Caddy issues and
+  renews it; the helper copies it out of Caddy's storage into `/run/yoal/public-db-tls/` for the
+  agent (fixed verb, only `*.db.*` / `<label>.db.*` names, like the mail certificate). Clients can
+  use `sslmode=verify-full` with the system roots.
+- **Protocols.** The proxy terminates TLS and speaks to the database in plaintext over loopback or
+  the mTLS endpoint.
+
+  | Engine | Client TLS | Notes |
+  |---|---|---|
+  | PostgreSQL | `SSLRequest` (any libpq `sslmode=require`+) or direct TLS (PG17 `sslnegotiation=direct`, ALPN `postgresql`) | Plaintext startup is refused with SQLSTATE `28000`. `GSSENCRequest` is answered `N`. Cancel requests are forwarded. `channel_binding=require` does not work through the proxy (SCRAM-PLUS binds to the proxy's certificate); the default `prefer` does. |
+  | Valkey, Redis | direct TLS (`rediss://`) | |
+  | MongoDB | direct TLS (`tls=true`) | standalone, `directConnection=true` |
+  | ClickHouse | HTTPS on the public port | |
+  | MySQL, MariaDB | – | Not supported: TLS is negotiated inside the MySQL handshake. Refused with a clear error. |
+
+### 19.2 Lockdown
+
+Each control is enforced in the place that cannot be bypassed by the layer above it.
+
+| Control | Rule | Enforced by |
+|---|---|---|
+| Off by default | Nothing listens until a database is enabled; `YOAL_FEATURE_DB_PUBLIC_ACCESS` (kill switch, default on) off closes every listener on the next converge | control plane, agent |
+| Permission | `database:expose` (risk `secret`, step-up window, never over MCP, not in any default agent scope; owner and admin only). Disabling needs only `database:update`, so narrowing is never harder than widening | IAM |
+| Source allowlist | 1–50 CIDRs, each with a label. Loopback, link-local, private (RFC 1918, CGNAT, ULA), multicast, reserved and the overlay are refused; IPv4 prefixes shorter than `/8` and IPv6 shorter than `/32` are refused. Host bits must be zero | contracts, core |
+| Anywhere | `0.0.0.0/0` + `::/0` only with `allowAnywhere: true`, which needs the opt-in `YOAL_FEATURE_DB_PUBLIC_ANYWHERE` and still requires TLS, the role allowlist and the ban below | core |
+| Kernel filter | Per port: `tcp dport <port> ip saddr { … } accept`, then the whole range dropped. The agent binds a public listener only after the helper confirmed the current rule set (fail closed) | helper (`inet yoal-public-db`) |
+| Second check | The listener checks the source against the same list before reading a byte | agent |
+| TLS only | TLS 1.2+, the public certificate; no plaintext path. No certificate yet → connections are closed and the node reports `no-certificate` | agent |
+| Roles (Postgres) | 1–20 credentials (`dbc_…`, the owner included only if chosen). The proxy reads the startup message and refuses any other `user` with SQLSTATE `28000` before the database sees it. Revoking a credential removes it from the list | agent |
+| Connection cap | `maxConnections` (1–500, default 20) concurrent connections per database per ingress | agent |
+| Rate limit | 60 new connections per minute per source address; over it, the connection is closed | agent |
+| Auth-failure ban | Postgres: 10 failed logins (SQLSTATE `28P01`/`28000` from the database) from one address in 10 min bans it from that database for 15 min. Other engines: 30 failed handshakes | agent |
+| Expiry | Optional `expiresAt` (≤ 1 year). The agent closes the listener at that time itself, even without the control plane; maintenance then disables the row and audits `database.public-access.expire` | agent, core |
+| Narrowing cuts | A change that removes a CIDR or a role closes the open connections it no longer allows; disabling closes all of them | agent |
+| Audit | `database.public-access.enable`, `.update`, `.disable`, `.expire` with the rule list (labels and CIDRs, never secrets) | core |
+| Visibility | Each ingress reports listener state, open/accepted/refused counts and the last refusals (time, source, reason) with its heartbeat; the database page shows them | agent, core |
+
+The proxy does not replace credentials: a client still needs a password, and the database still
+authenticates it. For Postgres, a dedicated `app` or `readonly` credential (§16) is the intended
+role for an outside app.
+
+### 19.3 Surfaces
+
+- **REST.** `GET /databases/:name/public-access` (`database:read`), `PUT` (`database:expose`;
+  enables or replaces the whole configuration), `DELETE` (`database:update`; disables). The view
+  carries the host, port, rules, roles, expiry, a connection-string template without a password,
+  per-node status and recent refusals.
+- **CLI.** `yoal db public-access <name>` (show), `… enable <name> --allow 203.0.113.0/24=office
+  [--allow …] [--credential app] [--expires 30d] [--max-connections 20]`, `… disable <name>`.
+- **Dashboard.** Database → Connect → **Public access**: rule editor with labels, role picker,
+  expiry presets, the connection string, node status and recent refusals.
+- **MCP.** `get_database_public_access` (read-only). Enabling or widening is never offered to a
+  model (D29, D53); disabling is a dashboard/CLI action.
+- **Credentials reveal.** While public access is on and the role is allowed, `GET /credentials`
+  and the named-credential reveal also return `publicUrl` (same audit as the reveal).
+
+### 19.4 Runtime
+
+- **Desired state.** Ingress nodes advertising `public-db` get `publicDatabases[]`: id, port,
+  protocol, host, allowed CIDRs, allowed roles, the loopback upstream port, `maxConnections`,
+  `expiresAt` and a `version`. Nodes without the capability get nothing (capability gate) and
+  enabling is refused while no ingress has it.
+- **Cross-node.** A database on another node gets a C2 service endpoint on every ingress node
+  (`ServiceEndpointService.reconcile` adds public databases to the ingress's plan), so the provider
+  listener, its client pin and failover re-pointing are the ones attachments already use. This
+  needs `YOAL_FEATURE_SERVICE_ENDPOINTS` (default on); without it such a database reports
+  `unreachable` on that ingress.
+- **Firewall.** `POST /v1/public-db/firewall { ports: [{ port, allow }] }` renders and applies
+  `inet yoal-public-db` (`nft -c` first). With ufw or firewalld active it also opens
+  `24000–24999/tcp` in the host manager, because the Yoal table only drops; an empty list closes it
+  again. The verb validates every port and CIDR; nothing else is taken from the wire.
+- **Certificates.** `POST /v1/public-db/tls { names }` copies each name's newest certificate from
+  Caddy's storage. The agent re-reads them every 10 min and swaps the TLS context in place.
+- **Heartbeat.** `publicDatabases[]` (per database: state, error, open, accepted, refused by reason,
+  auth failures, banned addresses) and up to 50 `publicDatabaseEvents` per beat. The control plane
+  keeps per-node status in `database_public_access_nodes` and the last 200 events per database.
+
+### 19.5 Not built
+
+- Public access to the pooler (PgBouncer requires client TLS, so it needs a re-encrypting hop).
+- MySQL and MariaDB.
+- Per-org policy (a cap on how many databases an org may expose).

@@ -142,9 +142,71 @@ ssh -L 15432:127.0.0.1:15432 <node>
 psql "$(yoal db credentials main)"
 ```
 
-If you expose the database through your own TCP proxy or tunnel, store the public `postgres://…` URL in the database's **Overview → Connection → Public database URL**. Yoal keeps it encrypted and shows it only when you reveal it. The public URL never appears in desired state, logs or MCP output.
+To reach a database from an app that does not run on Yoal, turn on [public access](#public-access) instead of a tunnel. If you expose the database through your own TCP proxy or tunnel, store the public `postgres://…` URL in the database's **Overview → Connection → Public database URL**. Yoal keeps it encrypted and shows it only when you reveal it. The public URL never appears in desired state, logs or MCP output.
 
 TLS is on by default. An operator can turn it off with `YOAL_FEATURE_DB_TLS=0` (see [configuration](/self-hosting/configuration)). With TLS on, PostgreSQL uses a per-database certificate, connection strings carry `sslmode=require`, and the public CA certificate is available from the credentials response. For full hostname verification, use `sslmode=verify-full` with the CA. If certificate generation fails, the database starts without TLS and the dashboard shows a warning.
+
+## Public access
+
+Public access lets clients outside Yoal, such as a laptop, a CI runner, or an app hosted elsewhere, connect to a database over the internet. Yoal runs a TLS proxy on its ingress nodes. The proxy accepts connections only from the addresses you list and, for PostgreSQL, only for the roles you choose. It is off for every database until you turn it on. Apps on Yoal never need it: they connect through their [attachment](#attach-to-a-project).
+
+Each database gets its own address and port, for example `main-ab12cd34.db.example.com:24000`. The port stays the same if you turn access off and on again.
+
+### Turn it on
+
+In the dashboard, open the database's **Overview → Public access**, choose **Turn on…**, and fill in:
+
+- **Allowed sources.** One or more IPv4 or IPv6 addresses or CIDR ranges (up to 50), each with an optional label. Use the egress addresses of the app or network that connects.
+- **Roles that may log in** (PostgreSQL only). The proxy refuses every other user name before the database sees it. Prefer a dedicated `app` or `readonly` [named credential](#named-credentials) over the owner.
+- **Turns off after.** Optional: 1, 7, 30 or 90 days. The ingress nodes close the listener at that time on their own.
+- **Max connections per ingress.** 20 by default, up to 500.
+
+With the CLI:
+
+```sh
+yoal db credentials create main --role app --purpose "vercel"
+yoal db public-access enable main --allow 203.0.113.0/24=office --allow 2a01:4f8:c0c::/48=ci \
+  --credential app --expires 30d
+yoal db public-access main                 # status, address, rules and recent refusals
+yoal db credentials reveal main dbc_…      # --json includes publicUrl, ready to paste
+yoal db public-access disable main
+```
+
+Saving the configuration replaces the previous one. Turning access on, or changing it, needs `database:expose`. Only the owner and admin roles have it, and the dashboard asks you to verify your sign-in first. Turning it off needs only `database:update`. AI agents can read the status over MCP (`get_database_public_access`) but can never turn it on, widen it or turn it off. Every change is recorded in the audit log.
+
+### Which sources are accepted
+
+- Ranges must be reachable from the internet. Private (`10.0.0.0/8`, `172.16.0.0/12`, `192.168.0.0/16`), carrier-grade NAT, loopback, link-local, multicast and reserved ranges are refused, in both IPv4 and IPv6.
+- A range can't be broader than `/8` (IPv4) or `/32` (IPv6), and its host bits must be zero: write `203.0.113.0/24`, not `203.0.113.7/24`.
+- To admit any address, an operator must first set `YOAL_FEATURE_DB_PUBLIC_ANYWHERE=1`. You then tick **Allow any address**. TLS, the role list and the failed-login ban still apply, but a leaked password is then enough to get in. Use it only when your client has no fixed addresses.
+
+### What the proxy enforces
+
+- **TLS is required.** The certificate is publicly trusted, so no CA file is needed. Plain-text connections are refused.
+- Connections from unlisted addresses are dropped by the node's firewall before the proxy sees them.
+- Each source address may open 60 new connections a minute.
+- After 10 failed PostgreSQL logins in 10 minutes, the address is blocked for 15 minutes. For the other engines, the limit is 30 failed handshakes.
+- When you remove a source or a role, open connections it no longer allows are closed. Turning access off closes all of them.
+
+The proxy does not replace the password: a client still has to log in.
+
+### Connecting
+
+| Engine | Connection string |
+|---|---|
+| PostgreSQL | `postgres://<user>:<password>@<host>:<port>/<db>?sslmode=require` |
+| Valkey, Redis | `rediss://<user>:<password>@<host>:<port>/0` |
+| MongoDB | `mongodb://<user>:<password>@<host>:<port>/<db>?authSource=admin&tls=true&directConnection=true` |
+| ClickHouse | `https://<user>:<password>@<host>:<port>/<db>` |
+| MySQL, MariaDB | Not supported yet. Use an SSH tunnel. |
+
+For PostgreSQL, `sslmode=verify-full` also works with clients that check the system's trusted roots (with libpq 16 or later, add `sslrootcert=system`). `channel_binding=require` does not work through the proxy, because channel binding ties the login to the proxy's certificate. The default, `prefer`, works. PgBouncer is not reachable through public access; connect directly.
+
+The **Public access** panel shows the URL with placeholders. Revealing a credential that public access allows also shows its full public URL.
+
+### For operators
+
+Public access needs an ingress node running a recent agent, and one DNS record: `*.db.<content domain>` as an A (and AAAA) record pointing at the ingress nodes. The record must be **DNS-only** (grey cloud on Cloudflare), because Cloudflare's proxy does not carry database protocols. With a Cloudflare API token configured, Caddy issues one wildcard certificate, `*.db.<content domain>`. Without one, it issues a certificate per database host over HTTP. Ports 24000 to 24999 must be reachable on the ingress nodes. Yoal opens them in its own firewall table for the listed sources only. Set `YOAL_FEATURE_DB_PUBLIC_ACCESS=0` to turn public access off for the whole install and close every listener.
 
 ## Connection pooling
 

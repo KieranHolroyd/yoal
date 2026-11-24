@@ -266,6 +266,7 @@ Each table has one row per path. Where a path takes several methods, they share 
 | POST | `/databases/{name}/restore` | Bring a soft-deleted database back. |
 | GET | `/databases/{name}/credentials` | Reveal connection details. Audited and never cached. |
 | GET, PUT, DELETE | `/databases/{name}/public-url` | Read, set or clear the public connection URL. It is stored sealed. |
+| GET, PUT, DELETE | `/databases/{name}/public-access` | Read, enable or turn off public access from outside Yoal: CIDR allowlist, Postgres roles, expiry and connection limit. Enabling needs `database:expose`. |
 | GET | `/databases/{name}/metrics` | Size, connection and throughput metrics for a time range. |
 | GET | `/databases/{name}/logs` | Service log events. |
 | GET, POST | `/databases/{name}/backups` | List backups, or start one. |

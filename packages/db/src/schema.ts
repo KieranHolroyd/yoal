@@ -207,6 +207,68 @@ export const overlayMeshPairs = sqliteTable(
 	(t) => [primaryKey({ columns: [t.nodeA, t.nodeB] })],
 );
 
+/** Public database access (docs/DATABASES.md §19, D241): one row per database ever exposed. */
+export const databasePublicAccess = sqliteTable(
+	'database_public_access',
+	{
+		databaseId: text('database_id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		enabled: integer('enabled', { mode: 'boolean' }).notNull().default(false),
+		/** Install-wide, from 24000–24999; kept while the database exists. */
+		port: integer('port').notNull(),
+		/** JSON `[{ cidr, label }]`. */
+		rules: text('rules').notNull().default('[]'),
+		allowAnywhere: integer('allow_anywhere', { mode: 'boolean' }).notNull().default(false),
+		/** JSON `["dbc_…"]` (Postgres). */
+		credentialIds: text('credential_ids').notNull().default('[]'),
+		maxConnections: integer('max_connections').notNull().default(20),
+		expiresAt: integer('expires_at'),
+		version: integer('version').notNull().default(0),
+		enabledAt: integer('enabled_at'),
+		enabledBy: text('enabled_by'),
+		disabledAt: integer('disabled_at'),
+		/** `manual` or `expired`. */
+		disabledReason: text('disabled_reason'),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+		updatedBy: text('updated_by'),
+	},
+	(t) => [uniqueIndex('database_public_access_port').on(t.port)],
+);
+
+/** What each ingress last reported for a database's public listener (D241). */
+export const databasePublicAccessNodes = sqliteTable(
+	'database_public_access_nodes',
+	{
+		databaseId: text('database_id').notNull(),
+		nodeId: text('node_id').notNull(),
+		state: text('state').notNull(),
+		error: text('error'),
+		open: integer('open').notNull().default(0),
+		accepted: integer('accepted').notNull().default(0),
+		refused: integer('refused').notNull().default(0),
+		authFailures: integer('auth_failures').notNull().default(0),
+		banned: integer('banned').notNull().default(0),
+		version: integer('version').notNull().default(0),
+		reportedAt: integer('reported_at').notNull(),
+	},
+	(t) => [primaryKey({ columns: [t.databaseId, t.nodeId] })],
+);
+
+/** Recent public access refusals, the last 200 per database (D241). */
+export const databasePublicAccessEvents = sqliteTable(
+	'database_public_access_events',
+	{
+		id: integer('id').primaryKey({ autoIncrement: true }),
+		databaseId: text('database_id').notNull(),
+		nodeId: text('node_id').notNull(),
+		at: integer('at').notNull(),
+		source: text('source').notNull(),
+		reason: text('reason').notNull(),
+		detail: text('detail'),
+	},
+	(t) => [index('database_public_access_events_db').on(t.databaseId, t.id)],
+);
+
 /** A day of round-trip samples per ordered pair, one a minute, for the Fleet sparkline (D221). */
 export const nodeLinkHistory = sqliteTable(
 	'node_link_history',

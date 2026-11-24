@@ -81,6 +81,11 @@ the `yoal` supplementary group (to read release artifacts) and sets the admin so
 | `examplecloud.com` | A | `178.104.255.136` | Proxied |
 | `*.examplecloud.com` | A | `178.104.255.136` | Proxied |
 | `control.example.com` | A | `178.104.255.136` | Proxied |
+| `*.db.examplecloud.com` | A | `178.104.255.136` | **DNS only** |
+
+`*.db.<contentDomain>` is the host of public database access (DATABASES.md §19, D241). It must be
+DNS-only: Cloudflare's proxy does not carry database protocols. Add it only when a database uses
+public access; like `*.k8s`, it publishes the ingress address, which mail already exposes.
 
 Certificates are issued by Let's Encrypt over **ACME DNS-01** and renewed by Caddy.
 `examplecloud.com`, `*.examplecloud.com`, and `control.example.com` are separate certificates;

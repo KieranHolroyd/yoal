@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import type { DatabasePublicAccessSummary } from './database-public-access.ts';
 import { SLUG_PATTERN } from './slugs.ts';
 import { nodeZoneSchema } from './cluster.ts';
 import type { DatabaseBackupSummary } from './database-backup.ts';
@@ -953,6 +954,8 @@ export interface DatabaseCredentialView {
 /** A credential plus its secret. Only an interactive reveal returns this shape. */
 export interface DatabaseCredentialReveal extends DatabaseCredentialView {
 	password: string;
+	/** The URL through public access (D241) when it is on and lets this role in; null otherwise. */
+	publicUrl?: string | null;
 }
 
 export const databaseCredentialTaskSchema = z.object({
@@ -1127,6 +1130,8 @@ export interface DatabaseView {
 	backup: DatabaseBackupSummary;
 	/** Public URL metadata only; the URL itself needs `revealPublicUrl` (and `database:credentials`). */
 	publicUrl: DatabasePublicUrlView;
+	/** Public access from outside Yoal (D241); details in `GET /databases/:name/public-access`. */
+	publicAccess: DatabasePublicAccessSummary;
 	createdAt: string;
 	updatedAt: string;
 	deletedAt: string | null;
@@ -1203,6 +1208,8 @@ export interface DatabaseCredentials {
 	caPem: string | null;
 	/** Copy-paste snippets keyed by client (`psql`, `prisma`, `drizzle`, …). */
 	connectionSnippets: Record<string, string>;
+	/** The URL through public access (D241) when it is on and lets this role in; null otherwise. */
+	publicUrl?: string | null;
 	note: string;
 }
 

@@ -683,6 +683,7 @@ reporting online, and ports never change. A node holds at most 1,000 endpoints.
 | `19000–19999` | storage instance ports | used today |
 | `21000–21999` | consumer endpoint ports | C2 |
 | `22000–22999` | Kubernetes cluster API and ingress ports (D226) | `KubernetesService` |
+| `24000–24999` | public database access listeners on ingress nodes, one install-wide port per exposed database (D241, DATABASES.md §19) | `DatabasePublicAccessService` |
 | `23000–23999` | read-URL ports on the consumer node (moved from 22000–22999 by HA-PLAN F2). Reserved for later (`RESERVED_LATER_HOST_PORTS`): new apps are refused, an app already there keeps its port; C7 moves such apps off before it allocates the range and makes it a platform range | C7 |
 
 The ranges are disjoint and each has one allocator; a new range is added here before anything uses

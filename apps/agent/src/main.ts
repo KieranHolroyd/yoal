@@ -23,6 +23,7 @@ import {
 	type NodeStudioDesired,
 	type NodeContainerConsoleDesired,
 	type NodeStatus,
+	type PublicDatabaseListener,
 	type VolumeInventory,
 	type WireguardStatus,
 	type WorkloadActivation,
@@ -75,6 +76,7 @@ import { ReleaseManager, servesReleaseLocally } from './releases.ts';
 import { databaseTlsHeartbeat, WorkloadRuntime, workloadHeartbeat } from './runtime.ts';
 import { HardwareCollector } from './hardware.ts';
 import { ServiceForwarder, wantsGateway } from './endpoints.ts';
+import { PublicDatabaseProxy, type PublicDbCertificate } from './public-db.ts';
 import { NodeCertificateManager } from './node-cert.ts';
 import { NodeCaIdentity } from './node-ca.ts';
 import { StatsCollector } from './stats.ts';
@@ -149,6 +151,16 @@ class AgentRuntime {
 	private readonly nodeCa: NodeCaIdentity;
 	/** Set once the helper's endpoint guard is in place; gateway listeners wait for it. */
 	private endpointGuardReady = false;
+	/** Public database listeners on this ingress (D241). */
+	private readonly publicDb = new PublicDatabaseProxy({ log: (level, message) => log(level, message) });
+	/** The rule set the helper last applied for them; listeners bind only while it matches. */
+	private publicDbFirewallKey: string | null = null;
+	private publicDbHelperOutdated = false;
+	private publicDbCertificates = new Map<string, PublicDbCertificate>();
+	private publicDbCertNames = '';
+	private publicDbCertsAt = 0;
+	/** Set once this process served a listener, so the heartbeat keeps reporting an emptied set. */
+	private publicDbReported = false;
 	private wireguardStatus: WireguardStatus | null = null;
 	/** The helper's WireGuard public key, once fetched; the private key never leaves the helper. */
 	private wireguardPublicKey: string | null = null;
@@ -705,6 +717,7 @@ class AgentRuntime {
 		await this.mail.close();
 		await this.poolIdentity.close();
 		this.serviceForwarder.close();
+		this.publicDb.close();
 		this.certificateDelivery.close();
 		await this.replicaLinks.close();
 		this.server?.stop(true);
@@ -1112,6 +1125,8 @@ class AgentRuntime {
 		} catch (error) {
 			log('error', `Service endpoint converge failed: ${errorText(error)}`);
 		}
+		// Public database listeners after the endpoints they may dial (D241).
+		await this.syncPublicDatabases(state.publicDatabases ?? []);
 		// Replica link sockets before the replica workloads, whose units mount their directories (C7).
 		try {
 			await this.replicaLinks.converge(state.databaseReplicaLinks ?? []);
@@ -1734,8 +1749,66 @@ class AgentRuntime {
 		}
 	}
 
+	/**
+	 * Public database access (docs/DATABASES.md §19.4, D241): apply the helper's per-port firewall
+	 * when the rule set changed (listeners bind only while it is current), keep the `*.db`
+	 * certificates copied out of Caddy's storage, then converge the proxy. Never throws.
+	 */
+	private async syncPublicDatabases(listeners: PublicDatabaseListener[]): Promise<void> {
+		try {
+			if (listeners.length > 0) this.publicDbReported = true;
+			const rules = listeners.map((listener) => ({ port: listener.port, allow: [...listener.allow].sort() })).sort((a, b) => a.port - b.port);
+			const key = JSON.stringify(rules);
+			// A node that never served a listener leaves the helper alone (and older helpers quiet).
+			if (key !== this.publicDbFirewallKey && (listeners.length > 0 || this.publicDbReported)) {
+				try {
+					const applied = await this.helper.publicDbFirewall(rules);
+					this.publicDbHelperOutdated = applied === null;
+					this.publicDbFirewallKey = applied === null ? null : key;
+				} catch (error) {
+					this.publicDbFirewallKey = null;
+					log('warn', `Public database firewall not applied, listeners stay closed: ${errorText(error)}`);
+				}
+			}
+			const names = [...new Set(listeners.flatMap((listener) => listener.certificateNames))].sort();
+			const namesKey = names.join(',');
+			const missing = listeners.some((listener) => !listener.certificateNames.some((name) => this.publicDbCertificates.has(name)));
+			const age = Date.now() - this.publicDbCertsAt;
+			if (names.length === 0) {
+				this.publicDbCertificates = new Map();
+				this.publicDbCertNames = '';
+			} else if (!this.publicDbHelperOutdated && (namesKey !== this.publicDbCertNames || age > 10 * 60_000 || (missing && age > 60_000))) {
+				this.publicDbCertsAt = Date.now();
+				this.publicDbCertNames = namesKey;
+				try {
+					const results = (await this.helper.publicDbTls(names)) ?? [];
+					const next = new Map<string, PublicDbCertificate>();
+					for (const result of results) {
+						if (!result.found || !result.certPath || !result.keyPath) continue;
+						const [certPem, keyPem] = await Promise.all([fs.readFile(result.certPath, 'utf8'), fs.readFile(result.keyPath, 'utf8')]);
+						next.set(result.name, { certPem, keyPem });
+					}
+					this.publicDbCertificates = next;
+				} catch (error) {
+					log('warn', `Copying public database certificates failed: ${errorText(error)}`);
+				}
+			}
+			this.publicDb.converge(listeners, {
+				firewallReady: this.publicDbFirewallKey === key,
+				helperOutdated: this.publicDbHelperOutdated,
+				certificates: this.publicDbCertificates,
+			});
+		} catch (error) {
+			log('error', `Public database converge failed: ${errorText(error)}`);
+		}
+	}
+
 	private async sendHeartbeat(requestedStatus: NodeStatus): Promise<boolean> {
 		await this.checkCaddy();
+		// Retries a firewall apply that failed and refreshes certificates; cheap when nothing is due.
+		if (this.desired) await this.syncPublicDatabases(this.desired.publicDatabases ?? []);
+		const publicDatabases = this.publicDb.size > 0 || this.publicDbReported ? this.publicDb.status() : null;
+		const publicDatabaseEvents = this.publicDb.drainEvents();
 		const stats = await this.stats.collect();
 		const hardware = await this.hardware.collect();
 		const nodeCertificate = this.nodeCertificate.ensure();
@@ -1883,6 +1956,8 @@ class AgentRuntime {
 			...(linkSamples.length > 0 ? { links: linkSamples } : {}),
 			...(linkTestResults.length > 0 ? { linkTestResults } : {}),
 			...(this.poolIdentity.isActive ? { identityStatus: this.poolIdentity.status() } : {}),
+			...(publicDatabases ? { publicDatabases } : {}),
+			...(publicDatabaseEvents.length > 0 ? { publicDatabaseEvents } : {}),
 		};
 
 		const parsed = heartbeatSchema.safeParse(body);

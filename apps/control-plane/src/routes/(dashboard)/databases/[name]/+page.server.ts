@@ -5,6 +5,7 @@ import {
 	databaseCredentialCreateSchema,
 	databaseEngineRegistry,
 	databasePublicUrlUpdateSchema,
+	type DatabasePublicAccessView,
 	pitrUnsupportedReason,
 	type DatabasePitrStatus,
 	databaseUpdateSchema,
@@ -115,6 +116,14 @@ export const load: PageServerLoad = async ({ locals, params, url }) => {
 		}
 	}
 
+	// Public access from outside Yoal (D241): no secrets in the view.
+	let publicAccess: DatabasePublicAccessView | null;
+	try {
+		publicAccess = core.databasePublicAccess.get(principal, params.name);
+	} catch {
+		publicAccess = null;
+	}
+
 	// Point-in-time recovery (docs/PITR.md): only offered while YOAL_FEATURE_PITR is on.
 	const pitrFeature = featureEnabled(core.ctx.config, 'PITR') && database.capabilities.pitr;
 	let pitr: DatabasePitrStatus | null = null;
@@ -131,6 +140,7 @@ export const load: PageServerLoad = async ({ locals, params, url }) => {
 	return {
 		database,
 		credentials,
+		publicAccess,
 		pitrFeature,
 		pitr,
 		pitrError,
@@ -308,6 +318,36 @@ export const actions: Actions = {
 		return {
 			success: 'Public URL saved. It is encrypted with the org key and only revealed on demand.',
 		};
+	},
+
+	// Public access (D241): the whole configuration arrives as one JSON field so `runAction` can
+	// retry it after step-up; core validates every rule.
+	'public-access': async ({ request, locals, params }) => {
+		const principal = locals.principal!;
+		let config: unknown;
+		try {
+			config = JSON.parse(formString(await request.formData(), 'config') || '{}');
+		} catch {
+			return fail(400, { message: 'The public access settings could not be read.' });
+		}
+		try {
+			const view = core.databasePublicAccess.enable(principal, params.name, config);
+			return { success: `Public access is on at ${view.host}:${view.port}. Ingress nodes open it on their next pull.` };
+		} catch (caught) {
+			if (caught instanceof Error && caught.name === 'ZodError')
+				return fail(400, { message: 'Check the public access settings.' });
+			return fail(failStatus(caught), toFormFailure(caught));
+		}
+	},
+
+	'public-access-disable': async ({ locals, params }) => {
+		const principal = locals.principal!;
+		try {
+			core.databasePublicAccess.disable(principal, params.name);
+		} catch (caught) {
+			return fail(failStatus(caught), toFormFailure(caught));
+		}
+		return { success: 'Public access is off. Ingress nodes close the listener on their next pull.' };
 	},
 
 	'clear-public-url': async ({ locals, params }) => {

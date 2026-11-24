@@ -88,6 +88,7 @@ surfaces all read the same list. Each entry has a `level` (`window` | `always`) 
 | Members | invite, change role, remove member, cancel invitation | window | deny |
 | Ownership | transfer org ownership, remove an owner | always | deny |
 | Secrets out | reveal DB credentials / public URL / named credentials, reveal env var values, storage access keys, broker credentials | window | allow |
+| Exposure | turn on or widen database public access (`database:expose`, D241); turning it off is a plain `database:update` | window | allow (never MCP) |
 | Exfil paths | create/edit backup target, create log drain, presign object, create share link | window | allow |
 | Destructive | delete project / database / bucket / broker / domain, restore database (PITR), rotate credentials | window | allow |
 | Live access | container shell (D127), database studio (D96) | window | deny |

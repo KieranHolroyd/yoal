@@ -18,6 +18,7 @@ import { authenticatedClient } from './common.ts';
 import { credentialsCommand, credentialsUsage, isCredentialVerb } from './db-credentials.ts';
 import { pitrBackupCommand, pitrCommand, restoreToCommand } from './db-pitr.ts';
 import { replicaCommand } from './db-replicas.ts';
+import { publicAccessCommand } from './db-public-access.ts';
 import { durabilityCommand, switchoverCommand } from './db-durability.ts';
 import { failoverCommand } from './db-failover.ts';
 import { confirmOrRefuse } from './run-operation.ts';
@@ -41,6 +42,8 @@ Commands:
   credentials <name>           Print the connection URL (--json for user, password, host, port)
   credentials list|create|rotate|revoke|reveal <name> …
                                Named credentials (app, readonly, backup); see \`yoal db credentials --help\`
+  public-access <name>         Reach it from outside Yoal over TLS, only from listed CIDRs;
+                               enable|disable <name> …, see \`yoal db public-access --help\`
   restart <name>|--all         Restart a database (and its pooler) or every database
   upgrade <name> --to <major>  Plan a PostgreSQL major upgrade; --apply queues a backup
   rotate <name>                Rotate the owner password (--monitor for the monitor role)
@@ -220,6 +223,7 @@ const subcommands: Record<string, (argv: string[]) => Promise<void>> = {
 	durability: durabilityCommand,
 	switchover: switchoverCommand,
 	failover: failoverCommand,
+	'public-access': publicAccessCommand,
 	restart: restartDatabase,
 	rotate: rotateCredentials,
 	upgrade: upgradeDatabase,

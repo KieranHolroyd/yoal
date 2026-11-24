@@ -635,6 +635,13 @@ export class NodeService {
 			this.ctx.releaseCommands.recordResults(node.id, input.releaseCommandResults);
 		if (input.upstreamCounters?.length)
 			this.ctx.workloads.recordUpstreamCounters(node.id, input.upstreamCounters);
+		// Public database listeners and their refusals (D241); a bad report never fails the beat.
+		if (input.publicDatabases !== undefined || input.publicDatabaseEvents?.length)
+			try {
+				this.ctx.databasePublicAccess.ingestHeartbeat(node.id, input.publicDatabases, input.publicDatabaseEvents);
+			} catch (error) {
+				console.error('[heartbeat] public database report:', error);
+			}
 		if (input.databaseReplication?.length)
 			this.ctx.databaseReplicas.applyReplicationReports(node.id, input.databaseReplication);
 		if (input.databaseReplicaPromotionResults?.length)
@@ -1419,6 +1426,11 @@ export class NodeService {
 				return purges.length > 0 ? { cloudShellPurges: purges } : {};
 			})(),
 			kubernetesRoutes: this.ctx.kubernetes.routesForNode(node.id, isIngress, state.proxyAddress),
+			// Public database listeners (D241): ingress nodes with `public-db` only, omitted while empty.
+			...(() => {
+				const listeners = this.ctx.databasePublicAccess.listenersForNode(node.id, isIngress, node.capabilitiesJson);
+				return listeners.length > 0 ? { publicDatabases: listeners } : {};
+			})(),
 			kubernetesManifests: this.ctx.kubernetes.manifestsForNode(node.id),
 			kubernetesComponentRequest: this.ctx.kubernetes.componentRequestForNode(node.id),
 			kubernetesBackupTasks: await this.ctx.kubernetes.backupTasksForNode(node.id),

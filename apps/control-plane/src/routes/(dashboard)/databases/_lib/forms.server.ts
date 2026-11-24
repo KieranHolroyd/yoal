@@ -8,6 +8,8 @@ export function databaseCan(principal: Principal) {
 		delete: hasPermission(principal, 'database:delete'),
 		credentials: hasPermission(principal, 'database:credentials'),
 		console: hasPermission(principal, 'database:console'),
+		/** Open the database to the internet (D241); turning it off needs only `update`. */
+		expose: hasPermission(principal, 'database:expose'),
 		/** Attach/detach also changes the project (D56). */
 		attach:
 			hasPermission(principal, 'database:update') && hasPermission(principal, 'project:update')

@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import type { DesiredState, IdentityDesired, IngressDesired, RouteSpec } from '@yoal/contracts';
-import { INGRESS_HEALTH_PATH, INGRESS_HEALTH_PORT } from '@yoal/contracts';
+import { INGRESS_HEALTH_PATH, INGRESS_HEALTH_PORT, PUBLIC_DATABASE_ZONE } from '@yoal/contracts';
 import {
 	compileAwaitingDeployRoute,
 	compileCaddyConfig,
@@ -816,6 +816,24 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 		const automation = ((tls as Record<string, unknown>).automation ??= {}) as Record<string, unknown>;
 		const policies = (automation.policies as Record<string, unknown>[] | undefined) ?? [];
 		policies.push({ subjects: [wildcard], issuers: customDomainIssuers(options.tls) });
+		automation.policies = policies;
+	}
+
+	// Public database access (docs/DATABASES.md §19.1, D241): the agent's proxy terminates TLS for
+	// `<name>-<org8>.db.<contentDomain>`; Caddy only obtains and renews the certificate, and the
+	// helper copies it out. With Cloudflare DNS-01 one wildcard covers every database; without it
+	// each host gets its own certificate over HTTP-01 (the DNS-only `*.db` record points here).
+	const publicHosts = [...new Set((options.state.publicDatabases ?? []).map((listener) => normalizeHost(listener.host)))];
+	if (publicHosts.length > 0 && apps && options.tls) {
+		const subjects = options.tls.cloudflareApiToken
+			? [`*.${PUBLIC_DATABASE_ZONE}.${normalizeHost(options.state.contentDomain)}`]
+			: publicHosts;
+		const tls = (apps.tls ??= {});
+		const certificates = ((tls as Record<string, unknown>).certificates ??= {}) as Record<string, unknown>;
+		certificates.automate = [...new Set([...((certificates.automate as string[] | undefined) ?? []), ...subjects])];
+		const automation = ((tls as Record<string, unknown>).automation ??= {}) as Record<string, unknown>;
+		const policies = (automation.policies as Record<string, unknown>[] | undefined) ?? [];
+		policies.push({ subjects, issuers: customDomainIssuers(options.tls) });
 		automation.policies = policies;
 	}
 

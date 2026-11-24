@@ -95,6 +95,12 @@ export class MaintenanceService {
 		// W10: a sync-set change that timed out, and a sync database whose standby went away.
 		await this.ctx.databaseMembers.tick().catch((error: unknown) => console.error('[maintenance] database durability:', error));
 		this.ctx.databaseStudio.tick();
+		// Public database access (D241): record expiries the agents already enforced, free purged ports.
+		try {
+			this.ctx.databasePublicAccess.sweep();
+		} catch (error) {
+			console.error('[maintenance] public database access:', error);
+		}
 		// Cloud shells (D236): stop idle and over-long shells and revoke their CLI keys.
 		try {
 			this.ctx.cloudShells.sweep();

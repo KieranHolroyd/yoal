@@ -2854,6 +2854,21 @@ function buildServer(
 	);
 
 	tool(
+		'get_database_public_access',
+		{
+			title: 'Get database public access',
+			description:
+				'Show whether a managed database is reachable from outside Yoal (D241): status, host and port, the allowed source CIDRs, ' +
+				'the Postgres roles the proxy lets in, expiry, per-ingress listener state and recent refusals. Read-only: enabling, ' +
+				'widening or turning it off is a dashboard or CLI action (`yoal db public-access`). Never includes a password.',
+			inputSchema: z.object({ database: z.string().describe('Database name') }),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('database:read'),
+		},
+		async ({ database }) => run(async () => core.databasePublicAccess.get(principal, database)),
+	);
+
+	tool(
 		'get_database_logs',
 		{
 			title: 'Get database logs',

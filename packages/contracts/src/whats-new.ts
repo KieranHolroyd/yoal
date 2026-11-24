@@ -97,6 +97,17 @@ export const WHATS_NEW_ITEMS: readonly WhatsNewItem[] = [
 		attention: 'info',
 		href: '/settings/clustering',
 		learnMore: 'https://github.com/yoal-dev/yoal/blob/main/docs/CLUSTERING.md'
+	},
+	{
+		id: 'database-public-access',
+		since: '0.16.17',
+		title: 'Public access: use a database from outside Yoal',
+		summary:
+			'A database can now be reached from a laptop, CI or an app hosted elsewhere at <name>-<org>.db.<your domain>:<port>, through a TLS proxy on your ingress nodes that only lets in the addresses you list.',
+		body: 'Off for every database until an owner or admin turns it on (database:expose, with step-up). You list the CIDRs your app connects from; private, loopback and very broad ranges are refused, and any-address access needs YOAL_FEATURE_DB_PUBLIC_ANYWHERE. TLS is required with a publicly trusted certificate, Postgres logins are limited to the credentials you pick, repeated failed logins ban the address, and access can expire by itself. PostgreSQL, Valkey, Redis, MongoDB and ClickHouse are supported; MySQL and MariaDB are not yet. Operators add a DNS-only *.db.<content domain> record pointing at the ingress nodes, and ingress nodes need this release. Turn it off everywhere with YOAL_FEATURE_DB_PUBLIC_ACCESS=0.',
+		attention: 'info',
+		href: '/databases',
+		learnMore: 'https://github.com/yoal-dev/yoal/blob/main/docs/DATABASES.md'
 	}
 ];
 

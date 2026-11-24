@@ -70,6 +70,7 @@ Each role is a set of permissions written as `resource:action`, for example `dep
 | `database:delete` | Delete a database. | No | No |
 | `database:credentials` | Reveal a database's connection credentials. | Yes | No |
 | `database:console` | Open the database studio. | Yes | No |
+| `database:expose` | Turn on or widen [public access](/data/databases#public-access) from outside Yoal. Needs a recent sign-in; never available to AI agents. | No | No |
 | `storage:create` | Create an object storage bucket. | Yes | No |
 | `storage:read` | See object storage. | Yes | Yes |
 | `storage:update` | Change object storage settings. | Yes | No |

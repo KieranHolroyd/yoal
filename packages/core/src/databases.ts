@@ -232,7 +232,7 @@ export class DatabaseService {
 	}
 
 	/** `require` with the resource threaded through: the database, or any project it is attached to. */
-	private requireDatabasePermission(
+	requireDatabasePermission(
 		principal: Principal,
 		permission: Permission,
 		row: DatabaseRow,
@@ -697,6 +697,8 @@ export class DatabaseService {
 			.where(eq(databases.id, row.id))
 			.run();
 		this.ctx.databaseStudio.closeForDatabase(row.id, 'deleted', principal);
+		// A deleted database loses public access, so a restore never reopens it silently (D241).
+		this.ctx.databasePublicAccess.onDatabaseDeleted(row.id, principal);
 		// A backup queued before the delete can no longer run; fail it rather than leaving a task
 		// pending forever on a node that no longer receives the database.
 		this.ctx.db
@@ -862,6 +864,8 @@ export class DatabaseService {
 				caPem: tls.caPem,
 				engine: row.engine,
 			}),
+			// The outside URL when public access lets the owner in (D241).
+			publicUrl: this.ctx.databasePublicAccess.publicUrlFor(row, { id: null, username: user, password: pass }),
 			note: `${tlsNote} Listens on loopback on node "${node?.name ?? row.nodeId}" only. From elsewhere, tunnel: ssh -L ${row.hostPort}:127.0.0.1:${row.hostPort} <node>.${sessionNote}`,
 		};
 	}
@@ -916,6 +920,7 @@ export class DatabaseService {
 		const row = this.requireRow(principal, name);
 		this.requireDatabasePermission(principal, 'database:read', row);
 		this.requireDatabasePermission(principal, 'database:credentials', row);
+		this.assertCredentialRevealAllowed(principal);
 		if (!row.publicUrlSealed) throw new NotFoundError(`Public URL for "${name}"`);
 		const url = this.ctx.secrets.open(row.orgId, row.publicUrlSealed);
 		this.ctx.audit.record({
@@ -1391,7 +1396,11 @@ export class DatabaseService {
 	 * Reveal one credential's password, gated exactly like the owner URL (D58): the dashboard
 	 * session or the CLI's API key with `database:credentials`, never MCP. Every read is audited.
 	 */
-	revealCredential(principal: Principal, name: string, credentialId: string): DatabaseCredentialView & { password: string } {
+	revealCredential(
+		principal: Principal,
+		name: string,
+		credentialId: string,
+	): DatabaseCredentialView & { password: string; publicUrl: string | null } {
 		const db = this.requireRow(principal, name);
 		this.requireDatabasePermission(principal, 'database:credentials', db);
 		this.assertCredentialRevealAllowed(principal);
@@ -1421,7 +1430,12 @@ export class DatabaseService {
 			args: { name, credentialId, role: credential.role },
 			result: 'ok',
 		});
-		return { ...toCredentialView(credential), password: secret };
+		return {
+			...toCredentialView(credential),
+			password: secret,
+			// The outside URL when public access lets this role in (D241); revealed under the same audit.
+			publicUrl: this.ctx.databasePublicAccess.publicUrlFor(db, { id: credential.id, username: credential.username, password: secret }),
+		};
 	}
 
 	credentialTasksForNode(nodeId: string): DatabaseCredentialTask[] {
@@ -3939,6 +3953,7 @@ export class DatabaseService {
 			slowQueriesAt: row.slowQueriesAt ? new Date(row.slowQueriesAt).toISOString() : null,
 			backup: this.backupSummary(row),
 			publicUrl: this.publicUrlView(row),
+			publicAccess: this.ctx.databasePublicAccess.summary(row),
 			createdAt: new Date(row.createdAt).toISOString(),
 			updatedAt: new Date(row.updatedAt).toISOString(),
 			deletedAt: row.deletedAt ? new Date(row.deletedAt).toISOString() : null,

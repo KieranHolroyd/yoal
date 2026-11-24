@@ -1,4 +1,11 @@
 import { registryMirrorDesiredSchema } from './registry.ts';
+import {
+	PUBLIC_ACCESS_EVENTS_PER_HEARTBEAT,
+	PUBLIC_DB_CAPABILITY,
+	publicDatabaseEventSchema,
+	publicDatabaseListenerSchema,
+	publicDatabaseStatusSchema,
+} from './database-public-access.ts';
 import { INGRESS_SET_CAPABILITY, ingressDesiredSchema, ingressHealthSchema } from './ingress.ts';
 import { controlDesiredSchema, controlReportSchema } from './control-plane.ts';
 import * as z from 'zod';
@@ -392,6 +399,11 @@ export const desiredStateSchema = z.object({
 	/** Public routes to Kubernetes API servers and cluster ingress (docs/KUBERNETES.md K7, K11). */
 	kubernetesRoutes: z.array(kubernetesRouteSchema).default([]),
 	/**
+	 * Public database listeners on this ingress (docs/DATABASES.md §19, D241). Only to an agent with
+	 * `public-db`, omitted while empty; absent means none, so the agent closes every listener.
+	 */
+	publicDatabases: z.array(publicDatabaseListenerSchema).max(1000).optional(),
+	/**
 	 * Manifest generation per server machine here. When it changes the agent fetches the files from
 	 * `/api/agent/kubernetes/manifests/<machineId>` (they can hold attachment passwords) and hands
 	 * them to the helper, without restarting the machine.
@@ -532,6 +544,8 @@ export const nodeCapabilities = [
 	CLOUD_SHELL_CAPABILITY,
 	// Grows an existing cloud shell home disk to a larger `cloudShell.diskMb`.
 	CLOUD_SHELL_RESIZE_CAPABILITY,
+	// Public database listeners, the `inet yoal-public-db` firewall and the `*.db` TLS copy (D241).
+	PUBLIC_DB_CAPABILITY,
 ] as const;
 export type NodeCapability = (typeof nodeCapabilities)[number];
 
@@ -728,6 +742,10 @@ export const heartbeatSchema = z.object({
 	storageRootKeys: z.array(storageRootKeyReportSchema).max(200).optional(),
 	/** The identity unit's health on this node, so the fleet view can fall back to control-plane routes. */
 	identityStatus: identityUnitStatusSchema.nullable().optional(),
+	/** Public database listeners on this ingress, one entry per listener in desired state (D241). */
+	publicDatabases: z.array(publicDatabaseStatusSchema).max(1000).optional(),
+	/** Refusals since the last heartbeat, newest last, at most 50 (D241). */
+	publicDatabaseEvents: z.array(publicDatabaseEventSchema).max(PUBLIC_ACCESS_EVENTS_PER_HEARTBEAT).optional(),
 });
 export type Heartbeat = z.infer<typeof heartbeatSchema>;
 

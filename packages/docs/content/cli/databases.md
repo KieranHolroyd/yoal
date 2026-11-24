@@ -308,6 +308,32 @@ Prints a named credential's password, alone on stdout so it can be piped. On a t
 yoal db credentials reveal main dbc_abc123
 ```
 
+### db public-access
+
+```sh
+yoal db public-access <name> [--json]
+yoal db public-access enable <name> --allow <cidr>[=label] … [--anywhere] [--credential <id|role>] … [--expires <when>] [--max-connections <n>] [--json]
+yoal db public-access disable <name> [--json]
+```
+
+Shows, turns on or turns off [public access](/data/databases#public-access) from outside Yoal. Without a verb, prints the status, address, connection-string template, sources, roles, expiry, per-ingress listener state and recent refusals. Reading needs `database:read`.
+
+`enable` sends the whole configuration, replacing the previous one. It needs `database:expose` (owner and admin), with a recent sign-in. `disable` closes the listeners and keeps the port. It needs `database:update`.
+
+| Flag | Description |
+| --- | --- |
+| `--allow <cidr>[=label]` | A source address or range, with an optional label, for example `203.0.113.0/24=office`. Repeat for up to 50. Private, loopback and reserved ranges, host bits, and prefixes broader than /8 (IPv4) or /32 (IPv6) are refused. |
+| `--anywhere` | Admit any address. Only works when the operator set `YOAL_FEATURE_DB_PUBLIC_ANYWHERE=1`. |
+| `--credential <id\|role>` | PostgreSQL: a credential that may log in through the proxy, by ID or by role (`owner`, `app`, `readonly`, `backup`). Repeatable. At least one is required. |
+| `--expires <when>` | Turn access off by itself after `12h`, `7d` or `30d`, or at an ISO time, at most a year ahead. |
+| `--max-connections <n>` | Concurrent connections per ingress node, 1 to 500. The default is 20. |
+
+```sh
+yoal db public-access enable main --allow 203.0.113.0/24=office --credential app --expires 30d
+yoal db public-access main
+yoal db public-access disable main
+```
+
 ### db restart
 
 ```sh

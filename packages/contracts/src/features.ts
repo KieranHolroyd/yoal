@@ -131,6 +131,22 @@ export const FEATURE_FLAGS = {
 		area: 'databases',
 		description: 'Accept TLS connections to managed databases and publish sslmode=require URLs.'
 	},
+	DB_PUBLIC_ACCESS: {
+		name: 'DB_PUBLIC_ACCESS',
+		// D241: per-database opt-in, so on by default; off closes every public listener (kill switch).
+		default: true,
+		area: 'databases',
+		description:
+			'Public database access: a TLS proxy on ingress nodes, locked to listed CIDRs, for apps outside Yoal (docs/DATABASES.md §19, D241). Set 0 to refuse enabling and close every public listener.'
+	},
+	DB_PUBLIC_ANYWHERE: {
+		name: 'DB_PUBLIC_ANYWHERE',
+		// D241: admitting any address is an operator opt-in on top of DB_PUBLIC_ACCESS.
+		default: false,
+		area: 'databases',
+		description:
+			'Let database public access admit any address (0.0.0.0/0 and ::/0) when a person asks for it explicitly. TLS, the role allowlist and the auth-failure ban still apply.'
+	},
 	ORG_NETWORKS: {
 		name: 'ORG_NETWORKS',
 		default: true,
@@ -351,7 +367,8 @@ export const OPT_IN_FEATURES: ReadonlySet<FeatureName> = new Set<FeatureName>([
 	'PITR_REWIND',
 	'SLO_OBJECTS',
 	'EXTERNAL_PROBER',
-	'REGIONS'
+	'REGIONS',
+	'DB_PUBLIC_ANYWHERE'
 ]);
 
 export type FeatureFlags = {

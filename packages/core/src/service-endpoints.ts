@@ -108,6 +108,9 @@ export class ServiceEndpointService {
 			services.push(...planned.services);
 			readServices.push(...planned.reads);
 		}
+		// An ingress reaches a publicly exposed database on another node through the same endpoint
+		// an attachment would use (docs/DATABASES.md §19.4, D241).
+		services.push(...this.ctx.databasePublicAccess.endpointServicesFor(consumerNodeId));
 		const readKeys = new Map(readServices.map((service) => [service.serviceId, service.upstreamsKey]));
 		const existingRows = this.ctx.db
 			.select()

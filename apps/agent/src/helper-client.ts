@@ -556,6 +556,45 @@ export class HelperClient
 		await this.request('POST', '/v1/endpoints/guard', undefined, WIREGUARD_TIMEOUT_MS);
 	}
 
+	/**
+	 * Public database access (D241): replace the `inet yoal-public-db` table with these per-port
+	 * allowlists (the rest of 24000–24999 is dropped). Null when the helper has no such verb (an
+	 * older node), so the caller reports `helper-outdated` and binds nothing.
+	 */
+	async publicDbFirewall(ports: Array<{ port: number; allow: string[] }>): Promise<{ table: string; ports: number } | null> {
+		try {
+			const body = asRecord(await this.request('POST', '/v1/public-db/firewall', { ports }, WIREGUARD_TIMEOUT_MS));
+			return { table: typeof body.table === 'string' ? body.table : '', ports: typeof body.ports === 'number' ? body.ports : 0 };
+		} catch (error) {
+			if (error instanceof HelperError && (error.status === 404 || error.status === 501)) return null;
+			throw error;
+		}
+	}
+
+	/**
+	 * Copy `*.db.<domain>` / `<label>.db.<domain>` certificates out of Caddy's storage (D241). Null
+	 * on an older helper. Each result names the files the agent may read when `found`.
+	 */
+	async publicDbTls(names: string[]): Promise<Array<{ name: string; found: boolean; changed: boolean; certPath: string | null; keyPath: string | null }> | null> {
+		try {
+			const body = asRecord(await this.request('POST', '/v1/public-db/tls', { names }, STUDIO_TIMEOUT_MS));
+			const results = Array.isArray(body.results) ? body.results : [];
+			return results.map((item) => {
+				const entry = asRecord(item);
+				return {
+					name: typeof entry.name === 'string' ? entry.name : '',
+					found: entry.found === true,
+					changed: entry.changed === true,
+					certPath: typeof entry.certPath === 'string' ? entry.certPath : null,
+					keyPath: typeof entry.keyPath === 'string' ? entry.keyPath : null,
+				};
+			});
+		} catch (error) {
+			if (error instanceof HelperError && (error.status === 404 || error.status === 501)) return null;
+			throw error;
+		}
+	}
+
 	/** Apply the control plane's overlay state to the kernel interface (C1). */
 	async wireguardApply(state: WireguardState): Promise<{ peers: number }> {
 		const body = asRecord(

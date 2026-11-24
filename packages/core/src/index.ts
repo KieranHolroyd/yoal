@@ -28,6 +28,7 @@ import { ObservabilityService } from './observability.ts';
 import { AlertService } from './alerts.ts';
 import { TopologyService } from './topology.ts';
 import { ServiceEndpointService } from './service-endpoints.ts';
+import { DatabasePublicAccessService } from './database-public-access.ts';
 import { NodeCaService } from './node-ca.ts';
 import { ShareService } from './shares.ts';
 import { RegistryCredentialService } from './registry-credentials.ts';
@@ -342,6 +343,8 @@ export interface Core {
 	registry: RegistryService;
 	/** Managed database replicas (CLUSTERING §9.2, C7). */
 	databaseReplicas: DatabaseReplicaService;
+	/** Public database access from outside Yoal (docs/DATABASES.md §19, D241). */
+	databasePublicAccess: DatabasePublicAccessService;
 	/** Bucket replication (CLUSTERING §10.2, C9). */
 	storageReplication: StorageReplicationService;
 	/** Ingress HA status (CLUSTERING §7, C5). */
@@ -530,6 +533,7 @@ export function createCore(options: CoreOptions): Core {
 	ctx.functions = new FunctionService(ctx);
 	ctx.topology = new TopologyService(ctx);
 	ctx.endpoints = new ServiceEndpointService(ctx);
+	ctx.databasePublicAccess = new DatabasePublicAccessService(ctx);
 	ctx.nodeCa = new NodeCaService(ctx);
 	ctx.shares = new ShareService(ctx);
 	ctx.registryCredentials = new RegistryCredentialService(ctx);
@@ -645,6 +649,7 @@ export function createCore(options: CoreOptions): Core {
 		registryCredentials: ctx.registryCredentials,
 		registry: ctx.registry,
 		databaseReplicas: ctx.databaseReplicas,
+		databasePublicAccess: ctx.databasePublicAccess,
 		storageReplication: ctx.storageReplication,
 		ingress: ctx.ingress,
 		failover: ctx.failover,

@@ -1,4 +1,5 @@
 import { loadHelperConfig } from './config.ts';
+import { PublicDbManager } from './public-db.ts';
 import { startHelperServer, type RunningHelper } from './server.ts';
 import { spawnRunner, SystemdDriver } from './systemd.ts';
 import { NodeUpdater } from './node-update.ts';
@@ -99,6 +100,7 @@ export async function runHelper(options: RunHelperOptions = {}): Promise<void> {
 		log: (level, message) => log(level, `node update: ${message}`),
 	});
 	const firewall = new NetworkManager();
+	const publicDb = new PublicDbManager();
 	const wireguard = new WireguardManager({ firewall });
 	containers = new ContainerConsole({
 		podmanPath: config.podmanPath,
@@ -124,6 +126,11 @@ export async function runHelper(options: RunHelperOptions = {}): Promise<void> {
 		nodeUpdate,
 		wireguard,
 		endpointGuard: { apply: () => firewall.applyEndpointGuard() },
+		// Public database access (D241): the per-port allowlist table and the `*.db` certificate copy.
+		publicDb: {
+			firewall: (rules) => publicDb.applyFirewall(rules),
+			copyTls: (names) => publicDb.copyTls(names),
+		},
 		shares: new ShareMounter(),
 		disks: new DiskMounter(),
 		volumeProfiler: driver.volumeProfiler(),

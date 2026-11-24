@@ -1,4 +1,11 @@
 import { assertKubernetesId, parseManifestFiles } from './kubernetes.ts';
+import {
+	parsePublicDbFirewall,
+	parsePublicDbTls,
+	type PublicDbFirewallResult,
+	type PublicDbPortRule,
+	type PublicDbTlsResult,
+} from './public-db.ts';
 import type { ImagePruneResult } from './images.ts';
 import { MirrorValidationError, parseMirrorRequest, type MirrorRequest } from './registry-mirror.ts';
 import { createReadStream, promises as fs } from 'node:fs';
@@ -199,6 +206,11 @@ export interface HandlerOptions {
 	keepalived?: KeepalivedApi;
 	/** The endpoint guard nftables table (HA-PLAN H24); absent = 404. */
 	endpointGuard?: { apply(): Promise<{ table: string }> };
+	/** Public database access verbs (D241): the `inet yoal-public-db` table and the `*.db` TLS copy; absent = 404. */
+	publicDb?: {
+		firewall(rules: PublicDbPortRule[]): Promise<PublicDbFirewallResult>;
+		copyTls(names: string[]): Promise<PublicDbTlsResult[]>;
+	};
 	/** Profiling of a registered disk (docs/STORAGE.md §5.1); absent = 404. */
 	volumeProfiler?: { profile(request: VolumeProfileRequest): Promise<VolumeProfileResult> };
 	/** Share mount verbs (C3); absent on a helper that predates cluster shares. */
@@ -308,6 +320,17 @@ export function createHandler(
 				if (method !== 'POST') return methodNotAllowed('POST');
 				assertNoVerbInput({ search: url.search, body: await readText(request, maxBodyBytes) });
 				return json({ ok: true, ...(await options.endpointGuard.apply()) });
+			}
+
+			// --- public database access (D241): one fixed table and the `*.db` certificate copy ---
+			if (path === '/v1/public-db/firewall' || path === '/v1/public-db/tls') {
+				if (!options.publicDb) return json({ error: 'public database access is not available on this helper' }, 404);
+				if (method !== 'POST') return methodNotAllowed('POST');
+				if (url.search) throw new ValidationError('public-db verbs take no query parameters');
+				const body = await readJson(request, maxBodyBytes);
+				if (path === '/v1/public-db/firewall')
+					return json({ ok: true, ...(await options.publicDb.firewall(parsePublicDbFirewall(body))) });
+				return json({ ok: true, results: await options.publicDb.copyTls(parsePublicDbTls(body)) });
 			}
 
 			// --- managed overlay (C1): keygen, apply, status; no shell and no passthrough ----
@@ -1038,7 +1061,7 @@ export interface RunningHelper {
 export async function startHelperServer(
 	config: HelperConfig,
 	runtime: HelperRuntime,
-	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'keepalived' | 'endpointGuard' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler' | 'extraRoutes'> = {},
+	extras: Pick<HandlerOptions, 'nodeUpdate' | 'wireguard' | 'keepalived' | 'endpointGuard' | 'publicDb' | 'shares' | 'disks' | 'containers' | 'appVolumes' | 'jobs' | 'pipelineJobs' | 'volumeProfiler' | 'extraRoutes'> = {},
 ): Promise<RunningHelper> {
 	const directory = dirname(config.socketPath);
 	const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;

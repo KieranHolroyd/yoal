@@ -69,6 +69,7 @@
 	import RangePicker from '../../_lib/service/RangePicker.svelte';
 	import StatStrip from '../../_lib/service/StatStrip.svelte';
 	import ReplicasPanel from '../_lib/ReplicasPanel.svelte';
+	import PublicAccessPanel from '../_lib/PublicAccessPanel.svelte';
 	import { readTab, tabHref, type Stat } from '../../_lib/service/sections.js';
 	import { formatBytes, formatDate, formatDateTime, formatDuration } from '../../_lib/format.js';
 	import { purgeCountdown } from '../../_lib/operations/copy.js';
@@ -692,6 +693,17 @@
 								/>
 							</dd>
 						{/if}
+						{#if credentials.publicUrl}
+							<dt>Public URL</dt>
+							<dd>
+								<CopyValue
+									value={credentials.publicUrl}
+									label="public URL"
+									display={maskUrl(credentials.publicUrl, credentials.password)}
+									secret
+								/>
+							</dd>
+						{/if}
 						{#if credentials.caPem}
 							<dt>CA certificate</dt>
 							<dd>
@@ -831,6 +843,14 @@
 				{/if}
 			</Panel>
 		</div>
+
+		<PublicAccessPanel
+			{db}
+			access={data.publicAccess}
+			credentials={data.credentials}
+			canExpose={can.expose}
+			canUpdate={can.update}
+		/>
 
 		{#if caps.namedCredentials}
 			<CredentialsPanel {db} credentials={data.credentials} {can} fieldErrors={errors} />
