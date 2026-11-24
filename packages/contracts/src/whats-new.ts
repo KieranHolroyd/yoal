@@ -100,7 +100,7 @@ export const WHATS_NEW_ITEMS: readonly WhatsNewItem[] = [
 	},
 	{
 		id: 'database-public-access',
-		since: '0.16.17',
+		since: '0.16.18',
 		title: 'Public access: use a database from outside Yoal',
 		summary:
 			'A database can now be reached from a laptop, CI or an app hosted elsewhere at <name>-<org>.db.<your domain>:<port>, through a TLS proxy on your ingress nodes that only lets in the addresses you list.',
