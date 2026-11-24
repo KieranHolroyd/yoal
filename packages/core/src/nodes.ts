@@ -51,6 +51,7 @@ import {
 	KUBERNETES_CAPABILITY,
 	RELEASE_PHASE_CAPABILITY,
 	OFFLINE_DRILL_CAPABILITY,
+	WG_MESH_CAPABILITY,
 	WG_SUBNETS_CAPABILITY,
 	machineSubnetFor,
 	DEFAULT_REGION,
@@ -62,7 +63,8 @@ import {
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, UnauthorizedError, ValidationError } from './errors.ts';
 import { assertRegionWrites } from './region-gate.ts';
-import { allocateOverlayAddress, buildWireguardState, type OverlayNode } from './overlay.ts';
+import { allocateOverlayAddress, buildWireguardState, type OverlayGraphOptions, type OverlayNode } from './overlay.ts';
+import { observedEndpoints, overlayHosts } from './overlay-mesh.ts';
 import { newId, randomToken, sha256Hex, parseJson } from './util.ts';
 import { assertJoinKeyFree, assertJoinTokenUnused } from './node-join.ts';
 import { IDENTITY_NODE_SETTING, identityDesiredForNode } from './identity-desired.ts';
@@ -542,8 +544,8 @@ export class NodeService {
 			...(managed
 				? {
 						wireguard: (() => {
-							const cfg = this.ctx.cluster.get().overlay;
-							return buildWireguardState(nodeId, this.overlayNodes(), cfg.cidr, cfg);
+							const graph = this.overlayGraph();
+							return buildWireguardState(nodeId, graph.nodes, graph.cidr, graph.options);
 						})(),
 					}
 				: {}),
@@ -614,6 +616,8 @@ export class NodeService {
 		if (input.control) this.ctx.controlPlane.report({ ...input.control, nodeId: node.id });
 		// Every peer's desired state now carries this node's key.
 		if (adoptedKey) this.bump();
+		// Mesh mode (§4.7): a fresh `wg show` may prove or break a direct pair.
+		if (input.wireguard) this.ctx.overlayMesh?.evaluate(now);
 		if (input.workloads?.length) {
 			this.ctx.workloads.applyHeartbeat(node.id, input.workloads, input.actualStateVersion);
 			this.ctx.scaling.applyUsage(node.id, input.workloads);
@@ -1267,8 +1271,29 @@ export class NodeService {
 		}
 	}
 
-	/** Full rows as the pure peer-graph builder needs them. */
-	private overlayNodes(): OverlayNode[] {
+	/**
+	 * Everything the pure peer graph needs: the nodes, the CIDR and the options, with mesh mode's
+	 * pair states and names when it is on (§4.7). One source, so desired state, joins and the Fleet
+	 * map's path labels always agree.
+	 */
+	overlayGraph(): { nodes: OverlayNode[]; cidr: string; options: OverlayGraphOptions } {
+		const cfg = this.ctx.cluster.get().overlay;
+		const base = this.overlayNodes();
+		if (cfg.mode !== 'mesh') return { nodes: base, cidr: cfg.cidr, options: { ...cfg, mode: 'hub' } };
+		const observed = observedEndpoints(base, this.ctx.overlayMesh.reports(), this.ctx.now());
+		const withObserved = base.map((node) => ({ ...node, observedEndpoint: observed.get(node.id) ?? null }));
+		return {
+			nodes: withObserved,
+			cidr: cfg.cidr,
+			options: { ...cfg, mode: 'mesh', meshPairs: this.ctx.overlayMesh.states(), hosts: overlayHosts(withObserved) },
+		};
+	}
+
+	/**
+	 * Full rows as the pure peer-graph builder needs them; mesh mode adds each node's observed
+	 * endpoint on top (`overlayGraph`).
+	 */
+	overlayNodes(): OverlayNode[] {
 		return this.ctx.db
 			.select()
 			.from(nodes)
@@ -1290,6 +1315,8 @@ export class NodeService {
 					? machineSubnetFor(row.privateAddress)
 					: null,
 				acceptsSubnets: capabilities(row.capabilitiesJson).includes(WG_SUBNETS_CAPABILITY),
+				meshCapable: capabilities(row.capabilitiesJson).includes(WG_MESH_CAPABILITY),
+				joinedAt: row.createdAt,
 			}));
 	}
 
@@ -1418,7 +1445,12 @@ export class NodeService {
 				: {}),
 			...(node.networkMode === 'external'
 				? {}
-				: { wireguard: buildWireguardState(node.id, this.overlayNodes(), this.ctx.cluster.get().overlay.cidr, this.ctx.cluster.get().overlay) }),
+				: {
+						wireguard: (() => {
+							const graph = this.overlayGraph();
+							return buildWireguardState(node.id, graph.nodes, graph.cidr, graph.options);
+						})(),
+					}),
 		}, capabilities(node.capabilitiesJson), featureFlagsForGate(this.ctx.config));
 	}
 }

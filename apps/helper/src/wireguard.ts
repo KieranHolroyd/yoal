@@ -25,6 +25,8 @@ export interface WireguardPaths {
 	configPath: string;
 	wgPath: string;
 	ipPath: string;
+	/** Mesh mode writes the overlay names here, inside its own marked block (§4.7). */
+	hostsPath: string;
 }
 
 export interface WireguardPeer {
@@ -45,6 +47,8 @@ export interface WireguardState {
 	routes: string[];
 	/** This node's own machine /24, for the `yoal-k8s` network. */
 	machineSubnet: string | null;
+	/** Overlay names (mesh mode). Absent or empty removes the helper's block (hub mode). */
+	hosts?: Array<{ name: string; address: string }>;
 }
 
 export interface WireguardStatusPeer {
@@ -78,7 +82,11 @@ export const DEFAULT_WIREGUARD_PATHS: WireguardPaths = {
 	configPath: '/etc/wireguard/yoal/wg0.conf',
 	wgPath: 'wg',
 	ipPath: 'ip',
+	hostsPath: '/etc/hosts',
 };
+
+const HOSTS_BEGIN = '# BEGIN yoal overlay names (managed by yoal-helper; do not edit)';
+const HOSTS_END = '# END yoal overlay names';
 
 /** Where releases before 0.14.5 kept the key; `keygen` moves it so the node keeps its identity. */
 export const LEGACY_WIREGUARD_KEY_PATH = '/etc/yoal/wireguard/wg0.key';
@@ -151,8 +159,13 @@ export class WireguardManager {
 		await this.runIp(['addr', 'replace', `${state.address}/32`, 'dev', this.paths.interface]);
 		await this.runIp(['link', 'set', 'mtu', String(state.mtu), 'dev', this.paths.interface]);
 		await this.runIp(['link', 'set', this.paths.interface, 'up']);
-		const setconf = await this.runWg(['setconf', this.paths.interface, this.paths.configPath]);
-		if (setconf.code !== 0) throw new WireguardError(`wg setconf failed: ${setconf.stderr.trim()}`);
+		// `syncconf` changes only what differs, so live sessions and the endpoints NATed peers roamed
+		// to survive a re-apply; `setconf` drops every peer first. Older wireguard-tools lack it.
+		const sync = await this.runWg(['syncconf', this.paths.interface, this.paths.configPath]);
+		if (sync.code !== 0) {
+			const setconf = await this.runWg(['setconf', this.paths.interface, this.paths.configPath]);
+			if (setconf.code !== 0) throw new WireguardError(`wg setconf failed: ${setconf.stderr.trim()}`);
+		}
 		// The address is a /32, so nothing routes the overlay to the interface by itself: without
 		// this, traffic to a peer leaves through the default gateway. `src` pins the reply address.
 		if (state.cidr) {
@@ -166,7 +179,24 @@ export class WireguardManager {
 			if (route.code !== 0) throw new WireguardError(`could not route ${prefix} via ${this.paths.interface}: ${route.stderr.trim()}`);
 		}
 		await this.firewall?.apply({ forwardCidrs: state.routes });
+		await this.writeHosts(state.hosts ?? []);
 		return { peers: state.peers.length };
+	}
+
+	/** Replace the marked block in the hosts file; everything outside it is the host's own. */
+	async writeHosts(hosts: Array<{ name: string; address: string }>): Promise<void> {
+		const current = await fs.readFile(this.paths.hostsPath, 'utf8').catch(() => '');
+		const next = renderHosts(current, hosts);
+		if (next === current) return;
+		const temp = `${this.paths.hostsPath}.yoal-tmp`;
+		try {
+			await fs.writeFile(temp, next, { mode: 0o644 });
+			await fs.rename(temp, this.paths.hostsPath);
+		} catch {
+			// A bind-mounted hosts file (a container) cannot be replaced, only rewritten.
+			await fs.rm(temp, { force: true });
+			await fs.writeFile(this.paths.hostsPath, next);
+		}
 	}
 
 	/** Latest handshake and counters per peer, from `wg show <if> dump`. */
@@ -215,11 +245,27 @@ export class WireguardManager {
 export function renderConfig(privateKey: string, state: WireguardState): string {
 	const lines = ['[Interface]', `PrivateKey = ${privateKey}`, `ListenPort = ${state.listenPort}`];
 	for (const peer of state.peers) {
-		lines.push('', '[Peer]', `PublicKey = ${peer.publicKey}`, `AllowedIPs = ${peer.allowedIps.join(', ')}`);
+		lines.push('', '[Peer]', `PublicKey = ${peer.publicKey}`);
+		// A mesh probe has none: it handshakes on keepalives and carries nothing yet (§4.7).
+		if (peer.allowedIps.length > 0) lines.push(`AllowedIPs = ${peer.allowedIps.join(', ')}`);
 		if (peer.endpoint) lines.push(`Endpoint = ${peer.endpoint}`);
 		if (peer.persistentKeepalive > 0) lines.push(`PersistentKeepalive = ${peer.persistentKeepalive}`);
 	}
 	return `${lines.join('\n')}\n`;
+}
+
+/** The hosts file with the overlay block replaced (or removed when `hosts` is empty). */
+export function renderHosts(current: string, hosts: Array<{ name: string; address: string }>): string {
+	const lines = current.split('\n');
+	const begin = lines.indexOf(HOSTS_BEGIN);
+	const end = begin >= 0 ? lines.indexOf(HOSTS_END, begin) : -1;
+	// No block and nothing to write: the file is the host's own, byte for byte.
+	if (hosts.length === 0 && (begin < 0 || end < 0)) return current;
+	const kept = begin >= 0 && end > begin ? [...lines.slice(0, begin), ...lines.slice(end + 1)] : lines;
+	while (kept.length > 0 && kept[kept.length - 1] === '') kept.pop();
+	if (hosts.length === 0) return kept.length ? `${kept.join('\n')}\n` : '';
+	const block = [HOSTS_BEGIN, ...hosts.map((host) => `${host.address}\t${host.name}`), HOSTS_END];
+	return `${[...kept, ...(kept.length ? [''] : []), ...block].join('\n')}\n`;
 }
 
 /** Strict local validation: the helper does not link the control-plane contracts package. */
@@ -245,7 +291,8 @@ export function parseWireguardState(raw: unknown): WireguardState {
 		if (typeof peer.publicKey !== 'string' || !/^[A-Za-z0-9+/]{43}=$/.test(peer.publicKey))
 			throw new WireguardError(`peer ${index} has an invalid public key`);
 		if (peer.endpoint !== null && typeof peer.endpoint !== 'string') throw new WireguardError(`peer ${index} has an invalid endpoint`);
-		if (!Array.isArray(peer.allowedIps) || peer.allowedIps.length === 0 || peer.allowedIps.length > 128)
+		// Empty is a mesh probe (§4.7).
+		if (!Array.isArray(peer.allowedIps) || peer.allowedIps.length > 128)
 			throw new WireguardError(`peer ${index} has invalid allowed IPs`);
 		// /32 overlay addresses, plus /24 Kubernetes machine subnets.
 		for (const ip of peer.allowedIps)
@@ -271,7 +318,24 @@ export function parseWireguardState(raw: unknown): WireguardState {
 	const machineSubnet = record.machineSubnet === undefined || record.machineSubnet === null ? null : record.machineSubnet;
 	if (machineSubnet !== null && (typeof machineSubnet !== 'string' || !/^(?:\d{1,3}\.){3}0\/24$/.test(machineSubnet)))
 		throw new WireguardError('invalid machine subnet');
-	return { mode, address, cidr, mtu, listenPort, peers, routes, machineSubnet };
+	let hosts: Array<{ name: string; address: string }> | undefined;
+	if (record.hosts !== undefined) {
+		if (!Array.isArray(record.hosts) || record.hosts.length > 64) throw new WireguardError('hosts must be an array of at most 64');
+		hosts = record.hosts.map((value, index) => {
+			const host = value as Record<string, unknown> | null;
+			// Only overlay names and addresses: nothing that could shadow a real host or inject a line.
+			if (
+				!host ||
+				typeof host.name !== 'string' ||
+				!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.yoal\.internal$/.test(host.name) ||
+				typeof host.address !== 'string' ||
+				!/^(?:\d{1,3}\.){3}\d{1,3}$/.test(host.address)
+			)
+				throw new WireguardError(`host ${index} is invalid`);
+			return { name: host.name, address: host.address };
+		});
+	}
+	return { mode, address, cidr, mtu, listenPort, peers, routes, machineSubnet, ...(hosts ? { hosts } : {}) };
 }
 
 export const defaultRunner: CommandRunner = async (argv, input) => {

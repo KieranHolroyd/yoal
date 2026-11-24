@@ -6,6 +6,8 @@ import {
 	WG_KEEPALIVE_SECONDS,
 	type NodeNetworkMode,
 	type NodeRole,
+	type OverlayHost,
+	type OverlayMode,
 	type WireguardPeer,
 	type WireguardState,
 } from '@yoal/contracts';
@@ -35,6 +37,31 @@ export interface OverlayNode {
 	machineSubnet?: string | null;
 	/** Its helper accepts /24 entries (`wg-subnets`); older nodes only ever get /32s. */
 	acceptsSubnets?: boolean;
+	/** Its helper takes mesh probes and overlay names (`wg-mesh`, §4.7); older nodes stay hub-only. */
+	meshCapable?: boolean;
+	/** The public endpoint other nodes see its WireGuard socket on (mesh mode, read off the hubs). */
+	observedEndpoint?: string | null;
+	/** Join time (ms), which orders colliding overlay names. */
+	joinedAt?: number | null;
+}
+
+/** A pair's mesh state (§4.7); see `overlay-mesh.ts`. */
+export type MeshPairState = 'probing' | 'direct' | 'relayed';
+
+export function meshPairKey(a: string, b: string): string {
+	return a < b ? `${a}|${b}` : `${b}|${a}`;
+}
+
+export interface OverlayGraphOptions {
+	mtu?: number;
+	listenPort?: number;
+	keepaliveSeconds?: number;
+	/** `hub` (default) or `mesh` (§4.7). */
+	mode?: OverlayMode;
+	/** Mesh pair states by `meshPairKey`; a candidate pair with no entry is treated as `probing`. */
+	meshPairs?: ReadonlyMap<string, MeshPairState>;
+	/** Overlay names for capable nodes in mesh mode. */
+	hosts?: OverlayHost[];
 }
 
 /** How traffic between two overlay nodes travels underneath WireGuard. */
@@ -72,9 +99,14 @@ export function buildWireguardState(
 	nodeId: string,
 	nodes: OverlayNode[],
 	cidr = DEFAULT_OVERLAY_CIDR,
-	options: { mtu?: number; listenPort?: number; keepaliveSeconds?: number } = {},
+	options: OverlayGraphOptions = {},
 ): WireguardState {
 	const self = nodes.find((node) => node.id === nodeId);
+	const mesh = options.mode === 'mesh';
+	const keepalive = options.keepaliveSeconds ?? WG_KEEPALIVE_SECONDS;
+	// Only in mesh mode: a helper treats a missing list as "no names" and removes its block, so hub
+	// mode's desired state stays exactly what it was before mesh mode existed.
+	const hostsField = mesh && self?.meshCapable && options.hosts?.length ? { hosts: options.hosts } : {};
 	if (!self || self.networkMode === 'external' || !self.privateAddress) {
 		return {
 			mode: self?.networkMode ?? 'external',
@@ -85,6 +117,7 @@ export function buildWireguardState(
 			peers: [],
 			routes: [],
 			machineSubnet: null,
+			...(self?.networkMode === 'external' ? {} : hostsField),
 		};
 	}
 
@@ -107,15 +140,18 @@ export function buildWireguardState(
 	const peers: WireguardPeer[] = [];
 
 	if (hubs.length === 0 || self.roles.includes('ingress')) {
-		// A hub dials every node; a spoke with no hub can still reach same-zone LAN peers.
+		// A hub dials every node; a spoke with no hub can still reach same-zone LAN peers. With no
+		// hub at all, mesh mode also dials an endpoint another node observed.
 		for (const node of managed) {
-			const endpoint = sharesPrivateNetwork(self, node) ? node.lanEndpoint : node.wgEndpoint;
+			const endpoint = sharesPrivateNetwork(self, node)
+				? node.lanEndpoint
+				: (node.wgEndpoint ?? (mesh && hubs.length === 0 && self.meshCapable && node.meshCapable ? node.observedEndpoint : null));
 			peers.push({
 				nodeId: node.id,
 				publicKey: node.wgPublicKey!,
 				endpoint: endpoint ?? null,
 				allowedIps: [`${node.privateAddress}/32`],
-				persistentKeepalive: endpoint ? 0 : (options.keepaliveSeconds ?? WG_KEEPALIVE_SECONDS),
+				persistentKeepalive: endpoint && endpoint !== node.observedEndpoint ? 0 : keepalive,
 			});
 		}
 	} else {
@@ -123,6 +159,27 @@ export function buildWireguardState(
 		const relayedByHub = new Map<string, OverlayNode[]>(hubs.map((hub) => [hub.id, []]));
 		for (const node of managed) {
 			if (directIds.has(node.id) || hubIds.has(node.id)) continue;
+			// Mesh mode (§4.7): a spoke pair tries the direct path. A probe holds the peer with no
+			// addresses, so the hub keeps carrying the pair until a handshake proves the path.
+			if (
+				mesh &&
+				self.meshCapable &&
+				node.meshCapable &&
+				!node.roles.includes('ingress') &&
+				(dialable(node) || dialable(self))
+			) {
+				const state = options.meshPairs?.get(meshPairKey(self.id, node.id)) ?? 'probing';
+				if (state !== 'relayed')
+					peers.push({
+						nodeId: node.id,
+						publicKey: node.wgPublicKey!,
+						endpoint: dialable(node),
+						allowedIps: state === 'direct' ? [`${node.privateAddress}/32`] : [],
+						// Both sides keep sending: that is what holds each NAT mapping open.
+						persistentKeepalive: keepalive || WG_KEEPALIVE_SECONDS,
+					});
+				if (state === 'direct') continue;
+			}
 			const hub = hubs.find((candidate) => candidate.zone === node.zone) ?? hubs[0];
 			if (hub) relayedByHub.get(hub.id)!.push(node);
 		}
@@ -170,21 +227,32 @@ export function buildWireguardState(
 		peers: dedupePeers(withSubnets),
 		routes: anySubnets ? [DEFAULT_K8S_MACHINE_CIDR] : [],
 		machineSubnet: self.acceptsSubnets ? (self.machineSubnet ?? null) : null,
+		...hostsField,
 	};
+}
+
+function dialable(node: OverlayNode): string | null {
+	return node.wgEndpoint ?? node.observedEndpoint ?? null;
 }
 
 /**
  * The underlay path between two managed nodes, as the peer graph above builds it: `private` over a
  * shared LAN or private network, `direct` to a public WireGuard endpoint, `relayed` through a hub.
  */
-export function overlayPath(fromId: string, toId: string, nodes: OverlayNode[]): OverlayPath {
+export function overlayPath(
+	fromId: string,
+	toId: string,
+	nodes: OverlayNode[],
+	options: Pick<OverlayGraphOptions, 'mode' | 'meshPairs'> = {},
+): OverlayPath {
 	const from = nodes.find((node) => node.id === fromId);
 	const to = nodes.find((node) => node.id === toId);
 	if (!from || !to || from.id === to.id || !to.privateAddress) return 'none';
 	// Read the answer off the graph itself, so this can never disagree with what the node applies.
-	const peers = buildWireguardState(from.id, nodes).peers;
+	const peers = buildWireguardState(from.id, nodes, DEFAULT_OVERLAY_CIDR, options).peers;
 	const target = `${to.privateAddress}/32`;
-	const own = peers.find((peer) => peer.nodeId === to.id);
+	// A mesh probe is a peer that carries nothing yet: the pair is still relayed.
+	const own = peers.find((peer) => peer.nodeId === to.id && peer.allowedIps.includes(target));
 	// A LAN hop is one this node dials on the peer's LAN endpoint.
 	if (own) return own.endpoint !== null && own.endpoint === to.lanEndpoint ? 'private' : 'direct';
 	return peers.some((peer) => peer.allowedIps.includes(target)) ? 'relayed' : 'none';

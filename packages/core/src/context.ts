@@ -64,6 +64,7 @@ import type { NodeDrillService } from './node-drills.ts';
 import type { SchedulingService } from './scheduling-service.ts';
 import type { NodeRolloutService } from './node-rollouts.ts';
 import type { NodeLinkService } from './link-service.ts';
+import type { OverlayMeshService } from './overlay-mesh-service.ts';
 import type { ScalingService } from './scaling-service.ts';
 import type { ReleaseCommandScheduler } from './release-commands.ts';
 import type { RelocationService } from './relocation-service.ts';
@@ -240,6 +241,8 @@ export interface CoreContext {
 	nodeRollouts: NodeRolloutService;
 	/** Measured links between nodes: passive samples and link tests (CLUSTERING §4.6). */
 	links: NodeLinkService;
+	/** Mesh mode's direct node pairs (CLUSTERING §4.7, D240). */
+	overlayMesh: OverlayMeshService;
 	/** Horizontal scaling per app: copies, autoscaling policy, usage and history (SCALING.md). */
 	scaling: ScalingService;
 	/** Release commands: the run lease on a release id (HA-PLAN H25, I16). */

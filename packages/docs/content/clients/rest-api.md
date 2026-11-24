@@ -387,6 +387,7 @@ Each table has one row per path. Where a path takes several methods, they share 
 | GET | `/topology` | Zones, nodes, roles, labels, disks and placement counts. |
 | GET | `/topology/blast-radius` | What an outage of `?node=` or `?zone=` would take down. |
 | GET, PATCH | `/cluster/config` | Read or change cluster tunables such as overlay, replicas and limits. Platform admin, session only for changes. |
+| GET | `/cluster/mesh` | Mesh mode's node pairs: counts and each pair's state (`probing`, `direct`, `relayed`). Platform admin. |
 | GET, POST | `/shares` | List cluster shares (NFS or SMB), or register one. Session only for creates. |
 | GET, PATCH, PUT, DELETE | `/shares/{name}` | Read, update or remove a cluster share. |
 | PUT | `/shares/{name}/grants` | Replace the set of orgs that may use a share. |

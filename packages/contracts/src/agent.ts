@@ -523,6 +523,8 @@ export const nodeCapabilities = [
 	INGRESS_SET_CAPABILITY,
 	// The helper accepts /24 Kubernetes machine subnets in WireGuard peers (docs/KUBERNETES.md §10).
 	'wg-subnets',
+	// Mesh overlay (D240): probe peers with no allowed IPs, `wg syncconf`, overlay names in /etc/hosts.
+	'wg-mesh',
 	// Goes dark for a node offline drill (D235): no heartbeats or pulls, failing ingress probe.
 	OFFLINE_DRILL_CAPABILITY,
 	// Runs `cloudShell` workloads with their loop-mounted home disk, purges `cloudShellPurges`

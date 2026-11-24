@@ -17,7 +17,7 @@ import {
 } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError } from './errors.ts';
-import { overlayPath, type OverlayNode } from './overlay.ts';
+import { overlayPath } from './overlay.ts';
 import { newId, parseJson, randomToken } from './util.ts';
 
 type NodeRow = typeof nodes.$inferSelect;
@@ -96,8 +96,8 @@ export class NodeLinkService {
 
 	applySamples(nodeId: string, samples: readonly LinkSample[]): void {
 		const now = this.ctx.now();
-		const overlay = this.#overlayNodes();
-		const known = new Set(overlay.map((node) => node.id));
+		const overlay = this.ctx.nodes.overlayGraph();
+		const known = new Set(overlay.nodes.map((node) => node.id));
 		const minute = Math.floor(now / 60_000) * 60_000;
 		const since = new Map(
 			this.ctx.db
@@ -123,7 +123,7 @@ export class NodeLinkService {
 			const values = {
 				// Silence starts a clock; any answer stops it.
 				downSince: sample.rttMs === null ? (since.get(sample.nodeId) ?? now) : null,
-				path: overlayPath(nodeId, sample.nodeId, overlay),
+				path: overlayPath(nodeId, sample.nodeId, overlay.nodes, overlay.options),
 				rttMs: sample.rttMs,
 				rttMinMs: sample.minMs,
 				rttMaxMs: sample.maxMs,
@@ -185,8 +185,8 @@ export class NodeLinkService {
 		const now = this.ctx.now();
 		if (this.#expire(now)) this.#advance(now);
 		const rows = this.ctx.db.select().from(nodes).all();
-		const overlay = this.#overlayNodes();
-		const managed = new Set(overlay.filter((node) => node.privateAddress && node.networkMode !== 'external').map((node) => node.id));
+		const overlay = this.ctx.nodes.overlayGraph();
+		const managed = new Set(overlay.nodes.filter((node) => node.privateAddress && node.networkMode !== 'external').map((node) => node.id));
 		const stored = new Map(this.ctx.db.select().from(nodeLinks).all().map((row) => [`${row.fromNodeId}>${row.toNodeId}`, row]));
 		const firstMinute = Math.floor(now / 60_000) * 60_000 - (HISTORY_VIEW_MINUTES - 1) * 60_000;
 		const points = new Map<string, Map<number, number | null>>();
@@ -214,7 +214,7 @@ export class NodeLinkService {
 					fromNodeId: from.id,
 					toNodeId: to.id,
 					// Recomputed, so a change of private network shows before the next sample lands.
-					path: overlayPath(from.id, to.id, overlay) as LinkPath,
+					path: overlayPath(from.id, to.id, overlay.nodes, overlay.options) as LinkPath,
 					rttMs: row?.rttMs ?? null,
 					rttMinMs: row?.rttMinMs ?? null,
 					rttMaxMs: row?.rttMaxMs ?? null,
@@ -331,7 +331,10 @@ export class NodeLinkService {
 			};
 			this.ctx.db
 				.insert(nodeLinks)
-				.values({ fromNodeId: a.id, toNodeId: b.id, path: overlayPath(a.id, b.id, this.#overlayNodes()), ...values })
+				.values({ fromNodeId: a.id, toNodeId: b.id, path: (() => {
+					const graph = this.ctx.nodes.overlayGraph();
+					return overlayPath(a.id, b.id, graph.nodes, graph.options);
+				})(), ...values })
 				.onConflictDoUpdate({ target: [nodeLinks.fromNodeId, nodeLinks.toNodeId], set: values })
 				.run();
 			result.queued.push([a.id, b.id]);
@@ -467,24 +470,6 @@ export class NodeLinkService {
 			.filter((row) => row.networkMode !== 'external' && row.privateAddress && row.wgPublicKey);
 	}
 
-	#overlayNodes(): OverlayNode[] {
-		return this.ctx.db
-			.select()
-			.from(nodes)
-			.all()
-			.map((row) => ({
-				id: row.id,
-				name: row.name,
-				zone: row.zone,
-				roles: this.ctx.nodes.view(row).roles,
-				networkMode: row.networkMode,
-				privateAddress: row.privateAddress,
-				wgPublicKey: row.wgPublicKey,
-				wgEndpoint: row.wgEndpoint,
-				lanEndpoint: row.lanEndpoint,
-				privateNetwork: row.privateNetwork,
-			}));
-	}
 }
 
 function capable(row: Pick<NodeRow, 'capabilitiesJson'>): boolean {

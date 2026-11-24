@@ -86,6 +86,17 @@ export const WHATS_NEW_ITEMS: readonly WhatsNewItem[] = [
 		attention: 'info',
 		href: '/cloud-shell',
 		learnMore: 'https://github.com/yoal-dev/yoal/blob/main/docs/CLOUD-SHELL.md'
+	},
+	{
+		id: 'overlay-mesh',
+		since: '0.16.16',
+		title: 'Mesh mode: direct private paths between nodes, through NAT',
+		summary:
+			'Settings → Clustering → Overlay network can now connect every pair of nodes directly, as Tailscale does, instead of relaying pairs behind NAT through an ingress hub.',
+		body: 'Off by default. When it is on, the control plane reads the public address each node is seen on from the hubs and lets each pair dial the other. A pair switches to the direct path only after a handshake proves it works, and falls back to the hub if it stops answering, so turning it on interrupts nothing. Each node also gets a <node>.yoal.internal name in its hosts file. Nodes need this release before they take part; nodes on older agents stay on the hubs.',
+		attention: 'info',
+		href: '/settings/clustering',
+		learnMore: 'https://github.com/yoal-dev/yoal/blob/main/docs/CLUSTERING.md'
 	}
 ];
 

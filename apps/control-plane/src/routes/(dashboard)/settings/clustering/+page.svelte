@@ -1,6 +1,7 @@
 <script lang="ts">
 	import CircleArrowUpIcon from '@lucide/svelte/icons/circle-arrow-up';
 	import NetworkIcon from '@lucide/svelte/icons/network';
+	import WaypointsIcon from '@lucide/svelte/icons/waypoints';
 	import ShieldCheckIcon from '@lucide/svelte/icons/shield-check';
 	import { untrack } from 'svelte';
 	import { enhance } from '$app/forms';
@@ -45,6 +46,13 @@
 	let rolloutDrain = $state(updates.drain);
 	let rolloutCanary = $state(updates.canary === undefined ? '' : String(updates.canary));
 	let updatesPending = $state(false);
+	// Mesh mode (docs/CLUSTERING.md §4.7, D240).
+	// svelte-ignore state_referenced_locally -- seeded once; saving reloads the page data
+	let meshOn = $state(data.config.overlay.mode === 'mesh');
+	let overlayPending = $state(false);
+	const nodeName = (id: string) => data.mesh.names[id] ?? id;
+	const pairLabels: Record<string, string> = { direct: 'Direct', probing: 'Probing', relayed: 'Via hub' };
+
 	const strategyLabels: Record<string, string> = {
 		availability: 'Availability (recommended): canary, then waves that keep every redundant group up',
 		rolling: 'Rolling: a fixed number of nodes at a time',
@@ -93,6 +101,74 @@
 		</ul>
 	{/if}
 </Panel>
+
+<form
+	method="POST"
+	action="?/overlay"
+	class="mb-5"
+	use:enhance={() => {
+		overlayPending = true;
+		return async ({ update }) => {
+			await update({ reset: false });
+			overlayPending = false;
+		};
+	}}
+>
+	<Panel
+		title="Overlay network"
+		icon={WaypointsIcon}
+		description="How nodes reach each other's private addresses. Hub mode relays every pair that does not share a private network through an ingress hub."
+	>
+		<Field.Field orientation="horizontal" class="gap-2">
+			<input type="hidden" name="mesh" value={meshOn ? 'true' : ''} />
+			<Switch id="overlay-mesh" bind:checked={meshOn} />
+			<Field.Content>
+				<Field.Label for="overlay-mesh" class="font-normal">Mesh mode</Field.Label>
+				<Field.Description>
+					Connect every pair of nodes directly, through NAT where it allows it, with the hubs as the
+					fallback relay. Each node also gets a name, <span class="font-mono">&lt;node&gt;.yoal.internal</span>,
+					in its hosts file. Nodes on an agent from before mesh mode stay on the hubs.
+				</Field.Description>
+			</Field.Content>
+		</Field.Field>
+		{#if data.mesh.mode === 'mesh'}
+			<div class="mt-4 flex flex-wrap items-center gap-2 text-sm">
+				<Badge variant="success">{data.mesh.direct} direct</Badge>
+				<Badge variant="neutral">{data.mesh.probing} probing</Badge>
+				<Badge variant={data.mesh.relayed ? 'warning' : 'neutral'}>{data.mesh.relayed} via hub</Badge>
+			</div>
+			{#if data.mesh.pairs.length}
+				<ul class="mt-3 space-y-1 text-xs">
+					{#each data.mesh.pairs as pair (`${pair.a}|${pair.b}`)}
+						<li class="flex gap-2">
+							<span class="w-16 shrink-0 font-medium">{pairLabels[pair.state]}</span>
+							<span class="truncate">{nodeName(pair.a)} ↔ {nodeName(pair.b)}</span>
+							<span class="ml-auto shrink-0 text-muted-foreground">
+								{#if pair.state === 'relayed' && pair.retryAt}
+									tries again {formatRelative(pair.retryAt)}
+								{:else}
+									since {formatRelative(pair.since)}
+								{/if}
+							</span>
+						</li>
+					{/each}
+				</ul>
+			{:else}
+				<p class="mt-3 text-xs text-muted-foreground">
+					No pairs to connect yet. A pair needs two non-ingress nodes on a current agent, not on the
+					same private network, and at least one of them seen on a public address by a hub.
+				</p>
+			{/if}
+		{/if}
+		{#if result?.section === 'overlay' && result.message}<p class="mt-3 text-sm text-destructive">{result.message}</p>{/if}
+		{#if result?.section === 'overlay' && result.success}<p class="mt-3 text-sm text-success">{result.success}</p>{/if}
+		{#snippet footer()}
+			<div class="flex justify-end">
+				<Button type="submit" size="sm" disabled={overlayPending}>Save overlay</Button>
+			</div>
+		{/snippet}
+	</Panel>
+</form>
 
 <form
 	method="POST"
@@ -210,11 +286,11 @@
 			<Field.Label for="cluster-config">JSON</Field.Label>
 			<Textarea id="cluster-config" name="config" bind:value={text} rows={26} class="font-mono text-xs" spellcheck="false" />
 			<Field.Description>
-				Overlay CIDR/MTU/port, endpoint port range and mTLS, replica limits, spread, health-check interval and failover grace, database replica limits and promotion lag limits, storage targets, the failover controller's lease timing, automatic failover, scheduling (packing strategy, memory and CPU overcommit and the memory-pressure limit, automatic rebalance, rolling and surge deploys, automatic rollback, run leases for single workers) and the share mount root.
+				Overlay CIDR/MTU/port and mode, endpoint port range and mTLS, replica limits, spread, health-check interval and failover grace, database replica limits and promotion lag limits, storage targets, the failover controller's lease timing, automatic failover, scheduling (packing strategy, memory and CPU overcommit and the memory-pressure limit, automatic rebalance, rolling and surge deploys, automatic rollback, run leases for single workers) and the share mount root.
 			</Field.Description>
 		</Field.Field>
-		{#if result?.section !== 'updates' && result?.message}<p class="text-sm text-destructive">{result.message}</p>{/if}
-		{#if result?.section !== 'updates' && result?.success}<p class="text-sm text-success">{result.success}</p>{/if}
+		{#if !result?.section && result?.message}<p class="text-sm text-destructive">{result.message}</p>{/if}
+		{#if !result?.section && result?.success}<p class="text-sm text-success">{result.success}</p>{/if}
 	</Panel>
 	<div class="flex justify-end">
 		<Button type="submit">Save configuration</Button>

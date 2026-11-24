@@ -189,6 +189,24 @@ export const nodeLinks = sqliteTable(
 	(t) => [primaryKey({ columns: [t.fromNodeId, t.toNodeId] })],
 );
 
+/** A node pair mesh mode tries directly, and how far it got (docs/CLUSTERING.md §4.7, D240). */
+export const overlayMeshPairs = sqliteTable(
+	'overlay_mesh_pairs',
+	{
+		nodeA: text('node_a').notNull(),
+		nodeB: text('node_b').notNull(),
+		/** `probing`, `direct` or `relayed`. */
+		state: text('state').notNull(),
+		since: integer('since').notNull(),
+		attempts: integer('attempts').notNull().default(0),
+		retryAt: integer('retry_at'),
+		endpoints: text('endpoints').notNull().default(''),
+		lastHandshakeAt: integer('last_handshake_at'),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+	},
+	(t) => [primaryKey({ columns: [t.nodeA, t.nodeB] })],
+);
+
 /** A day of round-trip samples per ordered pair, one a minute, for the Fleet sparkline (D221). */
 export const nodeLinkHistory = sqliteTable(
 	'node_link_history',

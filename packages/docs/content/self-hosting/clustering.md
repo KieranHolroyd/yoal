@@ -238,6 +238,30 @@ A storage replication target is a real copy: the source's node copies every buck
 > [!NOTE]
 > Not available yet: synchronous Postgres replicas, replicas of a database with point-in-time recovery, cascading replicas, rewinding the old primary after a promotion (its copy is deleted instead), and replicas for other engines.
 
+### Mesh mode
+
+By default, two nodes that are both behind NAT (a homelab machine and an office server, for
+example) reach each other through an ingress hub. Mesh mode connects them directly, the way
+Tailscale does. Turn it on in **Settings → Clustering → Overlay network**, or set
+`overlay.mode` to `mesh`.
+
+The hubs already see the public address and port each node's WireGuard traffic arrives from.
+Yoal gives each pair of nodes the other's address, and both send at once, so each router lets the
+other's packets in. Traffic stays on the hub until a handshake proves the direct path works, so
+turning mesh mode on interrupts nothing. A pair whose direct path never answers (a strict
+"symmetric" NAT, or a provider firewall that drops UDP 51820) stays on the hub and tries again
+after 5 minutes, 15 minutes, then every hour. A direct path that stops answering goes back to the
+hub on its own.
+
+The panel shows each pair as **Direct**, **Probing** or **Via hub**, and the Fleet map labels
+links the same way. Ingress nodes and nodes that share a private network are already direct and
+are not listed. Nodes need this release; a node on an older agent stays on the hubs.
+
+Mesh mode also gives every node a name, `<node>.yoal.internal`, in each node's `/etc/hosts`, so
+you can `ssh root@edge-b.yoal.internal` from one node to another. The name comes from the node's
+name, lowercased with spaces turned into dashes. Containers do not see these names. Turning mesh
+mode off removes them.
+
 ### Attachment endpoints
 
 By default an app with an attached database runs next to it, and a process app on another node
@@ -294,6 +318,7 @@ These are the keys that code reads today:
 | `overlay.cidr` | `10.47.0.0/22` | Address range for the managed WireGuard network between nodes |
 | `overlay.mtu` | `1420` | MTU of the WireGuard interface |
 | `overlay.listenPort` | `51820` | UDP port WireGuard listens on |
+| `overlay.mode` | `hub` | `hub` relays node pairs behind NAT through an ingress hub; `mesh` connects them directly where NAT allows ([Mesh mode](#mesh-mode)) |
 | `endpoints.portMin`, `endpoints.portMax` | `21000`, `21999` | Local port range for cross-node service endpoints; `portMin` must be below `portMax` |
 | `replicas.max` | `20` | Most copies one app may run |
 | `replicas.spread` | `node` | `node` or `zone` |

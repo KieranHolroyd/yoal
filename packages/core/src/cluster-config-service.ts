@@ -139,6 +139,12 @@ export class ClusterConfigService {
 			JSON.stringify(merged.data.ingress) !== JSON.stringify(current.ingress)
 		)
 			this.ctx.projects.bump();
+		// Every node's peer list and names come from the overlay section (CLUSTERING §4.1, §4.7).
+		if (JSON.stringify(merged.data.overlay) !== JSON.stringify(current.overlay)) {
+			this.ctx.nodes.bump();
+			// Entering mesh mode seeds the pairs now; leaving it clears them, rather than at the next heartbeat.
+			if (merged.data.overlay.mode !== current.overlay.mode) this.ctx.overlayMesh.evaluate(this.ctx.now(), true);
+		}
 		this.ctx.audit.record({
 			principal,
 			action: 'platform.cluster_config',

@@ -40,6 +40,7 @@ import { NodeDrillService } from './node-drills.ts';
 import { SchedulingService } from './scheduling-service.ts';
 import { NodeRolloutService } from './node-rollouts.ts';
 import { NodeLinkService } from './link-service.ts';
+import { OverlayMeshService } from './overlay-mesh-service.ts';
 import { ScalingService } from './scaling-service.ts';
 import { ReleaseCommandScheduler } from './release-commands.ts';
 import { RelocationService } from './relocation-service.ts';
@@ -355,6 +356,8 @@ export interface Core {
 	nodeRollouts: NodeRolloutService;
 	/** Measured links between nodes (CLUSTERING §4.6). */
 	links: NodeLinkService;
+	/** Mesh mode's direct node pairs (CLUSTERING §4.7). */
+	overlayMesh: OverlayMeshService;
 	/** Horizontal scaling per app (SCALING.md). */
 	scaling: ScalingService;
 	/** Release commands: the run lease on a release id (HA-PLAN H25, I16). */
@@ -539,6 +542,7 @@ export function createCore(options: CoreOptions): Core {
 	ctx.scheduling = new SchedulingService(ctx);
 	ctx.nodeRollouts = new NodeRolloutService(ctx);
 	ctx.links = new NodeLinkService(ctx);
+	ctx.overlayMesh = new OverlayMeshService(ctx);
 	ctx.scaling = new ScalingService(ctx);
 	ctx.releaseCommands = new ReleaseCommandScheduler(ctx);
 	ctx.relocations = new RelocationService(ctx);
@@ -648,6 +652,7 @@ export function createCore(options: CoreOptions): Core {
 		scheduling: ctx.scheduling,
 		nodeRollouts: ctx.nodeRollouts,
 		links: ctx.links,
+		overlayMesh: ctx.overlayMesh,
 		scaling: ctx.scaling,
 		releaseCommands: ctx.releaseCommands,
 		relocations: ctx.relocations,

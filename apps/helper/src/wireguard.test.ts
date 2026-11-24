@@ -2,9 +2,11 @@ import { afterAll, describe, expect, test } from 'bun:test';
 import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseWireguardState, renderConfig, WireguardManager, type CommandResult, type CommandRunner } from './wireguard.ts';
+import { parseWireguardState, renderConfig, renderHosts, WireguardManager, type CommandResult, type CommandRunner } from './wireguard.ts';
 
 const dir = mkdtempSync(join(tmpdir(), 'yoal-wireguard-'));
+// Never the real /etc/hosts.
+const scratchHosts = join(dir, 'hosts-default');
 afterAll(() => rmSync(dir, { recursive: true, force: true }));
 
 const publicKey = `${'A'.repeat(43)}=`;
@@ -49,7 +51,7 @@ describe('WireguardManager', () => {
 	test('generates a key pair and keeps the private key 0600', async () => {
 		const calls: string[][] = [];
 		const manager = new WireguardManager({
-			paths: { dir: join(dir, 'keys'), privateKeyPath: join(dir, 'keys', 'wg0.key'), configPath: join(dir, 'keys', 'wg0.conf') },
+			paths: { dir: join(dir, 'keys'), privateKeyPath: join(dir, 'keys', 'wg0.key'), configPath: join(dir, 'keys', 'wg0.conf'), hostsPath: scratchHosts },
 			runner: fakeRunner(calls),
 		});
 		const result = await manager.keygen();
@@ -62,7 +64,7 @@ describe('WireguardManager', () => {
 	test('applies the interface and renders a peer config', async () => {
 		const calls: string[][] = [];
 		const manager = new WireguardManager({
-			paths: { dir: join(dir, 'apply'), privateKeyPath: join(dir, 'keys', 'wg0.key'), configPath: join(dir, 'apply', 'wg0.conf') },
+			paths: { dir: join(dir, 'apply'), privateKeyPath: join(dir, 'keys', 'wg0.key'), configPath: join(dir, 'apply', 'wg0.conf'), hostsPath: scratchHosts },
 			runner: fakeRunner(calls),
 		});
 		expect(await manager.apply(state)).toEqual({ peers: 1 });
@@ -71,7 +73,9 @@ describe('WireguardManager', () => {
 		expect(config).toContain('AllowedIPs = 10.47.1.1/32, 10.47.1.2/32');
 		expect(config).toContain('Endpoint = 203.0.113.10:51820');
 		expect(calls.some((call) => call[0] === 'ip' && call.includes('addr') && call.includes('10.47.1.5/32'))).toBe(true);
-		expect(calls.some((call) => call[0] === 'wg' && call.includes('setconf'))).toBe(true);
+		// syncconf keeps live sessions; setconf is only the fallback for old wireguard-tools.
+		expect(calls.some((call) => call[0] === 'wg' && call.includes('syncconf'))).toBe(true);
+		expect(calls.some((call) => call[0] === 'wg' && call.includes('setconf'))).toBe(false);
 		// The /32 address alone routes nothing: the overlay CIDR must point at the interface.
 		expect(calls).toContainEqual(['ip', 'route', 'replace', '10.47.0.0/22', 'dev', 'wg0', 'src', '10.47.1.5']);
 	});
@@ -82,7 +86,7 @@ describe('WireguardManager', () => {
 		writeFileSync(join(dir, 'legacy', 'wg0.key'), 'private-key\n');
 		const calls: string[][] = [];
 		const manager = new WireguardManager({
-			paths: { dir: join(dir, 'moved'), privateKeyPath: join(dir, 'moved', 'wg0.key'), configPath: join(dir, 'moved', 'wg0.conf') },
+			paths: { dir: join(dir, 'moved'), privateKeyPath: join(dir, 'moved', 'wg0.key'), configPath: join(dir, 'moved', 'wg0.conf'), hostsPath: scratchHosts },
 			legacyKeyPath: join(dir, 'legacy', 'wg0.key'),
 			runner: fakeRunner(calls),
 		});
@@ -100,7 +104,7 @@ describe('WireguardManager', () => {
 
 	test('reads status and treats a missing interface as empty', async () => {
 		const manager = new WireguardManager({
-			paths: { dir: join(dir, 'status'), privateKeyPath: join(dir, 'keys', 'wg0.key'), configPath: join(dir, 'status', 'wg0.conf') },
+			paths: { dir: join(dir, 'status'), privateKeyPath: join(dir, 'keys', 'wg0.key'), configPath: join(dir, 'status', 'wg0.conf'), hostsPath: scratchHosts },
 			runner: fakeRunner([]),
 		});
 		const status = await manager.status();
@@ -135,5 +139,60 @@ describe('kubernetes machine subnets', () => {
 		expect(parsed.machineSubnet).toBe('10.48.5.0/24');
 		expect(() => parseWireguardState({ ...state, routes: ['0.0.0.0/0'] })).toThrow(/route/);
 		expect(() => parseWireguardState({ ...state, peers: [{ ...state.peers[0], allowedIps: ['10.0.0.0/8'] }] })).toThrow();
+	});
+});
+
+describe('mesh mode (CLUSTERING §4.7)', () => {
+	test('falls back to setconf when syncconf is not available', async () => {
+		const calls: string[][] = [];
+		const base = fakeRunner(calls);
+		const manager = new WireguardManager({
+			paths: { dir: join(dir, 'fallback'), privateKeyPath: join(dir, 'keys', 'wg0.key'), configPath: join(dir, 'fallback', 'wg0.conf'), hostsPath: scratchHosts },
+			runner: async (argv, input) =>
+				argv[1] === 'syncconf' ? (calls.push(argv), { code: 1, stdout: '', stderr: 'Invalid subcommand' }) : base(argv, input),
+		});
+		await manager.apply(state);
+		expect(calls.some((call) => call.includes('setconf'))).toBe(true);
+	});
+
+	test('a probe peer has no AllowedIPs line but keeps its endpoint and keepalive', () => {
+		const probe = { publicKey, endpoint: '198.51.100.7:40211', allowedIps: [] as string[], persistentKeepalive: 25 };
+		const parsed = parseWireguardState({ ...state, peers: [probe] });
+		const config = renderConfig('private', parsed);
+		expect(config).not.toContain('AllowedIPs');
+		expect(config).toContain('Endpoint = 198.51.100.7:40211');
+		expect(config).toContain('PersistentKeepalive = 25');
+	});
+
+	test('writes, replaces and removes only its own hosts block', async () => {
+		const { writeFileSync } = await import('node:fs');
+		const hostsPath = join(dir, 'hosts');
+		writeFileSync(hostsPath, '127.0.0.1\tlocalhost\n::1\tlocalhost\n');
+		const manager = new WireguardManager({
+			paths: { dir: join(dir, 'hosts-apply'), privateKeyPath: join(dir, 'keys', 'wg0.key'), configPath: join(dir, 'hosts-apply', 'wg0.conf'), hostsPath },
+			runner: fakeRunner([]),
+		});
+		await manager.apply({ ...state, hosts: [{ name: 'edge.yoal.internal', address: '10.47.1.1' }] });
+		expect(readFileSync(hostsPath, 'utf8')).toBe(
+			'127.0.0.1\tlocalhost\n::1\tlocalhost\n\n# BEGIN yoal overlay names (managed by yoal-helper; do not edit)\n10.47.1.1\tedge.yoal.internal\n# END yoal overlay names\n',
+		);
+		await manager.apply({ ...state, hosts: [{ name: 'worker.yoal.internal', address: '10.47.1.2' }] });
+		const replaced = readFileSync(hostsPath, 'utf8');
+		expect(replaced).toContain('10.47.1.2\tworker.yoal.internal');
+		expect(replaced).not.toContain('edge.yoal.internal');
+		// Hub mode sends no list: the block goes, and nothing else is touched.
+		await manager.apply(state);
+		expect(readFileSync(hostsPath, 'utf8')).toBe('127.0.0.1\tlocalhost\n::1\tlocalhost\n');
+		writeFileSync(hostsPath, 'custom\n');
+		await manager.apply({ ...state, hosts: [] });
+		expect(readFileSync(hostsPath, 'utf8')).toBe('custom\n');
+	});
+
+	test('refuses a host that is not an overlay name or could inject a line', () => {
+		expect(() => parseWireguardState({ ...state, hosts: [{ name: 'github.com', address: '10.47.1.1' }] })).toThrow(/host 0/);
+		expect(() => parseWireguardState({ ...state, hosts: [{ name: 'a.yoal.internal\n1.2.3.4 x', address: '10.47.1.1' }] })).toThrow();
+		expect(() => parseWireguardState({ ...state, hosts: [{ name: 'a.yoal.internal', address: '10.47.1.1 evil' }] })).toThrow();
+		expect(renderHosts('', [])).toBe('');
+		expect(renderHosts('a\n\n\n', [])).toBe('a\n\n\n');
 	});
 });

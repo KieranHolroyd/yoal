@@ -6,7 +6,7 @@ D-number when its spike (§15) passes and it is built; phases are **C0–C10** (
 the target design in the present tense; the phase named in each section says when it lands. "Today"
 means verified here, "the plan" means unbuilt.
 
-**Implemented so far (2026-11-06):** C0's backend — migration 0040, the `hardware` heartbeat block, node zone/roles/labels/CPU budget, derived volume classes (disk tiers since D169), constraint-aware placement and the `GET /topology` + `GET /topology/blast-radius` API with its read-only dashboard page. C1's control-plane model and helper/agent apply path are in too (migration 0041, address allocation, peer graph, managed join fields, the desired-state `wireguard` block, root `wireguard/keygen|apply|status` verbs and peer health on the heartbeat); the served installer still requires the signed agent bundle, and real-host verification has not run. C2's data model, forwarding path, pinned self-signed mTLS and cross-node attachments for process apps are in as well (migration 0043, `node_certificates`, `service_endpoints`, the endpoint planner, desired-state endpoints/providers, the agent's Bun TCP/TLS forwarder with fingerprint pinning, and the `SERVICE_ENDPOINTS` flag covering database and private-storage attachments); the per-install CA, Caddy L4 proxy and cross-node container attachments are not. C3's share registry and dashboard page (migration 0044, CRUD, org grants), the helper's fixed NFS/SMB mount/unmount/status verbs and desired-state mounting are in (migration 0067, D143): a share mounts on chosen nodes at `/mnt/yoal-shares/<share>` with sealed SMB credentials and a read-write mount becomes a `bulk`, network disk ([STORAGE.md](./STORAGE.md) §3, D169); `backing: share` attachments, transport probes and blast-radius inheritance are not. C4's replica table, spread planner, deploy-time row population, per-node desired state and route fan-out are in behind `MULTI_NODE_REPLICAS` (migration 0045, `workload_replicas`, `planReplicas`, `RouteSpec.upstreams`); Caddy active health checks (interval `replicas.healthIntervalSeconds`) and least-conn balancing are in, and so (as of 2026-11-14, D222–D224) are rolling deploys, surge, drain and run leases for lone workers. C8's failover controller is in as of 2026-11-07 (migration 0060 `failover_events`, `packages/core/src/failover-service.ts`): a controller lease in the control plane's own SQLite with the epoch checked inside every write, replica re-placement off a lost (`failover.enabled`) or draining node under the §8.3 rate limits, flap protection and queue expiry, ingress record-set tracking for the DNS drivers as `manual` events, and the database `decide` stage with a pluggable promotion handler; `GET /api/v1/ha/status`, `get_ha_status`, `yoal ha status` and the Settings → High availability panels read it. Three-signal detection, the object-store lease, DNS writes and drills are not. C7's Postgres streaming read replicas are in as of 2026-11-07 (migration 0069): `pg_basebackup` bootstrap and streaming through an agent-served unix-socket link (local port or the primary node's pinned-mTLS provider listener), helper-managed `yoal_repl` role, `pg_hba` block and `yoal_*` slots, 30-second slot sampling for status/lag, `<P>_READ_*` env, removal with two-sided confirmation, and fenced manual promotion (`database_failovers`) that the C8 controller will drive behind `YOAL_FEATURE_DB_AUTO_PROMOTE` once database self-fencing exists (until then the flag is refused, HA-PLAN F1); see [DATABASES.md](./DATABASES.md) §18. As of 2026-11-14 fleet scheduling is in (§3.10, D214): every copy's node serves it and is charged for it, single-copy workloads move on drain, failover and rebalance (HTTP apps with a surge), with `spread`/`pack`, overcommit and an opt-in automatic rebalance; so are named private networks (D215) and measured links with on-demand throughput tests (§4.6, D216). Fleet node updates are in too (§3.11, D217): rollouts in `availability`/`rolling`/`parallel` waves with drain, soak, failure budget, pause/resume and an opt-in automatic rollout after a control-plane update, plus an on-node guard that restores the previous agent and helper when the new ones never confirm a healthy heartbeat. The rest of this document remains the plan.
+**Implemented so far (2026-11-06):** C0's backend — migration 0040, the `hardware` heartbeat block, node zone/roles/labels/CPU budget, derived volume classes (disk tiers since D169), constraint-aware placement and the `GET /topology` + `GET /topology/blast-radius` API with its read-only dashboard page. C1's control-plane model and helper/agent apply path are in too (migration 0041, address allocation, peer graph, managed join fields, the desired-state `wireguard` block, root `wireguard/keygen|apply|status` verbs and peer health on the heartbeat); the served installer still requires the signed agent bundle, and real-host verification has not run. C2's data model, forwarding path, pinned self-signed mTLS and cross-node attachments for process apps are in as well (migration 0043, `node_certificates`, `service_endpoints`, the endpoint planner, desired-state endpoints/providers, the agent's Bun TCP/TLS forwarder with fingerprint pinning, and the `SERVICE_ENDPOINTS` flag covering database and private-storage attachments); the per-install CA, Caddy L4 proxy and cross-node container attachments are not. C3's share registry and dashboard page (migration 0044, CRUD, org grants), the helper's fixed NFS/SMB mount/unmount/status verbs and desired-state mounting are in (migration 0067, D143): a share mounts on chosen nodes at `/mnt/yoal-shares/<share>` with sealed SMB credentials and a read-write mount becomes a `bulk`, network disk ([STORAGE.md](./STORAGE.md) §3, D169); `backing: share` attachments, transport probes and blast-radius inheritance are not. C4's replica table, spread planner, deploy-time row population, per-node desired state and route fan-out are in behind `MULTI_NODE_REPLICAS` (migration 0045, `workload_replicas`, `planReplicas`, `RouteSpec.upstreams`); Caddy active health checks (interval `replicas.healthIntervalSeconds`) and least-conn balancing are in, and so (as of 2026-11-14, D222–D224) are rolling deploys, surge, drain and run leases for lone workers. C8's failover controller is in as of 2026-11-07 (migration 0060 `failover_events`, `packages/core/src/failover-service.ts`): a controller lease in the control plane's own SQLite with the epoch checked inside every write, replica re-placement off a lost (`failover.enabled`) or draining node under the §8.3 rate limits, flap protection and queue expiry, ingress record-set tracking for the DNS drivers as `manual` events, and the database `decide` stage with a pluggable promotion handler; `GET /api/v1/ha/status`, `get_ha_status`, `yoal ha status` and the Settings → High availability panels read it. Three-signal detection, the object-store lease, DNS writes and drills are not. C7's Postgres streaming read replicas are in as of 2026-11-07 (migration 0069): `pg_basebackup` bootstrap and streaming through an agent-served unix-socket link (local port or the primary node's pinned-mTLS provider listener), helper-managed `yoal_repl` role, `pg_hba` block and `yoal_*` slots, 30-second slot sampling for status/lag, `<P>_READ_*` env, removal with two-sided confirmation, and fenced manual promotion (`database_failovers`) that the C8 controller will drive behind `YOAL_FEATURE_DB_AUTO_PROMOTE` once database self-fencing exists (until then the flag is refused, HA-PLAN F1); see [DATABASES.md](./DATABASES.md) §18. As of 2026-11-14 fleet scheduling is in (§3.10, D214): every copy's node serves it and is charged for it, single-copy workloads move on drain, failover and rebalance (HTTP apps with a surge), with `spread`/`pack`, overcommit and an opt-in automatic rebalance; so are named private networks (D215) and measured links with on-demand throughput tests (§4.6, D216). Fleet node updates are in too (§3.11, D217): rollouts in `availability`/`rolling`/`parallel` waves with drain, soak, failure budget, pause/resume and an opt-in automatic rollout after a control-plane update, plus an on-node guard that restores the previous agent and helper when the new ones never confirm a healthy heartbeat. Mesh mode is in as of 2026-11-24 (§4.7, D240): an opt-in `overlay.mode` that connects node pairs directly through NAT on the endpoints the hubs observe, with the hubs kept as the relay and `<node>.yoal.internal` names in each node's hosts file. The rest of this document remains the plan.
 
 Related: [DESIGN.md](./DESIGN.md) §3 and §9, [VOLUMES.md](./VOLUMES.md),
 [DATABASES.md](./DATABASES.md), [OBJECT-STORAGE.md](./OBJECT-STORAGE.md), [OPS.md](./OPS.md),
@@ -815,6 +815,65 @@ loss or unreachable) with a table of the same links; `GET /links`, `POST /links/
 **History and alerts** ([SCALING.md](./SCALING.md) §6): a point a minute is kept for a day, and a
 link silent for three minutes between two reporting nodes raises an alert. **Not built:** an MTU
 probe, and an unencrypted mode for a trusted private network.
+
+### 4.7 Mesh mode: direct paths through NAT (D240)
+
+Built 2026-11-24 (`overlay-mesh.ts`, `overlay-mesh-service.ts`, migration 0140). Off by default;
+a platform admin turns it on in Settings → Clustering → Overlay network, or with
+`PATCH /cluster/config { "overlay": { "mode": "mesh" } }`. It is what Tailscale does for a fleet,
+built from the parts §4.1 already has: kernel WireGuard, the hubs and the control plane.
+
+**What changes.** In `hub` mode (§4.1) a spoke peers with the hubs and with nodes on its own private
+network, and every other pair (two NATed nodes in different zones, say) is relayed through a hub.
+In `mesh` mode the control plane also tries every such pair directly, and the hub stays as the
+relay for any pair whose direct path never answers, as DERP does for Tailscale. Ingress nodes,
+pairs on a shared private network, bring-your-own (`external`) nodes and nodes whose agent lacks
+`wg-mesh` are unchanged.
+
+**Endpoint discovery.** Kernel WireGuard owns its UDP socket, so a node cannot ask a STUN server
+what its NAT mapped port 51820 to. A hub can see it: `wg show` lists the endpoint each spoke's
+handshake came from, which is that mapping, and it already rides the hub's heartbeat. The control
+plane takes each node's freshest public endpoint from those reports (a hub's view first; never a
+private, CGNAT or link-local address, and never from a node on the same private network). A node
+with its own public `wgEndpoint` needs none. On an endpoint-independent NAT (most home routers and
+cloud NAT gateways) the same mapping answers other peers; a symmetric NAT does not, and that pair
+stays relayed.
+
+**Hole punching without a gap.** A pair needs both nodes `wg-mesh` capable, neither an ingress,
+no shared private network, and at least one side dialable. Each pair then has one row in
+`overlay_mesh_pairs`, and moves through three states:
+
+| State | Each node's peer for the other | Traffic | Leaves when |
+|---|---|---|---|
+| `probing` | the other's endpoint, keepalive 25 s, **no allowed IPs** | through the hub | a handshake is reported after the probe began → `direct`; 120 s without one → `relayed` |
+| `direct` | the other's endpoint and `/32` (and machine subnet) | direct | a fresh report shows no handshake for 180 s → `probing` |
+| `relayed` | none | through the hub | the retry time (5 min, 15 min, then hourly) or an endpoint change → `probing` |
+
+Both nodes send keepalives at each other, so each NAT sees outgoing packets before the incoming
+ones arrive. A peer with no allowed IPs still handshakes (keepalives do not route by address), so
+the probe carries nothing and loses nothing: the `/32` moves off the hub only after a handshake
+proves the path. The two nodes pick up a state change on their next pull, a few seconds apart; in
+that window one side may already route directly while the other still expects the hub, so a
+packet can be dropped during the switch. A pair is only demoted on evidence: silence from an
+offline node changes nothing. State changes are audited as `node.mesh_pair` and re-render desired
+state; a refreshed handshake time alone does not. Mode `hub` deletes every row.
+
+**Applying it.** The helper now applies peers with `wg syncconf`, which changes only what differs,
+so live sessions and the endpoints NATed peers roamed to survive a re-apply; `wg setconf` (which
+drops every peer first) is the fallback for wireguard-tools older than December 2019. A peer with no
+allowed IPs is written without an `AllowedIPs` line. No firewall change is needed: every backend
+already accepts UDP 51820 (§4.1).
+
+**Names.** In mesh mode every capable node also gets every addressed node as
+`<name>.yoal.internal` (a DNS label made from the node name; a clash gets the id's tail) in a marked
+block of `/etc/hosts`, which the helper replaces atomically and removes when mesh mode is off. Only
+names of that shape and IPv4 addresses are accepted, so the block can never shadow a real host.
+There is no resolver: containers and other hosts do not see these names.
+
+**Surfaces.** Settings → Clustering → Overlay network (the switch, counts and each pair's state);
+`GET /cluster/mesh` (platform admins); the Fleet map's `direct`/`relayed` labels read the same graph.
+**Not built:** IPv6 endpoints beyond passing them through, port-mapping protocols (UPnP, NAT-PMP,
+PCP), a relay other than the hubs, and per-node opt-out.
 
 ---
 

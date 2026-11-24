@@ -6,7 +6,12 @@ import type { Actions, PageServerLoad } from './$types';
 
 export const load: PageServerLoad = ({ locals }) => {
 	const principal = requireOwnerPage(locals);
-	return { config: core.cluster.get(), failover: core.failover.status(principal) };
+	const names = Object.fromEntries(core.nodes.overlayGraph().nodes.map((node) => [node.id, node.name]));
+	return {
+		config: core.cluster.get(),
+		failover: core.failover.status(principal),
+		mesh: { ...core.overlayMesh.view(principal), names }
+	};
 };
 
 export const actions: Actions = {
@@ -27,6 +32,25 @@ export const actions: Actions = {
 			return fail(failStatus(caught), toFormFailure(caught));
 		}
 		return { success: 'Cluster configuration saved.' };
+	},
+
+	/** Overlay mode (CLUSTERING §4.7, D240): `hub`, or `mesh` for direct node-to-node paths. */
+	overlay: async ({ request, locals }) => {
+		const principal = requireOwnerPage(locals);
+		const data = await request.formData();
+		const mode = formBoolean(data, 'mesh') ? 'mesh' : 'hub';
+		try {
+			core.cluster.update(principal, { overlay: { mode } });
+		} catch (caught) {
+			return fail(failStatus(caught), { ...toFormFailure(caught), section: 'overlay' });
+		}
+		return {
+			success:
+				mode === 'mesh'
+					? 'Mesh mode is on. Node pairs move to direct paths as their handshakes succeed.'
+					: 'Mesh mode is off. Every node pair goes back to the hubs.',
+			section: 'overlay'
+		};
 	},
 
 	/** Fleet node updates (CLUSTERING §3.11, D217): rollout defaults and `autoRollout`. */

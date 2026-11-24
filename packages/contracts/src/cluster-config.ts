@@ -1,6 +1,7 @@
 import * as z from 'zod';
 import { ingressSettingsSchema, steeringDriverKinds } from './ingress.ts';
 import { nodeRolloutOptionsSchema } from './node-rollout.ts';
+import { overlayModes } from './overlay.ts';
 import { replicaSpreads } from './replica.ts';
 
 /**
@@ -20,6 +21,8 @@ const overlay = z.object({
 	mtu: int(1280, 1420).default(1420),
 	listenPort: int(1, 65_535).default(51_820),
 	keepaliveSeconds: int(0, 65_535).default(25),
+	/** `hub` (§4.1) or `mesh`: direct node-to-node paths through NAT, hubs as the relay (§4.7, D240). */
+	mode: z.enum(overlayModes).default('hub'),
 });
 
 const endpoints = z.object({
