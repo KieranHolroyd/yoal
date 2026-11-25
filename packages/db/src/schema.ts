@@ -3645,3 +3645,117 @@ export const cloudShellSettings = sqliteTable(
 	},
 	(t) => [primaryKey({ columns: [t.orgId, t.userId] })],
 );
+
+/** Logs Explorer hot tail for new sources (0142, docs/LOGS.md §3). JSON text in attributes/resource. */
+export const logRecords = sqliteTable(
+	'log_records',
+	{
+		seq: integer('seq').primaryKey({ autoIncrement: true }),
+		orgId: text('org_id').notNull(),
+		scopeKind: text('scope_kind').notNull(),
+		scopeId: text('scope_id').notNull(),
+		stream: text('stream'),
+		source: text('source').notNull(),
+		channel: text('channel'),
+		severityNumber: integer('severity_number').notNull().default(9),
+		body: text('body').notNull(),
+		attributes: text('attributes').notNull().default('{}'),
+		resource: text('resource').notNull().default('{}'),
+		traceId: text('trace_id'),
+		spanId: text('span_id'),
+		requestId: text('request_id'),
+		projectId: text('project_id'),
+		deploymentId: text('deployment_id'),
+		nodeId: text('node_id'),
+		ts: integer('ts').notNull(),
+		observedTs: integer('observed_ts').notNull(),
+	},
+	(t) => [
+		index('log_records_scope_seq_idx').on(t.scopeKind, t.scopeId, t.seq),
+		index('log_records_org_seq_idx').on(t.orgId, t.seq),
+		index('log_records_ts_idx').on(t.ts),
+	],
+);
+
+/** ClickHouse indexer cursors (0142, LP2). */
+export const logIndexCursors = sqliteTable('log_index_cursors', {
+	sourceTable: text('source_table').primaryKey(),
+	cursor: integer('cursor').notNull().default(0),
+	indexedTs: integer('indexed_ts'),
+	lastError: text('last_error'),
+	updatedAt: integer('updated_at').notNull().$defaultFn(now),
+});
+
+/** Saved log queries (0142, §7.2). */
+export const logSavedQueries = sqliteTable(
+	'log_saved_queries',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		ownerId: text('owner_id').notNull(),
+		name: text('name').notNull(),
+		query: text('query').notNull(),
+		scopes: text('scopes').notNull().default('[]'),
+		range: text('range').notNull().default('{"relative":"1h"}'),
+		columns: text('columns').notNull().default('[]'),
+		visibility: text('visibility').notNull().default('personal'),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+	},
+	(t) => [
+		index('log_saved_queries_org_idx').on(t.orgId, t.visibility),
+		index('log_saved_queries_owner_idx').on(t.ownerId),
+	],
+);
+
+/** Exclusion, sampling, index-only and redaction rules (0142, §10.3–10.4). */
+export const logRules = sqliteTable(
+	'log_rules',
+	{
+		id: text('id').primaryKey(),
+		orgId: text('org_id').notNull(),
+		projectId: text('project_id'),
+		name: text('name').notNull(),
+		kind: text('kind').notNull(),
+		query: text('query').notNull().default(''),
+		pattern: text('pattern'),
+		replacement: text('replacement'),
+		sampleRate: real('sample_rate'),
+		enabled: integer('enabled', { mode: 'boolean' }).notNull().default(true),
+		createdBy: text('created_by').notNull(),
+		createdAt: integer('created_at').notNull().$defaultFn(now),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+	},
+	(t) => [index('log_rules_org_idx').on(t.orgId, t.enabled)],
+);
+
+/** Retention, quota and sampling settings per platform/org/project (0142, LP9). */
+export const logSettings = sqliteTable(
+	'log_settings',
+	{
+		scopeType: text('scope_type').notNull(),
+		scopeId: text('scope_id').notNull(),
+		settings: text('settings').notNull().default('{}'),
+		updatedAt: integer('updated_at').notNull().$defaultFn(now),
+		updatedBy: text('updated_by'),
+	},
+	(t) => [primaryKey({ columns: [t.scopeType, t.scopeId] })],
+);
+
+/** Lines dropped at ingest per scope per minute (0142, §10.2). */
+export const logDropCounts = sqliteTable(
+	'log_drop_counts',
+	{
+		orgId: text('org_id').notNull(),
+		scopeKind: text('scope_kind').notNull(),
+		scopeId: text('scope_id').notNull(),
+		minute: integer('minute').notNull(),
+		reason: text('reason').notNull(),
+		lines: integer('lines').notNull().default(0),
+		bytes: integer('bytes').notNull().default(0),
+	},
+	(t) => [
+		primaryKey({ columns: [t.scopeKind, t.scopeId, t.minute, t.reason] }),
+		index('log_drop_counts_org_minute_idx').on(t.orgId, t.minute),
+	],
+);
