@@ -1,6 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { FUNCTION_ANALYTICS_PORT } from '@yoal/contracts';
+import {
+	FEATURE_FLAGS,
+	FUNCTION_ANALYTICS_PORT,
+	featureEnvKey,
+	parseFeatureFlagValue,
+	type FeatureName,
+} from '@yoal/contracts';
 import { BUILD_VERSION } from './build-version.ts';
 
 /**
@@ -96,6 +102,12 @@ export interface AgentConfig {
 	/** Bounded on-disk telemetry spool (HA-PLAN H28): bucket count and bytes. */
 	telemetrySpoolBuckets: number;
 	telemetrySpoolBytes: number;
+	/**
+	 * docs/LOGS.md kill switches, read from this agent's own environment (`YOAL_FEATURE_*` in
+	 * /etc/yoal/yoal.env): LP6 edge request records + X-Request-Id, LP7 the OTLP logs receiver.
+	 */
+	edgeRequestLogs: boolean;
+	otlpLogs: boolean;
 }
 
 export class ConfigError extends Error {
@@ -404,7 +416,14 @@ export function loadConfig(env: Env = process.env): AgentConfig {
 		// HA-PLAN H28: the disk spool replaces the in-memory 5,000-bucket cap. Both bounds apply.
 		telemetrySpoolBuckets: parseIntegerEnv(env, 'YOAL_TELEMETRY_SPOOL_BUCKETS', 5_000, 100, 1_000_000),
 		telemetrySpoolBytes: parseIntegerEnv(env, 'YOAL_TELEMETRY_SPOOL_BYTES', 32 * 1024 * 1024, 1_048_576, 4 * 1024 * 1024 * 1024),
+		edgeRequestLogs: featureFlag(env, 'EDGE_REQUEST_LOGS'),
+		otlpLogs: featureFlag(env, 'OTLP_LOGS'),
 	};
+}
+
+/** A registered `YOAL_FEATURE_<NAME>` flag from this process's env; unset or malformed keeps the default. */
+function featureFlag(env: Env, name: FeatureName): boolean {
+	return parseFeatureFlagValue(env[featureEnvKey(name)]) ?? FEATURE_FLAGS[name].default;
 }
 
 function isNotFound(error: unknown): boolean {

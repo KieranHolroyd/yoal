@@ -334,6 +334,25 @@ export const FEATURE_FLAGS = {
 		area: 'platform',
 		description:
 			'Regions group zones: a node region, spread: region, a database standby region that never auto-promotes, and the fenced, human-confirmed region promotion (HA-PLAN H26). Once a region value is stored, downgrading the control plane is unsupported until it is put back.'
+	},
+	EDGE_REQUEST_LOGS: {
+		name: 'EDGE_REQUEST_LOGS',
+		// docs/LOGS.md LP6: a kill switch. Read by the agent from its own environment, so a worker's
+		// /etc/yoal/yoal.env needs the value too. Off stops X-Request-Id injection and access records;
+		// the 1-minute traffic aggregates are unaffected.
+		default: true,
+		area: 'platform',
+		description:
+			'Edge request logs: Caddy injects and echoes X-Request-Id, and the agent ships every non-2xx/3xx access line plus a 10% sample of the rest to the Logs Explorer (docs/LOGS.md LP6). Set 0 to stop both.'
+	},
+	OTLP_LOGS: {
+		name: 'OTLP_LOGS',
+		// docs/LOGS.md LP7: a kill switch, read by the agent from its own environment. Off closes the
+		// loopback /v1/logs receiver and stops injecting OTEL_* variables at the next apply.
+		default: true,
+		area: 'workloads',
+		description:
+			'OTLP logs: the agent receives OTLP/HTTP JSON logs on loopback and apps get OTEL_EXPORTER_OTLP_ENDPOINT and OTEL_SERVICE_NAME unless they set their own (docs/LOGS.md LP7). Set 0 to close the receiver.'
 	}
 } as const satisfies Record<string, FeatureFlagDefinition>;
 

@@ -44,7 +44,8 @@ interface BucketState {
 	referrers: Map<string, number>;
 }
 
-interface AccessLogEntry {
+/** One parsed Caddy JSON access-log line. Every field is untrusted input. */
+export interface AccessLogEntry {
 	ts?: unknown;
 	status?: unknown;
 	size?: unknown;
@@ -52,20 +53,38 @@ interface AccessLogEntry {
 	request?: {
 		host?: unknown;
 		uri?: unknown;
+		method?: unknown;
+		proto?: unknown;
+		remote_ip?: unknown;
+		client_ip?: unknown;
 		headers?: Record<string, unknown>;
 	};
+	/** Response headers as written, including the echoed `X-Request-Id` (docs/LOGS.md LP6). */
+	resp_headers?: Record<string, unknown>;
 }
+
+/**
+ * Sees every parsed access line after the aggregator has counted it (docs/LOGS.md LP6: the edge
+ * request records are sampled, the aggregates never are). Must not throw; the aggregator guards it.
+ */
+export type AccessLogEntryListener = (entry: AccessLogEntry) => void;
 
 export class AccessLogAggregator {
 	private readonly buckets = new Map<string, BucketState>();
 	private readonly pending: MetricBucket[] = [];
 	private readonly resolveProject: (host: string) => string | null;
 	private readonly now: () => number;
+	private readonly onEntry: AccessLogEntryListener | null;
 	private totalDropped = 0;
 
-	constructor(resolveProject: (host: string) => string | null, now: () => number = Date.now) {
+	constructor(
+		resolveProject: (host: string) => string | null,
+		now: () => number = Date.now,
+		onEntry: AccessLogEntryListener | null = null,
+	) {
 		this.resolveProject = resolveProject;
 		this.now = now;
+		this.onEntry = onEntry;
 	}
 
 	get dropped(): number {
@@ -86,7 +105,15 @@ export class AccessLogAggregator {
 		} catch {
 			return;
 		}
+		if (typeof entry !== 'object' || entry === null) return;
 		this.addEntry(entry);
+		if (this.onEntry) {
+			try {
+				this.onEntry(entry);
+			} catch {
+				// Request records are best-effort; a bug there must never cost the aggregates.
+			}
+		}
 	}
 
 	private addEntry(entry: AccessLogEntry): void {
@@ -235,7 +262,8 @@ function numberOr(value: unknown, fallback: number): number {
 	return Number.isFinite(number) ? number : fallback;
 }
 
-function headerValue(headers: Record<string, unknown> | undefined, name: string): string | null {
+/** First value of a logged header, matched case-insensitively (`name` is lower case). */
+export function headerValue(headers: Record<string, unknown> | undefined, name: string): string | null {
 	if (!headers) return null;
 	for (const [key, value] of Object.entries(headers)) {
 		if (key.toLowerCase() !== name) continue;
@@ -371,6 +399,8 @@ export interface TelemetryClientOptions {
 	spoolDir?: string | null;
 	spoolMaxBuckets?: number;
 	spoolMaxBytes?: number;
+	/** Edge request records (docs/LOGS.md LP6): every parsed line, after aggregation. */
+	onAccessEntry?: AccessLogEntryListener | null;
 }
 
 /** Owns the tailer + aggregator and ships batches to `POST /api/agent/telemetry`. */
@@ -392,7 +422,7 @@ export class TelemetryClient {
 
 	constructor(options: TelemetryClientOptions) {
 		this.options = options;
-		this.aggregator = new AccessLogAggregator(options.resolveProject, options.now);
+		this.aggregator = new AccessLogAggregator(options.resolveProject, options.now, options.onAccessEntry ?? null);
 		this.tailer = new AccessLogTailer(options.accessLogPath, this.aggregator);
 		this.spool = options.spoolDir
 			? new TelemetrySpool(options.spoolDir, {

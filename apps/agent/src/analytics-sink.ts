@@ -68,6 +68,12 @@ export interface AnalyticsSinkOptions {
 	record: (event: AnalyticsEvent) => void;
 	/** Called once per valid tail event. Optional: without it `POST /tail` answers 404. */
 	recordTail?: (event: FunctionTailEvent) => void;
+	/**
+	 * The OTLP/HTTP logs receiver (docs/LOGS.md LP7, `otlp-logs.ts`) on the same loopback port. It
+	 * answers its own paths (`/v1/logs`, `/otlp/<workload>/<key>/v1/logs`) and returns null for any
+	 * other, which then falls through to the routes above.
+	 */
+	otlp?: (request: Request) => Promise<Response | null>;
 	log?: AnalyticsSinkLog;
 }
 
@@ -177,7 +183,8 @@ export function startAnalyticsSink(options: AnalyticsSinkOptions): AnalyticsSink
 	const server = Bun.serve({
 		hostname: '127.0.0.1',
 		port: options.port,
-		fetch: (request) => handleAnalyticsRequest(request, options.record, options.recordTail),
+		fetch: async (request) =>
+			(await options.otlp?.(request)) ?? handleAnalyticsRequest(request, options.record, options.recordTail),
 	});
 	const port = server.port ?? options.port;
 	options.log?.('info', `Analytics Engine sink listening on 127.0.0.1:${port}`);

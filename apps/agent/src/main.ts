@@ -27,6 +27,7 @@ import {
 	type VolumeInventory,
 	type WireguardStatus,
 	type WorkloadActivation,
+	type WorkloadDesired,
 	INGRESS_SET_CAPABILITY,
 	HA_EPOCH_CAPABILITY,
 	DB_MEMBER_SELF_FENCING_CAPABILITY,
@@ -88,6 +89,9 @@ import { BROKER_STATS_INTERVAL_MS, BrokerStatsSampler } from './broker-stats.ts'
 import { KubernetesSync, kubernetesCapabilities, readKubernetesComponent } from './kubernetes.ts';
 import { atomicWriteFile, DesiredStateStore, desiredStateEtag, desiredStateRequest } from './state.ts';
 import { postTelemetryBatch, TelemetryClient } from './telemetry.ts';
+import { accessLogHosts, createClientIpHasher, EdgeRequestLogs } from './edge-request-logs.ts';
+import { loadLogsSecret, NodeLogBatcher, postNodeLogBatch } from './log-records.ts';
+import { OtlpLogsReceiver, otlpWorkloadEnv } from './otlp-logs.ts';
 import { handleSiteRequest, normalizeHost, UsedTokenCache } from './verify.ts';
 import { IngressSecretsStore, ingressListeners } from './ingress.ts';
 import { AccessDecisionCache } from './yoal-access.ts';
@@ -111,6 +115,8 @@ const VOLUME_INVENTORY_INTERVAL_MS = 60_000;
 /** `@id` present in every config the agent loads (site-config's catch-all route). */
 const CONVERGED_SENTINEL_ID = 'catch-all';
 const TELEMETRY_POLL_MS = 1_000;
+/** How often access and OTLP log records are shipped (docs/LOGS.md LP6, LP7). */
+const LOG_RECORDS_INTERVAL_MS = 2_000;
 
 class Backoff {
 	private readonly initialMs: number;
@@ -232,6 +238,17 @@ class AgentRuntime {
 	private appliedCaddyJson: string | null = null;
 	private actualStateVersion = 0;
 	private projectByHost = new Map<string, string>();
+	/**
+	 * docs/LOGS.md LP6: hosts whose access lines may become log records (routes and their verified
+	 * custom domains), with the route's 2xx/3xx sample rate when desired state sets one.
+	 */
+	private accessLogHosts = new Map<string, number | undefined>();
+	/** Edge access records and OTLP logs waiting for `POST /api/agent/log-records` (LP6, LP7). */
+	private readonly logRecords: NodeLogBatcher;
+	private edgeRequestLogs: EdgeRequestLogs | null = null;
+	private otlpLogs: OtlpLogsReceiver | null = null;
+	/** `<dataDir>/logs.key`, loaded on first use; null when it cannot be read or written. */
+	private logsSecretValue: Buffer | null | undefined = undefined;
 	private readonly usedTokens: UsedTokenCache;
 	/** Shared ingress secrets fetched through the node-authenticated activation endpoint (G8). */
 	private readonly ingressSecretsStore: IngressSecretsStore;
@@ -380,6 +397,9 @@ class AgentRuntime {
 			log,
 		});
 		this.runLease = new RunLeaseClock({ path: join(config.dataDir, 'run-lease.json'), log });
+		this.logRecords = new NodeLogBatcher({
+			post: (batch) => postNodeLogBatch({ controlUrl: config.controlUrl, nodeToken: config.nodeToken }, batch),
+		});
 		this.workloads = new WorkloadRuntime({
 			runLeaseValid: (ttlSeconds) => this.runLease.valid(ttlSeconds),
 			helper: this.helper,
@@ -395,6 +415,15 @@ class AgentRuntime {
 				if (identity) this.identity.hold(workload.id, identity);
 			},
 			ensureIdentity: (workload, signal) => this.identity.refresh([workload], signal),
+			// docs/LOGS.md LP7: OTEL_* for process/container apps, never replacing the app's own.
+			...(config.otlpLogs
+				? {
+						extraEnv: (workload: WorkloadDesired, env: Readonly<Record<string, string>>) => {
+							const secret = this.logsSecret();
+							return secret ? otlpWorkloadEnv(workload, env, { secret, port: config.functionAnalyticsPort }) : {};
+						},
+					}
+				: {}),
 		});
 		this.databaseStats = new DatabaseStatsSampler({ source: this.workloads, log });
 		this.databaseBackups = new DatabaseBackupRunner({ helper: this.helper, log });
@@ -612,6 +641,25 @@ class AgentRuntime {
 		await this.startServer();
 		this.identity.start();
 
+		// docs/LOGS.md LP6: access records ride the same tail as the aggregates, which still see
+		// every line. Only with an access log configured (YOAL_CADDY_ACCESS_LOG) and the flag on.
+		const logsSecret = this.config.edgeRequestLogs || this.config.otlpLogs ? this.logsSecret() : null;
+		if (this.config.caddyAccessLog && this.config.edgeRequestLogs && logsSecret) {
+			this.edgeRequestLogs = new EdgeRequestLogs({
+				batcher: this.logRecords,
+				hashIp: createClientIpHasher(logsSecret),
+				knownHost: (host) => this.accessLogHosts.has(host),
+				sampleRate: (host) => this.accessLogHosts.get(host),
+			});
+		}
+		if (this.config.otlpLogs && logsSecret) {
+			this.otlpLogs = new OtlpLogsReceiver({
+				batcher: this.logRecords,
+				secret: logsSecret,
+				workloadOnNode: (id) => Boolean(this.desired?.workloads.some((workload) => workload.id === id)),
+			});
+		}
+
 		if (this.config.caddyAccessLog) {
 			this.telemetry = new TelemetryClient({
 				controlUrl: this.config.controlUrl,
@@ -630,6 +678,7 @@ class AgentRuntime {
 					if (projectId) this.functions.noteActivity(projectId);
 					return projectId;
 				},
+				onAccessEntry: this.edgeRequestLogs?.consume ?? null,
 			});
 		}
 
@@ -642,6 +691,7 @@ class AgentRuntime {
 				port: this.config.functionAnalyticsPort,
 				record: (event) => this.telemetry?.recordAnalytics(event),
 				recordTail: (event) => this.telemetry?.recordTail(event),
+				...(this.otlpLogs ? { otlp: this.otlpLogs.handle } : {}),
 				log,
 			});
 		} catch (error) {
@@ -666,6 +716,7 @@ class AgentRuntime {
 			this.certificateLoop(),
 			this.identityLoop(),
 			this.telemetryLoop(),
+			this.logRecordsLoop(),
 			this.databaseStatsLoop(),
 			this.databaseBackupLoop(),
 			this.appVolumeLoop(),
@@ -710,6 +761,8 @@ class AgentRuntime {
 		this.analyticsSink?.stop();
 		this.analyticsSink = null;
 		await this.telemetry?.stop().catch(() => undefined);
+		// The tail's last lines and any OTLP records still buffered; best effort on the way out.
+		await this.logRecords.flush().catch(() => undefined);
 		await this.studioUpdates;
 		if (this.studioFront) (await this.studioFront.catch(() => null))?.stop();
 		this.consoleFront?.stop();
@@ -1180,6 +1233,8 @@ class AgentRuntime {
 			agentSocket: this.config.agentSocket,
 			caddyAdminSocket: this.config.caddyAdminSocket,
 			accessLog: this.config.caddyAccessLog,
+			// docs/LOGS.md LP6: X-Request-Id on site routes (flag EDGE_REQUEST_LOGS).
+			...(this.config.edgeRequestLogs ? { requestIds: true } : {}),
 			...(tls ? { tls } : {}),
 			// With the flag off the manager is null and the relay list empty: today's per-node ACME.
 			...(this.certificateDelivery.manager() ? { certificateManager: this.certificateDelivery.manager() } : {}),
@@ -1226,6 +1281,7 @@ class AgentRuntime {
 		this.projectByHost = new Map(
 			state.routes.map((route) => [normalizeHost(route.host), route.projectId]),
 		);
+		this.accessLogHosts = accessLogHosts(state);
 		this.convergedVersion = state.version;
 		this.actualStateVersion = state.version;
 		this.lastReconcileSuccessAt = Date.now();
@@ -2048,6 +2104,36 @@ class AgentRuntime {
 			}
 		} catch {
 			// A transient admin error is not proof of a restart; the next check will tell.
+		}
+	}
+
+	// --- log records (docs/LOGS.md LP6, LP7) ---------------------------------
+
+	/** The node-local logs secret, created on first use. Null (and logged once) when the data dir refuses it. */
+	private logsSecret(): Buffer | null {
+		if (this.logsSecretValue !== undefined) return this.logsSecretValue;
+		try {
+			this.logsSecretValue = loadLogsSecret(this.config.dataDir);
+		} catch (error) {
+			log('warn', `Log records disabled: cannot create ${join(this.config.dataDir, 'logs.key')}: ${errorText(error)}`);
+			this.logsSecretValue = null;
+		}
+		return this.logsSecretValue;
+	}
+
+	/** Ship buffered access and OTLP records every 2 s, the live-tail floor (docs/LOGS.md §2). */
+	private async logRecordsLoop(): Promise<void> {
+		if (!this.edgeRequestLogs && !this.otlpLogs) return;
+		let warned = false;
+		while (this.running) {
+			try {
+				await this.logRecords.flush();
+				warned = false;
+			} catch (error) {
+				if (!warned) log('warn', `Log records flush failed: ${errorText(error)}`);
+				warned = true;
+			}
+			await sleep(LOG_RECORDS_INTERVAL_MS, this.shutdownController.signal);
 		}
 	}
 

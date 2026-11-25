@@ -218,6 +218,12 @@ export const routeSpecSchema = z.object({
 	 * from the host.
 	 */
 	production: z.boolean().optional(),
+	/**
+	 * docs/LOGS.md LP6: the share of 2xx/3xx requests to this host the agent ships as `access` log
+	 * records (0–1). Absent means the agent default (10%, decided 2026-11-25); every other status
+	 * is always shipped. A control plane sets it only when a site asks for something else.
+	 */
+	accessLogSampleRate: z.number().min(0).max(1).optional(),
 });
 export type RouteSpec = z.infer<typeof routeSpecSchema>;
 

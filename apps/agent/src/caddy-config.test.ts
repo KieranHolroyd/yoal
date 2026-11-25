@@ -1085,3 +1085,97 @@ describe('public database certificates (D241)', () => {
 		expect(JSON.stringify(plain)).not.toContain('.db.example.com');
 	});
 });
+
+describe('request ids (docs/LOGS.md LP6)', () => {
+	function withRequestIds(value: DesiredState, extra: Partial<Parameters<typeof buildCaddyConfig>[0]> = {}): Json {
+		return buildCaddyConfig({
+			state: value,
+			listen: [':8080'],
+			dataDir: '/data',
+			agentSocket: '/run/yoal-agent/agent.sock',
+			caddyAdminSocket: '/var/lib/caddy/admin.sock',
+			requestIds: true,
+			...extra,
+		});
+	}
+
+	function requestIdHandler(route: Json | undefined): Json {
+		const first = (route?.handle as Json[] | undefined)?.[0];
+		expect(first?.handler).toBe('subroute');
+		return first!;
+	}
+
+	test('off by default: no route mentions X-Request-Id', () => {
+		expect(JSON.stringify(config())).not.toContain('X-Request-Id');
+	});
+
+	test('every site route sets the id upstream, echoes it deferred, then runs the site unchanged', () => {
+		const plain = routes(config());
+		const compiled = routes(withRequestIds(state()));
+		const sites = compiled.filter((route) => String(route['@id']).startsWith('site:'));
+		expect(sites).toHaveLength(2);
+		for (const site of sites) {
+			const handler = requestIdHandler(site);
+			const [assign, echo] = handler.routes as Json[];
+			// No trusted peers on this node: the id is always Caddy's own, whatever the client sent.
+			expect(assign).toEqual({
+				handle: [{ handler: 'headers', request: { set: { 'X-Request-Id': ['{http.request.uuid}'] } } }],
+			});
+			expect(echo).toEqual({
+				handle: [
+					{
+						handler: 'headers',
+						response: { set: { 'X-Request-Id': ['{http.request.header.X-Request-Id}'] }, deferred: true },
+					},
+				],
+			});
+			// The rest of the route is exactly what it was without request ids.
+			const before = plain.find((route) => route['@id'] === site['@id']);
+			expect({ ...site, handle: (site.handle as Json[]).slice(1) } as Json).toEqual(before!);
+		}
+	});
+
+	test('redirects, placeholders and storage routes are untouched', () => {
+		for (const route of routes(withRequestIds(state()))) {
+			const id = String(route['@id']);
+			if (id.startsWith('site:') || id.startsWith('unavailable:')) continue;
+			expect(JSON.stringify(route)).not.toContain('X-Request-Id');
+		}
+	});
+
+	test('an incoming id is kept only from a trusted proxy or the node overlay', () => {
+		const value = state();
+		value.wireguard = { mode: 'managed', address: '10.47.0.2', cidr: '10.47.0.0/22', mtu: 1420, listenPort: 51820, peers: [], routes: [], machineSubnet: null } as never;
+		const compiled = withRequestIds(value, {
+			ingress: ingressDesiredSchema.parse({ trustedProxies: ['203.0.113.0/24'] }),
+			ingressHealthDir: '/run/yoal/health',
+		});
+		const site = routes(compiled).find((route) => String(route['@id']).startsWith('site:prj_public:'));
+		const [assign] = requestIdHandler(site).routes as Json[];
+		expect(assign!.match).toEqual([
+			{ not: [{ remote_ip: { ranges: ['203.0.113.0/24', '10.47.0.0/22'] }, header: { 'X-Request-Id': ['*'] } }] },
+		]);
+	});
+
+	test('a bring-your-own overlay is not trusted', () => {
+		const value = state();
+		value.wireguard = { mode: 'external', address: null, cidr: '10.9.0.0/16', mtu: 1420, listenPort: 51820, peers: [], routes: [], machineSubnet: null } as never;
+		const site = routes(withRequestIds(value)).find((route) => String(route['@id']).startsWith('site:prj_public:'));
+		const [assign] = requestIdHandler(site).routes as Json[];
+		expect(assign!.match).toBeUndefined();
+	});
+
+	test('unavailable routes carry an id too, so a 503 can be traced', () => {
+		const value = state();
+		value.routes[0] = { ...value.routes[0]!, upstream: 'unix//run/yoal/route-unavailable.sock', unavailable: 'down' };
+		const blocked = routes(withRequestIds(value)).find((route) => route['@id'] === 'unavailable:public.example.com');
+		requestIdHandler(blocked);
+	});
+
+	test('the access log keeps response headers, which carry the echoed id', () => {
+		const compiled = withRequestIds(state(), { accessLog: '/var/log/caddy/yoal-access.log' });
+		// Caddy logs `resp_headers` unless an encoder filter drops it; none may be configured.
+		expect(JSON.stringify(compiled.logging)).not.toContain('resp_headers');
+		expect(server(compiled).logs).toBeDefined();
+	});
+});
