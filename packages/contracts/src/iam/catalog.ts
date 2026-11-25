@@ -104,7 +104,11 @@ export const statements = {
 	// Email (docs/EMAIL.md): domains, sending, suppressions, routes, credentials.
 	email: ['read', 'send', 'update', 'delete', 'credentials'],
 	shareLink: ['create', 'read', 'revoke'],
-	logs: ['read'],
+	// Logs Explorer (docs/LOGS.md §10.5): `read` covers records in readable scopes; `query` adds pipe
+	// stages and Why? (a cost control for API keys).
+	logs: ['read', 'query'],
+	// Saved log queries (docs/LOGS.md §7.2). `manage` edits and deletes other people's org queries.
+	logQuery: ['create', 'read', 'update', 'delete', 'manage'],
 	// Container console (D127): inspect a project's container, browse its files, open a shell.
 	container: ['inspect', 'files', 'exec'],
 	// Cloud shell (D236): open your own terminal on a node, with the CLI signed in as you.
@@ -158,7 +162,9 @@ const RESOURCE_SCOPES: Record<Resource, readonly ScopeType[]> = {
 	kubernetes: ['org', 'kubernetesCluster'],
 	email: ['org', 'emailDomain'],
 	shareLink: ['org', 'project'],
-	logs: ['org', 'project', 'environment'],
+	// Records live in projects and in the managed-service scopes (docs/LOGS.md §10.5).
+	logs: ['org', 'project', 'environment', 'database', 'storage', 'broker', 'kubernetesCluster', 'pipelineRepository'],
+	logQuery: ['org'],
 	container: ['org', 'project', 'environment', 'container'],
 	cloudShell: ['org'],
 	image: ['org', 'project', 'repository'],
@@ -229,6 +235,10 @@ const RISK_OVERRIDE: Partial<Record<Permission, Risk>> = {
 	'kubernetes:admin': 'secret',
 	// Opening a database to the internet (D241): step-up like a secret, never over MCP.
 	'database:expose': 'secret',
+	// Deleting a saved log query loses nothing but a bookmark (docs/LOGS.md §7.2).
+	'logQuery:delete': 'write',
+	// Pipe stages and Why? read logs; the separate permission only lets a key be narrowed (§10.5).
+	'logs:query': 'read',
 };
 
 /** Step-up level, when the risk default isn't right. Ownership changes are `always` (STEP-UP §4). */

@@ -303,3 +303,69 @@ describe('log drain', () => {
 		expect(pruned).toBeGreaterThan(0);
 	});
 });
+
+describe('per-scope caps and append listeners (docs/LOGS.md §4.4, §10.2)', () => {
+	test('a noisy scope trims only its own history, in every hot-tail table', () => {
+		const now = clock + 10_000_000;
+		const insert = opened.sqlite.prepare(
+			`INSERT INTO log_events (org_id, project_id, source, stream, level, message, ts) VALUES ('org_1', ?, 'runtime', 'stdout', 'info', ?, ?)`,
+		);
+		const record = opened.sqlite.prepare(
+			`INSERT INTO log_records (org_id, scope_kind, scope_id, source, body, ts, observed_ts) VALUES ('org_1', 'platform', ?, 'platform', ?, ?, ?)`,
+		);
+		opened.sqlite.transaction(() => {
+			for (let index = 0; index < 12; index += 1) insert.run('prj_noisy', `noisy ${index}`, now + index);
+			for (let index = 0; index < 3; index += 1) insert.run('prj_quiet', `quiet ${index}`, now + index);
+			for (let index = 0; index < 8; index += 1) record.run('node_a', `unit ${index}`, now + index, now + index);
+		})();
+		core.logs.prune(now, 86_400_000, 5);
+		const count = (sql: string, value: string): number =>
+			opened.sqlite.query<{ n: number }, [string]>(sql).get(value)!.n;
+		expect(count('SELECT COUNT(*) AS n FROM log_events WHERE project_id = ?', 'prj_noisy')).toBe(5);
+		expect(count('SELECT COUNT(*) AS n FROM log_events WHERE project_id = ?', 'prj_quiet')).toBe(3);
+		expect(count('SELECT COUNT(*) AS n FROM log_records WHERE scope_id = ?', 'node_a')).toBe(5);
+		const kept = opened.sqlite
+			.query<{ message: string }, [string]>('SELECT message FROM log_events WHERE project_id = ? ORDER BY seq')
+			.all('prj_noisy')
+			.map((row) => row.message);
+		expect(kept).toEqual(['noisy 7', 'noisy 8', 'noisy 9', 'noisy 10', 'noisy 11']);
+	});
+
+	test('every append path hands its inserted rows to onAppend listeners, unified', async () => {
+		const { project, deploymentId } = await projectWithBuild();
+		const received: Array<{ tag: string; body: string; scope: string }> = [];
+		const listener = (rows: Array<{ tag: string; body: string; scope_kind: string; scope_id: string }>): void => {
+			for (const row of rows) received.push({ tag: row.tag, body: row.body, scope: `${row.scope_kind}:${row.scope_id}` });
+		};
+		core.logs.onAppend.push(listener);
+		try {
+			core.logs.appendSystem({ orgId: 'org_1', projectId: project.id, deploymentId, message: 'breadcrumb' });
+			core.logs.appendServiceSystem({ kind: 'broker', serviceId: 'brk_1', orgId: 'org_1', message: 'broker restarted' });
+			core.logs.appendServiceSystem({ kind: 'storage', serviceId: 'st_1', orgId: 'org_1', message: 'storage restarted' });
+		} finally {
+			core.logs.onAppend.splice(core.logs.onAppend.indexOf(listener), 1);
+		}
+		expect(received).toEqual([
+			{ tag: 'le', body: 'breadcrumb', scope: `project:${project.id}` },
+			{ tag: 'ble', body: 'broker restarted', scope: 'broker:brk_1' },
+			{ tag: 'sle', body: 'storage restarted', scope: 'storage:st_1' },
+		]);
+	});
+
+	test('a throwing listener never breaks an append', async () => {
+		const { project } = await projectWithBuild();
+		const broken = (): void => {
+			throw new Error('listener bug');
+		};
+		core.logs.onAppend.push(broken);
+		const originalError = console.error;
+		console.error = () => {};
+		try {
+			expect(() => core.logs.appendSystem({ orgId: 'org_1', projectId: project.id, message: 'still stored' })).not.toThrow();
+		} finally {
+			console.error = originalError;
+			core.logs.onAppend.splice(core.logs.onAppend.indexOf(broken), 1);
+		}
+		expect(core.logs.query(principal, project, { source: 'system' }).events.at(-1)?.message).toBe('still stored');
+	});
+});
