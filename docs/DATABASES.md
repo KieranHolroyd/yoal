@@ -770,7 +770,7 @@ Each control is enforced in the place that cannot be bypassed by the layer above
 | Anywhere | `0.0.0.0/0` + `::/0` only with `allowAnywhere: true`, which needs the opt-in `YOAL_FEATURE_DB_PUBLIC_ANYWHERE` and still requires TLS, the role allowlist and the ban below | core |
 | Kernel filter | Per port: `tcp dport <port> ip saddr { … } accept`, then the whole range dropped. The agent binds a public listener only after the helper confirmed the current rule set (fail closed) | helper (`inet yoal-public-db`) |
 | Second check | The listener checks the source against the same list before reading a byte | agent |
-| TLS only | TLS 1.2+, the public certificate; no plaintext path. No certificate yet → connections are closed and the node reports `no-certificate` | agent |
+| TLS only | TLS 1.2+, the public certificate; no plaintext path. No certificate yet → the node reports `no-certificate`; Postgres `SSLRequest` is answered `N` and a plaintext startup gets SQLSTATE `57P03` saying the certificate is not issued yet (nothing reaches the database); direct TLS and the other engines are closed | agent |
 | Roles (Postgres) | 1–20 credentials (`dbc_…`, the owner included only if chosen). The proxy reads the startup message and refuses any other `user` with SQLSTATE `28000` before the database sees it. Revoking a credential removes it from the list | agent |
 | Connection cap | `maxConnections` (1–500, default 20) concurrent connections per database per ingress | agent |
 | Rate limit | 60 new connections per minute per source address; over it, the connection is closed | agent |

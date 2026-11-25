@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { caddyDataDirs, findCaddyCertificate } from './caddy-storage.ts';
 import { ValidationError } from './validate.ts';
 import { defaultRunner, type CommandRunner } from './wireguard.ts';
 
@@ -171,8 +172,8 @@ export interface PublicDbPaths {
 	firewallCmdPath: string;
 	/** The rendered ruleset, kept for review. */
 	configPath: string;
-	/** Caddy's data dir; certificates live under `<dir>/certificates/<issuer>/<name>/`. */
-	caddyDataDir: string;
+	/** Caddy's data dirs (`caddyDataDirs()`); certificates live under `<dir>/certificates/<issuer>/<name>/`. */
+	caddyDataDirs: readonly string[];
 	/** Where the agent reads `<name>/cert.pem` + `key.pem` (`YOAL_PUBLIC_DB_TLS_DIR`). */
 	tlsDir: string;
 	/** A path owned by the agent's user; the copies get its uid/gid. */
@@ -184,7 +185,7 @@ export const DEFAULT_PUBLIC_DB_PATHS: PublicDbPaths = {
 	ufwPath: 'ufw',
 	firewallCmdPath: 'firewall-cmd',
 	configPath: '/etc/yoal/network/yoal-public-db.nft',
-	caddyDataDir: process.env.YOAL_CADDY_DATA_DIR ?? '/var/lib/caddy/.local/share/caddy',
+	caddyDataDirs: caddyDataDirs(),
 	tlsDir: process.env.YOAL_PUBLIC_DB_TLS_DIR ?? '/run/yoal/public-db-tls',
 	ownerFrom: process.env.YOAL_MAIL_OWNER_PATH ?? '/var/lib/yoal',
 };
@@ -268,7 +269,7 @@ export class PublicDbManager {
 		const results: PublicDbTlsResult[] = [];
 		for (const name of names) {
 			const storage = caddyStorageName(name);
-			const source = await this.findCertificate(storage);
+			const source = await findCaddyCertificate(this.paths.caddyDataDirs, storage);
 			if (!source) {
 				results.push({ name, found: false, changed: false, certPath: null, keyPath: null });
 				continue;
@@ -296,28 +297,6 @@ export class PublicDbManager {
 			results.push({ name, found: true, changed, certPath, keyPath });
 		}
 		return results;
-	}
-
-	private async findCertificate(storage: string): Promise<{ cert: string; key: string } | null> {
-		const root = join(this.paths.caddyDataDir, 'certificates');
-		let issuers: string[];
-		try {
-			issuers = await fs.readdir(root);
-		} catch {
-			return null;
-		}
-		let best: { cert: string; key: string; mtime: number } | null = null;
-		for (const issuer of issuers) {
-			const cert = join(root, issuer, storage, `${storage}.crt`);
-			const key = join(root, issuer, storage, `${storage}.key`);
-			try {
-				const [stat] = await Promise.all([fs.stat(cert), fs.stat(key)]);
-				if (!best || stat.mtimeMs > best.mtime) best = { cert, key, mtime: stat.mtimeMs };
-			} catch {
-				// Not issued by this issuer.
-			}
-		}
-		return best ? { cert: best.cert, key: best.key } : null;
 	}
 
 	private async expect(argv: string[], label: string): Promise<void> {

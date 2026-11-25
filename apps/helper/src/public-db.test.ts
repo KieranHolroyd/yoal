@@ -145,7 +145,7 @@ describe('PublicDbManager.copyTls', () => {
 		mkdirSync(join(out, 'stale.db.example.com'), { recursive: true });
 		const chowned: string[] = [];
 		const manager = new PublicDbManager({
-			paths: { caddyDataDir: caddy, tlsDir: out, ownerFrom: owner },
+			paths: { caddyDataDirs: [caddy], tlsDir: out, ownerFrom: owner },
 			chown: async (path) => {
 				chowned.push(path);
 			},

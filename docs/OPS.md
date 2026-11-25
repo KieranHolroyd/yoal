@@ -357,7 +357,7 @@ mail node (the unit sets the paths). None of them is secret: DKIM keys and crede
 | `YOAL_MAIL_PORT_INBOUND` / `_SUBMISSION` / `_SUBMISSIONS` | `mail.env` | `25` / `587` / `465` | Ports; `off` disables one. Submission stays off until a certificate exists. |
 | `YOAL_MAIL_IPV6` | `mail.env` | unset | `1` delivers over IPv6 too. Only with a working IPv6 PTR. |
 | `YOAL_MAIL_DELIVERY_PORT` | `mail.env` | `25` | Remote MX port (tests and lab setups only). |
-| `YOAL_CADDY_DATA_DIR`, `YOAL_MAIL_TLS_DIR` | helper env | `/var/lib/caddy/.local/share/caddy`, `/run/yoal/mail-tls` | Where the helper copies the `smtp.` certificate from and to. |
+| `YOAL_CADDY_DATA_DIR`, `YOAL_MAIL_TLS_DIR` | helper env | unset (searches `/var/lib/caddy/.local/share/caddy` for `caddy.service` and `/var/lib/yoal/caddy/data/caddy` for `yoal-caddy.service`), `/run/yoal/mail-tls` | Where the helper copies the `smtp.` and `*.db.` certificates from (set it to pin one Caddy data dir), and where the `smtp.` copy goes. |
 | `YOAL_PUBLIC_DB_TLS_DIR` | helper env | `/run/yoal/public-db-tls` | Where the helper copies `*.db.` certificates for public database access (D241). |
 | `YOAL_FEATURE_DB_PUBLIC_ACCESS`, `YOAL_FEATURE_DB_PUBLIC_ANYWHERE` | control-plane env | `1`, `0` | Public database access kill switch, and whether a database may admit any address (DATABASES.md §19). |
 

@@ -35,7 +35,7 @@ describe('mail certificate copy', () => {
 			await Bun.sleep(5);
 		}
 		const owned: string[] = [];
-		const options = { caddyDataDir: caddy, outDir: join(root, 'out'), ownerFrom: root, chown: async (path: string) => void owned.push(path) };
+		const options = { caddyDataDirs: [caddy], outDir: join(root, 'out'), ownerFrom: root, chown: async (path: string) => void owned.push(path) };
 		expect(await copyMailTls(host, options)).toEqual({ found: true, changed: true });
 		expect(await fs.readFile(join(root, 'out', 'cert.pem'), 'utf8')).toBe('NEW CERT');
 		expect(((await fs.stat(join(root, 'out', 'key.pem'))).mode & 0o777).toString(8)).toBe('600');

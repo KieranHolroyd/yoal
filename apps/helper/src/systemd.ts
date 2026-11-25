@@ -17,6 +17,7 @@ import {
 	type RegistrySecrets,
 } from './registry.ts';
 import { copyMailTls, MAIL_UNIT } from './mail.ts';
+import { caddyDataDirs } from './caddy-storage.ts';
 import { IDENTITY_LITESTREAM_UNIT, IDENTITY_UNIT } from './identity.ts';
 import { constants as fsConstants, promises as fs } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
@@ -1954,7 +1955,7 @@ export class SystemdDriver {
 	/** Copy the submission certificate out of Caddy's storage for `yoal-mail`. */
 	async copyMailTls(host: string): Promise<{ found: boolean; changed: boolean }> {
 		return copyMailTls(host, {
-			caddyDataDir: process.env.YOAL_CADDY_DATA_DIR ?? '/var/lib/caddy/.local/share/caddy',
+			caddyDataDirs: caddyDataDirs(),
 			outDir: process.env.YOAL_MAIL_TLS_DIR ?? '/run/yoal/mail-tls',
 			ownerFrom: process.env.YOAL_MAIL_OWNER_PATH ?? '/var/lib/yoal',
 			chown: this.chown,

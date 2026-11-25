@@ -260,15 +260,61 @@ describe('PublicDatabaseProxy', () => {
 		tls.destroy();
 	});
 
-	test('without a certificate the listener reports it and closes connections', async () => {
+	/** A bound listener with no certificate for it. */
+	async function withoutCertificate(overrides: Partial<PublicDatabaseListener> = {}) {
 		const proxy = new PublicDatabaseProxy({ bindHosts: ['127.0.0.1'] });
 		proxies.push(proxy);
-		proxy.converge([listener()], { firewallReady: true, certificates: new Map() });
+		proxy.converge([listener(overrides)], { firewallReady: true, certificates: new Map() });
 		await until(() => proxy.boundPort('db_1') !== null);
 		expect(proxy.status()[0]).toMatchObject({ state: 'no-certificate' });
-		const raw = connect(proxy.boundPort('db_1')!, '127.0.0.1');
-		expect((await collect(raw)).closed).toBe(true);
+		return { proxy, port: proxy.boundPort('db_1')! };
+	}
+
+	test('without a certificate, sslmode=prefer is declined TLS and told why, and never reaches the database', async () => {
+		const { proxy, port } = await withoutCertificate();
+		const before = upstreamUsers.length;
+		const raw = connect(port, '127.0.0.1');
+		raw.write(sslRequest());
+		const answer = await new Promise<string>((resolve) => raw.once('data', (chunk: Buffer) => resolve(chunk.toString())));
+		expect(answer).toBe('N');
+		// libpq's prefer fallback: the startup message again, in plaintext.
+		raw.write(startup('app'));
+		const { data, closed } = await collect(raw);
+		expect(closed).toBe(true);
+		expect(data[0]).toBe(0x45);
+		expect(data.toString()).toContain('C57P03');
+		expect(data.toString()).toContain('no TLS certificate');
+		expect(data.toString()).toContain('app-org1.db.test');
+		expect(upstreamUsers.length).toBe(before);
+		// One refusal per connection, not one for the SSLRequest and another for the startup.
 		expect(proxy.drainEvents().map((event) => event.reason)).toEqual(['no-certificate']);
+		expect(proxy.status()[0]).toMatchObject({ accepted: 0, open: 0 });
+	});
+
+	test('without a certificate, sslmode=require stops at the N and the refusal is still recorded', async () => {
+		const { proxy, port } = await withoutCertificate();
+		const raw = connect(port, '127.0.0.1');
+		raw.write(sslRequest());
+		const answer = await new Promise<string>((resolve) => raw.once('data', (chunk: Buffer) => resolve(chunk.toString())));
+		expect(answer).toBe('N');
+		raw.end();
+		await until(() => proxy.status()[0]?.open === 0);
+		expect(proxy.drainEvents().map((event) => event.reason)).toEqual(['no-certificate']);
+	});
+
+	test('without a certificate, direct TLS and TLS-first protocols are closed without a byte', async () => {
+		const pg = await withoutCertificate();
+		const direct = connect(pg.port, '127.0.0.1');
+		direct.write(Buffer.from([0x16, 0x03, 0x01, 0x00, 0x05, 0x01, 0x00, 0x00, 0x01, 0x00]));
+		const first = await collect(direct);
+		expect(first).toEqual({ data: Buffer.alloc(0), closed: true });
+		expect(pg.proxy.drainEvents().map((event) => event.reason)).toEqual(['no-certificate']);
+
+		pg.proxy.close();
+		const tlsFirst = await withoutCertificate({ protocol: 'tls', users: [] });
+		const raw = connect(tlsFirst.port, '127.0.0.1');
+		expect(await collect(raw)).toEqual({ data: Buffer.alloc(0), closed: true });
+		expect(tlsFirst.proxy.drainEvents().map((event) => event.reason)).toEqual(['no-certificate']);
 	});
 
 	test('nothing binds until the firewall is applied, and an unreachable upstream is reported', async () => {

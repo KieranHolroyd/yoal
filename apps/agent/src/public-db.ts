@@ -410,7 +410,9 @@ export class PublicDatabaseProxy {
 			client.destroy();
 			return;
 		}
-		if (!entry.context) {
+		// Postgres can still be told why (see `postgresPreamble`); other protocols speak TLS from the
+		// first byte, so there is nothing to answer with.
+		if (!entry.context && entry.config.protocol !== 'postgres') {
 			this.refuse(entry, source, 'no-certificate');
 			client.destroy();
 			return;
@@ -437,9 +439,19 @@ export class PublicDatabaseProxy {
 
 	// ------------------------------------------------------------------------------ Postgres
 
-	/** Before TLS: direct TLS, `SSLRequest`, `GSSENCRequest`, a plaintext cancel, or a refusal. */
+	/**
+	 * Before TLS: direct TLS, `SSLRequest`, `GSSENCRequest`, a plaintext cancel, or a refusal.
+	 *
+	 * With no certificate yet, `SSLRequest` is answered `N` rather than by hanging up: a client on the
+	 * default `sslmode=prefer` then sends its startup message in plaintext and gets an ErrorResponse
+	 * that says why, instead of "server closed the connection unexpectedly". (libpq ignores the text
+	 * of an error sent in reply to `SSLRequest` itself, CVE-2024-10977.) `sslmode=require` stops at
+	 * the `N` with "server does not support SSL". Nothing past the startup message is read and no
+	 * plaintext session is ever opened.
+	 */
 	private postgresPreamble(entry: Entry, conn: Conn): void {
 		let buffer = Buffer.alloc(0);
+		let declinedTls = false;
 		const onData = (chunk: Buffer) => {
 			buffer = Buffer.concat([buffer, chunk]);
 			for (;;) {
@@ -455,6 +467,13 @@ export class PublicDatabaseProxy {
 				}
 				const length = buffer.readInt32BE(0);
 				const code = buffer.readInt32BE(4);
+				if (length === 8 && code === SSL_REQUEST && !entry.context) {
+					if (!declinedTls) this.refuse(entry, conn.source, 'no-certificate');
+					declinedTls = true;
+					conn.client.write('N');
+					buffer = buffer.subarray(8);
+					continue;
+				}
 				if (length === 8 && code === SSL_REQUEST) {
 					stop();
 					const rest = buffer.subarray(8);
@@ -471,6 +490,13 @@ export class PublicDatabaseProxy {
 					if (buffer.length < 16) return;
 					stop();
 					this.forwardCancel(entry, conn, buffer.subarray(0, 16));
+					return;
+				}
+				if (length >= 8 && length <= MAX_STARTUP && code >>> 16 === 3 && !entry.context) {
+					stop();
+					if (!declinedTls) this.refuse(entry, conn.source, 'no-certificate');
+					conn.client.end(postgresError('57P03', noCertificateMessage(entry.config.host)));
+					this.finish(entry, conn);
 					return;
 				}
 				if (length >= 8 && length <= MAX_STARTUP && code >>> 16 === 3) {
@@ -706,6 +732,11 @@ function errorCode(body: Buffer): string | null {
 		offset = end + 1;
 	}
 	return null;
+}
+
+/** What a Postgres client is told while the node has no certificate for the host. */
+export function noCertificateMessage(host: string): string {
+	return `Public access to ${host} is not serving yet: this node has no TLS certificate for it. It starts by itself once the certificate is issued; the database's Public access panel shows the status.`;
 }
 
 /** A FATAL ErrorResponse. */

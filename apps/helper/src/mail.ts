@@ -1,5 +1,6 @@
 import { promises as fs } from 'node:fs';
 import { join } from 'node:path';
+import { findCaddyCertificate } from './caddy-storage.ts';
 import { ValidationError } from './validate.ts';
 
 /**
@@ -19,8 +20,8 @@ export function assertMailHost(value: unknown): string {
 }
 
 export interface MailTlsOptions {
-	/** Caddy's data dir; certificates live under `<dir>/certificates/<issuer>/<host>/`. */
-	caddyDataDir: string;
+	/** Caddy's data dirs (`caddyDataDirs()`); certificates live under `<dir>/certificates/<issuer>/<host>/`. */
+	caddyDataDirs: readonly string[];
 	/** Where `yoal-mail` reads `cert.pem` + `key.pem`. */
 	outDir: string;
 	/** A path owned by the agent's user; the copies get its uid/gid. */
@@ -28,32 +29,10 @@ export interface MailTlsOptions {
 	chown: (path: string, uid: number, gid: number) => Promise<void>;
 }
 
-async function findCertificate(caddyDataDir: string, host: string): Promise<{ cert: string; key: string } | null> {
-	const root = join(caddyDataDir, 'certificates');
-	let issuers: string[];
-	try {
-		issuers = await fs.readdir(root);
-	} catch {
-		return null;
-	}
-	let best: { cert: string; key: string; mtime: number } | null = null;
-	for (const issuer of issuers) {
-		const cert = join(root, issuer, host, `${host}.crt`);
-		const key = join(root, issuer, host, `${host}.key`);
-		try {
-			const [stat] = await Promise.all([fs.stat(cert), fs.stat(key)]);
-			if (!best || stat.mtimeMs > best.mtime) best = { cert, key, mtime: stat.mtimeMs };
-		} catch {
-			// Not issued by this issuer.
-		}
-	}
-	return best ? { cert: best.cert, key: best.key } : null;
-}
-
 /** Copy the newest certificate for `host` into `outDir`. Returns whether the files changed. */
 export async function copyMailTls(host: string, options: MailTlsOptions): Promise<{ found: boolean; changed: boolean }> {
 	assertMailHost(host);
-	const source = await findCertificate(options.caddyDataDir, host);
+	const source = await findCaddyCertificate(options.caddyDataDirs, host);
 	if (!source) return { found: false, changed: false };
 	const [cert, key] = await Promise.all([fs.readFile(source.cert), fs.readFile(source.key)]);
 	const certPath = join(options.outDir, 'cert.pem');
