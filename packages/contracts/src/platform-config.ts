@@ -15,6 +15,7 @@
  */
 
 import { validCloudflareToken, validateDomainSettings, type DomainSettings } from './platform-domains.ts';
+import { SYSTEM_TOGGLE_KEYS, isSystemToggleKey } from './system-settings.ts';
 
 export const PLATFORM_CONFIG_DEFAULTS = {
 	/** Written by the control plane (yoal-owned directory). */
@@ -66,7 +67,7 @@ export const PLATFORM_OBJECT_STORE_SECRET_KEYS: ReadonlySet<string> = new Set([
 /** Litestream release the helper installs when the host has none (sha256 pinned in the helper). */
 export const LITESTREAM_VERSION = '0.3.13';
 
-export type PlatformConfigSection = 'backups' | 'email' | 'sms' | 'alerts' | 'assistant';
+export type PlatformConfigSection = 'backups' | 'email' | 'sms' | 'alerts' | 'assistant' | 'system';
 
 /**
  * The only environment keys the dashboard can change, per section. The assistant is optional: it
@@ -104,6 +105,8 @@ export const PLATFORM_CONFIG_SECTIONS = {
 		'YOAL_ASSISTANT_MODEL',
 		'YOAL_ASSISTANT_API_KEY',
 	],
+	/** Settings → System: every on/off setting in yoal.env (system-settings.ts). Values are `0` or `1`. */
+	system: SYSTEM_TOGGLE_KEYS,
 } as const satisfies Record<PlatformConfigSection, readonly string[]>;
 
 export type PlatformConfigKey = (typeof PLATFORM_CONFIG_SECTIONS)[PlatformConfigSection][number];
@@ -129,6 +132,7 @@ export const PLATFORM_CONFIG_REQUIRED: Record<PlatformConfigSection, readonly Pl
 	sms: ['YOAL_TWILIO_ACCOUNT_SID', 'YOAL_TWILIO_AUTH_TOKEN', 'YOAL_TWILIO_FROM'],
 	alerts: [],
 	assistant: ['YOAL_ASSISTANT_BASE_URL', 'YOAL_ASSISTANT_MODEL'],
+	system: [],
 };
 
 const HOSTNAME = /^(?=.{1,253}$)[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*$/i;
@@ -161,6 +165,7 @@ function validUrl(value: string, protocols: string[]): boolean {
 /** Returns an error message, or null when the value is acceptable for the key. */
 export function validatePlatformConfigValue(key: PlatformConfigKey, value: string): string | null {
 	if (/[\r\n\0]/.test(value)) return 'must be a single line';
+	if (isSystemToggleKey(key)) return value === '0' || value === '1' ? null : 'must be 0 or 1';
 	switch (key) {
 		case 'R2_ACCOUNT_ID':
 			return /^[a-f0-9]{32}$/i.test(value) ? null : 'must be the 32-character Cloudflare account ID';

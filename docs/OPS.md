@@ -190,7 +190,8 @@ Every feature ships on and its flag is a kill switch. Each flag is read once at 
 `GET /api/setup/status` under `features` (never the raw environment). Accepted values are
 `1/true/on/yes` and `0/false/off/no`, case-insensitive. An unset **or malformed** value keeps
 the default below (on). Set `0` to turn a feature off, then restart
-`yoal-control-plane`.
+`yoal-control-plane`, or flip it in **Settings → System** (§4.3), which writes `0`/`1` to
+`yoal.env` and restarts the control plane for you (D242).
 
 | Variable | Default | Area | Meaning |
 |---|---|---|---|
@@ -1957,7 +1958,9 @@ a data directory written by an older major, and never let an image tag change pe
 **Settings → Backups** (R2 credentials, turning Litestream and the monthly restore drill on and off,
 running a drill, downloading a database snapshot), **Settings → Notifications** (SMTP for
 sign-in links, invites and email alerts, plus the alert webhook and alert email address) and
-**Settings → Assistant** (the optional in-dashboard chat's OpenAI-compatible endpoint) change
+**Settings → Assistant** (the optional in-dashboard chat's OpenAI-compatible endpoint) and
+**Settings → System** (every on/off setting in `yoal.env` as a toggle: each `YOAL_FEATURE_*` flag
+from §2.5 plus `YOAL_OWNER_2FA`, `YOAL_OPEN_SIGNUP` and `YOAL_MCP_ALLOW_DCR`, D242) change
 `/etc/yoal/yoal.env` without SSH. **Settings → Domains** (§3.7) also rewrites the edge agent's
 `/etc/yoal/agent.env` and restarts the agent, and verifies the new address before keeping it. **Settings → Telemetry** installs or removes the optional
 ClickHouse store (§3.6) the same way; installing takes a few minutes (a ~240 MB download).
@@ -1983,7 +1986,10 @@ It works like the update button. The control plane can't write `/etc/yoal`, so:
    `YOAL_SMTP_HOST/PORT/USER/PASSWORD/FROM/SECURE`, `YOAL_TWILIO_ACCOUNT_SID/AUTH_TOKEN/FROM`,
    `YOAL_ALERT_WEBHOOK YOAL_ALERT_EMAIL YOAL_ALERT_SMS`,
    `YOAL_ALERT_DISCORD_WEBHOOK YOAL_ALERT_SLACK_WEBHOOK YOAL_ALERT_TELEGRAM_BOT_TOKEN/CHAT_ID YOAL_ALERT_NTFY_URL/TOKEN`, and
-   (Settings → Assistant, optional) `YOAL_ASSISTANT_PROVIDER/BASE_URL/MODEL/API_KEY`. Values are pattern-checked (single line; nothing that could change the meaning of
+   (Settings → Assistant, optional) `YOAL_ASSISTANT_PROVIDER/BASE_URL/MODEL/API_KEY`, and
+   (Settings → System) the toggle list in `packages/contracts/src/system-settings.ts`, whose values
+   must be exactly `0` or `1`. A toggle moved back to its default is removed from the file rather
+   than pinned. Values are pattern-checked (single line; nothing that could change the meaning of
    `litestream.yml`, which expands `${VAR}` before parsing).
 4. It saves the old file as `yoal.env.previous`, writes the new one (`root:yoal 0640`), and
    restarts the control plane. If the control plane is not healthy within 60 s, it restores

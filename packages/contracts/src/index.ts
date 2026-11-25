@@ -35,6 +35,7 @@ export * from './lease.ts';
 export * from './self-update.ts';
 export * from './node-rollout.ts';
 export * from './platform-config.ts';
+export * from './system-settings.ts';
 export * from './platform-domains.ts';
 export * from './assistant.ts';
 export * from './model.ts';

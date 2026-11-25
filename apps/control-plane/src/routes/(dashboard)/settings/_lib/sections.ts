@@ -31,6 +31,7 @@ import PackageIcon from '@lucide/svelte/icons/package';
 import WaypointsIcon from '@lucide/svelte/icons/waypoints';
 import WrenchIcon from '@lucide/svelte/icons/wrench';
 import ShipWheelIcon from '@lucide/svelte/icons/ship-wheel';
+import ToggleRightIcon from '@lucide/svelte/icons/toggle-right';
 import type { Permission } from '@yoal/contracts';
 
 /**
@@ -87,7 +88,8 @@ export type SectionId =
 	| 'kubernetes'
 	| 'maintenance'
 	| 'updates'
-	| 'usage-analytics';
+	| 'usage-analytics'
+	| 'system';
 
 export type SectionGroup =
 	| 'you'
@@ -102,7 +104,7 @@ export type SectionGroup =
 /**
  * The settings navigation passes each href to SvelteKit's `resolve()`, whose generic is distributed
  * over the route-id union; TypeScript stops inferring past 25 members. SSO, Yoal Access, User
- * pools, Server errors and Config export are the newest sections, so they are left out of this type and asserted
+ * pools, Server errors, Config export and System are the newest sections, so they are left out of this type and asserted
  * at their entries below. All are real routes (`svelte-kit sync` lists them in `$app/types`); every other entry is literal-checked.
  */
 export type SectionHref =
@@ -386,6 +388,17 @@ export const SECTIONS: Section[] = [
 		path: '/settings/errors',
 		icon: BugIcon,
 		platform: 'view'
+	},
+	{
+		id: 'system',
+		group: 'platform',
+		label: 'System',
+		summary:
+			'Every on/off setting in the server environment, from feature kill switches to owner sign-in, as a toggle.',
+		href: '/(dashboard)/settings/system' as unknown as SectionHref,
+		path: '/settings/system',
+		icon: ToggleRightIcon,
+		ownerOnly: true
 	},
 	{
 		id: 'domains',

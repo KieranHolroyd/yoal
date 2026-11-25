@@ -190,7 +190,9 @@ export function currentSection(section: PlatformConfigSection): SectionView {
 					? Boolean(
 							env.YOAL_TWILIO_ACCOUNT_SID && env.YOAL_TWILIO_AUTH_TOKEN && env.YOAL_TWILIO_FROM
 						)
-					: section === 'assistant'
+					: section === 'system'
+						? true
+						: section === 'assistant'
 						? Boolean(
 								env.YOAL_ASSISTANT_BASE_URL &&
 								env.YOAL_ASSISTANT_MODEL &&

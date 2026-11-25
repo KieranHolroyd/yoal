@@ -127,6 +127,29 @@ describe('configure', () => {
 		expect(host.commands).toContainEqual(['systemctl', 'restart', 'yoal-control-plane.service']);
 	});
 
+	test('System toggles write 0/1 feature flags and restart the control plane', async () => {
+		const host = fakeHost();
+		request({ action: 'configure', section: 'system', set: { YOAL_FEATURE_MEDIA: '0', YOAL_FEATURE_REGIONS: '1' } });
+		const status = await new PlatformConfigHelper(layout, host).applyRequestFile();
+		expect(status?.outcome).toBe('applied');
+		expect(status?.changed?.sort()).toEqual(['YOAL_FEATURE_MEDIA', 'YOAL_FEATURE_REGIONS']);
+		const env = readEnvFile(layout.envFile);
+		expect(env.get('YOAL_FEATURE_MEDIA')).toBe('0');
+		expect(env.get('BETTER_AUTH_SECRET')).toBe('keep-me');
+		expect(host.commands).toContainEqual(['systemctl', 'restart', 'yoal-control-plane.service']);
+	});
+
+	test('System toggles refuse a key or a value outside the toggle list', async () => {
+		for (const set of [{ YOAL_PLATFORM_ORIGIN: 'https://evil.example' }, { YOAL_FEATURE_MEDIA: 'false' }]) {
+			const host = fakeHost();
+			const before = readFileSync(layout.envFile, 'utf8');
+			request({ action: 'configure', section: 'system', set });
+			const status = await new PlatformConfigHelper(layout, host).applyRequestFile();
+			expect(status?.outcome).toBe('rejected');
+			expect(readFileSync(layout.envFile, 'utf8')).toBe(before);
+		}
+	});
+
 	test('rejects a forged key without touching the env file', async () => {
 		const host = fakeHost();
 		const before = readFileSync(layout.envFile, 'utf8');

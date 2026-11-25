@@ -206,7 +206,7 @@ The assistant is on when `YOAL_ASSISTANT_MODEL` is set and `YOAL_ASSISTANT_DISAB
 
 ### Feature flags
 
-Each flag is set with `YOAL_FEATURE_<NAME>`. Accepted values are `1`, `true`, `on` or `yes` to enable, and `0`, `false`, `off` or `no` to disable. Any other value is ignored and the default applies. Flags are read at start-up, so restart the control plane after a change. Most flags default on; set one to `0` to turn that feature off. The table says which default off. `YOAL_FEATURE_DB_CONSOLE` was removed; the control plane logs a warning and ignores it.
+Each flag is set with `YOAL_FEATURE_<NAME>`. Accepted values are `1`, `true`, `on` or `yes` to enable, and `0`, `false`, `off` or `no` to disable. Any other value is ignored and the default applies. Flags are read at start-up, so restart the control plane after a change. **Settings → System** shows every flag as a toggle, writes `0` or `1` and restarts the control plane for you. Most flags default on; set one to `0` to turn that feature off. The table says which default off. `YOAL_FEATURE_DB_CONSOLE` was removed; the control plane logs a warning and ignores it.
 
 | Flag | Default | What it controls |
 |---|---|---|
@@ -367,6 +367,7 @@ Some settings can be changed in the dashboard, under **Settings**, instead of by
 | **Settings → Backups** | `R2_*` (the backup bucket and credentials), and enables or disables Litestream replication and the restore drill. |
 | **Settings → Notifications** | `YOAL_SMTP_*`, the Twilio keys, the `YOAL_ALERT_*` channels, and the Web Push keys. |
 | **Settings → Assistant** | `YOAL_ASSISTANT_*`. |
+| **Settings → System** | Every on/off setting: each `YOAL_FEATURE_*` flag, plus `YOAL_OWNER_2FA`, `YOAL_OPEN_SIGNUP` and `YOAL_MCP_ALLOW_DCR`. Values are `0` or `1`; a toggle moved back to its default is removed from the file. |
 | **Settings → Telemetry** | Installs or removes ClickHouse and writes the `YOAL_CLICKHOUSE_*` values. |
 | **Settings → Domains** | The dashboard host, content domain and HTTPS settings, and the Cloudflare token. |
 | **Settings → Usage analytics** | Nothing in a file: the opt-in, install id and optional endpoint are database settings. `YOAL_USAGE_ANALYTICS_ENDPOINT` still overrides the endpoint. |
