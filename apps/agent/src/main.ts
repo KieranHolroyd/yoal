@@ -72,6 +72,7 @@ import { JobRunner, ReleaseCommandRunner } from './jobs.ts';
 import { HelperClient } from './helper-client.ts';
 import { formatEnv, JOIN_USAGE, joinNode, nodeFilePath, parseJoinArgs } from './join.ts';
 import { WorkloadLogDrain } from './log-drain.ts';
+import { PlatformLogDrain } from './platform-log-drain.ts';
 import { ReleaseManager, servesReleaseLocally } from './releases.ts';
 import { databaseTlsHeartbeat, WorkloadRuntime, workloadHeartbeat } from './runtime.ts';
 import { HardwareCollector } from './hardware.ts';
@@ -177,6 +178,7 @@ class AgentRuntime {
 	/** Workload JWT delivery and the loopback metadata endpoint (IAM.md I18). */
 	private readonly identity: WorkloadIdentityBroker;
 	private readonly logDrain: WorkloadLogDrain;
+	private readonly platformLogDrain: PlatformLogDrain;
 	private readonly storage: StorageRequester;
 	private readonly databaseStats: DatabaseStatsSampler;
 	private readonly databaseBackups: DatabaseBackupRunner;
@@ -377,6 +379,13 @@ class AgentRuntime {
 			controlUrl: config.controlUrl,
 			nodeToken: config.nodeToken,
 			intervalMs: config.logDrainIntervalMs,
+			log,
+		});
+		this.platformLogDrain = new PlatformLogDrain({
+			helper: this.helper,
+			controlUrl: config.controlUrl,
+			nodeToken: config.nodeToken,
+			statePath: join(config.dataDir, 'platform-log-cursors.json'),
 			log,
 		});
 		this.runLease = new RunLeaseClock({ path: join(config.dataDir, 'run-lease.json'), log });
@@ -695,6 +704,8 @@ class AgentRuntime {
 		];
 		if (this.config.logDrain)
 			this.loops.push(this.logDrain.run(() => this.desired, this.shutdownController.signal));
+		if (this.config.platformLogDrain)
+			this.loops.push(this.platformLogDrain.run(this.shutdownController.signal));
 		log(
 			'info',
 			`Agent ${this.config.agentVersion} for ${this.config.nodeId} running (control ${this.config.controlUrl})`,

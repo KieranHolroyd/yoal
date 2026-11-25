@@ -16,6 +16,7 @@ describe('feature registry', () => {
 			'FUNCTIONS',
 			'BROKERS',
 			'KUBERNETES',
+			'PLATFORM_LOGS',
 			'EMAIL',
 			'BACKUPS_RESTORE',
 			'PITR',

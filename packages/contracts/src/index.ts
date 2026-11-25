@@ -66,6 +66,7 @@ export * from './kubernetes.ts';
 export * from './email.ts';
 export * from './event-notification.ts';
 export * from './log-drain.ts';
+export * from './platform-log-units.ts';
 export * from './node-task.ts';
 export * from './node-drill.ts';
 export * from './build.ts';

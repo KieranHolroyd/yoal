@@ -208,6 +208,26 @@ describe('workload log drain', () => {
 		expect(helper.readCalls[1]?.options.cursor).toBe('s=2');
 	});
 
+	test('joins a stack trace into one line before posting and advances to its last cursor', async () => {
+		const helper = new FakeHelper();
+		helper.results.push({
+			entries: [
+				{ cursor: 's=1', ts: 1_700_000_000_000, priority: 3, message: 'Error: boom' },
+				{ cursor: 's=2', ts: 1_700_000_000_001, priority: 3, message: '    at handler (/app/index.js:4:11)' },
+				{ cursor: 's=3', ts: 1_700_000_000_002, priority: 6, message: 'listening on :3000' },
+			],
+			nextCursor: 's=3',
+		});
+		const client = drain(helper);
+
+		expect(await client.drain(state())).toBe(2);
+		expect(posts[0]!.lines).toEqual([
+			{ ts: 1_700_000_000_000, stream: 'stderr', level: 'error', message: 'Error: boom\n    at handler (/app/index.js:4:11)' },
+			{ ts: 1_700_000_000_002, stream: 'stdout', level: 'info', message: 'listening on :3000' },
+		]);
+		expect(posts[0]!.cursor).toBe('s=3');
+	});
+
 	test('parses a JSON line into level, message and embedded timestamp', async () => {
 		const helper = new FakeHelper();
 		helper.results.push({

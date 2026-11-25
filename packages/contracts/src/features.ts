@@ -57,6 +57,16 @@ export const FEATURE_FLAGS = {
 		area: 'workloads',
 		description: 'Create managed Kubernetes (k3s) clusters on nodes with the optional component (docs/KUBERNETES.md).'
 	},
+	PLATFORM_LOGS: {
+		name: 'PLATFORM_LOGS',
+		// docs/LOGS.md §5 (LP5): agents drain a fixed allow-list of Yoal's own units into the
+		// `platform` log scope (platform admins only). A kill switch: 0 makes the control plane
+		// discard platform batches and the agents back off to a slow probe.
+		default: true,
+		area: 'platform',
+		description:
+			"Ship journald output of Yoal's own services (agent, helper, control plane, Caddy, mail, ClickHouse, registry, builder) to the platform log scope, visible to platform admins only (docs/LOGS.md §5)."
+	},
 	EMAIL: {
 		name: 'EMAIL',
 		// docs/EMAIL.md: purely additive. Nothing listens on 25/587/465 until a platform admin picks a

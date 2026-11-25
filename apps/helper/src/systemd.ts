@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto';
+import { platformLogMatches } from './platform-logs.ts';
 import { VolumeProfiler } from './volume-profile.ts';
 import { pruneNodeImages, type ImagePruneResult } from './images.ts';
 import { applyMirror, type MirrorRequest } from './registry-mirror.ts';
@@ -3469,6 +3470,29 @@ END $$;`];
 		const units = compose
 			? compose.map((service) => serviceUnitName(this.composeServiceId(id, service)))
 			: [serviceUnitName(id)];
+		return this.readJournal(units, lines, options.cursor, id);
+	}
+
+	/**
+	 * Read new journal entries for one of Yoal's own units (docs/LOGS.md §5, LP5). The unit is a
+	 * key of the fixed `PLATFORM_LOG_UNITS` allow-list, never a caller-chosen unit name: the
+	 * journalctl matches come from that table. Same cursor and line rules as workload logs.
+	 */
+	async platformLogs(unit: string, options: LogReadOptions = {}): Promise<HelperLogResult> {
+		const matches = platformLogMatches(unit);
+		if (!matches) throw new ValidationError('unit is not a platform log unit');
+		const lines = Math.max(1, Math.min(Math.floor(options.lines ?? 200), 1_000));
+		return this.readJournal(matches, lines, options.cursor, unit, true);
+	}
+
+	/** The fixed journalctl argv shared by the workload and platform log verbs. */
+	private async readJournal(
+		units: string[],
+		lines: number,
+		cursorOption: string | undefined,
+		label: string,
+		tolerateNoEntries = false,
+	): Promise<HelperLogResult> {
 		const args = [
 			this.journalctlPath,
 			...units.flatMap((unit) => ['-u', unit]),
@@ -3479,12 +3503,16 @@ END $$;`];
 			'-n',
 			String(lines),
 		];
-		const cursor = options.cursor?.trim();
+		const cursor = cursorOption?.trim();
 		if (cursor) args.push('--after-cursor', cursor);
 		const result = await this.runner.run(args);
 		if (result.code !== 0) {
 			const detail = result.stderr.trim() || result.stdout.trim() || 'no output';
-			throw new Error(`journalctl for ${id} failed (${result.code}): ${detail.slice(0, 500)}`);
+			// Platform units that are not installed on this node (no control plane on a worker, no
+			// ClickHouse) are normal; some journalctl versions exit non-zero on "No entries".
+			if (tolerateNoEntries && !result.stdout.trim() && /no entries/i.test(detail))
+				return { entries: [], nextCursor: cursor ?? null };
+			throw new Error(`journalctl for ${label} failed (${result.code}): ${detail.slice(0, 500)}`);
 		}
 		const entries: HelperLogEntry[] = [];
 		for (const line of result.stdout.split('\n')) {

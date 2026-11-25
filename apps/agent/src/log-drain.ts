@@ -5,7 +5,7 @@ import {
 	type RuntimeLogBatch,
 	type WorkloadDesired,
 } from '@yoal/contracts';
-import type { HelperApi } from './helper-client.ts';
+import type { HelperApi, HelperLogEntry } from './helper-client.ts';
 
 const DEFAULT_INTERVAL_MS = 2_000;
 const LINES_PER_READ = 200;
@@ -102,8 +102,9 @@ export class WorkloadLogDrain {
 			return 0;
 		}
 
-		const lines = result.entries.map((entry) => {
-			const parsed = parseLogLine(entry.message);
+		// Stack traces and other multi-line output become one record (docs/LOGS.md §4.3 step 1).
+		const lines = joinMultilineEntries(result.entries).map((entry) => {
+			const parsed = parseJoinedLogMessage(entry.message);
 			return {
 				ts: parsed.ts ?? entry.ts,
 				stream: (entry.priority <= 3 ? 'stderr' : 'stdout') as
@@ -146,6 +147,126 @@ export class WorkloadLogDrain {
 			);
 		}
 	}
+}
+
+/** A joined record never exceeds the 16 KiB line cap the control plane stores. */
+export const MULTILINE_MAX_CHARS = 16_384;
+export const MULTILINE_MAX_LINES = 200;
+/** A continuation more than this long after the previous line starts a new record. */
+export const MULTILINE_GAP_MS = 1_000;
+
+export interface MultilineOptions {
+	maxChars?: number;
+	maxLines?: number;
+	gapMs?: number;
+}
+
+/** Python's banners between chained tracebacks. */
+const PYTHON_CHAIN =
+	/^(During handling of the above exception, another exception occurred:|The above exception was the direct cause of the following exception:)$/;
+/** The last line of a Python traceback: `ValueError: boom`, `KeyboardInterrupt`, `pkg.Error: …`. */
+const PYTHON_EXCEPTION_LINE = /^[A-Za-z_][\w.]*(: .*)?$/;
+
+type MultilineVerdict = 'new' | 'join' | 'join-traceback' | 'end-traceback';
+
+/**
+ * Whether `line` continues the record before it (docs/LOGS.md §4.3 step 1). Continuations are
+ * indented lines (stack frames: `\tat …`, `    at …`, `  File "…"`, `\t... 12 more`, source
+ * excerpts), `Caused by: …`, a `Traceback (most recent call last):` header that follows an error
+ * message, and, inside a Python traceback, the chained-exception banners and the final exception
+ * line.
+ */
+export function classifyLogContinuation(line: string, inTraceback: boolean): MultilineVerdict {
+	if (/^Traceback \(most recent call last\):\s*$/.test(line)) return 'join-traceback';
+	if (/^[ \t]+\S/.test(line)) return 'join';
+	if (/^Caused by: /.test(line)) return 'join';
+	if (inTraceback && PYTHON_CHAIN.test(line)) return 'join';
+	if (inTraceback && PYTHON_EXCEPTION_LINE.test(line)) return 'end-traceback';
+	return 'new';
+}
+
+interface PendingRecord {
+	entry: HelperLogEntry;
+	lines: string[];
+	chars: number;
+	lastTs: number;
+	stderr: boolean;
+	inTraceback: boolean;
+}
+
+/**
+ * Join continuation lines to the previous line of the same unit and stream, in read order (only
+ * the agent sees the exact journald order). A joined record keeps the first line's time, the most
+ * severe priority and the last line's cursor. It is capped at `maxChars`/`maxLines` (16 KiB / 200
+ * lines), and a line more than `gapMs` (1 s) after the previous one always starts a new record.
+ * The batch end flushes: a trace split across two reads ships as two records. Pure.
+ */
+export function joinMultilineEntries(
+	entries: readonly HelperLogEntry[],
+	options: MultilineOptions = {},
+): HelperLogEntry[] {
+	const maxChars = options.maxChars ?? MULTILINE_MAX_CHARS;
+	const maxLines = options.maxLines ?? MULTILINE_MAX_LINES;
+	const gapMs = options.gapMs ?? MULTILINE_GAP_MS;
+	const out: HelperLogEntry[] = [];
+	let pending: PendingRecord | null = null;
+
+	const flush = (): void => {
+		if (!pending) return;
+		out.push(
+			pending.lines.length === 1
+				? pending.entry
+				: { ...pending.entry, message: pending.lines.join('\n') },
+		);
+		pending = null;
+	};
+	const start = (entry: HelperLogEntry, inTraceback: boolean): void => {
+		pending = {
+			entry: { ...entry },
+			lines: [entry.message],
+			chars: entry.message.length,
+			lastTs: entry.ts,
+			stderr: entry.priority <= 3,
+			inTraceback,
+		};
+	};
+
+	for (const entry of entries) {
+		const current = pending as PendingRecord | null;
+		const verdict = classifyLogContinuation(entry.message, current?.inTraceback ?? false);
+		const joinable =
+			current !== null &&
+			verdict !== 'new' &&
+			current.stderr === entry.priority <= 3 &&
+			Math.abs(entry.ts - current.lastTs) <= gapMs &&
+			current.lines.length < maxLines &&
+			current.chars + 1 + entry.message.length <= maxChars;
+		if (!joinable || !current) {
+			flush();
+			start(entry, verdict === 'join-traceback');
+			continue;
+		}
+		current.lines.push(entry.message);
+		current.chars += 1 + entry.message.length;
+		current.lastTs = entry.ts;
+		current.entry.cursor = entry.cursor;
+		current.entry.priority = Math.min(current.entry.priority, entry.priority);
+		if (verdict === 'join-traceback') current.inTraceback = true;
+		else if (verdict === 'end-traceback') current.inTraceback = false;
+	}
+	flush();
+	return out;
+}
+
+/**
+ * `parseLogLine` for a possibly joined record: the first line carries the level, time and
+ * envelope; the continuation lines are kept verbatim under the parsed message.
+ */
+export function parseJoinedLogMessage(message: string): ReturnType<typeof parseLogLine> {
+	const newline = message.indexOf('\n');
+	if (newline < 0) return parseLogLine(message);
+	const parsed = parseLogLine(message.slice(0, newline));
+	return { ...parsed, message: `${parsed.message}${message.slice(newline)}` };
 }
 
 function sleep(ms: number, signal: AbortSignal): Promise<void> {

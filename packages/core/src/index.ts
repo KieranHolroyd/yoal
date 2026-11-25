@@ -237,6 +237,7 @@ export * from './service-actions.ts';
 export * from './backup-targets.ts';
 export * from './audit.ts';
 export * from './log-drains.ts';
+export { PLATFORM_LOG_ORG_ID, normalizeLogHost } from './log-record-ingest.ts';
 export * from './webhook-signature.ts';
 export * from './upgrades.ts';
 export * from './blueprints.ts';

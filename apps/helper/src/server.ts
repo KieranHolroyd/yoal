@@ -11,6 +11,7 @@ import { MirrorValidationError, parseMirrorRequest, type MirrorRequest } from '.
 import { createReadStream, promises as fs } from 'node:fs';
 import { Readable } from 'node:stream';
 import { assertMailHost } from './mail.ts';
+import { platformLogMatches } from './platform-logs.ts';
 import { dirname } from 'node:path';
 import type { HelperConfig } from './config.ts';
 import {
@@ -86,6 +87,11 @@ export interface HelperRuntime {
 	kubernetesComponent?(action: 'install' | 'remove', purge: boolean): import('./kubernetes-component.ts').KubernetesComponentJob;
 	kubernetesComponentJob?(): import('./kubernetes-component.ts').KubernetesComponentJob;
 	logs(id: string, options?: LogReadOptions): Promise<HelperLogResult>;
+	/**
+	 * Journald for one of Yoal's own units, by `PLATFORM_LOG_UNITS` key (docs/LOGS.md §5, LP5).
+	 * Optional: an older runtime answers 404.
+	 */
+	platformLogs?(unit: string, options?: LogReadOptions): Promise<HelperLogResult>;
 	/** Remove a purged database's or storage instance's unit and `<stateDir>/<id>` data dir (D59, S8). */
 	purge(id: string): Promise<void>;
 	/** Dump a managed database with the fixed `pg_dump -Fc` profile (docs/DATABASES.md §9). */
@@ -1016,6 +1022,23 @@ export function createHandler(
 				}
 				await runtime.purge(id);
 				return json({ ok: true, purged: id });
+			}
+
+			// Platform unit logs (docs/LOGS.md §5, LP5): the unit is an allow-list key, never a unit name.
+			const platformLogMatch = /^\/v1\/platform-logs\/([a-z0-9-]{1,64})$/.exec(path);
+			if (platformLogMatch) {
+				if (method !== 'GET') return methodNotAllowed('GET');
+				if (!runtime.platformLogs) return json({ error: 'not_found', path }, 404);
+				const unit = platformLogMatch[1]!;
+				if (!platformLogMatches(unit)) throw new ValidationError('unit is not a platform log unit');
+				const lines = Number(url.searchParams.get('lines') ?? 200);
+				if (!Number.isFinite(lines) || lines < 1 || lines > 1_000)
+					throw new ValidationError('lines must be between 1 and 1000');
+				const cursor = url.searchParams.get('cursor')?.trim() || undefined;
+				if (cursor && cursor.length > 512)
+					throw new ValidationError('cursor must be 512 characters or fewer');
+				const result = await runtime.platformLogs(unit, { cursor, lines: Math.floor(lines) });
+				return json({ ok: true, ...result });
 			}
 
 			const logMatch = /^\/v1\/workloads\/([^/]+)\/logs$/.exec(path);

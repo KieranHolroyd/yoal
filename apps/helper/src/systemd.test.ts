@@ -297,6 +297,51 @@ describe('logs', () => {
 	});
 });
 
+describe('platform logs', () => {
+	test('reads an allow-listed unit with the fixed journalctl matches', async () => {
+		const f = await fixture();
+		f.runner.journal = JSON.stringify({
+			__CURSOR: 's=20',
+			__REALTIME_TIMESTAMP: '1700000000000000',
+			PRIORITY: '4',
+			MESSAGE: 'caddy reloaded',
+		});
+		const result = await f.driver.platformLogs('caddy', { cursor: 's=19', lines: 100 });
+		expect(result.entries).toEqual([{ cursor: 's=20', ts: 1_700_000_000_000, priority: 4, message: 'caddy reloaded' }]);
+		expect(result.nextCursor).toBe('s=20');
+		const call = f.runner.calls.find((argv) => argv[0]?.includes('journalctl'))!;
+		const matches = call.flatMap((arg, index) => (arg === '-u' ? [call[index + 1]] : []));
+		expect(matches).toEqual(['yoal-caddy.service', 'caddy.service']);
+		expect(call[call.indexOf('--after-cursor') + 1]).toBe('s=19');
+		expect(call).toContain('100');
+	});
+
+	test('matches the registry workload units by a fixed glob', async () => {
+		const f = await fixture();
+		await f.driver.platformLogs('yoal-registry');
+		const call = f.runner.calls.find((argv) => argv[0]?.includes('journalctl'))!;
+		expect(call[call.indexOf('-u') + 1]).toBe('yoal-workload-reg_*.service');
+	});
+
+	test('refuses a unit outside the allow-list without running journalctl', async () => {
+		const f = await fixture();
+		for (const unit of ['sshd', 'yoal-workload-wld_abc123', 'caddy.service', '../yoal-agent', 'constructor'])
+			await expect(f.driver.platformLogs(unit)).rejects.toThrow('platform log unit');
+		expect(f.runner.calls.some((argv) => argv[0]?.includes('journalctl'))).toBe(false);
+	});
+
+	test('treats "No entries" from a unit that is not installed as an empty read', async () => {
+		const f = await fixture();
+		f.runner.run = async (argv) => {
+			f.runner.calls.push(argv);
+			return { code: 1, stdout: '', stderr: '-- No entries --' };
+		};
+		expect(await f.driver.platformLogs('yoal-clickhouse', { cursor: 's=5' })).toEqual({ entries: [], nextCursor: 's=5' });
+		// The workload verb keeps failing loudly.
+		await expect(f.driver.logs('wld_abc123')).rejects.toThrow('journalctl');
+	});
+});
+
 describe('remove', () => {
 	test('disables units, deletes unit files and scrubs the runtime directory', async () => {
 		const f = await fixture();
