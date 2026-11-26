@@ -84,6 +84,7 @@ import { DomainService } from './domains.ts';
 import { BuildService } from './builds.ts';
 import { PipelineService } from './pipelines.ts';
 import { LogService } from './logs.ts';
+import { LogExplorerService } from './log-explorer.ts';
 import { LogDrainService } from './log-drains.ts';
 import { ConfigExportService } from './config-export.ts';
 import { ConfigImportService } from './config-import/service.ts';
@@ -223,6 +224,13 @@ export * from './registry.ts';
 export * from './registry-token.ts';
 export * from './oci-client.ts';
 export * from './logs.ts';
+export * from './log-explorer.ts';
+export * from './log-tail-bus.ts';
+export * from './log-saved-queries.ts';
+export * from './log-store/types.ts';
+export * from './log-store/sqlite-sources.ts';
+export * from './log-store/sqlite-compiler.ts';
+export * from './log-store/sqlite-store.ts';
 export * from './environments.ts';
 export * from './source.ts';
 export * from './notify.ts';
@@ -312,6 +320,8 @@ export interface Core {
 	builds: BuildService;
 	pipelines: PipelineService;
 	logs: LogService;
+	/** The Logs Explorer (docs/LOGS.md): `/api/v1/logs/*`, live tail and saved queries. */
+	logExplorer: LogExplorerService;
 	environments: EnvironmentService;
 	source: SourceService;
 	audit: AuditService;
@@ -517,6 +527,7 @@ export function createCore(options: CoreOptions): Core {
 	ctx.storageObjects = new StorageObjectsService(ctx);
 	ctx.domains = new DomainService(ctx);
 	ctx.logs = new LogService(ctx);
+	ctx.logExplorer = new LogExplorerService(ctx);
 	ctx.builds = new BuildService(ctx);
 	ctx.pipelines = new PipelineService(ctx);
 	ctx.operations = createOperationService(ctx);
@@ -630,6 +641,7 @@ export function createCore(options: CoreOptions): Core {
 		builds: ctx.builds,
 		pipelines: ctx.pipelines,
 		logs: ctx.logs,
+		logExplorer: ctx.logExplorer,
 		environments: ctx.environments,
 		source,
 		audit: ctx.audit,

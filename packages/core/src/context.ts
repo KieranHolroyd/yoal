@@ -37,6 +37,7 @@ import type { DomainService } from './domains.ts';
 import type { BuildService } from './builds.ts';
 import type { PipelineService } from './pipelines.ts';
 import type { LogService } from './logs.ts';
+import type { LogExplorerService } from './log-explorer.ts';
 import type { EnvironmentService } from './environments.ts';
 import type { OperationService } from './operations/service.ts';
 import type { BlueprintService } from './blueprints.ts';
@@ -171,6 +172,8 @@ export interface CoreContext {
 	/** GitHub-Actions-shaped pipelines (docs/PIPELINES.md). */
 	pipelines: PipelineService;
 	logs: LogService;
+	/** The Logs Explorer: boundaries, lite store, live tail, saved queries (docs/LOGS.md). */
+	logExplorer: LogExplorerService;
 	environments: EnvironmentService;
 	operations: OperationService;
 	/** Blueprint stacks: plan/apply of a declarative file (plan 11). */

@@ -43,7 +43,8 @@ export const roles = {
 		'kubernetes:create', 'kubernetes:read', 'kubernetes:update', 'kubernetes:view', 'kubernetes:edit',
 		'email:read', 'email:send', 'email:update', 'email:credentials',
 		'shareLink:create', 'shareLink:read', 'shareLink:revoke',
-		'logs:read', 'metrics:read',
+		'logs:read', 'logs:query', 'metrics:read',
+		'logQuery:create', 'logQuery:read', 'logQuery:update', 'logQuery:delete',
 		'container:inspect', 'container:files', 'container:exec',
 		'cloudShell:use',
 		'image:pull', 'image:push', 'image:credentials',
@@ -54,6 +55,7 @@ export const roles = {
 	viewer: pick(
 		'project:read', 'deployment:read', 'domain:read', 'secret:read-metadata',
 		'build:read', 'database:read', 'storage:read', 'broker:read', 'email:read', 'shareLink:read', 'logs:read', 'metrics:read',
+		'logs:query', 'logQuery:create', 'logQuery:read', 'logQuery:update', 'logQuery:delete',
 		'kubernetes:read', 'kubernetes:view',
 		'container:inspect', 'image:pull',
 		'environment:read', 'pipeline:read', 'alert:read', 'dashboard:read', 'volume:read',

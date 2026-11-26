@@ -20,21 +20,110 @@ import type { CoreContext } from './context.ts';
 import { CoreError } from './errors.ts';
 import type { ProjectRow } from './projects.ts';
 import { JOB_LOG_LINES_MAX } from './jobs.ts';
+import { sqliteLogSource, type SqliteLogTag, type UnifiedLogRow } from './log-store/sqlite-sources.ts';
 
 const LOG_LIMIT = 2_000_000;
 const LOG_TAIL = 8_000;
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 2_000;
-/** A global ceiling on drained rows; age is the primary policy, this bounds a chatty week. */
-const MAX_ROWS = 500_000;
+/**
+ * Per-scope ceiling on hot-tail rows, per table (docs/LOGS.md §10.2, LP9). Age is the primary
+ * policy; this bounds a chatty week without letting one noisy project evict everyone else's
+ * history, which the old global 500,000-row cap did.
+ */
+export const LOG_SCOPE_ROW_CAP = 100_000;
+/** Tables `prune` trims, with the columns that identify a scope in each. */
+const PRUNED_LOG_TABLES: ReadonlyArray<{ table: string; scope: readonly string[] }> = [
+	{ table: 'log_events', scope: ['project_id'] },
+	{ table: 'service_log_events', scope: ['kind', 'service_id'] },
+	{ table: 'broker_log_events', scope: ['broker_id'] },
+	{ table: 'log_records', scope: ['scope_kind', 'scope_id'] },
+];
+/** Most rows one append can publish to the live-tail bus in one read. */
+const PUBLISH_BATCH = 5_000;
 const LEVEL_ORDER: LogLevel[] = ['debug', 'info', 'warn', 'error'];
 
 /**
  * The log drain (DESIGN §8). Builders and agents append small batches, the dashboard tails the
  * monotonic `seq` cursor over SSE, and every read goes through `logs:read` like any other surface.
  */
+/**
+ * An `onAppend` listener that reports whether it currently wants rows, so appends skip the
+ * publish read while no live tail is open.
+ */
+export function appendListener(
+	listener: (rows: UnifiedLogRow[]) => void,
+	active: () => boolean,
+): (rows: UnifiedLogRow[]) => void {
+	return Object.assign(listener, { active });
+}
+
 export class LogService {
+	/**
+	 * Live-tail listeners (docs/LOGS.md §4.4). Every append path calls each one with the rows it
+	 * inserted, already projected onto the unified columns. `LogExplorerService` registers the
+	 * tail bus here; node record ingest (`appendRecords`) calls the same list. A listener must not
+	 * throw into an append: errors are swallowed.
+	 *
+	 * A listener may carry an `active()` property (see `appendListener`): while every listener says
+	 * it is inactive (no live tail open), append paths skip the extra read entirely.
+	 */
+	readonly onAppend: Array<(rows: UnifiedLogRow[]) => void> = [];
+
 	constructor(private readonly ctx: CoreContext) {}
+
+	/**
+	 * Publish the rows of one hot-tail table inserted after `afterSeq`. Append paths in other
+	 * services (pipeline steps, Kubernetes pod logs) can call this after their own insert.
+	 */
+	publishInserted(tag: SqliteLogTag, afterSeq: number): void {
+		if (!this.appendWanted()) return;
+		const source = sqliteLogSource(tag);
+		if (!source) return;
+		const rows = this.ctx.sqlite
+			.query<UnifiedLogRow, [number, number]>(`${source.select} WHERE t.seq > ? ORDER BY t.seq LIMIT ?`)
+			.all(afterSeq, PUBLISH_BATCH);
+		if (rows.length > 0) this.emitAppended(rows);
+	}
+
+	/** True when some listener wants inserted rows now. */
+	appendWanted(): boolean {
+		return this.onAppend.some((listener) => {
+			const active = (listener as { active?: () => boolean }).active;
+			return typeof active !== 'function' || active();
+		});
+	}
+
+	/** Call every listener; one failing listener never breaks ingest or the others. */
+	emitAppended(rows: UnifiedLogRow[]): void {
+		for (const listener of this.onAppend) {
+			try {
+				listener(rows);
+			} catch (error) {
+				console.error('[logs] live-tail listener failed', error);
+			}
+		}
+	}
+
+	/** The newest seq in a hot-tail table (an O(1) rowid read). */
+	maxSeq(tag: SqliteLogTag): number {
+		const source = sqliteLogSource(tag);
+		if (!source) return 0;
+		return this.ctx.sqlite.query<{ seq: number | null }, []>(`SELECT MAX(seq) AS seq FROM ${source.table}`).get()?.seq ?? 0;
+	}
+
+	/**
+	 * Run a write and publish what it inserted into `tag`'s table. With no listener it is just the
+	 * write. The re-read is a primary-key range read of the rows just written, so the published
+	 * shape is exactly what the store's adapters return.
+	 */
+	private tracked<T>(tag: SqliteLogTag, write: () => T): T {
+		if (!this.appendWanted()) return write();
+		const before = this.maxSeq(tag);
+		const result = write();
+		this.publishInserted(tag, before);
+		return result;
+	}
 
 	/**
 	 * Append one Builder chunk. The node must own the build and the build must still be running;
@@ -68,13 +157,15 @@ export class LogService {
 				ts: parsed.ts ?? now,
 			};
 		});
-		this.ctx.db.transaction((tx) => {
-			tx.insert(logEvents).values(rows).run();
-			tx.update(builds)
-				.set({ log, logTail: log.slice(-LOG_TAIL) })
-				.where(eq(builds.id, buildId))
-				.run();
-		});
+		this.tracked('le', () =>
+			this.ctx.db.transaction((tx) => {
+				tx.insert(logEvents).values(rows).run();
+				tx.update(builds)
+					.set({ log, logTail: log.slice(-LOG_TAIL) })
+					.where(eq(builds.id, buildId))
+					.run();
+			}),
+		);
 		return true;
 	}
 
@@ -135,7 +226,7 @@ export class LogService {
 				ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? now,
 			};
 		});
-		this.ctx.db.insert(logEvents).values(rows).run();
+		this.tracked('le', () => this.ctx.db.insert(logEvents).values(rows).run());
 		return rows.length;
 	}
 
@@ -187,7 +278,7 @@ export class LogService {
 				message: `Output truncated: a run keeps its first ${JOB_LOG_LINES_MAX} lines.`,
 				ts: now,
 			});
-		if (rows.length > 0) this.ctx.db.insert(logEvents).values(rows).run();
+		if (rows.length > 0) this.tracked('le', () => this.ctx.db.insert(logEvents).values(rows).run());
 		return rows.length;
 	}
 
@@ -208,7 +299,7 @@ export class LogService {
 		if (!service) {
 			// Kubernetes machines keep their own log table (0116); the service checks node ownership.
 			if (this.ctx.kubernetes.isMachineId(batch.workloadId))
-				return this.ctx.kubernetes.appendRuntimeLogs(
+				return this.tracked('kle', () => this.ctx.kubernetes.appendRuntimeLogs(
 					nodeId,
 					batch.workloadId,
 					batch.lines.map((line) => {
@@ -220,10 +311,10 @@ export class LogService {
 							ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? this.ctx.now(),
 						};
 					}),
-				);
+				));
 			// Brokers keep their own log table (0048); the service checks node ownership.
 			if (!this.ctx.brokers.isBrokerId(batch.workloadId)) return 0;
-			return this.ctx.brokers.appendRuntimeLogs(
+			return this.tracked('ble', () => this.ctx.brokers.appendRuntimeLogs(
 				nodeId,
 				batch.workloadId,
 				batch.lines.map((line) => {
@@ -235,7 +326,7 @@ export class LogService {
 						ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? this.ctx.now(),
 					};
 				}),
-			);
+			));
 		}
 		if (service.nodeId !== nodeId)
 			throw new CoreError('forbidden', 'This service is placed on another node.', 403);
@@ -256,7 +347,7 @@ export class LogService {
 				ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? now,
 			};
 		});
-		this.ctx.db.insert(serviceLogEvents).values(rows).run();
+		this.tracked('sle', () => this.ctx.db.insert(serviceLogEvents).values(rows).run());
 		return rows.length;
 	}
 
@@ -270,7 +361,7 @@ export class LogService {
 		message: string;
 	}): void {
 		if (input.kind === 'broker') {
-			this.ctx.db
+			this.tracked('ble', () => this.ctx.db
 				.insert(brokerLogEvents)
 				.values({
 					orgId: input.orgId,
@@ -282,10 +373,10 @@ export class LogService {
 					message: sanitize(input.message),
 					ts: this.ctx.now(),
 				})
-				.run();
+				.run());
 			return;
 		}
-		this.ctx.db
+		this.tracked('sle', () => this.ctx.db
 			.insert(serviceLogEvents)
 			.values({
 				orgId: input.orgId,
@@ -298,7 +389,7 @@ export class LogService {
 				message: sanitize(input.message),
 				ts: this.ctx.now(),
 			})
-			.run();
+			.run());
 	}
 
 	/** Newest page or everything after a cursor, scoped to one managed service. */
@@ -452,7 +543,7 @@ export class LogService {
 		level?: LogLevel;
 		message: string;
 	}): void {
-		this.ctx.db
+		this.tracked('le', () => this.ctx.db
 			.insert(logEvents)
 			.values({
 				orgId: input.orgId,
@@ -466,7 +557,7 @@ export class LogService {
 				message: sanitize(input.message),
 				ts: this.ctx.now(),
 			})
-			.run();
+			.run());
 	}
 
 	/**
@@ -539,35 +630,35 @@ export class LogService {
 		};
 	}
 
-	/** Delete drained rows older than the retention window, then trim the global ceiling. */
-	prune(now = this.ctx.now(), retentionMs = this.ctx.policies.logRetentionMs()): number {
-		const expired = this.ctx.sqlite.run('DELETE FROM log_events WHERE ts < ?', [
-			now - retentionMs,
-		]);
-		const overflow = this.ctx.sqlite.run(
-			'DELETE FROM log_events WHERE seq IN (SELECT seq FROM log_events ORDER BY seq DESC LIMIT -1 OFFSET ?)',
-			[MAX_ROWS],
-		);
-		const expiredService = this.ctx.sqlite.run('DELETE FROM service_log_events WHERE ts < ?', [
-			now - retentionMs,
-		]);
-		const overflowService = this.ctx.sqlite.run(
-			'DELETE FROM service_log_events WHERE seq IN (SELECT seq FROM service_log_events ORDER BY seq DESC LIMIT -1 OFFSET ?)',
-			[MAX_ROWS],
-		);
-		const expiredBroker = this.ctx.sqlite.run('DELETE FROM broker_log_events WHERE ts < ?', [now - retentionMs]);
-		const overflowBroker = this.ctx.sqlite.run(
-			'DELETE FROM broker_log_events WHERE seq IN (SELECT seq FROM broker_log_events ORDER BY seq DESC LIMIT -1 OFFSET ?)',
-			[MAX_ROWS],
-		);
-		return (
-			expired.changes +
-			overflow.changes +
-			expiredService.changes +
-			overflowService.changes +
-			expiredBroker.changes +
-			overflowBroker.changes
-		);
+	/**
+	 * Delete hot-tail rows older than the retention window, then keep at most `cap` newest rows per
+	 * scope in each table (docs/LOGS.md §10.2, LP9): a noisy project trims only its own history.
+	 * Kubernetes and pipeline lines keep their own retention.
+	 */
+	prune(now = this.ctx.now(), retentionMs = this.ctx.policies.logRetentionMs(), cap = LOG_SCOPE_ROW_CAP): number {
+		const cutoff = now - retentionMs;
+		const limit = Math.max(1, Math.floor(cap));
+		let removed = 0;
+		for (const { table, scope } of PRUNED_LOG_TABLES) {
+			removed += this.ctx.sqlite.run(`DELETE FROM ${table} WHERE ts < ?`, [cutoff]).changes;
+			const columns = scope.join(', ');
+			const match = scope.map((column) => `${column} = ?`).join(' AND ');
+			const over = this.ctx.sqlite
+				.query<Record<string, string>, [number]>(
+					`SELECT ${columns} FROM ${table} GROUP BY ${columns} HAVING COUNT(*) > ?`,
+				)
+				.all(limit);
+			for (const row of over) {
+				const values = scope.map((column) => row[column] ?? null);
+				removed += this.ctx.sqlite.run(
+					`DELETE FROM ${table} WHERE ${match} AND seq <= (
+					   SELECT seq FROM ${table} WHERE ${match} ORDER BY seq DESC LIMIT 1 OFFSET ?
+					 )`,
+					[...values, ...values, limit],
+				).changes;
+			}
+		}
+		return removed;
 	}
 }
 
