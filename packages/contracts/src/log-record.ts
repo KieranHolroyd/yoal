@@ -375,3 +375,68 @@ export const nodeLogBatchSchema = z.object({
 	dropped: z.number().int().nonnegative().default(0),
 });
 export type NodeLogBatch = z.infer<typeof nodeLogBatchSchema>;
+
+/** Compare (docs/LOGS.md §8.2): patterns new/rising/falling/gone between two windows. ClickHouse only. */
+export const logCompareInputSchema = logReadInputSchema.extend({
+	baseline: z.discriminatedUnion('kind', [
+		/** The window of the same length immediately before the current one. */
+		z.object({ kind: z.literal('previous') }),
+		/** The current window shifted back, e.g. 1 day or 7 days. */
+		z.object({ kind: z.literal('offset'), offsetMs: z.number().int().positive() }),
+		/** Deploy-aware: the window before vs after this deployment went live (same length each side). */
+		z.object({ kind: z.literal('deploy'), deploymentId: z.string().min(1).max(64) }),
+		z.object({ kind: z.literal('range'), from: z.number().int().nonnegative(), to: z.number().int().nonnegative() }),
+	]),
+	limit: z.number().int().min(1).max(500).default(100),
+});
+export type LogCompareInput = z.infer<typeof logCompareInputSchema>;
+
+export interface LogCompareRow {
+	patternId: string;
+	template: string;
+	current: number;
+	baseline: number;
+	/** Counts are normalised per minute before classifying when the windows differ in length. */
+	change: 'new' | 'gone' | 'rising' | 'falling' | 'steady';
+	/** current/baseline rate; null when the baseline is zero. */
+	ratio: number | null;
+	sampleId: string | null;
+}
+
+export interface LogCompareResult {
+	current: { from: number; to: number; total: number };
+	baseline: { from: number; to: number; total: number };
+	rows: LogCompareRow[];
+	engine: LogEngine;
+	warnings: LogWarning[];
+}
+
+/** Why? (docs/LOGS.md §8.3): which field values are over-represented in a selection. ClickHouse only. */
+export const logWhyInputSchema = logReadInputSchema.extend({
+	/** The brushed region; the baseline is the rest of `from..to`. */
+	selection: z.object({ from: z.number().int().nonnegative(), to: z.number().int().nonnegative() }),
+	/** Field names to consider; omitted = built-ins plus the top attribute keys. */
+	fields: z.array(z.string().max(200)).max(40).optional(),
+	limit: z.number().int().min(1).max(100).default(25),
+});
+export type LogWhyInput = z.infer<typeof logWhyInputSchema>;
+
+export interface LogWhyRow {
+	/** Query name, e.g. `node`, `@http.route`. */
+	field: string;
+	value: string;
+	selectionCount: number;
+	baselineCount: number;
+	selectionShare: number;
+	baselineShare: number;
+	/** selectionShare − baselineShare; rows are ranked by it. */
+	lift: number;
+}
+
+export interface LogWhyResult {
+	selection: { from: number; to: number; total: number };
+	baseline: { from: number; to: number; total: number };
+	rows: LogWhyRow[];
+	engine: LogEngine;
+	warnings: LogWarning[];
+}

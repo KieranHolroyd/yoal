@@ -319,19 +319,173 @@ The work:
 - `bun run check` in `apps/control-plane` (svelte-check) must pass. Add unit tests for the URL-state codec, ANSI
   renderer and CSV/NDJSON export (vitest or bun test, whichever the app uses).
 
-## Wave 2 (after Wave 1 merges)
+## Wave 1 result (merged 2026-11-26)
 
-Briefs are written after the Wave 1 merge, against the merged code:
+All seven lanes are merged on local `main`:
 
-- **A, analysis (L4):** Patterns tab, Compare (windows + deploy-aware), Why? field diff, Analytics tab charts.
-- **R, act (L5):** `log_count` / `log_pattern_new` alert rules, the dashboards `logs` dataset + Logs panel, and
-  pivots from traffic, app errors, alerts and deployments.
-- **C, cost and safety (L6):** retention tiers + Parquet archive + rehydrate estimate, quotas + drop counters,
-  exclusion/sampling/index-only rules with preview, redaction wired at ingest (Lane D's module) with known-secret
-  values, and Settings → Logs.
-- **M, CLI, MCP and assistant (L7):** `yoal logs` on the unified API (`-q`, `--since`, `--until`, `-f`,
-  `--json`, `--scope`, `patterns`, `context`), MCP `query_logs` / `get_log_patterns` / `get_log_context` /
-  `compare_logs` (per the MCP surface rules), per-resource MCP log tools as wrappers, and assistant NL→query.
+| Lane | Commit | Delivered |
+|---|---|---|
+| D | `d65cb338` | `DrainMiner` and `createRedactor` |
+| Q | `9eaa2177` | the grammar, predicate and suggestions (its semantics doc comment is the reference) |
+| I | `6ccc5615` | `yoal.logs` and the indexer. S1 numbers: 5 M-row scope, token search 17 ms, histogram 55–78 ms, 62 B/row, facets 1.8 s |
+| S | `7e2ff1d1` | `SqliteLogStore`, `LogExplorerService`, the tail bus, `/api/v1/logs/*` and IAM `logs:query` / `logQuery` |
+| N1 | `a402aab5` | multiline join, platform unit drain, `/api/agent/log-records` and `appendRecords`. Platform and unmatched-edge records use the sentinel `org_id = 'platform'` |
+| N2 | `67adf9a3` | `X-Request-Id`, edge access records at 10%, the OTLP JSON receiver and `OTEL_*` injection |
+| U | `7679ca84` | `LogExplorer`, `/logs`, and all viewers swapped |
+
+## Wave 2 (parallel, from the merged Wave 1)
+
+Contract types for Compare and Why? (`logCompareInputSchema`, `LogCompareResult`, `logWhyInputSchema`, `LogWhyResult`)
+are already in `packages/contracts/src/log-record.ts`. Lane A implements them, and Lane M calls them.
+
+### X: integration fixes
+Owns the files named below.
+- **Text semantics** (resolves Q vs I).
+  - A bare word that is one alphanumeric token (`/^[\p{L}\p{N}]+$/u`) is a whole-token, case-insensitive match:
+    the body's tokens split on non-alphanumerics, like ClickHouse `hasToken` over `lower(body)`.
+  - Anything else (a quoted phrase, or a bare word containing punctuation) is a case-insensitive substring.
+  - Update the `compileLogPredicate` doc and code in `log-query.ts` and the `SqliteLogStore` compiler (emulate
+    tokens with `' ' || <lower(body) with ASCII punctuation and whitespace replaced by spaces> || ' ' LIKE '% tok %'`).
+  - Keep the ClickHouse compiler's default `bareWordMatch: 'token'`.
+  - Add cross-engine tests with one corpus asserting the predicate and the SQLite compiler agree, and that they
+    agree with the ClickHouse SQL by inspection.
+- **Platform sentinel org.** Verify `LogExplorerService` and both stores return `org_id = 'platform'` rows (platform
+  scope, and edge scopes for unmatched hosts) to platform admins via `crossOrg`, and never to anyone else. Add tests
+  through `appendRecords` → `search` / `tail`.
+- **Swap UI suggestions.** Swap `apps/control-plane/src/lib/logs/suggest.ts` for `suggestLogQuery` from
+  `@yoal/contracts`, mapping item fields, and delete the stand-in.
+- **Patterns at index time.** Wire `DrainMiner` into the indexer at control-plane boot (`setPatternMiner`), and
+  persist a snapshot to the data dir every 10 min and on shutdown, restoring at boot.
+- **Tail publishing.** Publish pipeline lines (`pipeline-engine.ts` appends) and Kubernetes pod-log inserts to the
+  tail via `ctx.logs.publishInserted(tag, afterSeq)` (or the equivalent S added).
+- **OTLP fallback.** Remove N2's bare `/v1/logs` fallback (only the keyed `/otlp/<workloadId>/<key>` path
+  accepts records) and update the tests.
+- **Contract check.** Cross-check U's `lib/logs/api.ts` against S's routes field by field: verbs, bodies, the
+  saved-list shape, pattern-table columns (`pattern`, `template`, `count`), context ordering, and the stream
+  `cursor` param. Fix whichever side is wrong.
+- **One poster.** If N1's platform drain and N2's `log-records.ts` each have a poster, make the platform drain use
+  N2's poster.
+- **Live check.**
+  1. Start the control-plane dev server (see `apps/control-plane` scripts; `bun run dev:clickhouse` exists).
+  2. Create a user and project through the existing test or dev helpers, or use an API key.
+  3. Hit every `/api/v1/logs/*` route with curl in both lite mode and with ClickHouse.
+  4. Fix what breaks, and record what you ran.
+
+### A: analysis (L4)
+Owns:
+- `LogExplorerService.compare()` / `why()` (new file `packages/core/src/log-analysis.ts` with thin hooks in
+  `log-explorer.ts`)
+- the ClickHouse queries for them (in `clickhouse-store.ts` or a sibling)
+- `POST /api/v1/logs/compare` and `/why`
+- pattern sparklines and `first_seen` in `| patterns`
+- the UI tabs in `apps/control-plane/src/lib/logs/` (Patterns, Analytics, Compare, and the Why? panel)
+
+The work:
+- **Compare** follows LOGS.md §8.2 with the contract types. Deploy baselines read the deployment's live time from
+  SQLite. Classification is per-minute rate: new (baseline 0), gone (current 0), rising (≥2× and ≥5 lines),
+  falling (≤0.5×), steady.
+- **Why?** follows §8.3, using two `topK`/count queries per field (built-ins plus the top 20 attribute keys), ranked
+  by lift.
+- **Lite mode** returns 422 `needs_clickhouse`.
+- **UI.**
+  - **Patterns tab:** the template with highlighted placeholders, count, sparkline and first seen, plus
+    only-this / hide actions (`pattern:<id>` / `-pattern:<id>`).
+  - **Analytics tab:** `| stats` with `bin()` renders as a time series (reuse the dashboards renderer), otherwise
+    as a table or bar chart.
+  - **Compare tab:** baseline picker (previous, yesterday, last week, a deploy from the markers, custom), with new,
+    rising, falling and gone groups.
+  - **Why?:** a brush selection on the histogram offers "Why?" and opens a ranked panel with click-to-filter.
+- **URL contract** (Lane R links to it): `mode=compare&baseline=previous|offset:<ms>|deploy:<id>|range:<from>-<to>`.
+- Tests: classification, SQL with tenancy, and route validation.
+
+### R: act (L5)
+Owns the alert-rule kinds, the dashboards dataset and panel, and the pivots on other pages.
+
+The work:
+- **Alerts** (D109, `docs/ALERTS.md`): add rule kinds `log_count` (query + scopes + window + threshold +
+  comparator; works in lite mode) and `log_pattern_new` (scopes + min count + optional "only within N min after a
+  deploy"; ClickHouse only), evaluated by the existing rule loop through `core.logExplorer`. Notifications carry
+  an Explorer URL with the query, scope and window. Check whether `alert_rules` can hold the new kinds without a
+  migration (no CHECK); if not, use migration number **0143**. Add these to the alert-rule editor UI, plus a
+  "Create alert" action in the Explorer that prefills from the current query (a small hook in
+  `LogExplorer.svelte`'s toolbar).
+- **Dashboards** (D101): a `logs` dataset in the builder.
+  - Measures: count and `count_distinct` of a field.
+  - Group by severity, source, scope, `bin`, or any field.
+  - Filter: log-query text compiled with the caller's boundary through the ClickHouse compiler.
+
+  Add a **Logs panel** type showing a scoped query's newest rows, plus "Add to dashboard" from the Explorer
+  Analytics tab.
+- **Pivots** (§9.3):
+  - traffic chart 5xx → `source:access @http.status:>=500` over the window
+  - app error event → same project ±60 s, plus `request:<id>` when present
+  - alert instance → the rule query at fire time
+  - deployment page → "Logs for this deploy" and "Compare with previous deploy"
+    (`mode=compare&baseline=deploy:<id>`)
+  - node page → platform logs (admins)
+- Tests for rule evaluation in both engines, dataset compilation with tenancy, and the link builders.
+
+### C: cost and safety (L6)
+Owns:
+- a log settings module (`packages/core/src/log-settings.ts` + contract schema)
+- `packages/core/src/log-retention.ts`, `log-archive.ts`, `log-quotas.ts`, `log-rules.ts`
+- the ingest hooks in `logs.ts` and `log-record-ingest.ts`
+- Settings → Logs (org) and the platform settings UI
+- the rules API
+
+The work (LOGS.md §10, decisions in §15):
+- **Settings** (`log_settings` rows, platform → org → project inheritance): hot days (3 with ClickHouse, 7
+  without), search days 14, archive off and its days, ingest lines/s + burst + MB/day per project, and edge 2xx
+  sample rate (default 0.1, per-site 1.0 toggle) sent through desired state as `accessLogSampleRate` (the field N2
+  added).
+- **Retention:** SQLite prune uses hot days. ClickHouse uses a daily lightweight `DELETE` per org past search days
+  (TTL 90 d stays a backstop).
+- **Archive:** daily Parquet per org to the object store, reusing telemetry's Parquet export. Add
+  `POST /api/v1/logs/archive/estimate` (bytes, files, seconds), and a search over archived ranges only with
+  `archive: true` confirmed, via the `s3()` table function with a scan budget; otherwise an `archive` warning.
+- **Quotas:** enforced at every append path (an in-memory token bucket per project plus daily bytes). Drops are
+  counted in `log_drop_counts` (reason `quota`), with one `system` line per minute per scope, and log GB/day
+  appears on the usage page (`docs/QUOTAS.md`).
+- **Rules:** CRUD `/api/v1/logs/rules` and `POST /rules/preview`, which replays the last 15 min through the
+  predicate and returns the % dropped and the top patterns.
+  - `exclude` and `sample` apply at ingest.
+  - `index_only` applies at the indexer (skip the insert).
+  - `redact` adds regex rules.
+- **Redaction at ingest:** every append path runs Lane D's `createRedactor`, using built-ins, org rules and
+  known-secret fingerprints of the project's secrets. The fingerprint key comes from the master key via HKDF, and
+  the fingerprint cache is built when secrets change, never per line.
+- Tests: inheritance, quota drops, rule application at each stage, redaction at ingest (a secret never reaches
+  SQLite), and the archive estimate.
+
+### M: CLI, MCP and assistant (L7)
+Owns `apps/cli/src/commands/logs.ts` (and helpers), the MCP log tools, the MCP docs catalogue, and the assistant
+prompt and hooks.
+
+The work:
+- **`yoal logs`** on the unified API:
+  - `yoal logs [scope…] [-q <query>] [--since 1h] [--until …] [-f] [--json] [--limit n] [--order asc|desc]`
+  - scope shorthand: a bare name is a project slug; `db:<name>`, `storage:<name>`, `broker:<name>`,
+    `k8s:<name>`, `pipeline:<repo>`, `platform:<node>`
+  - `yoal logs patterns …`, `yoal logs context <id>`, `yoal logs compare … --baseline previous|1d|deploy:<id>`
+
+  It validates the query client-side with `parseLogQuery` and pretty-prints with severity colours. `-f` uses the
+  SSE stream with resume. Keep `yoal db|storage|broker|k8s|jobs|run logs` working; route them through the unified
+  API where that is simple.
+- **MCP** (read-only, `logs:read` / `logs:query`; follow the MCP surface rules: no credentials, docs catalogue in
+  exact sync):
+  - `query_logs` (q, scopes, from/to or range, limit, cursor → records or table)
+  - `get_log_patterns`, `get_log_context`, `compare_logs` (calls `core.logExplorer.compare`, which Lane A builds;
+    code to the contract types), `explain_log_spike` (calls `why`)
+  - Keep `get_logs` / `get_database_logs` / `get_broker_logs` / `get_storage_logs` with their current params, as
+    thin wrappers.
+
+  Update `packages/docs/content/clients/mcp.md` (tables, the confirmed-tools sentence, the tool count) and the
+  README "For agents" table.
+- **Assistant** (`docs/ASSISTANT.md`): add a grammar summary to the system prompt so it writes log queries, put
+  `query_logs` in the core tool set, and add an Explorer "Ask" action: explain this pattern, or summarise errors
+  in this window. It opens the assistant panel prefilled and shows a generated query as editable, never run
+  automatically (§6.4).
+- Tests for CLI arg parsing and scope shorthand, MCP tool schemas and permissions, and catalogue sync.
 
 ## Wave 3: integration
 
