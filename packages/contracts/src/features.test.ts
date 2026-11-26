@@ -53,7 +53,8 @@ describe('feature registry', () => {
 			'STEERING',
 			'SLO_OBJECTS',
 			'EXTERNAL_PROBER',
-			'REGIONS'
+			'REGIONS',
+			'LOG_INDEX'
 		]);
 		for (const name of FEATURE_FLAG_NAMES) {
 			expect(FEATURE_FLAGS[name].name).toBe(name);

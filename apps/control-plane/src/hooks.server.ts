@@ -148,6 +148,13 @@ export const init: ServerInit = async () => {
 			if (!mayAct()) return;
 			void core.logDrains.deliverDue().catch((error) => reportBackgroundError('log-drains', error));
 		}, 5_000).unref?.();
+		// Logs Explorer search index (docs/LOGS.md §4.2): copy new hot-tail lines into ClickHouse
+		// every 5 s. Fail-open (an outage only stalls the cursors) and a running pass skips the next.
+		setInterval(() => {
+			const indexer = core.ctx.logIndexer;
+			if (!indexer || !mayAct()) return;
+			void indexer.tick().catch((error) => reportBackgroundError('log-index', error));
+		}, 5_000).unref?.();
 		// Flows (docs/FLOWS.md): signals and starts advance runs at once; this loop handles retries
 		// after backoff, wait timeouts and cancels requested while another process held the run.
 		setInterval(() => {

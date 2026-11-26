@@ -395,6 +395,80 @@ const tailEventsTableSql = (database: string): string => `
 	TTL toDateTime(ts) + INTERVAL 30 DAY
 	COMMENT 'Structured tail-worker items from function invocations'`;
 
+/**
+ * The Logs Explorer search index (docs/LOGS.md §4.2, LP2). A derived copy of the SQLite hot tail,
+ * written by the cursor indexer (`log-indexer.ts`) and read by `ClickHouseLogStore`. Timestamps
+ * are milliseconds, matching the `LogRecord` contract. Plain MergeTree: an insert replayed after a
+ * crash is dropped by its `insert_deduplication_token`, which needs the non-replicated dedup window.
+ *
+ * Body search uses a `text` index (GA in 26.x) with a `lower()` preprocessor, so `hasToken` and
+ * `ILIKE` are case-insensitive and index-backed. A server that rejects `text` gets a `tokenbf_v1`
+ * over `lower(body)` instead; the store asks which one exists and compiles to match.
+ */
+export type LogTextIndexKind = 'text' | 'tokenbf';
+
+const LOGS_BODY_INDEX: Record<LogTextIndexKind, string> = {
+	text: `INDEX body_text body TYPE text(tokenizer = 'splitByNonAlpha', preprocessor = lower(body)) GRANULARITY 1`,
+	tokenbf: `INDEX body_text lower(body) TYPE tokenbf_v1(65536, 2, 0) GRANULARITY 1`,
+};
+
+/** Days a search-index row lives at most; per-scope retention prunes earlier (LP9). */
+export const LOGS_TTL_DAYS = 90;
+
+export const logsTableSql = (database: string, textIndex: LogTextIndexKind, ttl: string): string => `
+	CREATE TABLE IF NOT EXISTS ${database}.logs (
+		ts DateTime64(3, 'UTC') COMMENT 'Event time (UTC, milliseconds)',
+		observed_ts DateTime64(3, 'UTC') COMMENT 'Receive time (UTC, milliseconds); equals ts when unknown',
+		id String COMMENT 'Stable record id shared with the SQLite hot tail (le:123, lr:45, ...)',
+		org_id LowCardinality(String) COMMENT 'Owning organisation',
+		scope_kind LowCardinality(String) COMMENT 'project, database, storage, broker, k8s, pipeline, function, edge or platform',
+		scope_id String COMMENT 'The scope resource id',
+		stream String COMMENT 'Stream inside the scope: deployment:<id>, build:<id>, pod:<ns>/<pod>/<container>, unit:<name>, ...',
+		source LowCardinality(String) COMMENT 'runtime, build, job, pipeline, system, access, otlp, audit, platform, email',
+		channel LowCardinality(String) COMMENT 'stdout, stderr, system or empty',
+		severity_number UInt8 COMMENT 'OTel severity number (1-24)',
+		severity_text LowCardinality(String) COMMENT 'Severity band: trace, debug, info, warn, error, fatal',
+		body String COMMENT 'Message text (at most 16 KiB)',
+		attributes Map(LowCardinality(String), String) COMMENT 'Per-record fields (parsed JSON/logfmt keys, http.*, OTLP attributes)',
+		resource Map(LowCardinality(String), String) COMMENT 'Producer fields (service.name, deployment.id, host.name, k8s.*, replica)',
+		trace_id String,
+		span_id String,
+		request_id String,
+		pattern_id String COMMENT 'Drain template id (hex), empty until mined',
+		project_id String,
+		deployment_id String,
+		build_id String,
+		job_run_id String,
+		node_id LowCardinality(String),
+		replica Int16 DEFAULT -1 COMMENT 'Replica index, -1 when not applicable',
+		${LOGS_BODY_INDEX[textIndex]},
+		INDEX id_bf id TYPE bloom_filter(0.01) GRANULARITY 4,
+		INDEX req request_id TYPE bloom_filter GRANULARITY 4,
+		INDEX trace trace_id TYPE bloom_filter GRANULARITY 4,
+		INDEX attr_keys mapKeys(attributes) TYPE bloom_filter GRANULARITY 4
+	) ENGINE = MergeTree
+	PARTITION BY toDate(ts)
+	ORDER BY (org_id, scope_kind, scope_id, ts)
+	TTL toDateTime(ts) + ${ttl}
+	SETTINGS non_replicated_deduplication_window = 1000, ttl_only_drop_parts = 1
+	COMMENT 'Logs Explorer search index, copied from the SQLite hot tail (docs/LOGS.md)'`;
+
+/** Drain templates per scope (docs/LOGS.md §8.1); the newest `last_seen` row per key wins. */
+export const logPatternsTableSql = (database: string, ttl: string): string => `
+	CREATE TABLE IF NOT EXISTS ${database}.log_patterns (
+		org_id LowCardinality(String),
+		scope_kind LowCardinality(String),
+		scope_id String,
+		pattern_id String COMMENT 'Stable hex hash of the template',
+		template String COMMENT 'Template with masked placeholders (<NUM>, <UUID>, <*>, ...)',
+		first_seen DateTime64(3, 'UTC'),
+		last_seen DateTime64(3, 'UTC'),
+		sample_id String COMMENT 'One record id that produced the template'
+	) ENGINE = ReplacingMergeTree(last_seen)
+	ORDER BY (org_id, scope_kind, scope_id, pattern_id)
+	TTL toDateTime(last_seen) + ${ttl}
+	COMMENT 'Log templates mined at index time (docs/LOGS.md §8.1)'`;
+
 /** The contract caps one telemetry batch at 2,000 tails; insert in chunks of that size. */
 const TAILS_INSERT_BATCH = 2_000;
 /** Hard per-call cap, for the same reason as `ANALYTICS_MAX_EVENTS`. */
@@ -706,6 +780,11 @@ export class TelemetryStore {
 	#writeTail: Promise<void> = Promise.resolve();
 	#closed = false;
 	#lastVersion = 0;
+
+	/** True once `yoal.logs` and `yoal.log_patterns` exist (docs/LOGS.md §4.2). */
+	#logsReady = false;
+	#logsTextIndex: LogTextIndexKind | null = null;
+	#logsError: string | null = null;
 
 	/** True once ClickHouse answered and the schema was created. */
 	available = false;
@@ -1612,6 +1691,8 @@ export class TelemetryStore {
 			await client.exec(analyticsTableSql(db));
 			// Tail-worker items (phase 3): structured invocation logs, independent 30-day TTL.
 			await client.exec(tailEventsTableSql(db));
+			// The Logs Explorer search index (docs/LOGS.md §4.2). Its failure never fails telemetry.
+			await this.#openLogs(client, db);
 			// Hourly views for dashboard SQL: every hour in retention, rolled or not.
 			await client.exec(
 				hourlyViewSql(db, 'traffic_hourly', 'traffic', 'host', [
@@ -1656,6 +1737,72 @@ export class TelemetryStore {
 			this.error = new Error(`Telemetry (ClickHouse) unavailable: ${cause.message}`, { cause });
 			this.available = false;
 			this.#notify(this.error);
+		}
+	}
+
+	/**
+	 * Create the search-index tables (docs/LOGS.md §4.2). The `text` index is tried first; a server
+	 * that rejects it (older than its GA, or with it disabled) gets the `tokenbf_v1` fallback. Which
+	 * one exists is read back from the table, so an index created by an earlier process is honoured.
+	 * Only an unreachable server propagates; any other failure leaves the index off with the reason
+	 * in `logsError`, and the rest of telemetry keeps working.
+	 */
+	async #openLogs(client: ClickHouseClient, db: string): Promise<void> {
+		this.#logsReady = false;
+		try {
+			// Not 100 years: `toDateTime(ts) + 100 YEAR` passes DateTime's 2106 limit, wraps into the
+			// past, and the TTL merge then drops every fresh part.
+			const ttl = this.#tableTtl ? `INTERVAL ${LOGS_TTL_DAYS} DAY` : 'INTERVAL 50 YEAR';
+			try {
+				await client.exec(logsTableSql(db, 'text', ttl));
+			} catch (error) {
+				if (error instanceof ClickHouseUnavailableError) throw error;
+				await client.exec(logsTableSql(db, 'tokenbf', ttl));
+			}
+			await client.exec(logPatternsTableSql(db, ttl));
+			const [row] = await client.query<{ statement: string }>(`SHOW CREATE TABLE ${db}.logs`);
+			const statement = row?.statement ?? '';
+			this.#logsTextIndex = /\bTYPE text\(/.test(statement) ? 'text' : /\btokenbf_v1\(/.test(statement) ? 'tokenbf' : null;
+			this.#logsError = null;
+			this.#logsReady = true;
+		} catch (error) {
+			if (error instanceof ClickHouseUnavailableError) throw error;
+			this.#logsError = asError(error).message;
+			this.#notify(new Error(`Telemetry log index unavailable: ${this.#logsError}`, { cause: error }));
+		}
+	}
+
+	/** Which body index `yoal.logs` has, once it exists; null when it has none (or is not created). */
+	get logsTextIndex(): LogTextIndexKind | null {
+		return this.#logsTextIndex;
+	}
+
+	/** Why the search-index tables could not be created, when they could not. */
+	get logsError(): string | null {
+		return this.#logsError;
+	}
+
+	/** Open if needed and say whether the search-index tables are usable now. */
+	async logsReady(): Promise<boolean> {
+		return (await this.ready()) && this.#logsReady;
+	}
+
+	/**
+	 * Insert rows into a search-index table, as the writer. Unlike the telemetry methods this is not
+	 * fail-open: the indexer must know whether ClickHouse acknowledged, so it can keep its cursor.
+	 */
+	async insertLogRows(
+		table: 'logs' | 'log_patterns',
+		rows: ReadonlyArray<Record<string, unknown>>,
+		settings: ClickHouseSettings = {},
+	): Promise<void> {
+		if (!(await this.logsReady()))
+			throw new ClickHouseUnavailableError(this.#logsError ?? this.error?.message ?? 'The log search index is unavailable');
+		try {
+			await this.#write().insert(`${this.database}.${table}`, rows, { settings });
+		} catch (error) {
+			if (error instanceof ClickHouseUnavailableError) this.#markUnavailable(error);
+			throw error;
 		}
 	}
 
