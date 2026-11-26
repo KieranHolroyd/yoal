@@ -60,7 +60,7 @@
 	import DatabasesCard from './_components/DatabasesCard.svelte';
 	import DomainsPanel from './_components/DomainsPanel.svelte';
 	import EnvironmentsPanel from './_components/EnvironmentsPanel.svelte';
-	import LogsPanel from './_components/LogsPanel.svelte';
+	import ProjectLogs from './_components/ProjectLogs.svelte';
 	import JobsPanel from './_components/JobsPanel.svelte';
 	import ProjectAccessCard from './_components/ProjectAccessCard.svelte';
 	import {
@@ -589,7 +589,7 @@
 				}}
 			/>
 		{:else if tab === 'logs'}
-			<LogsPanel
+			<ProjectLogs
 				bind:source={logSource}
 				bind:buildId={logBuildId}
 				bind:deploymentId={logDeploymentId}

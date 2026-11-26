@@ -2,8 +2,9 @@ import type { Principal, ServiceLogEvent, ServiceLogQueryResult } from '@yoal/co
 import { core } from './core';
 
 /**
- * Managed Kubernetes cluster logs (docs/KUBERNETES.md §11) in the shape the managed-service log
- * tail (`ServiceLogs.svelte`) reads, so the REST tail and the dashboard page share one format.
+ * Managed Kubernetes cluster logs (docs/KUBERNETES.md §11) in the managed-service log shape, for
+ * the REST tail (`/api/v1/kubernetes/:name/logs`). The dashboard reads them through the Logs
+ * Explorer (`/api/v1/logs/*`) instead.
  * `serviceLogKinds` has no `kubernetes` member yet, so the kind is carried as a plain string.
  */
 export function kubernetesLogPage(

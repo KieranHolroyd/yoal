@@ -1,5 +1,5 @@
 <script lang="ts">
-	import ServiceLogs from '../../../_lib/service/ServiceLogs.svelte';
+	import LogExplorer from '#lib/logs/LogExplorer.svelte';
 	import DatabaseHeader from '../../_lib/DatabaseHeader.svelte';
 	import type { PageProps } from './$types';
 
@@ -13,12 +13,18 @@
 <div class="space-y-6">
 	<DatabaseHeader db={data.database} can={data.dbCan} />
 
-	<ServiceLogs
-		endpoint="/api/v1/databases/{encodeURIComponent(data.database.name)}/logs"
-		filename="{data.database.name}-postgres.log"
+	<LogExplorer
+		scopes={[{ kind: 'database', id: data.database.id }]}
+		locked
+		lockedLabel={data.database.name}
+		urlPrefix=""
+		order="oldest-first"
+		defaultLive
+		defaultTime={{ kind: 'relative', value: '7d' }}
+		facets={false}
+		defaultColumns={['time', 'level']}
+		filename="{data.database.name}-postgres"
 		canRead={data.canRead}
-		initial={data.initial}
-		loadError={data.logsError}
 		emptyHint="Postgres writes to the unit journal and the agent drains it every couple of seconds. A fresh database may take a moment."
 	/>
 </div>

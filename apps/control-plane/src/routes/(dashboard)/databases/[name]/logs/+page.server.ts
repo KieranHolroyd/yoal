@@ -1,13 +1,14 @@
 import { error } from '@sveltejs/kit';
 import { CoreError } from '@yoal/core';
-import { hasPermission, type ServiceLogQueryResult, type DatabaseView } from '@yoal/contracts';
+import { hasPermission, type DatabaseView } from '@yoal/contracts';
 import { core } from '#lib/server/core.js';
 import { databaseCan } from '../../_lib/forms.server.js';
 import type { PageServerLoad } from './$types';
 
 /**
- * Postgres container logs (D82). The agent drains the unit's journal like any other workload; this
- * page shows the newest page and tails the JSON endpoint.
+ * Postgres container logs (D82) in the Logs Explorer, locked to `database:<id>` (docs/LOGS.md §7).
+ * The agent drains the unit's journal like any other workload; the explorer reads and tails it
+ * through `/api/v1/logs/*`.
  */
 export const load: PageServerLoad = ({ locals, params }) => {
 	const principal = locals.principal!;
@@ -19,22 +20,9 @@ export const load: PageServerLoad = ({ locals, params }) => {
 		throw caught;
 	}
 
-	const canRead = hasPermission(principal, 'logs:read');
-	let initial: ServiceLogQueryResult | null = null;
-	let logsError: string | null = null;
-	if (canRead) {
-		try {
-			initial = core.logs.queryService(principal, 'database', database.id, { limit: 500 });
-		} catch (caught) {
-			logsError = caught instanceof Error ? caught.message : 'Could not read logs.';
-		}
-	}
-
 	return {
 		database,
-		initial,
-		logsError,
-		canRead,
+		canRead: hasPermission(principal, 'logs:read'),
 		dbCan: databaseCan(principal)
 	};
 };

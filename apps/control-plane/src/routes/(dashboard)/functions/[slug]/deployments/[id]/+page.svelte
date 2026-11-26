@@ -25,7 +25,7 @@
 		shortSha
 	} from '../../../../_lib/format.js';
 	import { bindingInfo, formatIdleStop } from '../../../../_lib/function-view.js';
-	import LogsPanel from '../../../../projects/[slug]/_components/LogsPanel.svelte';
+	import ProjectLogs from '../../../../projects/[slug]/_components/ProjectLogs.svelte';
 	import SourcePanel from '../../../../projects/[slug]/_components/SourcePanel.svelte';
 	import FunctionHeader from '../../../_lib/FunctionHeader.svelte';
 	import {
@@ -250,7 +250,7 @@
 			</div>
 		</div>
 	{:else if tab === 'logs'}
-		<LogsPanel
+		<ProjectLogs
 			project={data.project}
 			deployments={[deployment]}
 			builds={[]}

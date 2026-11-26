@@ -1,5 +1,5 @@
 <script lang="ts">
-	import ServiceLogs from '../../../_lib/service/ServiceLogs.svelte';
+	import LogExplorer from '#lib/logs/LogExplorer.svelte';
 	import BrokerHeader from '../../_lib/BrokerHeader.svelte';
 	import type { PageProps } from './$types';
 
@@ -13,12 +13,18 @@
 <div class="space-y-6">
 	<BrokerHeader broker={data.broker} can={data.brokerCan} />
 
-	<ServiceLogs
-		endpoint="/api/v1/brokers/{encodeURIComponent(data.broker.name)}/logs"
-		filename="{data.broker.name}-{data.broker.engine}.log"
+	<LogExplorer
+		scopes={[{ kind: 'broker', id: data.broker.id }]}
+		locked
+		lockedLabel={data.broker.name}
+		urlPrefix=""
+		order="oldest-first"
+		defaultLive
+		defaultTime={{ kind: 'relative', value: '7d' }}
+		facets={false}
+		defaultColumns={['time', 'level']}
+		filename="{data.broker.name}-{data.broker.engine}"
 		canRead={data.canRead}
-		initial={data.initial}
-		loadError={data.logsError}
 		emptyHint="The broker writes to the unit journal and the agent drains it every couple of seconds. A fresh broker may take a moment."
 	/>
 </div>
