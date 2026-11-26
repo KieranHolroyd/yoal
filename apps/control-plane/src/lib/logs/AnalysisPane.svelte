@@ -17,7 +17,7 @@
 	import { logKeys, tableLogs } from './api.js';
 	import CompareView from './CompareView.svelte';
 	import PatternsView from './PatternsView.svelte';
-	import { combineQuery, hasPipes, withPipes } from './query-text.js';
+	import { analysisQueryText } from './query-text.js';
 	import { binFor, type LogTimeZone } from './time.js';
 
 	let {
@@ -62,15 +62,9 @@
 		'This needs the telemetry store (ClickHouse). Lite mode searches the SQLite hot tail only.';
 
 	const span = $derived(to - from);
-	const userStats = $derived(hasPipes(q) && !/\|\s*patterns\b/i.test(q));
-	const tableQueryText = $derived.by(() => {
-		if (mode === 'patterns') return withPipes(streamQuery, '| patterns');
-		if (mode === 'analytics')
-			return userStats
-				? combineQuery(baseQuery, q)
-				: withPipes(streamQuery, `| stats count() by bin(${binFor(span)}), level`);
-		return '';
-	});
+	const tableQueryText = $derived(
+		analysisQueryText({ mode, q, baseQuery, streamQuery, bin: binFor(span) })
+	);
 	const unavailable = $derived.by(() => {
 		if (!features) return null;
 		if (mode === 'patterns' && !features.patterns) return LITE_REASON;

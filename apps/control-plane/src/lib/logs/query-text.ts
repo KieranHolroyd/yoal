@@ -329,3 +329,23 @@ export function highlightMatches(text: string, terms: readonly string[]): Highli
 	if (last < text.length) parts.push({ text: text.slice(last), match: false });
 	return parts;
 }
+
+/**
+ * The pipe query the Patterns or Analytics tab runs (docs/LOGS.md §8): the user's own `| stats`
+ * when they wrote one, otherwise patterns or a count-by-level histogram over the stream filter.
+ * Shared by the analysis pane and the toolbar's "Add to dashboard" action so both see one query.
+ */
+export function analysisQueryText(input: {
+	mode: string;
+	q: string;
+	baseQuery: string;
+	streamQuery: string;
+	bin: string;
+}): string {
+	if (input.mode === 'patterns') return withPipes(input.streamQuery, '| patterns');
+	if (input.mode !== 'analytics') return '';
+	const userStats = hasPipes(input.q) && !/\|\s*patterns\b/i.test(input.q);
+	return userStats
+		? combineQuery(input.baseQuery, input.q)
+		: withPipes(input.streamQuery, `| stats count() by bin(${input.bin}), level`);
+}

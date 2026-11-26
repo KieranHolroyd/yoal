@@ -77,6 +77,7 @@
 	} from './LogStream.svelte';
 	import QueryEditor from './QueryEditor.svelte';
 	import {
+		analysisQueryText,
 		combineQuery,
 		hasPipes,
 		searchTerms,
@@ -94,6 +95,7 @@
 	import {
 		DEFAULT_LOG_TIME,
 		aroundLogTime,
+		binFor,
 		reachesNow,
 		resolveLogTime,
 		shiftLogTime,
@@ -991,7 +993,15 @@
 					scopes={effectiveScopes}
 					{span}
 					analytics={mode === 'analytics'}
-					tableQuery={mode === 'analytics' ? tableQueryText : ''}
+					tableQuery={mode === 'analytics'
+						? analysisQueryText({
+								mode,
+								q,
+								baseQuery,
+								streamQuery,
+								bin: binFor(bounds.to - bounds.from)
+							})
+						: ''}
 				/>
 				<DropdownMenu.Root>
 					<DropdownMenu.Trigger>
