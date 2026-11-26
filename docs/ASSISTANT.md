@@ -18,8 +18,8 @@ The assistant cannot do more than the signed-in user, and every action is audite
   call. A question that spans areas is answered in one pass; there is no routing step and no
   merging of partial answers. An owner can narrow the tool list (see below).
 - **Tool search.** The catalog is well over a hundred tools, so when a turn has more than 40 the
-  model starts with a core set of reads (`whoami`, docs, projects, deployments, logs, status,
-  databases, storage, nodes, `guide_user`) plus `search_tools`. The prompt lists every other tool
+  model starts with a core set of reads (`whoami`, docs, projects, deployments, logs including
+  `query_logs`, status, databases, storage, nodes, `guide_user`) plus `search_tools`. The prompt lists every other tool
   by name only; `search_tools` takes keywords or `select:name1,name2` and loads the matches, which
   are callable from the next model round of the same turn. A call to a tool that was never loaded
   is not run: it is loaded and the model is told to call it again with the schema. This only saves
@@ -33,6 +33,13 @@ The assistant cannot do more than the signed-in user, and every action is audite
   `run_in_cloud_shell` (D237): one bash command in their own shell, where the `yoal` CLI is signed
   in as them. It is always confirmed, see [Cloud shell commands](#cloud-shell-commands). MCP
   clients never get it.
+- **Log queries.** When the user may call `query_logs`, `LOG_QUERY_GUIDE` (the log query grammar
+  of [LOGS.md §6](./LOGS.md#6-query-language) in one screen) is appended to the prompt, an
+  owner-edited one included, so the assistant writes queries that parse. A query it writes for the
+  user is shown as an editable code block with an **Open in the Logs Explorer** link, the request
+  quoted above it; it is never run for them (LOGS.md §6.4). It runs `query_logs` itself only to
+  answer a question, then works down `explain_log_spike`, `get_log_patterns`, `compare_logs` and
+  `get_log_context`, citing record ids and each result's `explorerUrl`.
 - **Optional.** No provider means no launcher and the chat endpoint answers `503`.
 
 ## The chat panel
@@ -72,6 +79,11 @@ narrows the page instead of covering it.
 - **Contextual questions.** A firing or no-data series on Alerts has **Ask AI**, which opens the
   panel with the rule, series, value and duration already written out and asks the assistant to
   explain the cause and next steps. It respects the page-context preference.
+  The Logs Explorer has **Ask AI** in its header (summarise the errors in this window: the scopes,
+  the time range and the current filter) and in a record's flyout (explain this line, or its
+  pattern once indexed). These only **prefill** a new conversation's composer
+  (`assistant.prefill`); nothing is sent until the user presses Enter, so the prompt can be edited.
+  The quoted log line is marked as data, not instructions.
 - Also: copy on every message, timestamps, turn duration, a jump-to-latest pill when you have scrolled up, an unread dot on the launcher when a
   reply finishes while the panel is closed, and Export as Markdown.
 
@@ -244,7 +256,7 @@ works on pages that have not been annotated.
 |---|---|
 | `packages/contracts/src/assistant.ts` | Page outline, chat request, tour, event and status types |
 | `apps/control-plane/src/lib/server/mcp.ts` | `yoalToolDefinitions()` captures the MCP catalog |
-| `apps/control-plane/src/lib/server/assistant/agents.ts` | The system prompt and `PANEL_FORMAT` |
+| `apps/control-plane/src/lib/server/assistant/agents.ts` | The system prompt, `LOG_QUERY_GUIDE` and `PANEL_FORMAT` |
 | `apps/control-plane/src/lib/server/assistant/orchestrator.ts` | The tool loop and confirmations |
 | `apps/control-plane/src/lib/server/assistant/cloud-shell-tool.ts` | `run_in_cloud_shell`: start, type, read between markers, hang up (D237) |
 | `apps/control-plane/src/lib/server/assistant/tool-search.ts` | Deferred tool loading: core set, `search_tools`, ranking |
@@ -254,5 +266,6 @@ works on pages that have not been annotated.
 | `apps/control-plane/src/routes/api/v1/assistant/*` | Status, chat stream and confirm endpoints |
 | `apps/control-plane/src/lib/assistant/assistant.svelte.ts` | Chat state, persisted conversations, turns, regenerate/edit, confirmations |
 | `apps/control-plane/src/lib/assistant/markdown.ts`, `Markdown.svelte` | Safe Markdown subset for replies |
+| `apps/control-plane/src/lib/logs/ask.ts` | The Logs Explorer's Ask AI prompts (explain a line or pattern, summarise a window) |
 | `apps/control-plane/src/lib/assistant/*.svelte` | Panel, composer (slash commands, mentions), messages, tool steps, confirmation cards, history, launcher, tour, model picker |
 | `apps/control-plane/src/routes/(dashboard)/settings/assistant` | Owner-only setup |

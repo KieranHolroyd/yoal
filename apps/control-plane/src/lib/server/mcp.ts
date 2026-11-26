@@ -156,6 +156,20 @@ import { principalFromMcp } from './principal';
 import { consoleJson } from './container-console';
 import { containerConsoleDeps } from './container-console-deps';
 import { pipelineTools } from './mcp-pipelines';
+import {
+	compactLogRecord,
+	explorerUrl,
+	legacyLogRead,
+	logAnalysis,
+	logInstantInput,
+	logScopesInput,
+	logWindowInput,
+	parseLogBaseline,
+	queryHasPipes,
+	resolveLogScopes,
+	resolveLogWindow,
+	spikeWindow,
+} from './mcp-logs';
 import { generateKubernetesConfig } from './kubernetes-ai';
 
 /**
@@ -367,6 +381,12 @@ const requiresWith =
 	};
 
 const round = (value: number, digits: number) => Number(value.toFixed(digits));
+
+/** A log window as ISO times, so an agent can quote it back. */
+const isoWindow = (window: { from: number; to: number }) => ({
+	from: new Date(window.from).toISOString(),
+	to: new Date(window.to).toISOString(),
+});
 
 /**
  * Last-hour health for `get_database`, from the agent's 1-minute samples (D57). Telemetry
@@ -2888,12 +2908,7 @@ function buildServer(
 		async ({ database, after, limit, level, q }) =>
 			run(() => {
 				const view = core.databases.requireRow(principal, database, { includeDeleted: true });
-				return core.logs.queryService(principal, 'database', view.id, {
-					...(after !== undefined ? { after } : {}),
-					limit,
-					...(level ? { level } : {}),
-					...(q ? { q } : {}),
-				});
+				return legacyLogRead(principal, { kind: 'database', id: view.id }, { after, limit, level, q });
 			}),
 	);
 
@@ -3714,12 +3729,7 @@ function buildServer(
 		async ({ broker, after, limit, level, q }) =>
 			run(() => {
 				const row = core.brokers.requireRow(principal, broker, { includeDeleted: true });
-				return core.logs.queryService(principal, 'broker', row.id, {
-					...(after !== undefined ? { after } : {}),
-					limit,
-					...(level ? { level } : {}),
-					...(q ? { q } : {}),
-				});
+				return legacyLogRead(principal, { kind: 'broker', id: row.id }, { after, limit, level, q });
 			}),
 	);
 
@@ -4951,12 +4961,7 @@ function buildServer(
 		async ({ storage, after, limit, level, q }) =>
 			run(() => {
 				const view = core.storage.requireRow(principal, storage, { includeDeleted: true });
-				return core.logs.queryService(principal, 'storage', view.id, {
-					...(after !== undefined ? { after } : {}),
-					limit,
-					...(level ? { level } : {}),
-					...(q ? { q } : {}),
-				});
+				return legacyLogRead(principal, { kind: 'storage', id: view.id }, { after, limit, level, q });
 			}),
 	);
 
@@ -6163,9 +6168,9 @@ function buildServer(
 			scopeChallenge: requires('logs:read'),
 		},
 		async (input) =>
-			run(() => {
+			run(async () => {
 				const row = core.projects.requireRow(principal, input.project);
-				const result = core.logs.query(principal, row, input);
+				const result = await legacyLogRead(principal, { kind: 'project', id: row.id }, input);
 				return {
 					events: result.events,
 					lines: result.events.map((event) => ({
@@ -6179,6 +6184,199 @@ function buildServer(
 						? { note: 'Static deployments have no application logs. Use get_metrics for traffic and error rates.' }
 						: {}),
 				};
+			}),
+	);
+
+	// --- Logs Explorer (docs/LOGS.md §6, §8, §11 L7): one query language over every log the caller
+	// may read. Read-only; the logic and the scope shorthand live in mcp-logs.ts.
+	tool(
+		'query_logs',
+		{
+			title: 'Query logs',
+			description:
+				'Search every log you may read (apps, builds, jobs, databases, storage, brokers, Kubernetes, pipelines; platform scopes for platform admins) ' +
+				'with the log query language. Filters: bare words and "phrases" search the message; level:error means error or worse; built-in fields ' +
+				'service, deployment, node, source, stream, request, trace, pattern; @attr:value (also >= <, * wildcards, /regex/); -term or NOT to exclude; ' +
+				'OR and ( ). Pipe stages return a table: | stats count() by bin(5m), level · | stats p95(@duration_ms) by @http.route | sort p95 desc | limit 10 · ' +
+				'| patterns · | dedup body · | fields ts, level, body. Without pipes you get records newest first; pass `cursor` (from cursor.older) for the next page. ' +
+				'`explorerUrl` opens the same view in the dashboard. Attributes, regex and pipe stages need the ClickHouse index (a needs_clickhouse error says so).',
+			inputSchema: z.object({
+				q: z.string().max(4_000).default('').describe('Log query; empty matches everything'),
+				scopes: logScopesInput,
+				...logWindowInput,
+				limit: z.number().int().min(1).max(500).default(100).describe('Records per page (ignored for pipe queries)'),
+				cursor: z.string().max(2_048).optional().describe('cursor.older from the previous page'),
+				order: z.enum(['desc', 'asc']).default('desc').describe('desc = newest first'),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requiresWith(['logs:read'], (args) => (queryHasPipes(args.q) ? ['logs:query'] : [])),
+		},
+		async ({ q, scopes, from, to, range, limit, cursor, order }) =>
+			run(async () => {
+				const refs = resolveLogScopes(principal, scopes);
+				const window = resolveLogWindow({ from, to, range }, core.ctx.now());
+				const link = explorerUrl(q, refs, window);
+				if (queryHasPipes(q)) {
+					const table = await core.logExplorer.table(principal, { q, scopes: refs, ...window });
+					return { ...table, window: isoWindow(window), explorerUrl: link };
+				}
+				const page = await core.logExplorer.search(principal, { q, scopes: refs, ...window, limit, cursor, order });
+				return {
+					records: page.records.map(compactLogRecord),
+					cursor: page.cursor,
+					engine: page.engine,
+					warnings: page.warnings,
+					window: isoWindow(window),
+					explorerUrl: link,
+					...(page.records.length === 0
+						? { note: 'Nothing matched. Widen `range`, drop a filter, or check the scope names.' }
+						: {}),
+				};
+			}),
+	);
+
+	tool(
+		'get_log_patterns',
+		{
+			title: 'Get log patterns',
+			description:
+				'Group log lines into templates (Drain patterns, docs/LOGS.md §8.1), most frequent first: each row has the pattern id, the template with ' +
+				'variable parts masked, a count and a sample record id for get_log_context. Narrow with a filter `q` (no pipes), then filter the stream ' +
+				'with pattern:<id> or exclude it with -pattern:<id> in query_logs. Needs the ClickHouse index.',
+			inputSchema: z.object({
+				q: z.string().max(4_000).default('').describe('Filter only; `| patterns` is added for you'),
+				scopes: logScopesInput,
+				...logWindowInput,
+				limit: z.number().int().min(1).max(500).default(50),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('logs:read', 'logs:query'),
+		},
+		async ({ q, scopes, from, to, range, limit }) =>
+			run(async () => {
+				if (queryHasPipes(q)) throw new Error('Pass only a filter in `q`; this tool adds `| patterns` itself.');
+				const refs = resolveLogScopes(principal, scopes);
+				const window = resolveLogWindow({ from, to, range }, core.ctx.now());
+				const text = `${q.trim()} | patterns | limit ${limit}`.trim();
+				const table = await core.logExplorer.table(principal, { q: text, scopes: refs, ...window });
+				const patterns = table.rows.map((row, index) => ({
+					...Object.fromEntries(table.columns.map((column, at) => [column.name, row[at] ?? null])),
+					sampleId: table.sampleIds?.[index] ?? null,
+				}));
+				return {
+					patterns,
+					engine: table.engine,
+					warnings: table.warnings,
+					window: isoWindow(window),
+					explorerUrl: explorerUrl(q, refs, window, { mode: 'patterns' }),
+				};
+			}),
+	);
+
+	tool(
+		'get_log_context',
+		{
+			title: 'Get log context',
+			description:
+				'The lines before and after one record in the same stream, like grep -C, with the record itself as `anchor`. ' +
+				'Pass a record `id` from query_logs, get_log_patterns (sampleId) or compare_logs.',
+			inputSchema: z.object({
+				id: z.string().min(3).max(200).describe('Record id, e.g. le:123'),
+				before: z.number().int().min(0).max(200).default(20),
+				after: z.number().int().min(0).max(200).default(20),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('logs:read'),
+		},
+		async ({ id, before, after }) =>
+			run(async () => {
+				const result = await core.logExplorer.context(principal, { id, before, after });
+				if (!result.anchor) throw new NotFoundError(`No log record ${id} that you can read.`);
+				const window = { from: (result.before[0] ?? result.anchor).ts, to: (result.after.at(-1) ?? result.anchor).ts + 1 };
+				return {
+					anchor: compactLogRecord(result.anchor),
+					before: result.before.map(compactLogRecord),
+					after: result.after.map(compactLogRecord),
+					engine: result.engine,
+					explorerUrl: explorerUrl('', [result.anchor.scope], window, { row: result.anchor.id }),
+				};
+			}),
+	);
+
+	tool(
+		'compare_logs',
+		{
+			title: 'Compare logs',
+			description:
+				'What changed in the logs between two windows (docs/LOGS.md §8.2): patterns that are new, rising, falling or gone, with counts per window. ' +
+				'`baseline` is previous (the window just before), a shift such as 1d or 7d (the same window that long ago), deploy:<deployment id> ' +
+				'(before vs after that deploy went live) or <from>..<to>. Answers "what did this deploy change?". Needs the ClickHouse index.',
+			inputSchema: z.object({
+				q: z.string().max(4_000).default('').describe('Filter only (no pipes)'),
+				scopes: logScopesInput,
+				...logWindowInput,
+				baseline: z.string().min(1).max(100).describe('previous | 1d | 7d | deploy:<id> | <from>..<to>'),
+				limit: z.number().int().min(1).max(500).default(50),
+				includeSteady: z.boolean().default(false).describe('Also return patterns that did not change'),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('logs:read', 'logs:query'),
+		},
+		async ({ q, scopes, from, to, range, baseline, limit, includeSteady }) =>
+			run(async () => {
+				if (queryHasPipes(q)) throw new Error('Pass only a filter in `q`; compare groups by pattern itself.');
+				const now = core.ctx.now();
+				const refs = resolveLogScopes(principal, scopes);
+				const window = resolveLogWindow({ from, to, range }, now);
+				const compare = logAnalysis('compare');
+				const result = await compare(principal, { q, scopes: refs, ...window, baseline: parseLogBaseline(baseline, now), limit });
+				return {
+					...result,
+					rows: includeSteady ? result.rows : result.rows.filter((row) => row.change !== 'steady'),
+					explorerUrl: explorerUrl(q, refs, window, { mode: 'compare' }),
+				};
+			}),
+	);
+
+	tool(
+		'explain_log_spike',
+		{
+			title: 'Explain a log spike',
+			description:
+				'Why? for a spike (docs/LOGS.md §8.3): compares the `selection` window against the rest of the window across the built-in fields and ' +
+				'the top attribute keys, and ranks the values over-represented in the selection, e.g. node = edge-b is 92% of the selection vs 31% around it. ' +
+				'Use it after query_logs shows a burst (for example a | stats count() by bin(1m) peak). Without from/range the window is the hour ' +
+				'before the selection to 30 minutes after it. Needs the ClickHouse index.',
+			inputSchema: z.object({
+				q: z.string().max(4_000).default('').describe('Filter only (no pipes), e.g. level:error'),
+				scopes: logScopesInput,
+				...logWindowInput,
+				selection: z
+					.object({ from: logInstantInput, to: logInstantInput })
+					.describe('The spike: epoch ms or ISO times inside the window'),
+				fields: z.array(z.string().max(200)).max(40).optional().describe('Only these fields, e.g. ["node", "@http.route"]'),
+				limit: z.number().int().min(1).max(100).default(15),
+			}),
+			annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true },
+			scopeChallenge: requires('logs:read', 'logs:query'),
+		},
+		async ({ q, scopes, from, to, range, selection, fields, limit }) =>
+			run(async () => {
+				if (queryHasPipes(q)) throw new Error('Pass only a filter in `q`.');
+				const now = core.ctx.now();
+				const refs = resolveLogScopes(principal, scopes);
+				const picked = resolveLogWindow({ from: selection.from, to: selection.to }, now);
+				const window = spikeWindow({ from, to, range }, picked, now);
+				const why = logAnalysis('why');
+				const result = await why(principal, {
+					q,
+					scopes: refs,
+					...window,
+					selection: picked,
+					...(fields ? { fields } : {}),
+					limit,
+				});
+				return { ...result, explorerUrl: explorerUrl(q, refs, window) };
 			}),
 	);
 

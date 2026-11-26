@@ -190,7 +190,7 @@ Commands:
   domains [list|add|check|remove]            Custom project domains and DNS verification
   promote <project> <deploymentId>           Move production to a deployment
   rollback <project>                         Move production back one deployment
-  logs <project>                             Show recent project logs
+  logs [scope…] [-q <query>] [-f]           Search, follow, group and compare logs (\`yoal logs --help\`)
   container [inspect|ls|cat|cp|restart] <p>  Inspect a container project, read its files, restart it (\`yoal container --help\`)
   shell <project>                            Interactive shell inside a container project
   open <project>                             Open the site in a browser

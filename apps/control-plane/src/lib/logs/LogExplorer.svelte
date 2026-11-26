@@ -25,6 +25,7 @@
 	import SearchIcon from '@lucide/svelte/icons/search';
 	import Share2Icon from '@lucide/svelte/icons/share-2';
 	import ShieldAlertIcon from '@lucide/svelte/icons/shield-alert';
+	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
 	import WrapTextIcon from '@lucide/svelte/icons/wrap-text';
 	import { toast } from 'svelte-sonner';
@@ -42,6 +43,8 @@
 	import { Toggle } from '#lib/components/ui/toggle/index.js';
 	import * as ToggleGroup from '#lib/components/ui/toggle-group/index.js';
 	import { errorText } from '#lib/query.js';
+	import { assistant } from '#lib/assistant/assistant.svelte.js';
+	import { explainRecordPrompt, summariseWindowPrompt } from './ask.js';
 	import {
 		contextLogs,
 		fieldsLogs,
@@ -240,6 +243,26 @@
 		retry: false
 	}));
 	const caps = $derived(capabilities.data);
+
+	// --- Ask AI (docs/LOGS.md §6.4, L7): prefill the assistant, never send or run anything ------
+
+	const assistantEnabled = $derived(page.data.assistant?.enabled === true);
+	function askSummary(): void {
+		const names = new Map(
+			(caps?.scopes ?? []).map((entry) => [`${entry.kind}:${entry.id}`, entry.name])
+		);
+		assistant.prefill(
+			summariseWindowPrompt({
+				q: streamQuery,
+				scopes: effectiveScopes.map((scope) => ({
+					scope,
+					name: names.get(`${scope.kind}:${scope.id}`)
+				})),
+				from: bounds.from,
+				to: bounds.to
+			})
+		);
+	}
 	const lite = $derived(caps?.engine === 'sqlite');
 	const features = $derived(caps?.features);
 	const LITE_REASON =
@@ -1021,6 +1044,16 @@
 						<DropdownMenu.Item onclick={() => download('csv')}>CSV</DropdownMenu.Item>
 					</DropdownMenu.Content>
 				</DropdownMenu.Root>
+				{#if assistantEnabled}
+					<Button
+						variant="outline"
+						size="sm"
+						title="Ask the assistant to summarise the errors in this window"
+						onclick={askSummary}
+					>
+						<SparklesIcon /><span class="hidden xl:inline">Ask AI</span>
+					</Button>
+				{/if}
 				{#if urlPrefix !== null}
 					<Button
 						variant="outline"
@@ -1342,6 +1375,9 @@
 		}}
 		onpivot={pivot}
 		onaround={around}
+		onask={assistantEnabled
+			? (record) => assistant.prefill(explainRecordPrompt(record))
+			: undefined}
 		onopenchange={(next) => {
 			if (!next) rowId = null;
 		}}

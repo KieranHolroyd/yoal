@@ -168,7 +168,7 @@ elicitation, and clients that don't support elicitation get a dashboard hand-off
 | Kubernetes (while the feature is on) | `list_k8s_clusters` · `get_k8s_cluster` · `create_k8s_cluster` · `update_k8s_cluster` · `add_k8s_route` · `attach_to_k8s_cluster` · `generate_k8s_config` · `apply_k8s_config` · `k8s_pod_logs` · `backup_k8s_cluster` · `list_k8s_backups` · `restore_k8s_backup` · `delete_k8s_cluster` |
 | Access | `set_access` · `create_share_link` · `list_share_links` · `revoke_share_link` · `list_site_sessions` · `revoke_site_session` · `sign_out_all_visitors` |
 | Identity & IAM | `list_roles` · `explain_access` · `who_can` · `simulate_access` · `bind_role` · `unbind_role` · `request_access` · `list_service_accounts` · `create_service_account` · `list_federation_trusts` |
-| Observe | `get_status` · `get_metrics` · `get_logs` · `get_audit_log` · `list_log_drains` · `create_log_drain` · `test_log_drain` · `delete_log_drain` |
+| Observe | `get_status` · `get_metrics` · `get_logs` · `query_logs` · `get_log_patterns` · `get_log_context` · `compare_logs` · `explain_log_spike` · `get_audit_log` · `list_log_drains` · `create_log_drain` · `test_log_drain` · `delete_log_drain` |
 | Dashboards | `describe_telemetry` · `query_telemetry` · `list_dashboards` · `get_dashboard` · `create_dashboard` · `add_dashboard_panels` · `update_dashboard_panel` · `remove_dashboard_panels` · `update_dashboard` · `delete_dashboard` |
 | Alerts | `list_alerts` · `get_alert_rule` · `create_alert_rule` · `update_alert_rule` · `silence_alerts` · `list_alert_silences` · `remove_alert_silence` · `acknowledge_alert` · `get_alert_history` · `delete_alert_rule` |
 | SLOs (while the feature is on) | `list_slos` · `evaluate_slos` · `set_slo` · `delete_slo` |

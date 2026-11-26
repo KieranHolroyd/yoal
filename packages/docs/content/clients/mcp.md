@@ -99,7 +99,7 @@ These are the permissions the MCP tools use. The tables in the catalogue below n
 | `email:read`, `email:update`, `email:send` | Read sending domains and messages, change domains, suppressions and sandbox recipients, and send email |
 | `shareLink:create`, `shareLink:read`, `shareLink:revoke` | Create, list and revoke share links |
 | `container:inspect`, `container:files` | Inspect container projects; list and read their files (`container:files` is never pre-ticked) |
-| `logs:read`, `metrics:read` | Read logs and log drains (owners and admins also manage drains); read metrics, dashboards and alerts |
+| `logs:read`, `logs:query`, `metrics:read` | Read logs and log drains (owners and admins also manage drains); run log pipe stages, patterns, Compare and Why? (`logs:query`); read metrics, dashboards and alerts |
 | `database:credentials`, `storage:credentials`, `broker:credentials`, `database:console` | Rotate database credentials. No MCP tool reveals credentials. |
 | `kubernetes:read`, `kubernetes:create`, `kubernetes:update`, `kubernetes:delete` | Read, create, change and soft-delete managed Kubernetes clusters, their routes, attachments and backups |
 | `kubernetes:view`, `kubernetes:edit` | Read a cluster's shipped pod logs; apply YAML to a cluster as you (the cluster's own RBAC still decides per object) |
@@ -179,7 +179,7 @@ You don't need to name tools. Ask in plain language and the agent picks them. Th
 
 ## Tool catalogue
 
-There are 237 tools. The permission column lists every scope a call checks, and a note in parentheses says when a second one applies. Tools that ask you to confirm are marked as such. Some tools appear only while their feature is on: Email, Jobs, point-in-time recovery, Blueprints, the container console and Kubernetes are on by default, and SLOs are off by default (see [configuration](/self-hosting/configuration)).
+There are 242 tools. The permission column lists every scope a call checks, and a note in parentheses says when a second one applies. Tools that ask you to confirm are marked as such. Some tools appear only while their feature is on: Email, Jobs, point-in-time recovery, Blueprints, the container console and Kubernetes are on by default, and SLOs are off by default (see [configuration](/self-hosting/configuration)).
 
 ### Documentation
 
@@ -458,6 +458,11 @@ These tools read and change who may do what in the organisation (see [identity a
 | `get_status` | Summarise the fleet: nodes, projects, deployments and storage | `project:read` |
 | `get_metrics` | Show request metrics in 1-minute or 1-hour buckets, filtered by project or host | `metrics:read`, `project:read` |
 | `get_logs` | Show recent runtime or build logs for a project. Pass a cursor to tail them | `logs:read` |
+| `query_logs` | Search every log you may read with the log query language. Filters return records newest first, with paging; pipe stages (`\| stats`, `\| patterns`, `\| dedup`, `\| fields`) return a table. Name scopes as in `yoal logs` (`api`, `db:main`, `platform:<node>`). Each answer links to the same view in the Logs Explorer | `logs:read`, plus `logs:query` for a pipe stage |
+| `get_log_patterns` | Group lines into templates, most frequent first, with a count and a sample record id. Needs the log index | `logs:read`, `logs:query` |
+| `get_log_context` | Show the lines before and after one record in its stream | `logs:read` |
+| `compare_logs` | Show the patterns that are new, rising, falling or gone against a baseline: the previous window, the same window a day or week back, or before a deploy. Needs the log index | `logs:read`, `logs:query` |
+| `explain_log_spike` | Rank the field values that are over-represented in a spike compared with the time around it. Needs the log index | `logs:read`, `logs:query` |
 | `get_audit_log` | Show organisation audit entries, newest first. Narrow with `from`/`to` (a date, ISO time or epoch ms) and follow `nextCursor` with `cursor` for older pages | `project:read` |
 | `list_log_drains` | List log drains with their status, lines sent and dropped, and last error. Header values and secrets are never shown | `logs:read` |
 | `create_log_drain` | Forward logs from now on to a webhook or OTLP receiver. Returns a webhook drain's signing secret once. Owners and admins | `logs:read` |

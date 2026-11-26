@@ -27,6 +27,8 @@ export const CORE_TOOLS: ReadonlySet<string> = new Set([
 	'list_deployments',
 	'get_deployment',
 	'get_logs',
+	// The Logs Explorer (docs/LOGS.md §11 L7): one query over every log the user may read.
+	'query_logs',
 	'get_status',
 	'list_databases',
 	'get_database',

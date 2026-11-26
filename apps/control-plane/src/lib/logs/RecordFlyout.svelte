@@ -13,6 +13,7 @@
 	import CrosshairIcon from '@lucide/svelte/icons/crosshair';
 	import FilterIcon from '@lucide/svelte/icons/filter';
 	import FilterXIcon from '@lucide/svelte/icons/filter-x';
+	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import { formatLogScope, type LogRecord } from '@yoal/contracts';
 	import CopyButton from '#lib/components/yoal/CopyButton.svelte';
 	import { Button } from '#lib/components/ui/button/index.js';
@@ -34,6 +35,7 @@
 		onfilter,
 		onpivot,
 		onaround,
+		onask,
 		onopenchange
 	}: {
 		record: LogRecord | null;
@@ -46,6 +48,8 @@
 		onpivot: (clause: string) => void;
 		/** Show ±5 minutes around this record in the stream. */
 		onaround: (record: LogRecord) => void;
+		/** Ask the assistant to explain this line or pattern; absent when there is no assistant. */
+		onask?: (record: LogRecord) => void;
 		onopenchange?: (open: boolean) => void;
 	} = $props();
 
@@ -120,14 +124,28 @@
 						<Tabs.Trigger value="context">Context</Tabs.Trigger>
 						<Tabs.Trigger value="raw">Raw</Tabs.Trigger>
 					</Tabs.List>
-					<Button
-						variant="outline"
-						size="sm"
-						onclick={() => onaround(record)}
-						title="Show ±5 minutes around this line"
-					>
-						<CrosshairIcon />Around this time
-					</Button>
+					<div class="flex items-center gap-2">
+						{#if onask}
+							<Button
+								variant="outline"
+								size="sm"
+								onclick={() => onask(record)}
+								title={record.patternId
+									? 'Ask the assistant to explain this pattern'
+									: 'Ask the assistant to explain this line'}
+							>
+								<SparklesIcon />Ask AI
+							</Button>
+						{/if}
+						<Button
+							variant="outline"
+							size="sm"
+							onclick={() => onaround(record)}
+							title="Show ±5 minutes around this line"
+						>
+							<CrosshairIcon />Around this time
+						</Button>
+					</div>
 				</div>
 
 				<Tabs.Content value="fields" class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
