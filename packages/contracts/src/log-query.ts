@@ -30,7 +30,7 @@ import {
  *
  * ─── Syntax (§6.1) ────────────────────────────────────────────────────────────────────────────────
  *
- *   timeout                 text term: body contains "timeout"
+ *   timeout                 text term: body has the whole token "timeout" (see "Leaves")
  *   "connection reset"      phrase: body contains the phrase (`\"` and `\\` escape inside quotes)
  *   level:error             severity ≥ error;  level:=warn exactly the warn band
  *   level:>warn level:<=info   band comparisons (see "level" below)
@@ -89,11 +89,23 @@ import {
  *   @key → attributes[key] · resource.key → resource[key]
  *
  * Leaves
- *   text {value}            case-insensitive SUBSTRING of body (`phrase` only records how it was
- *                           written; it does not change matching). Engines may use a token index
- *                           as a prefilter but must keep substring results (`time` matches
- *                           `timeout`). SQLite: instr(lower(body), lower(v)) > 0; ClickHouse:
- *                           positionCaseInsensitiveUTF8(body, v) > 0.
+ *   text {value, phrase}    body search, case-insensitive for ASCII letters. Non-ASCII letters
+ *                           compare exactly here and in SQLite (`lower` folds ASCII only); a
+ *                           ClickHouse ILIKE substring may also fold them. Two forms:
+ *                           - TOKEN: `phrase` false and the value is one run of letters/digits
+ *                             (`isLogTokenSearch`, /^[\p{L}\p{N}]+$/u). Matches when the body has
+ *                             that whole token, where body tokens are the maximal runs between
+ *                             ASCII characters that are not letters or digits (`_` separates;
+ *                             non-ASCII characters are token characters), like ClickHouse
+ *                             `hasToken` over lower(body). `time` does NOT match `timeout`;
+ *                             `timeout` matches `upstream-Timeout:` but not `UpstreamTimeout`.
+ *                           - SUBSTRING: a quoted phrase, or a bare word with any other character
+ *                             (`user@example.com`, `foo*`, `12:30`). Matches when the body
+ *                             contains the value.
+ *                           `logTextMatches` is the reference implementation. SQLite emulates
+ *                           tokens with `' ' || <lower(body), separators → spaces> || ' ' LIKE
+ *                           '% tok %'`; ClickHouse uses hasToken / hasTokenCaseInsensitive
+ *                           (substrings: ILIKE or positionCaseInsensitive).
  *   field eq, string value  case-insensitive equality of the whole value. A `body` eq node only
  *                           comes from `body:=x` and means the WHOLE body equals x (`body:x` parses
  *                           to a text node).
@@ -192,6 +204,51 @@ export const NUMERIC_LOG_AGGREGATIONS: readonly LogAggregationFn[] = [
 ];
 
 const NUMBER_RE = /^\s*[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?\s*$/;
+
+/** A bare search word that matches whole body tokens: one run of letters and digits (§6.1). */
+export const LOG_TOKEN_WORD_RE = /^[\p{L}\p{N}]+$/u;
+
+/** One or more body-token separators: every ASCII character that is not a letter or digit. */
+export const LOG_TOKEN_SEPARATOR_RE = /[\x00-\x2f\x3a-\x40\x5b-\x60\x7b-\x7f]+/;
+
+/** ASCII codes of the body-token separators (NUL excluded), for SQL compilers that emulate tokens. */
+export const LOG_TOKEN_SEPARATOR_CODES: readonly number[] = Array.from({ length: 127 }, (_, i) => i + 1).filter(
+	(code) => !((code >= 48 && code <= 57) || (code >= 65 && code <= 90) || (code >= 97 && code <= 122)),
+);
+
+/** Whether a text leaf is a whole-token search (bare, one letters/digits run) rather than a substring. */
+export function isLogTokenSearch(node: { value: string; phrase: boolean }): boolean {
+	return !node.phrase && LOG_TOKEN_WORD_RE.test(node.value);
+}
+
+/** Lower-case ASCII letters only, the case folding every engine shares (SQLite `lower`, ClickHouse `lower`). */
+export function foldLogCase(text: string): string {
+	return text.replace(/[A-Z]+/g, (run) => run.toLowerCase());
+}
+
+/** The case-folded tokens of a body, split on `LOG_TOKEN_SEPARATOR_RE`. */
+export function logBodyTokens(body: string): string[] {
+	return foldLogCase(body)
+		.split(LOG_TOKEN_SEPARATOR_RE)
+		.filter((token) => token.length > 0);
+}
+
+/** Reference semantics of a text leaf (see "Leaves" above). An empty value matches everything. */
+export function logTextMatches(body: string | null | undefined, value: string, phrase: boolean): boolean {
+	if (!value) return true;
+	const haystack = foldLogCase(body ?? '');
+	const needle = foldLogCase(value);
+	if (!isLogTokenSearch({ value, phrase })) return haystack.includes(needle);
+	let from = 0;
+	for (;;) {
+		const at = haystack.indexOf(needle, from);
+		if (at < 0) return false;
+		const before = at === 0 ? '' : haystack[at - 1]!;
+		const after = haystack[at + needle.length] ?? '';
+		if ((before === '' || LOG_TOKEN_SEPARATOR_RE.test(before)) && (after === '' || LOG_TOKEN_SEPARATOR_RE.test(after))) return true;
+		from = at + 1;
+	}
+}
 
 /** Strict number parse used for comparisons and numeric aggregations (`''`, `0x10`, `1e` → null). */
 export function parseLogNumber(text: string): number | null {
@@ -1442,8 +1499,8 @@ function compileNode(node: LogQueryNode): Predicate {
 			return (record) => !child(record);
 		}
 		case 'text': {
-			const needle = node.value.toLowerCase();
-			return (record) => (record.body ?? '').toLowerCase().includes(needle);
+			const { value, phrase } = node;
+			return (record) => logTextMatches(record.body, value, phrase);
 		}
 		case 'exists': {
 			const ref = node.field;

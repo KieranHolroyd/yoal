@@ -1,7 +1,10 @@
 import {
 	LOG_QUERY_LIMITS,
+	LOG_TOKEN_SEPARATOR_RE,
 	SEVERITY_NUMBER,
 	builtinLogFields,
+	foldLogCase,
+	isLogTokenSearch,
 	platformLogScopeKinds,
 	severityForNumber,
 	severityForText,
@@ -30,9 +33,11 @@ import type { LogReadBoundary, LogStoreRead } from './types.ts';
  *   computed columns are `c0, c1, …` and the display names travel separately.
  *
  * Semantics (shared with the SQLite compiler and the JS predicate, §6.1):
- * - A bare alphanumeric word is a case-insensitive token match when the body has an index
- *   (`hasToken`); phrases and other text are case-insensitive substrings (`ILIKE`, which the `text`
- *   index also serves, or `positionCaseInsensitive`).
+ * - A bare letters/digits word is a case-insensitive whole-token match (`hasToken` with the `text`
+ *   index's lower() preprocessor, otherwise `hasTokenCaseInsensitive`), the same tokens as the JS
+ *   predicate (`logTextMatches`) and the SQLite compiler. Phrases and other text are
+ *   case-insensitive substrings (`ILIKE`, which the `text` index also serves, or
+ *   `positionCaseInsensitive`).
  * - `level:x` compares by severity band; `level:=x` (op `eq`) is exactly that band.
  * - A missing field never matches, and therefore always matches under NOT: numeric compares are
  *   `ifNull(…, 0)` and wildcard/regex check presence first.
@@ -297,18 +302,16 @@ export function filterSql(node: LogQueryNode, params: SqlParams, options: ClickH
 	}
 }
 
-const ASCII_WORD = /^[A-Za-z0-9]+$/;
-
 /**
- * Body search. A bare word with an index is a token match; anything else is a case-insensitive
+ * Body search (§6.1, `logTextMatches`). A bare letters/digits word is a whole-token match whether
+ * or not an index exists (the index only makes it fast); anything else is a case-insensitive
  * substring. With a `tokenbf_v1` index, the whole words strictly inside a phrase are a cheap
  * pre-filter the bloom filter can answer.
  */
 export function textSql(value: string, phrase: boolean, params: SqlParams, options: ClickHouseCompileOptions): string {
 	if (!value) return '1';
-	const bare = !phrase && ASCII_WORD.test(value);
-	if (bare && (options.bareWordMatch ?? 'token') === 'token' && options.textIndex) {
-		const token = params.string(value.toLowerCase());
+	if (isLogTokenSearch({ value, phrase }) && (options.bareWordMatch ?? 'token') === 'token') {
+		const token = params.string(foldLogCase(value));
 		// `text` has a lower() preprocessor, so hasToken is case-insensitive and index-backed;
 		// the tokenbf index is over lower(body), which hasTokenCaseInsensitive uses.
 		return options.textIndex === 'text' ? `hasToken(body, ${token})` : `hasTokenCaseInsensitive(body, ${token})`;
@@ -323,14 +326,15 @@ export function textSql(value: string, phrase: boolean, params: SqlParams, optio
 
 /** Tokens bounded by separators on both sides inside the text (so they are whole tokens in any match). */
 export function innerTokens(text: string): string[] {
+	// Tokens are split exactly like `hasToken` (and `logBodyTokens`): on ASCII non-alphanumerics,
+	// with non-ASCII characters inside tokens, so `naïve` is one token and never `na` + `ve`.
 	const tokens: string[] = [];
-	const re = /[A-Za-z0-9]+/g;
-	let match: RegExpExecArray | null;
-	while ((match = re.exec(text))) {
-		const start = match.index;
-		const end = start + match[0].length;
-		if (start === 0 || end === text.length) continue;
-		tokens.push(match[0].toLowerCase());
+	const separator = new RegExp(LOG_TOKEN_SEPARATOR_RE.source, 'g');
+	let start = 0;
+	for (const match of [...text.matchAll(separator), null]) {
+		const end = match ? match.index : text.length;
+		if (start > 0 && end < text.length && end > start) tokens.push(foldLogCase(text.slice(start, end)));
+		if (match) start = match.index + match[0].length;
 	}
 	return [...new Set(tokens)].slice(0, 8);
 }

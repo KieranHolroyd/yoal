@@ -570,7 +570,8 @@
 		}
 		if (untrack(() => finished)) return;
 		const timer = setTimeout(async () => {
-			const cursor = tail.cursor ?? newerCursor;
+			// A search cursor only: the tail's own cursor (`t.…`) is not one `/search` accepts.
+			const cursor = newerCursor;
 			if (cursor) {
 				try {
 					const page = await searchLogs({

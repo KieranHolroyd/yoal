@@ -70,8 +70,8 @@ export interface AnalyticsSinkOptions {
 	recordTail?: (event: FunctionTailEvent) => void;
 	/**
 	 * The OTLP/HTTP logs receiver (docs/LOGS.md LP7, `otlp-logs.ts`) on the same loopback port. It
-	 * answers its own paths (`/v1/logs`, `/otlp/<workload>/<key>/v1/logs`) and returns null for any
-	 * other, which then falls through to the routes above.
+	 * answers its own paths (`/otlp/<workload>/<key>/v1/logs`, and a refusal on a bare `/v1/logs`)
+	 * and returns null for any other, which then falls through to the routes above.
 	 */
 	otlp?: (request: Request) => Promise<Response | null>;
 	log?: AnalyticsSinkLog;

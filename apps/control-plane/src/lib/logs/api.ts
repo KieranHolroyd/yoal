@@ -121,26 +121,26 @@ export function contextLogs(
 	});
 }
 
-/** The list may come back bare or wrapped (`{ queries }`); accept both until the route settles. */
+/** `GET /saved` answers `{ queries }` (personal ones plus the org's shared ones). */
 export async function listSavedQueries(signal?: AbortSignal): Promise<LogSavedQuery[]> {
-	const body = await fetchJson<unknown>(LOGS_API.saved, {
+	const body = await fetchJson<{ queries?: unknown }>(LOGS_API.saved, {
 		signal,
 		fallback: 'Could not load saved queries'
 	});
-	if (Array.isArray(body)) return body as LogSavedQuery[];
-	const wrapped = body as { queries?: unknown; saved?: unknown; items?: unknown };
-	const list = wrapped.queries ?? wrapped.saved ?? wrapped.items;
-	return Array.isArray(list) ? (list as LogSavedQuery[]) : [];
+	return Array.isArray(body?.queries) ? (body.queries as LogSavedQuery[]) : [];
 }
 
-function unwrapSaved(body: unknown): LogSavedQuery {
-	const wrapped = body as { query?: LogSavedQuery; saved?: LogSavedQuery };
-	return wrapped.query ?? wrapped.saved ?? (body as LogSavedQuery);
+/** Single-query routes (POST, PATCH, GET by id) answer `{ query }`. */
+function unwrapSaved(body: { query: LogSavedQuery }): LogSavedQuery {
+	return body.query;
 }
 
 export async function createSavedQuery(input: LogSavedQueryInput): Promise<LogSavedQuery> {
 	return unwrapSaved(
-		await fetchJson(LOGS_API.saved, { ...post(input), fallback: 'Could not save the query' })
+		await fetchJson<{ query: LogSavedQuery }>(LOGS_API.saved, {
+			...post(input),
+			fallback: 'Could not save the query'
+		})
 	);
 }
 
@@ -149,7 +149,7 @@ export async function updateSavedQuery(
 	patch: Partial<LogSavedQueryInput>
 ): Promise<LogSavedQuery> {
 	return unwrapSaved(
-		await fetchJson(`${LOGS_API.saved}/${encodeURIComponent(id)}`, {
+		await fetchJson<{ query: LogSavedQuery }>(`${LOGS_API.saved}/${encodeURIComponent(id)}`, {
 			method: 'PATCH',
 			headers: { 'content-type': 'application/json' },
 			body: JSON.stringify(patch),
@@ -158,7 +158,7 @@ export async function updateSavedQuery(
 	);
 }
 
-/** DELETE may answer 204 with no body, so this one does not go through `fetchJson`. */
+/** DELETE answers `{ ok: true }`; a bodiless 204 is accepted too, so it skips `fetchJson`. */
 export async function deleteSavedQuery(id: string): Promise<void> {
 	const response = await fetch(`${LOGS_API.saved}/${encodeURIComponent(id)}`, {
 		method: 'DELETE',
@@ -176,8 +176,9 @@ export async function deleteSavedQuery(id: string): Promise<void> {
 }
 
 /**
- * The live tail URL. `cursor` is only for a manual reconnect: an `EventSource` that drops and
- * retries by itself sends the last event id as `Last-Event-ID`, which the server prefers.
+ * The live tail URL. `cursor` is a tail cursor (`t.…`, a manual reconnect) or the newest search
+ * page's `newer` cursor (the server catches up from that page's time). An `EventSource` that drops
+ * and retries by itself sends the last event id as `Last-Event-ID`, which the server prefers.
  */
 export function streamUrl(input: {
 	scopes: readonly LogScopeRef[];

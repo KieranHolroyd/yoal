@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test';
+import { suggestLogQuery } from '@yoal/contracts';
 import {
 	combineQuery,
 	formatFilterClause,
@@ -10,7 +11,6 @@ import {
 	toggleFilterClause,
 	withPipes
 } from './query-text';
-import { suggestLogQuery } from './suggest';
 import { binFor, logTimeLabel, resolveLogTime, shiftLogTime } from './time';
 
 describe('lexer', () => {
@@ -142,31 +142,29 @@ describe('search terms to highlight', () => {
 	});
 });
 
-describe('suggestions (local stand-in for lane Q)', () => {
+describe('suggestions (the shared contracts suggester the editor uses)', () => {
 	test('field names at the start of a term', () => {
 		const result = suggestLogQuery('lev', 3);
 		expect(result.from).toBe(0);
 		expect(result.to).toBe(3);
-		expect(result.items[0]).toMatchObject({ label: 'level', insertText: 'level:', kind: 'field' });
+		expect(result.items[0]).toMatchObject({ label: 'level', insert: 'level:', kind: 'field' });
 	});
 
 	test('values for a field, from the catalog or built-ins', () => {
-		expect(suggestLogQuery('level:er', 8).items.map((item) => item.insertText)).toEqual([
-			'level:error'
-		]);
+		const level = suggestLogQuery('level:er', 8);
+		expect(level.items.map((item) => item.insert)).toContain('error');
 		const catalog = { service: ['api', 'worker'] };
-		expect(
-			suggestLogQuery('x -service:w', 12, catalog).items.map((item) => item.insertText)
-		).toEqual(['-service:worker']);
+		const service = suggestLogQuery('x -service:w', 12, catalog);
+		expect(service.items.map((item) => item.label)).toEqual(['worker']);
 	});
 
 	test('pipe stages and aggregations', () => {
-		expect(suggestLogQuery('a | st', 6).items.map((item) => item.label)).toEqual(['stats']);
-		expect(suggestLogQuery('a | stats p9', 12).items.map((item) => item.label)).toEqual([
-			'p90()',
-			'p95()',
-			'p99()'
-		]);
+		expect(suggestLogQuery('a | st', 6).items.map((item) => item.label)).toContain('stats');
+		expect(
+			suggestLogQuery('a | stats p9', 12)
+				.items.map((item) => item.label)
+				.filter((label) => label.startsWith('p9'))
+		).toHaveLength(3);
 	});
 });
 

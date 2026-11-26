@@ -10,6 +10,7 @@ import {
 } from '@yoal/contracts';
 import type { HelperLogEntry, HelperLogResult, LogReadOptions } from './helper-client.ts';
 import { joinMultilineEntries, parseJoinedLogMessage } from './log-drain.ts';
+import { postNodeLogBatch } from './log-records.ts';
 
 const DEFAULT_INTERVAL_MS = 5_000;
 /** While the control plane's `PLATFORM_LOGS` flag is off, probe this often instead of reading. */
@@ -188,24 +189,12 @@ export class PlatformLogDrain {
 		return stored;
 	}
 
+	/** The shared `/api/agent/log-records` poster (`log-records.ts`), plus the kill-switch answer. */
 	private async post(batch: NodeLogBatch): Promise<{ stored: number }> {
-		const response = await this.doFetch(`${this.controlUrl}/api/agent/log-records`, {
-			method: 'POST',
-			headers: {
-				authorization: `Bearer ${this.nodeToken}`,
-				'content-type': 'application/json',
-			},
-			body: JSON.stringify(batch),
-		});
-		if (!response.ok) {
-			const text = await response.text().catch(() => '');
-			throw new Error(`platform log drain -> ${response.status}${text ? `: ${text.slice(0, 300)}` : ''}`);
-		}
-		const body = (await response.json().catch(() => ({}))) as { stored?: unknown; disabled?: unknown };
-		const disabled = body.disabled === true;
+		const { stored, disabled } = await postNodeLogBatch({ controlUrl: this.controlUrl, nodeToken: this.nodeToken }, batch, this.doFetch);
 		if (disabled && !this.disabled) this.log('info', 'Platform logs are switched off (PLATFORM_LOGS); probing once a minute');
 		this.disabled = disabled;
-		return { stored: typeof body.stored === 'number' ? body.stored : 0 };
+		return { stored };
 	}
 
 	private async load(): Promise<CursorState> {

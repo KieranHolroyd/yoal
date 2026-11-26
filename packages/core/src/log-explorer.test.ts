@@ -1,9 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDb } from '@yoal/db';
-import type { LogSearchResult } from '@yoal/contracts';
+import { nodeLogBatchSchema, type LogSearchResult } from '@yoal/contracts';
 import { buildPrincipal } from './orgs.ts';
 import { createCore, type Core } from './index.ts';
 import { LocalObjectStore } from './object-store.ts';
@@ -301,6 +302,25 @@ describe('live tail', () => {
 		}
 	});
 
+	test('a tail opened with a search page cursor resumes right after that page', async () => {
+		line(owner, ids.api!, 'page-resume 1');
+		const page = await core.logExplorer.search(owner, recent({ q: 'page-resume', order: 'desc', limit: 10 }));
+		expect(bodies(page)).toEqual(['page-resume 1']);
+		line(owner, ids.api!, 'page-resume 2');
+		const session = core.logExplorer.openTail(owner, { q: 'page-resume', lastEventId: page.cursor.newer });
+		try {
+			// The page's own newest line may come back (same ts); the client drops ids it has.
+			expect(session.initial.records.map((record) => record.body).filter((body) => body !== 'page-resume 1')).toEqual(['page-resume 2']);
+			line(owner, ids.api!, 'page-resume 3');
+			expect((await session.next(1_000)).records.map((record) => record.body)).toEqual(['page-resume 3']);
+		} finally {
+			session.close();
+		}
+		const junk = core.logExplorer.openTail(owner, { q: 'page-resume', lastEventId: 'nonsense' });
+		expect(junk.initial.records).toEqual([]);
+		junk.close();
+	});
+
 	test('a reconnect too far behind gets the newest lines and a dropped count', async () => {
 		const first = core.logExplorer.openTail(owner, { q: 'flood' });
 		const cursor = first.cursor;
@@ -329,6 +349,105 @@ describe('live tail', () => {
 		core.logExplorer.openTail(admin, { scopes: [{ kind: 'platform', id: 'node_p' }] }).close();
 		const after = opened.sqlite.query<{ n: number }, []>(`SELECT COUNT(*) AS n FROM audit_log WHERE action = 'logs.read_platform'`).get()!.n;
 		expect(after).toBe(before + 1);
+	});
+
+	test('pipeline lines and Kubernetes pod and runtime lines publish too', async () => {
+		opened.sqlite.run(
+			`INSERT INTO pipeline_repositories (id, org_id, name, clone_url, created_by, created_at, updated_at)
+			 VALUES ('repo_t', 'org_1', 'mono', 'https://git.test/mono.git', 'user_1', ?, ?)`,
+			[clock, clock],
+		);
+		opened.sqlite.run(`INSERT INTO pipeline_jobs (id, run_id, org_id, repository_id, key, name, status, spec_json, created_at)
+			VALUES ('job_t', 'run_t', 'org_1', 'repo_t', 'build', 'Build', 'in_progress', '{}', 1)`);
+		opened.sqlite.run(
+			`INSERT INTO k8s_clusters (id, org_id, name, minor, release, node_id, memory_mb, api_port, ingress_port, token_secret, created_by, shipper, shipper_token_hash, created_at, updated_at)
+			 VALUES ('kc_t', 'org_1', 'lab', '1.37', 'v1.37.2+k3s1', 'node_p', 1024, 6443, 8080, 'x', 'user_1', 1, ?, ?, ?)`,
+			[createHash('sha256').update('ship-token').digest('hex'), clock, clock],
+		);
+		const session = core.logExplorer.openTail(owner, {
+			scopes: [
+				{ kind: 'pipeline', id: 'repo_t' },
+				{ kind: 'k8s', id: 'kc_t' },
+			],
+		});
+		try {
+			clock += 10;
+			const job = { id: 'job_t', runId: 'run_t' } as Parameters<typeof core.pipelines.engine.appendLogs>[0];
+			expect(core.pipelines.engine.appendLogs(job, { lines: [{ step: 0, stream: 'stdout', text: 'step output', ts: clock }] })).toBe(1);
+			core.pipelines.engine.appendSystemLine(job, 'job finished');
+			expect(core.kubernetes.ingestLogs('kc_t', 'ship-token', [{ namespace: 'default', pod: 'web-1', message: 'pod says hi', ts: clock }])).toBe(1);
+			const seen: string[] = [];
+			for (let attempt = 0; attempt < 5 && seen.length < 3; attempt += 1)
+				for (const record of (await session.next(200)).records) seen.push(`${record.scope.kind}:${record.body}`);
+			expect(seen).toEqual(['pipeline:step output', 'pipeline:[yoal] job finished', 'k8s:pod says hi']);
+		} finally {
+			session.close();
+		}
+	});
+
+	test('sentinel-org records from appendRecords reach platform admins only, by search and tail', async () => {
+		const scopes = [
+			{ kind: 'platform' as const, id: 'node_p' },
+			{ kind: 'edge' as const, id: 'node_p' },
+		];
+		const adminTail = core.logExplorer.openTail(admin, { q: 'sentinel', scopes });
+		const ownerTail = core.logExplorer.openTail(owner, { q: 'sentinel', scopes });
+		const otherTail = core.logExplorer.openTail(otherOrg, { q: 'sentinel' });
+		const sentinelOrgTail = core.logExplorer.openTail(
+			buildPrincipal({ kind: 'user', userId: 'user_s', orgId: 'platform', role: 'owner' }),
+			{ q: 'sentinel', scopes },
+		);
+		try {
+			clock += 10;
+			expect(
+				core.logs.appendRecords(
+					'node_p',
+					nodeLogBatchSchema.parse({
+						target: { kind: 'platform', unit: 'yoal-agent' },
+						records: [{ ts: clock, source: 'platform', severityNumber: 17, body: 'sentinel unit line' }],
+					}),
+				),
+			).toEqual({ stored: 1 });
+			expect(
+				core.logs.appendRecords(
+					'node_p',
+					nodeLogBatchSchema.parse({
+						target: { kind: 'site', host: 'stray.example' },
+						records: [{ ts: clock, source: 'access', severityNumber: 13, body: 'GET /sentinel 404 2ms' }],
+					}),
+				),
+			).toEqual({ stored: 1 });
+			const stored = opened.sqlite
+				.query<{ org_id: string; scope_kind: string }, []>(`SELECT org_id, scope_kind FROM log_records WHERE body LIKE '%sentinel%' ORDER BY seq`)
+				.all();
+			expect(stored).toEqual([
+				{ org_id: 'platform', scope_kind: 'platform' },
+				{ org_id: 'platform', scope_kind: 'edge' },
+			]);
+
+			const live = await adminTail.next(1_000);
+			expect(live.records.map((record) => [record.scope.kind, record.orgId, record.body])).toEqual([
+				['platform', 'platform', 'sentinel unit line'],
+				['edge', 'platform', 'GET /sentinel 404 2ms'],
+			]);
+			for (const tail of [ownerTail, otherTail, sentinelOrgTail]) expect((await tail.next(50)).records).toEqual([]);
+
+			const read = await core.logExplorer.search(admin, recent({ q: 'sentinel', scopes }));
+			expect(bodies(read).sort()).toEqual(['GET /sentinel 404 2ms', 'sentinel unit line']);
+			expect(read.records.map((record) => record.scopeName)).toEqual(['edge-p', 'edge-p']);
+			expect(await core.logExplorer.get(admin, read.records.find((record) => record.scope.kind === 'edge')!.id)).not.toBeNull();
+			for (const principal of [owner, viewer, otherOrg]) {
+				expect((await core.logExplorer.search(principal, recent({ q: 'sentinel', scopes }))).records).toEqual([]);
+				expect((await core.logExplorer.search(principal, recent({ q: 'sentinel' }))).records).toEqual([]);
+				for (const record of read.records) expect(await core.logExplorer.get(principal, record.id)).toBeNull();
+			}
+			// An admin's default (org-wide) read stays tenant-only.
+			expect((await core.logExplorer.search(admin, recent({ q: 'sentinel' }))).records).toEqual([]);
+			const capabilities = await core.logExplorer.capabilities(admin);
+			expect(capabilities.scopes.filter((scope) => scope.id === 'node_p').map((scope) => scope.kind)).toEqual(['platform', 'edge']);
+		} finally {
+			for (const tail of [adminTail, ownerTail, otherTail, sentinelOrgTail]) tail.close();
+		}
 	});
 
 	test('with no tail open, appends skip the publish read', () => {

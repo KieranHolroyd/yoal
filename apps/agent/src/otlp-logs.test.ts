@@ -297,27 +297,27 @@ describe('OtlpLogsReceiver', () => {
 		expect(receiver.stats.unauthorized).toBe(2);
 	});
 
-	test('bare /v1/logs falls back to a resource attribute naming a workload on this node', async () => {
+	test('bare /v1/logs accepts nothing, whatever the resource claims', async () => {
 		const { posted, batcher, receiver } = harness();
 		const body = {
 			resourceLogs: [
 				{
 					resource: { attributes: [{ key: 'service.instance.id', value: { stringValue: 'wl_web' } }] },
-					scopeLogs: [{ logRecords: [{ body: { stringValue: 'ok' } }] }],
+					scopeLogs: [{ logRecords: [{ body: { stringValue: 'claims wl_web' } }] }],
 				},
 				{
-					resource: { attributes: [{ key: 'yoal.workload.id', value: { stringValue: 'wl_elsewhere' } }] },
-					scopeLogs: [{ logRecords: [{ body: { stringValue: 'nope' } }, { body: { stringValue: 'nope' } }] }],
+					resource: { attributes: [{ key: 'yoal.workload.id', value: { stringValue: 'wl_api' } }] },
+					scopeLogs: [{ logRecords: [{ body: { stringValue: 'claims wl_api' } }] }],
 				},
 			],
 		};
 		const response = await receiver.handle(post('http://127.0.0.1:8085/v1/logs', body));
-		expect(response!.status).toBe(200);
-		expect(await response!.json()).toMatchObject({ partialSuccess: { rejectedLogRecords: '2' } });
+		expect(response!.status).toBe(401);
+		expect(((await response!.json()) as { message: string }).message).toContain('OTEL_EXPORTER_OTLP_ENDPOINT');
 		await batcher.flush();
-		expect(posted.map((batch) => [batch.target, batch.records.map((record) => record.body)])).toEqual([
-			[{ kind: 'workload', workloadId: 'wl_web' }, ['ok']],
-		]);
+		expect(posted).toEqual([]);
+		expect(receiver.stats.unauthorized).toBe(1);
+		expect(receiver.stats.records).toBe(0);
 	});
 
 	test('protobuf gets a clear 415; other media types too', async () => {

@@ -1533,16 +1533,21 @@ export class PipelineEngine {
 				text: `[yoal] log limit of ${MAX_LOG_LINES_PER_JOB} lines reached; further output is dropped`,
 				ts: now,
 			});
-		for (let i = 0; i < lines.length; i += 200)
-			this.ctx.db.insert(pipelineLogLines).values(lines.slice(i, i + 200)).run();
+		// Published to the Logs Explorer live tail (docs/LOGS.md §4.4) as well as stored.
+		this.ctx.logs.tracked('pll', () => {
+			for (let i = 0; i < lines.length; i += 200)
+				this.ctx.db.insert(pipelineLogLines).values(lines.slice(i, i + 200)).run();
+		});
 		return lines.length;
 	}
 
 	appendSystemLine(job: PipelineJobRow, text: string): void {
-		this.ctx.db
-			.insert(pipelineLogLines)
-			.values({ jobId: job.id, runId: job.runId, step: -1, stream: 'system', text: `[yoal] ${text}`, ts: this.ctx.now() })
-			.run();
+		this.ctx.logs.tracked('pll', () =>
+			this.ctx.db
+				.insert(pipelineLogLines)
+				.values({ jobId: job.id, runId: job.runId, step: -1, stream: 'system', text: `[yoal] ${text}`, ts: this.ctx.now() })
+				.run(),
+		);
 	}
 
 	complete(job: PipelineJobRow, input: PipelineJobComplete): void {

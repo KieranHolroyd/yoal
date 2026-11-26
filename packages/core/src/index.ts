@@ -246,6 +246,7 @@ export * from './backup-targets.ts';
 export * from './audit.ts';
 export * from './log-drains.ts';
 export * from './log-patterns.ts';
+export * from './log-pattern-snapshots.ts';
 export * from './log-redaction.ts';
 export * from './log-enrich.ts';
 export * from './log-indexer.ts';

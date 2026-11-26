@@ -1,5 +1,8 @@
 import {
+	LOG_TOKEN_SEPARATOR_CODES,
 	SEVERITY_NUMBER,
+	foldLogCase,
+	isLogTokenSearch,
 	severityForNumber,
 	severityForText,
 	type BuiltinLogField,
@@ -286,6 +289,29 @@ function join(children: SqlFragment[], operator: 'AND' | 'OR'): SqlFragment {
 	};
 }
 
+/**
+ * `lower(u.body)` with every token separator (ASCII non-alphanumerics, `LOG_TOKEN_SEPARATOR_RE`)
+ * turned into a space, so `' ' || this || ' ' LIKE '% tok %'` is a whole-token test (§6.1).
+ */
+const SPACED_BODY = LOG_TOKEN_SEPARATOR_CODES.filter((code) => code !== 32).reduce(
+	(expression, code) => `replace(${expression}, char(${code}), ' ')`,
+	'lower(u.body)',
+);
+
+/**
+ * Body search with the predicate's semantics (`logTextMatches`): a bare letters/digits word is a
+ * whole-token match, anything else a case-insensitive substring. The token form keeps the cheap
+ * `instr` test first, so only candidate rows pay for the separator rewrite.
+ */
+export function compileText(value: string, phrase: boolean): SqlFragment {
+	const needle = foldLogCase(value);
+	if (!isLogTokenSearch({ value, phrase })) return { sql: 'instr(lower(u.body), ?) > 0', params: [needle] };
+	return {
+		sql: `(instr(lower(u.body), ?) > 0 AND (' ' || ${SPACED_BODY} || ' ') LIKE ?)`,
+		params: [needle, `% ${needle} %`],
+	};
+}
+
 /** Compile a filter tree. Null (no filter) is `1`. */
 export function compileSqliteFilter(node: LogQueryNode | null): SqlFragment {
 	if (!node) return { sql: '1', params: [] };
@@ -300,7 +326,7 @@ export function compileSqliteFilter(node: LogQueryNode | null): SqlFragment {
 		}
 		case 'text':
 			if (!node.value) return { sql: '1', params: [] };
-			return leaf({ sql: 'instr(lower(u.body), lower(?)) > 0', params: [node.value] });
+			return leaf(compileText(node.value, node.phrase));
 		case 'field':
 			return leaf(compileField(node.field, node.op, node.value));
 		case 'exists':

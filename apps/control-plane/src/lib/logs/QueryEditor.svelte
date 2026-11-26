@@ -3,12 +3,16 @@
 	 * The log-query editor (docs/LOGS.md §6, §7.1): a transparent textarea over a highlighted
 	 * mirror, so the caret and selection are native while fields, values, strings, regexes and
 	 * pipe stages are coloured. Parse errors from `parseLogQuery` get a wavy underline at their
-	 * offsets. Autocomplete comes from `suggestLogQuery` (see `./suggest.ts`) with values from
-	 * `/fields`. Enter or ⌘↵ runs; Tab or Enter accepts a suggestion.
+	 * offsets. Autocomplete comes from `suggestLogQuery` (`@yoal/contracts`, shared with the CLI)
+	 * with values from `/fields`. Enter or ⌘↵ runs; Tab or Enter accepts a suggestion.
 	 */
-	import type { LogQueryError } from '@yoal/contracts';
+	import {
+		suggestLogQuery,
+		type LogQueryError,
+		type LogQuerySuggestCatalog,
+		type LogQuerySuggestion
+	} from '@yoal/contracts';
 	import { lexLogQuery, type QueryTokenKind } from './query-text.js';
-	import { suggestLogQuery, type LogQueryCatalog, type LogQuerySuggestion } from './suggest.js';
 
 	let {
 		value = $bindable(''),
@@ -21,7 +25,7 @@
 	}: {
 		value?: string;
 		error?: LogQueryError | null;
-		catalog?: LogQueryCatalog;
+		catalog?: LogQuerySuggestCatalog;
 		placeholder?: string;
 		onrun: () => void;
 		id?: string;
@@ -108,15 +112,15 @@
 	}
 
 	function accept(item: LogQuerySuggestion) {
-		const next = value.slice(0, suggestion.from) + item.insertText + value.slice(suggestion.to);
-		const caret = suggestion.from + item.insertText.length;
+		const next = value.slice(0, suggestion.from) + item.insert + value.slice(suggestion.to);
+		const caret = suggestion.from + item.insert.length;
 		value = next;
 		menuOpen = false;
 		queueMicrotask(() => {
 			textarea?.focus();
 			textarea?.setSelectionRange(caret, caret);
 			// A field name ending in `:` goes straight on to its values.
-			if (item.insertText.endsWith(':')) refreshSuggestions();
+			if (item.insert.endsWith(':')) refreshSuggestions();
 		});
 	}
 

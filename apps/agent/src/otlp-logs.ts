@@ -21,10 +21,10 @@ import { logsHmac, type NodeLogBatcher } from './log-records.ts';
  * workload on the same node cannot write as this one without reading its environment. The id must
  * also be a workload in this node's desired state.
  *
- * A bare `POST /v1/logs` (an app that configured `http://127.0.0.1:8085` itself) falls back to the
- * `yoal.workload.id`, then `service.instance.id`, resource attribute, and only when it names a
- * workload on this node. That is the tail sink's level of trust; the node never trusts tenancy
- * beyond it, and the control plane still resolves org and project from the workload.
+ * Only the keyed path accepts records. A bare `POST /v1/logs` (an app that configured
+ * `http://127.0.0.1:8085` itself) is refused with 401: a resource attribute can be set by any
+ * workload on the node, so it never names who is calling. The control plane still resolves org and
+ * project from the workload.
  *
  * Mapping (OTel logs data model → `NodeLogRecord`): time (event, else observed, else now) in ms;
  * `severityNumber` (or the band of `severityText`, else info); the body as text, structured bodies
@@ -412,19 +412,23 @@ export class OtlpLogsReceiver {
 		if (!keyed && !bare) return null;
 		if (this.options.enabled && !this.options.enabled()) return json({ error: 'not_found' }, 404);
 		if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405, { allow: 'POST' });
-
-		let workloadId: string | null = null;
-		const signal = keyed ? keyed[3]! : bare![1]!;
-		if (keyed) {
-			workloadId = keyed[1]!;
-			if (!this.options.workloadOnNode(workloadId) || !verifyOtlpIngestKey(this.options.secret, workloadId, keyed[2]!)) {
-				this.counters.unauthorized += 1;
-				return json({ error: 'unauthorized', message: 'Unknown workload or ingest key for this node.' }, 401);
-			}
+		if (!keyed) {
+			// The unkeyed path names no caller, so it accepts nothing (traces and metrics included).
+			if (bare![1] !== 'logs') return json({ error: 'not_found' }, 404);
+			this.counters.unauthorized += 1;
+			return json(
+				{ error: 'unauthorized', message: 'Send OTLP logs to the OTEL_EXPORTER_OTLP_ENDPOINT Yoal sets for this workload.' },
+				401,
+			);
 		}
 
-		if (signal !== 'logs') {
-			if (!keyed) return json({ error: 'not_found' }, 404);
+		const workloadId = keyed[1]!;
+		if (!this.options.workloadOnNode(workloadId) || !verifyOtlpIngestKey(this.options.secret, workloadId, keyed[2]!)) {
+			this.counters.unauthorized += 1;
+			return json({ error: 'unauthorized', message: 'Unknown workload or ingest key for this node.' }, 401);
+		}
+
+		if (keyed[3] !== 'logs') {
 			// The injected OTEL_EXPORTER_OTLP_ENDPOINT also points an SDK's traces and metrics here.
 			// Before this receiver they failed against a collector that was never there; answering
 			// 200 keeps that outcome without an export error in the app's own logs every interval.
@@ -459,45 +463,26 @@ export class OtlpLogsReceiver {
 
 		this.counters.requests += 1;
 		const parsed = mapOtlpLogsRequest(payload, this.options.now ? { now: this.options.now } : {});
-		let rejected = parsed.rejected;
-		let unidentified = 0;
+		const rejected = parsed.rejected;
 		for (const group of parsed.groups) {
-			const id = workloadId ?? this.identify(group.resource);
-			if (!id) {
-				unidentified += group.records.length;
-				continue;
-			}
 			// The node stamps the workload it authenticated; a resource attribute never names another.
-			const resource = { ...group.resource, 'yoal.workload.id': id };
+			const resource = { ...group.resource, 'yoal.workload.id': workloadId };
 			const records = group.records.map((record) => ({ ...record, resource }));
-			this.options.batcher.add({ kind: 'workload', workloadId: id }, records);
+			this.options.batcher.add({ kind: 'workload', workloadId }, records);
 			this.counters.records += records.length;
 		}
-		rejected += unidentified;
 		this.counters.rejected += rejected;
 		if (rejected === 0) return json({}, 200);
 		return json(
 			{
 				partialSuccess: {
 					rejectedLogRecords: String(rejected),
-					errorMessage:
-						unidentified > 0
-							? 'Records whose resource names no workload on this node were rejected; use the OTEL_EXPORTER_OTLP_ENDPOINT Yoal sets.'
-							: 'Malformed records, or more than the per-request limit, were rejected.',
+					errorMessage: 'Malformed records, or more than the per-request limit, were rejected.',
 				},
 			},
 			200,
 		);
 	};
-
-	/** Bare `/v1/logs`: a resource attribute, only when it names a workload on this node. */
-	private identify(resource: Record<string, string>): string | null {
-		for (const key of ['yoal.workload.id', 'service.instance.id']) {
-			const value = resource[key];
-			if (value && WORKLOAD_ID.test(value) && this.options.workloadOnNode(value)) return value;
-		}
-		return null;
-	}
 }
 
 type BodyResult = { ok: true; text: string } | { ok: false; response: Response };

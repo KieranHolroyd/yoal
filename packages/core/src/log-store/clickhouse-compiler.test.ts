@@ -168,8 +168,15 @@ describe('filters', () => {
 			sql: 'hasTokenCaseInsensitive(body, {p0:String})',
 			params: { p0: 'timeout' },
 		});
-		// Without an index (or when configured), it is a substring.
+		// Without an index it is still a token match (the semantics never depend on the index).
 		expect(frag({ type: 'text', value: 'Timeout', phrase: false }, NONE)).toEqual({
+			sql: 'hasTokenCaseInsensitive(body, {p0:String})',
+			params: { p0: 'timeout' },
+		});
+		// Letters beyond ASCII are token characters, and only ASCII is case-folded.
+		expect(frag({ type: 'text', value: 'Échec', phrase: false })).toEqual({ sql: 'hasToken(body, {p0:String})', params: { p0: 'Échec' } });
+		// Only an explicit configuration turns bare words into substrings.
+		expect(frag({ type: 'text', value: 'Timeout', phrase: false }, { textIndex: null, bareWordMatch: 'substring' })).toEqual({
 			sql: 'positionCaseInsensitive(body, {p0:String}) > 0',
 			params: { p0: 'Timeout' },
 		});
@@ -188,6 +195,7 @@ describe('filters', () => {
 	test('with tokenbf, whole words inside a phrase pre-filter the substring', () => {
 		expect(innerTokens('upstream connect error or reset')).toEqual(['connect', 'error', 'or']);
 		expect(innerTokens('GET /api/v1 500')).toEqual(['api', 'v1']);
+		expect(innerTokens('a naïve_Thing here')).toEqual(['naïve', 'thing']);
 		expect(frag({ type: 'text', value: 'upstream connect error', phrase: true }, TOKENBF)).toEqual({
 			sql: 'hasTokenCaseInsensitive(body, {p1:String}) AND positionCaseInsensitive(body, {p0:String}) > 0',
 			params: { p0: 'upstream connect error', p1: 'connect' },

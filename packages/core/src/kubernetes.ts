@@ -1424,19 +1424,22 @@ export class KubernetesService {
 		if (!machine) return 0;
 		if (machine.nodeId !== nodeId) throw new CoreError('forbidden', 'This machine is placed on another node.', 403);
 		if (rows.length === 0) return 0;
-		this.ctx.db
-			.insert(k8sLogEvents)
-			.values(
-				rows.map((line) => ({
-					orgId: machine.orgId,
-					clusterId: machine.clusterId,
-					machineId: machine.id,
-					nodeId,
-					source: 'runtime' as const,
-					...line,
-				})),
-			)
-			.run();
+		// Inserts publish to the Logs Explorer live tail (docs/LOGS.md §4.4).
+		this.ctx.logs.tracked('kle', () =>
+			this.ctx.db
+				.insert(k8sLogEvents)
+				.values(
+					rows.map((line) => ({
+						orgId: machine.orgId,
+						clusterId: machine.clusterId,
+						machineId: machine.id,
+						nodeId,
+						source: 'runtime' as const,
+						...line,
+					})),
+				)
+				.run(),
+		);
 		return rows.length;
 	}
 
@@ -2088,24 +2091,27 @@ export class KubernetesService {
 		const lines = kubernetesLogIngestSchema.parse(raw);
 		if (lines.length === 0) return 0;
 		const now = this.ctx.now();
-		this.ctx.db
-			.insert(k8sPodLogs)
-			.values(
-				lines.map((line) => {
-					const ts = typeof line.ts === 'number' ? line.ts : typeof line.ts === 'string' ? Date.parse(line.ts) : now;
-					return {
-						orgId: cluster.orgId,
-						clusterId: cluster.id,
-						namespace: line.namespace,
-						pod: line.pod,
-						container: line.container,
-						stream: line.stream,
-						message: line.message,
-						ts: Number.isFinite(ts) ? ts : now,
-					};
-				}),
-			)
-			.run();
+		// Pod lines publish to the Logs Explorer live tail as they land (docs/LOGS.md §4.4).
+		this.ctx.logs.tracked('kpl', () =>
+			this.ctx.db
+				.insert(k8sPodLogs)
+				.values(
+					lines.map((line) => {
+						const ts = typeof line.ts === 'number' ? line.ts : typeof line.ts === 'string' ? Date.parse(line.ts) : now;
+						return {
+							orgId: cluster.orgId,
+							clusterId: cluster.id,
+							namespace: line.namespace,
+							pod: line.pod,
+							container: line.container,
+							stream: line.stream,
+							message: line.message,
+							ts: Number.isFinite(ts) ? ts : now,
+						};
+					}),
+				)
+				.run(),
+		);
 		return lines.length;
 	}
 
@@ -2572,10 +2578,12 @@ export class KubernetesService {
 	}
 
 	private systemLog(clusterId: string, orgId: string, nodeId: string, message: string): void {
-		this.ctx.db
-			.insert(k8sLogEvents)
-			.values({ orgId, clusterId, nodeId, source: 'system', stream: 'system', level: 'info', message, ts: this.ctx.now() })
-			.run();
+		this.ctx.logs.tracked('kle', () =>
+			this.ctx.db
+				.insert(k8sLogEvents)
+				.values({ orgId, clusterId, nodeId, source: 'system', stream: 'system', level: 'info', message, ts: this.ctx.now() })
+				.run(),
+		);
 	}
 
 	private resource(row: KubernetesClusterRow): ResourceRef {

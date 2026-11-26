@@ -28,10 +28,13 @@ import {
 import type * as z from 'zod';
 import type { CoreContext } from './context.ts';
 import { CoreError, ForbiddenError, ValidationError } from './errors.ts';
+import { PLATFORM_LOG_ORG_ID } from './log-record-ingest.ts';
 import { LogSavedQueryService } from './log-saved-queries.ts';
 import { appendListener } from './logs.ts';
 import { LogStoreUnsupported, type LogReadBoundary, type LogStore, type LogStoreRead } from './log-store/types.ts';
+import { decodeSearchCursor } from './log-store/clickhouse-compiler.ts';
 import {
+	decodeLogCursor,
 	decodeTailCursor,
 	encodeTailCursor,
 	InvalidLogCursorError,
@@ -83,7 +86,10 @@ interface ClickHouseLogHooks {
 export interface LogTailOpenInput {
 	q?: string;
 	scopes?: LogScopeRef[];
-	/** `Last-Event-ID` from a reconnecting client: an opaque tail cursor. */
+	/**
+	 * `Last-Event-ID` from a reconnecting client: an opaque tail cursor. A search page's `newer`
+	 * cursor is accepted too, so a tail opened after a page resumes right after it (by time).
+	 */
 	lastEventId?: string | null;
 	/** Newest N matching lines (of the last 24 h) to send first on a fresh connection; 0–1,000. */
 	backfill?: number;
@@ -191,13 +197,20 @@ export class LogExplorerService {
 		return out;
 	}
 
-	/** One `platform` scope per node, for platform admins only (LP5). */
+	/**
+	 * A `platform` scope (Yoal's own units, LP5) and an `edge` scope (access lines for hosts no
+	 * project serves, LP6) per node, for platform admins only. Both hold sentinel-org rows
+	 * (`PLATFORM_LOG_ORG_ID`), which only a cross-org boundary reads.
+	 */
 	platformScopes(principal: Principal): LogScopeEntry[] {
 		if (!canViewPlatform(principal)) return [];
 		return this.ctx.sqlite
 			.query<{ id: string; name: string }, []>('SELECT id, name FROM nodes ORDER BY name')
 			.all()
-			.map((node) => ({ kind: 'platform' as const, id: node.id, name: node.name, parent: null, deleted: false }));
+			.flatMap((node) => [
+				{ kind: 'platform' as const, id: node.id, name: node.name, parent: null, deleted: false },
+				{ kind: 'edge' as const, id: node.id, name: node.name, parent: null, deleted: false },
+			]);
 	}
 
 	/**
@@ -211,6 +224,9 @@ export class LogExplorerService {
 		permissions: readonly Permission[] = ['logs:read'],
 	): ResolvedBoundary {
 		for (const permission of permissions) this.requireSomewhere(principal, permission);
+		// The sentinel org owns no tenant data; a principal claiming it reads nothing (defence in depth).
+		if (principal.orgId === PLATFORM_LOG_ORG_ID)
+			return { boundary: { orgId: principal.orgId, scopes: [], crossOrg: false }, names: new Map(), platform: [] };
 		const readable = this.readableScopes(principal, permissions);
 		const names = new Map<string, string>();
 		for (const entry of readable) names.set(formatLogScope(entry), entry.name);
@@ -370,6 +386,7 @@ export class LogExplorerService {
 			subscription.setFloor(upTo);
 			const ast: LogQueryAst = { filter, pipes: [] };
 			const resume = decodeTailCursor(input.lastEventId);
+			const afterPage = resume ? null : searchCursorTs(input.lastEventId);
 			const backfill = Math.max(0, Math.min(Math.floor(input.backfill ?? 0), 1_000));
 			let records: LogRecord[] = [];
 			let dropped = 0;
@@ -378,6 +395,18 @@ export class LogExplorerService {
 					const caughtUp = this.sqliteStore.tailCatchUp(
 						{ boundary: resolved.boundary, ast, from: 0, to: Number.MAX_SAFE_INTEGER },
 						resume,
+						upTo,
+						LOG_TAIL_CATCH_UP_LIMIT,
+						{ count: true },
+					);
+					records = caughtUp.records;
+					dropped = Math.max(0, caughtUp.total - caughtUp.records.length);
+				} else if (afterPage !== null) {
+					// From a search page: everything at or after its newest line (the client drops ids
+					// it already has), bounded by the floor so nothing is sent twice by the bus.
+					const caughtUp = this.sqliteStore.tailCatchUp(
+						{ boundary: resolved.boundary, ast, from: afterPage, to: Number.MAX_SAFE_INTEGER },
+						{},
 						upTo,
 						LOG_TAIL_CATCH_UP_LIMIT,
 						{ count: true },
@@ -617,4 +646,17 @@ function needsClickhouse(error: LogStoreUnsupported): CoreError {
 
 function invalidCursor(error: InvalidLogCursorError): CoreError {
 	return new CoreError('invalid_cursor', error.message, 400);
+}
+
+/** The time of a search page cursor (SQLite `p.` or ClickHouse), or null for anything else. */
+function searchCursorTs(cursor: string | null | undefined): number | null {
+	if (!cursor) return null;
+	for (const decode of [(value: string) => decodeLogCursor(value).ts, (value: string) => decodeSearchCursor(value).ts]) {
+		try {
+			return decode(cursor);
+		} catch {
+			// Not this format.
+		}
+	}
+	return null;
 }

@@ -314,3 +314,49 @@ describe.skipIf(!hasClickHouse)('ClickHouseLogStore against ClickHouse', () => {
 		expect(context.after.map((record) => record.id)).toEqual(['le:4']);
 	});
 });
+
+describe.skipIf(!hasClickHouse)('sentinel-org records in ClickHouse', () => {
+	let telemetry: TelemetryStore;
+	const NOW = Date.now();
+	const scopes = [
+		{ kind: 'platform' as const, id: 'node_1' },
+		{ kind: 'edge' as const, id: 'node_1' },
+	];
+	const read = (b: LogReadBoundary): LogStoreRead => ({ boundary: b, ast: { filter: null, pipes: [] }, from: NOW - 60_000, to: NOW + 1_000 });
+
+	beforeAll(async () => {
+		telemetry = testTelemetryStore();
+		expect(await telemetry.logsReady()).toBe(true);
+		const { sqlite } = createDb({ path: ':memory:' });
+		// What `appendRecords` writes for a platform unit and for a host no project serves.
+		for (const [kind, stream, body] of [
+			['platform', 'unit:yoal-agent', 'agent restarted'],
+			['edge', 'site:stray.example', 'GET / 404 1ms'],
+		] as const)
+			sqlite.run(
+				`INSERT INTO log_records (org_id, scope_kind, scope_id, stream, source, severity_number, body, ts, observed_ts)
+				 VALUES ('platform', ?, 'node_1', ?, 'platform', 9, ?, ?, ?)`,
+				[kind, stream, body, NOW - 1_000, NOW - 1_000],
+			);
+		const indexer = new LogIndexer({ sqlite, config: { features: {} } as never, now: () => Date.now() }, telemetry, {});
+		expect((await indexer.tick()).indexed).toBe(2);
+	});
+
+	afterAll(async () => {
+		await disposeTelemetryStore(telemetry);
+	});
+
+	test('a cross-org (platform admin) boundary reads them; a tenant boundary never does', async () => {
+		const store = new ClickHouseLogStore(telemetry);
+		const admin = await store.search(read({ orgId: 'org_1', scopes, crossOrg: true }), { limit: 10, order: 'asc' });
+		expect(admin.records.map((record) => [record.scope.kind, record.orgId])).toEqual([
+			['platform', 'platform'],
+			['edge', 'platform'],
+		]);
+		expect(await store.get({ orgId: 'org_1', scopes, crossOrg: true }, admin.records[1]!.id)).not.toBeNull();
+		const tenant = { orgId: 'org_1', scopes, crossOrg: false };
+		expect((await store.search(read(tenant), { limit: 10, order: 'asc' })).records).toEqual([]);
+		expect(await store.get(tenant, admin.records[0]!.id)).toBeNull();
+		expect((await store.histogram(read(tenant), { buckets: 10 })).total).toBe(0);
+	});
+});

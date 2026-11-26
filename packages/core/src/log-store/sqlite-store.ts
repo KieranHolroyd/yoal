@@ -576,6 +576,7 @@ const NAME_LOOKUPS: Partial<Record<LogScopeKind, string>> = {
 	k8s: 'SELECT id, name FROM k8s_clusters WHERE id IN',
 	pipeline: 'SELECT id, name FROM pipeline_repositories WHERE id IN',
 	platform: 'SELECT id, name FROM nodes WHERE id IN',
+	edge: 'SELECT id, name FROM nodes WHERE id IN',
 };
 
 /** Display names for scopes (`scopeName`), one query per kind. */

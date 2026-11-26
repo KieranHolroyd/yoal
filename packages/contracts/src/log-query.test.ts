@@ -438,9 +438,16 @@ describe('compileLogPredicate', () => {
 		expect(compileLogPredicate(null)(record())).toBe(true);
 	});
 
-	test('text is case-insensitive substring', () => {
+	test('a bare word is a whole-token match; phrases and punctuated words are substrings', () => {
 		expect(matches('timeout')).toBe(true);
-		expect(matches('TIME')).toBe(true);
+		expect(matches('TIMEOUT')).toBe(true);
+		expect(matches('TIME')).toBe(false);
+		expect(matches('"TIME"')).toBe(true);
+		expect(matches('v1')).toBe(true);
+		expect(matches('orders')).toBe(true);
+		expect(matches('/v1/ord')).toBe(true);
+		expect(matches('30000')).toBe(false);
+		expect(matches('30000ms')).toBe(true);
 		expect(matches('"upstream timeout"')).toBe(true);
 		expect(matches('"timeout upstream"')).toBe(false);
 		expect(matches('nothing')).toBe(false);

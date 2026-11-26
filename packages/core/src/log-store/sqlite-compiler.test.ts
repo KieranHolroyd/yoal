@@ -37,9 +37,14 @@ describe('sqlite compiler: text and logic', () => {
 		expect(ids(null)).toEqual(ALL);
 	});
 
-	test('bare words and phrases are case-insensitive substrings of the body', () => {
+	test('a bare word is a whole-token match; phrases and punctuated words are substrings', () => {
 		expect(ids(text('TIMEOUT'))).toEqual(['le:2', 'sle:1', 'le:6']);
+		expect(ids(text('TIME'))).toEqual([]);
+		expect(ids(text('TIME', true))).toEqual(['le:2', 'sle:1', 'le:6']);
 		expect(ids(text('upstream timeout', true))).toEqual(['le:2']);
+		expect(ids(text('done'))).toEqual(['le:4']);
+		expect(ids(text('100%_d'))).toEqual(['le:4']);
+		expect(ids(text('payment'))).toEqual(['le:3']);
 	});
 
 	test('and, or and not combine', () => {

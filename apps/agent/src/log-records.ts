@@ -50,12 +50,21 @@ export class LogRecordsPostError extends Error {
 	}
 }
 
-/** One `POST /api/agent/log-records`. Throws `LogRecordsPostError` on any non-2xx. */
+/** What the control plane answered: rows stored, and `disabled` while its kill switch is off. */
+export interface NodeLogPostResult {
+	stored: number;
+	disabled: boolean;
+}
+
+/**
+ * One `POST /api/agent/log-records`, the only poster for that route (the platform unit drain and
+ * the edge/OTLP batcher both use it). Throws `LogRecordsPostError` on any non-2xx.
+ */
 export async function postNodeLogBatch(
 	endpoint: LogRecordsEndpoint,
 	batch: NodeLogBatch,
 	fetchImpl: typeof fetch = fetch,
-): Promise<void> {
+): Promise<NodeLogPostResult> {
 	let response: Response;
 	try {
 		response = await fetchImpl(`${endpoint.controlUrl}/api/agent/log-records`, {
@@ -79,8 +88,8 @@ export async function postNodeLogBatch(
 			response.status === 404 && !json,
 		);
 	}
-	// Drain the body so the connection can be reused.
-	await response.arrayBuffer().catch(() => undefined);
+	const body = (await response.json().catch(() => ({}))) as { stored?: unknown; disabled?: unknown } | null;
+	return { stored: typeof body?.stored === 'number' ? body.stored : 0, disabled: body?.disabled === true };
 }
 
 interface TargetBuffer {
@@ -90,7 +99,7 @@ interface TargetBuffer {
 }
 
 export interface NodeLogBatcherOptions {
-	post: (batch: NodeLogBatch) => Promise<void>;
+	post: (batch: NodeLogBatch) => Promise<unknown>;
 	maxPerTarget?: number;
 	maxTargets?: number;
 	now?: () => number;
@@ -123,7 +132,7 @@ export function nodeLogTargetKey(target: NodeLogTarget): string {
  * the access-log tail and inside the OTLP HTTP handler.
  */
 export class NodeLogBatcher {
-	private readonly post: (batch: NodeLogBatch) => Promise<void>;
+	private readonly post: (batch: NodeLogBatch) => Promise<unknown>;
 	private readonly maxPerTarget: number;
 	private readonly maxTargets: number;
 	private readonly now: () => number;

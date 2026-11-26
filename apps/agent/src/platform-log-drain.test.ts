@@ -165,7 +165,7 @@ describe('PlatformLogDrain', () => {
 		plane.status = 502;
 		const path = await statePath();
 		const client = drain(helper, plane, path, ['yoal-agent']);
-		await expect(client.drain()).rejects.toThrow('platform log drain -> 502');
+		await expect(client.drain()).rejects.toThrow('log-records POST -> 502');
 		expect(client.cursorFor('yoal-agent')).toBeNull();
 		await expect(fs.readFile(path, 'utf8')).rejects.toThrow();
 

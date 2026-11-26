@@ -15,6 +15,7 @@ import {
 	createCore,
 	ClickHouseLogStore,
 	LogIndexer,
+	attachLogPatternMiner,
 	featureEnabled,
 	type Notifier
 } from '@yoal/core';
@@ -159,6 +160,15 @@ if (telemetry.installed) {
 		indexLagMs: () => core.ctx.logIndexer?.lagMs() ?? null
 	});
 	core.ctx.logIndexer = new LogIndexer(core.ctx, telemetry, { enabled: logIndexEnabled });
+	// Index-time patterns (§8.1): a Drain miner whose templates survive restarts through a
+	// snapshot in the data dir, saved every 10 min and on a graceful shutdown.
+	if (!building) {
+		const patterns = attachLogPatternMiner(core.ctx.logIndexer, dataDir, {
+			onError: (error) => console.error('[log-patterns] snapshot failed:', error)
+		});
+		const signals = process as unknown as { once(event: string, listener: () => void): void };
+		signals.once('sveltekit:shutdown', () => patterns.save());
+	}
 }
 // Never connect while SvelteKit analyses the build.
 if (!building) {

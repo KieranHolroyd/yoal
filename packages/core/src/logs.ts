@@ -118,9 +118,10 @@ export class LogService {
 	/**
 	 * Run a write and publish what it inserted into `tag`'s table. With no listener it is just the
 	 * write. The re-read is a primary-key range read of the rows just written, so the published
-	 * shape is exactly what the store's adapters return.
+	 * shape is exactly what the store's adapters return. Other services' append paths (pipeline
+	 * steps, Kubernetes) wrap their inserts in this too.
 	 */
-	private tracked<T>(tag: SqliteLogTag, write: () => T): T {
+	tracked<T>(tag: SqliteLogTag, write: () => T): T {
 		if (!this.appendWanted()) return write();
 		const before = this.maxSeq(tag);
 		const result = write();
