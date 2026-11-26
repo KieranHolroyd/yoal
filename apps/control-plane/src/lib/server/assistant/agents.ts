@@ -60,6 +60,13 @@ so placement \`auto\` is usually right; a public storage instance works from any
 apps receive connection values at activation, so a running app restarts when you attach or
 detach. Report sizes and budgets in human units, and flag when usage is close to a limit.
 
+Logs. query_logs reads every log the user may read (apps, builds, jobs, databases, storage,
+brokers, Kubernetes, pipelines) with the log query language below; get_logs and the per-service log
+tools are older shortcuts for one resource. For "why did api 500 at 14:02?": query_logs with a
+\`| stats count() by bin(1m)\` over the hour to find the spike, explain_log_spike on it,
+get_log_patterns or compare_logs (\`deploy:<id>\` for "what did this deploy change"), then
+get_log_context on a sample record. Cite record ids and link each tool's explorerUrl as evidence.
+
 Platform. Fleet health, nodes, workload capacity, traffic metrics, logs, the audit log and
 mass-operation status. The edge node serves ingress; workers run workloads over WireGuard. Nodes
 report once a minute; absence of a heartbeat is not proof a site is down (Caddy keeps serving
@@ -86,6 +93,37 @@ Observability dashboards (charts over the telemetry store):
    update_dashboard_panel, remove_dashboard_panels or update_dashboard. Refer to panels by title.
 Use builder queries; SQL panels only work for platform admins. Reply with the dashboard link and
 one line per panel, and point out panels the preview shows as empty.
+`.trim();
+
+/**
+ * The log query grammar (docs/LOGS.md §6), appended to the system prompt whenever the user may
+ * call query_logs (an owner-edited prompt included), so the assistant writes queries that parse.
+ * §6.4: a query written for the user is shown as editable text with a link, never run for them.
+ */
+export const LOG_QUERY_GUIDE = `
+Log queries (query_logs, get_log_patterns, compare_logs, explain_log_spike, and the Logs Explorer
+at /logs) use one grammar. Terms are ANDed.
+- Text: \`timeout\` or \`"connection reset"\` searches the message (case-insensitive substring).
+- \`level:error\` means error or worse; \`level:=warn\` exactly warn. Levels: trace debug info warn
+  error fatal.
+- Built-in fields: service (project slug or service name), deployment, build, job, node, replica,
+  source (runtime build job system access otlp platform), stream, channel, request, trace, pattern.
+- Attributes: \`@http.status:>=500\` (> >= < <= compare numbers), \`@path:/api/*\` (wildcard),
+  \`@user.id:*\` (present), \`@msg:/time(out|d out)/\` (regex). Quote values with spaces or colons.
+- \`-term\` or \`NOT term\` excludes; \`a OR b\`; parentheses group. AND/OR/NOT are upper case.
+- Pipe stages, in this order: \`| fields ts, level, body\`, \`| dedup body\`, then \`| stats ...\` or
+  \`| patterns\`, then \`| sort <column> desc\`, \`| limit 20\`. Stats: count(), sum avg min max
+  p50 p90 p95 p99 of a numeric field, grouped with \`by bin(5m), level\`. Example:
+  \`level:error | stats count() by bin(1m), service\`.
+- Attributes, regex, patterns and most stats need the ClickHouse index. A lite install answers
+  built-in filters, \`| stats count() by bin(…)\`, \`| sort\` and \`| limit\`, and says
+  needs_clickhouse for the rest, so fall back to plain filters there.
+- Scopes are not part of the query: pass \`scopes\` such as \`api\`, \`db:main\`, \`broker:events\`.
+When the user asks you to write a log query (for example "errors from api in the last hour after the
+14:00 deploy"), do not run it for them: quote their request, give the query in a fenced code block,
+and link it so they can edit and run it themselves, e.g.
+[Open in the Logs Explorer](/logs?q=service%3Aapi%20level%3Aerror&range=1h) (URL-encode the query;
+use from/to ISO times for an absolute window). Run query_logs yourself only to answer a question.
 `.trim();
 
 /**

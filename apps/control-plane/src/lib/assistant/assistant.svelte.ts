@@ -292,6 +292,22 @@ class AssistantChatState {
 		void this.send(text, this.prefs.includePage ? collectPageContext() : { path: '', targets: [] });
 	}
 
+	/**
+	 * Open the panel on a new conversation with `prompt` in the composer, unsent, so the user can
+	 * edit it first (the Logs Explorer's Ask action, docs/LOGS.md §6.4). Like `ask`, a reply still
+	 * streaming is stopped first: replies stream into the active conversation.
+	 */
+	prefill(prompt: string): void {
+		const text = prompt.trim();
+		if (!text) return;
+		if (this.sending) this.stop();
+		this.activeId = null;
+		this.editingTurn = null;
+		this.view = 'chat';
+		this.setDraft(text);
+		this.show();
+	}
+
 	private ensureConversation(): Conversation {
 		if (this.active) return this.active;
 		const conversation: Conversation = {

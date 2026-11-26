@@ -6,7 +6,7 @@ import {
 	type Principal
 } from '@yoal/contracts';
 import { core } from '../core';
-import { PANEL_FORMAT } from './agents';
+import { LOG_QUERY_GUIDE, PANEL_FORMAT } from './agents';
 import { assistantConfig, type AssistantRuntimeConfig } from './config';
 import { mintConfirmation, verifyConfirmation } from './confirm';
 import { streamChat, type ProviderMessage } from './provider';
@@ -103,7 +103,14 @@ async function runAgent(
 	const messages: ProviderMessage[] = [
 		{
 			role: 'system',
-			content: [definition.system, toolLoading, PANEL_FORMAT].filter(Boolean).join('\n\n')
+			content: [
+				definition.system,
+				toolLoading,
+				tools.some((tool) => tool.name === 'query_logs') ? LOG_QUERY_GUIDE : '',
+				PANEL_FORMAT
+			]
+				.filter(Boolean)
+				.join('\n\n')
 		},
 		...historyMessages(request),
 		{ role: 'user', content: `${pageSummary(request)}\n\nUser request:\n${request.message}` }
