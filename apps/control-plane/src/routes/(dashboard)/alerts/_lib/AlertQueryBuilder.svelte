@@ -88,7 +88,7 @@
 				aria-label="Dataset"
 				onchange={(event) => setDataset(event.currentTarget.value as ObservabilityDataset)}
 			>
-				{#each schema?.datasets ?? [] as item (item.name)}
+				{#each (schema?.datasets ?? []).filter((item) => item.name !== 'logs') as item (item.name)}
 					<NativeSelect.Option value={item.name}>{item.label}</NativeSelect.Option>
 				{:else}
 					<NativeSelect.Option value={builder.dataset}>{builder.dataset}</NativeSelect.Option>

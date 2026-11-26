@@ -15,6 +15,7 @@ import ChartColumnIcon from '@lucide/svelte/icons/chart-column';
 import ChartBarIcon from '@lucide/svelte/icons/chart-bar';
 import ChartLineIcon from '@lucide/svelte/icons/chart-line';
 import ChartPieIcon from '@lucide/svelte/icons/chart-pie';
+import ScrollTextIcon from '@lucide/svelte/icons/scroll-text';
 import GaugeIcon from '@lucide/svelte/icons/gauge';
 import HashIcon from '@lucide/svelte/icons/hash';
 import TableIcon from '@lucide/svelte/icons/table';
@@ -82,7 +83,13 @@ export const VIZ: VizMeta[] = [
 	},
 	{ type: 'table', label: 'Table', description: 'Rows and columns', icon: TableIcon },
 	{ type: 'pie', label: 'Pie chart', description: 'Share of a whole', icon: ChartPieIcon },
-	{ type: 'text', label: 'Text', description: 'Markdown notes', icon: TypeIcon }
+	{ type: 'text', label: 'Text', description: 'Markdown notes', icon: TypeIcon },
+	{
+		type: 'logs',
+		label: 'Logs',
+		description: 'The newest lines of a log query (Logs dataset)',
+		icon: ScrollTextIcon
+	}
 ];
 
 export function vizMeta(type: VizType): VizMeta {

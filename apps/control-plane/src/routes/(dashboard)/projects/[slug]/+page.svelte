@@ -544,6 +544,7 @@
 				ranges={data.trafficRanges}
 				links={data.trafficLinks}
 				variant="project"
+				logScopes={[{ kind: 'project', id: data.project.id }]}
 			/>
 		{:else if tab === 'environments'}
 			<EnvironmentsPanel

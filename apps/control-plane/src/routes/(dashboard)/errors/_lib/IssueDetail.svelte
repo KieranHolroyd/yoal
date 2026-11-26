@@ -10,6 +10,7 @@
 	import FingerprintIcon from '@lucide/svelte/icons/fingerprint';
 	import LinkIcon from '@lucide/svelte/icons/link';
 	import RotateCcwIcon from '@lucide/svelte/icons/rotate-ccw';
+	import ScrollTextIcon from '@lucide/svelte/icons/scroll-text';
 	import TrashIcon from '@lucide/svelte/icons/trash';
 	import { toast } from 'svelte-sonner';
 	import { goto } from '$app/navigation';
@@ -33,6 +34,7 @@
 	import {
 		dayLabels,
 		hourLabels,
+		eventLogsHref,
 		isNew,
 		isRegressed,
 		issuesHref,
@@ -73,6 +75,8 @@
 	const event = $derived(detail.events[Math.min(eventIndex, detail.events.length - 1)] ?? null);
 	const tags = $derived(event ? Object.entries(event.tags) : []);
 	const contexts = $derived(event ? Object.entries(event.contexts) : []);
+	/** The app's log lines around this event (docs/LOGS.md §9.3). */
+	const logsHref = $derived(event ? eventLogsHref(issue, event) : null);
 	const issueLink = $derived(`${page.url.origin}${page.url.pathname}?tab=issues&issue=${issue.id}`);
 
 	const stats = $derived([
@@ -360,6 +364,16 @@
 							</p>
 						{/if}
 					</div>
+					{#if logsHref}
+						<Button
+							size="sm"
+							variant="outline"
+							href={logsHref}
+							class="ml-auto"
+							title="The app's log lines around this event (its request, when it has an id), in the Logs Explorer"
+							><ScrollTextIcon />Logs</Button
+						>
+					{/if}
 					{#if detail.events.length > 1}
 						<div class="flex items-center gap-1">
 							<Button

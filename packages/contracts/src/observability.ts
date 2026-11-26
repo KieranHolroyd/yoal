@@ -1,4 +1,5 @@
 import * as z from 'zod';
+import { logScopeRefSchema } from './log-record.ts';
 
 /**
  * Observability dashboards (D101): user-built dashboards over the ClickHouse telemetry store.
@@ -13,8 +14,12 @@ import * as z from 'zod';
 
 // --- builder catalog --------------------------------------------------------------------------
 
-/** Builder datasets. Each maps to a `_1m`/`_1h` table pair; the server picks the resolution. */
-export const observabilityDatasets = ['traffic', 'traffic_paths', 'traffic_referrers', 'databases', 'storage', 'brokers'] as const;
+/**
+ * Builder datasets. Each maps to a `_1m`/`_1h` table pair; the server picks the resolution.
+ * `logs` is the exception (docs/LOGS.md §9.2): it reads log records through the Logs Explorer,
+ * with the builder's `logs` filter text and scopes and the caller's log boundary ANDed in.
+ */
+export const observabilityDatasets = ['traffic', 'traffic_paths', 'traffic_referrers', 'databases', 'storage', 'brokers', 'logs'] as const;
 export type ObservabilityDataset = (typeof observabilityDatasets)[number];
 
 /** `counter`: per-bucket deltas that sum. `gauge`: a sampled level. `derived`: a fixed formula. */
@@ -53,6 +58,13 @@ export const filterOperators = ['eq', 'neq', 'in', 'nin', 'contains', 'gt', 'gte
 export type FilterOperator = (typeof filterOperators)[number];
 
 const identifier = z.string().regex(/^[a-z][a-z0-9_]{0,63}$/, 'Use lower-case letters, digits and underscores');
+/**
+ * A group-by field: a dataset dimension, or (the `logs` dataset only) a log attribute or resource
+ * field such as `@http.route` or `resource.host.name`. The server checks it against the dataset.
+ */
+const groupField = z
+	.string()
+	.regex(/^(?:[a-z][a-z0-9_]{0,63}|@[A-Za-z0-9_.:/-]{1,200}|resource\.[A-Za-z0-9_.:/-]{1,200})$/, 'Use a dimension name, or @attribute for logs');
 /** Values may reference dashboard variables as `$name` or `${name}`. */
 const filterValue = z.union([z.string().max(500), z.number(), z.array(z.string().max(500)).max(200)]);
 
@@ -61,6 +73,8 @@ export const builderMetricSchema = z.object({
 	/** Ignored for derived fields. `count` counts buckets; `rate` is per second. */
 	agg: z.enum(metricAggregations).default('sum'),
 	alias: identifier.optional(),
+	/** `logs` dataset, `count_distinct` only: the log field whose distinct values are counted. */
+	of: z.string().min(1).max(200).optional(),
 });
 export type BuilderMetric = z.infer<typeof builderMetricSchema>;
 
@@ -75,17 +89,30 @@ export type BuilderFilter = z.infer<typeof builderFilterSchema>;
 export const builderIntervals = ['auto', '1m', '5m', '15m', '30m', '1h', '6h', '12h', '1d'] as const;
 export type BuilderInterval = (typeof builderIntervals)[number];
 
+/**
+ * What a `logs` dataset query reads (docs/LOGS.md §9.2): log query filter text (§6.1, no pipe
+ * stages) and scopes. Empty scopes mean every scope the caller may read; the server always
+ * intersects them with the caller's log boundary.
+ */
+export const builderLogsSchema = z.object({
+	q: z.string().max(4_000).default(''),
+	scopes: z.array(logScopeRefSchema).max(50).default([]),
+});
+export type BuilderLogs = z.infer<typeof builderLogsSchema>;
+
 export const builderSpecSchema = z.object({
 	dataset: z.enum(observabilityDatasets),
 	/** May be empty when `groupBy` is not: the query then lists distinct dimension values. */
 	metrics: z.array(builderMetricSchema).max(12).default([]),
-	groupBy: z.array(identifier).max(4).default([]),
+	groupBy: z.array(groupField).max(4).default([]),
 	filters: z.array(builderFilterSchema).max(20).default([]),
 	/** Bucket rows by time (a `time` column first). Off gives one row per group for the range. */
 	timeSeries: z.boolean().default(true),
 	interval: z.enum(builderIntervals).default('auto'),
 	orderBy: z.object({ field: identifier, dir: z.enum(['asc', 'desc']).default('desc') }).optional(),
 	limit: z.number().int().min(1).max(10_000).optional(),
+	/** The `logs` dataset's filter and scopes; ignored by every other dataset. */
+	logs: builderLogsSchema.optional(),
 });
 export type BuilderSpec = z.infer<typeof builderSpecSchema>;
 
@@ -176,7 +203,8 @@ export interface ObservabilitySchema {
 
 // --- dashboards -------------------------------------------------------------------------------
 
-export const vizTypes = ['timeseries', 'bar', 'stat', 'gauge', 'bargauge', 'table', 'pie', 'text'] as const;
+/** `logs` shows a scoped log query's newest lines (docs/LOGS.md §9.2); its query is a `logs` builder query. */
+export const vizTypes = ['timeseries', 'bar', 'stat', 'gauge', 'bargauge', 'table', 'pie', 'text', 'logs'] as const;
 export type VizType = (typeof vizTypes)[number];
 
 const thresholdSchema = z.object({ value: z.number().nullable(), color: z.string().max(32) });

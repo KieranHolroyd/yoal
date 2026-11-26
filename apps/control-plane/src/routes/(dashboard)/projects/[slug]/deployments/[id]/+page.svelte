@@ -11,6 +11,8 @@
 	import CpuIcon from '@lucide/svelte/icons/cpu';
 	import FileCogIcon from '@lucide/svelte/icons/file-cog';
 	import GitCommitIcon from '@lucide/svelte/icons/git-commit-horizontal';
+	import GitCompareIcon from '@lucide/svelte/icons/git-compare';
+	import { deploymentCompareLogLink, deploymentLogLink, logExplorerHref } from '@yoal/contracts';
 	import GlobeIcon from '@lucide/svelte/icons/globe';
 	import HammerIcon from '@lucide/svelte/icons/hammer';
 	import InfoIcon from '@lucide/svelte/icons/info';
@@ -238,6 +240,35 @@
 		>
 			<ArrowUpRightIcon />Open preview
 		</Button>
+		{#if data.can.readLogs}
+			<Button
+				variant="outline"
+				href={logExplorerHref(
+					deploymentLogLink({
+						projectId: data.project.id,
+						deploymentId: deployment.id,
+						from: Date.parse(deployment.createdAt)
+					})
+				)}
+				title="Every line this deployment logged, in the Logs Explorer"
+				><ScrollTextIcon />Logs for this deploy</Button
+			>
+			{#if deployment.activatedAt}
+				<Button
+					variant="outline"
+					href={logExplorerHref(
+						deploymentCompareLogLink({
+							projectId: data.project.id,
+							deploymentId: deployment.id,
+							liveAt: Date.parse(deployment.activatedAt),
+							now: Date.now()
+						})
+					)}
+					title="Log patterns that are new, rising, falling or gone since this deploy went live"
+					><GitCompareIcon />Compare with previous deploy</Button
+				>
+			{/if}
+		{/if}
 		{#if data.can.promote && !deployment.isProduction && deployment.status === 'active'}
 			<Button onclick={promote}><ArrowUpIcon />Promote</Button>
 		{/if}
@@ -567,6 +598,7 @@
 				range={data.range}
 				ranges={data.ranges}
 				links={data.rangeLinks}
+				logScopes={data.can.readLogs ? [{ kind: 'project', id: data.project.id }] : undefined}
 			/>
 		{:else}
 			<EmptyState

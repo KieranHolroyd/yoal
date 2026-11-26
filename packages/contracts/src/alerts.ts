@@ -1,4 +1,8 @@
 import * as z from 'zod';
+import { andLogQueries, logExplorerHref, type LogExplorerLink } from './log-links.ts';
+import type { LogScopeKind, LogScopeRef } from './log-record.ts';
+import { parseLogQuery } from './log-query.ts';
+import { builderLogsOf, LOGS_DATASET, logsBuilderOf } from './observability-logs.ts';
 import { panelQuerySchema, queryVariablesSchema, type BuilderSpec, type PanelQuery } from './observability.ts';
 
 /**
@@ -12,6 +16,15 @@ import { panelQuerySchema, queryVariablesSchema, type BuilderSpec, type PanelQue
  * the value, every string column is a label.
  *
  * Shared by the REST API (`/api/v1/alerts/*`), the dashboard UI, MCP tools and the service layer.
+ *
+ * Log alert kinds (docs/LOGS.md §9.1) sit on the same rules, states and notifiers. Their query is
+ * a `logs` builder query (filter text and scopes in `query.builder.logs`) evaluated through the
+ * Logs Explorer, not the telemetry store:
+ * - `log_count`: matching lines over the window (one series, or one per group-by field), compared
+ *   with the threshold. Works in lite mode (SQLite) too.
+ * - `log_pattern_new`: patterns never seen in the scope before the window (or before a recent
+ *   deploy, with `pattern.afterDeployMinutes`); one series per new pattern whose count meets the
+ *   condition. Needs ClickHouse.
  */
 
 export const alertSeverities = ['info', 'warning', 'critical'] as const;
@@ -35,6 +48,29 @@ export type AlertState = (typeof alertStates)[number];
 
 export type AlertRuleHealth = 'ok' | 'error' | 'unknown';
 
+/** `metric`: a telemetry query (D109). The others read logs (docs/LOGS.md §9.1). */
+export const alertRuleKinds = ['metric', 'log_count', 'log_pattern_new'] as const;
+export type AlertRuleKind = (typeof alertRuleKinds)[number];
+
+export function isLogAlertKind(kind: AlertRuleKind | undefined): kind is 'log_count' | 'log_pattern_new' {
+	return kind === 'log_count' || kind === 'log_pattern_new';
+}
+
+/** Scopes a log alert may read: tenant scopes only (platform and edge logs are for admins, §10.5). */
+export const logAlertScopeKinds: readonly LogScopeKind[] = ['project', 'database', 'storage', 'broker', 'k8s', 'pipeline', 'function'];
+
+/** `log_pattern_new` options. */
+export const logPatternAlertSchema = z.object({
+	/**
+	 * Only look for new patterns while a deploy of a project in scope went live within this many
+	 * minutes; the patterns are then "new since the deploy". Null: any time.
+	 */
+	afterDeployMinutes: z.number().int().min(1).max(1_440).nullable().default(null),
+	/** How far back "never seen before" looks, days. */
+	lookbackDays: z.number().int().min(1).max(30).default(7),
+});
+export type LogPatternAlertOptions = z.infer<typeof logPatternAlertSchema>;
+
 const EMAIL = /^[^\s@<>"]{1,64}@[a-z0-9.-]{1,253}\.[a-z]{2,}$/i;
 
 export const alertConditionSchema = z.object({
@@ -49,7 +85,11 @@ export const alertRuleInputSchema = z.object({
 	description: z.string().max(2_000).default(''),
 	enabled: z.boolean().default(true),
 	severity: z.enum(alertSeverities).default('warning'),
+	/** What the rule evaluates; log kinds take a `logs` builder query. */
+	kind: z.enum(alertRuleKinds).default('metric'),
 	query: panelQuerySchema,
+	/** `log_pattern_new` only. */
+	pattern: logPatternAlertSchema.optional(),
 	/** Values for `$variables` in the query (a rule made from a dashboard panel keeps them). */
 	variables: queryVariablesSchema.default({}),
 	condition: alertConditionSchema,
@@ -96,6 +136,83 @@ export function alertQueryProblem(query: PanelQuery): string | null {
 	const spec: BuilderSpec = query.builder;
 	if (spec.metrics.length !== 1) return 'An alert query needs exactly one metric: the value compared with the threshold.';
 	return null;
+}
+
+/**
+ * Check a rule's kind matches its query, beyond the schema (which cannot refine without breaking
+ * `.partial()`). Returns the field path and message, or null.
+ */
+export function alertRuleProblem(spec: Pick<AlertRuleSpec, 'kind' | 'query' | 'condition'>): { path: string; message: string } | null {
+	const logs = logsBuilderOf(spec.query);
+	if (!isLogAlertKind(spec.kind)) {
+		if (logs) return { path: 'kind', message: 'A rule over logs is a log alert: pick "Log line count" or "New log pattern".' };
+		const problem = alertQueryProblem(spec.query);
+		return problem ? { path: 'query', message: problem } : null;
+	}
+	if (!logs) return { path: 'query', message: 'A log alert needs a log query (the `logs` dataset).' };
+	const { q, scopes } = builderLogsOf(logs);
+	const parsed = parseLogQuery(q);
+	if (!parsed.ok) return { path: 'query.builder.logs.q', message: parsed.error.message };
+	if (parsed.ast.pipes.length > 0) return { path: 'query.builder.logs.q', message: 'Log alerts take a filter; remove the pipe stages (`| …`).' };
+	const outside = scopes.find((scope) => !logAlertScopeKinds.includes(scope.kind));
+	if (outside) return { path: 'query.builder.logs.scopes', message: `Log alerts cannot read ${outside.kind} scopes.` };
+	if (spec.kind === 'log_count') {
+		if (logs.metrics.length !== 1) return { path: 'query', message: 'A log count alert has one measure: count, or count_distinct of a field.' };
+	} else {
+		if (logs.groupBy.length > 0) return { path: 'query', message: 'A new-pattern alert has one series per pattern; remove the group-by.' };
+		if (spec.condition.op !== 'gte' && spec.condition.op !== 'gt')
+			return { path: 'condition', message: 'A new-pattern alert fires when a new pattern appears at least N times: use ≥ or >.' };
+	}
+	return null;
+}
+
+/** A `logs` builder query for a log alert (or a log panel): filter text, scopes and one measure. */
+export function logAlertQuery(input: { q?: string; scopes?: LogScopeRef[]; groupBy?: string[] } = {}): PanelQuery {
+	return {
+		mode: 'builder',
+		builder: {
+			dataset: LOGS_DATASET,
+			metrics: [{ field: 'count', agg: 'count' }],
+			groupBy: input.groupBy ?? [],
+			filters: [],
+			timeSeries: false,
+			interval: 'auto',
+			logs: { q: input.q ?? '', scopes: input.scopes ?? [] },
+		},
+	};
+}
+
+/**
+ * The Explorer link for a log alert over `[from, to]` (notifications, alert instances, history).
+ * `extra` narrows it further (a pattern id, a group's value). Null for metric rules.
+ */
+export function logAlertExplorerLink(
+	spec: Pick<AlertRuleSpec, 'kind' | 'query'>,
+	window: { from: number; to: number | null },
+	extra = '',
+): LogExplorerLink | null {
+	if (!isLogAlertKind(spec.kind)) return null;
+	const logs = logsBuilderOf(spec.query);
+	if (!logs) return null;
+	const { q, scopes } = builderLogsOf(logs);
+	return {
+		q: andLogQueries(q, extra),
+		scopes,
+		from: window.from,
+		to: window.to,
+		...(spec.kind === 'log_pattern_new' && !extra ? { mode: 'patterns' as const } : {}),
+	};
+}
+
+/** `logAlertExplorerLink` as an href (relative, or absolute with `origin`). */
+export function logAlertExplorerHref(
+	spec: Pick<AlertRuleSpec, 'kind' | 'query'>,
+	window: { from: number; to: number | null },
+	extra = '',
+	origin = '',
+): string | null {
+	const link = logAlertExplorerLink(spec, window, extra);
+	return link ? logExplorerHref(link, origin) : null;
 }
 
 export function compareAlert(value: number, condition: AlertCondition): boolean {
@@ -441,6 +558,37 @@ export const alertRuleTemplates: AlertRuleTemplate[] = [
 			condition: { op: 'gt', threshold: 900 },
 			windowSeconds: 600,
 			forSeconds: 0,
+		},
+	},	{
+		id: 'log_errors',
+		title: 'Error log lines',
+		description: 'More than 50 error lines in 5 minutes across your apps (a log count; works without ClickHouse).',
+		rule: {
+			name: 'Error log lines',
+			severity: 'warning',
+			kind: 'log_count',
+			query: logAlertQuery({ q: 'level:error' }),
+			condition: { op: 'gt', threshold: 50 },
+			windowSeconds: 300,
+			forSeconds: 0,
+			repeatMinutes: 60,
+		},
+	},
+	{
+		id: 'log_new_pattern_after_deploy',
+		title: 'New error pattern after a deploy',
+		description: 'An error message never seen before appears at least 5 times within 30 minutes of a deploy. Needs ClickHouse.',
+		rule: {
+			name: 'New error pattern after deploy',
+			severity: 'warning',
+			kind: 'log_pattern_new',
+			query: logAlertQuery({ q: 'level:error' }),
+			pattern: { afterDeployMinutes: 30, lookbackDays: 7 },
+			condition: { op: 'gte', threshold: 5 },
+			windowSeconds: 300,
+			forSeconds: 0,
+			notifyOnResolve: false,
+			repeatMinutes: 0,
 		},
 	},
 ];

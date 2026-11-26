@@ -1,5 +1,15 @@
 import {
 	alertOperatorSymbols,
+	builderLogsOf,
+	isLogAlertKind,
+	logAlertExplorerHref,
+	logAlertQuery,
+	logsBuilderOf,
+	parseLogScope,
+	formatLogScope,
+	formatLogQueryValue,
+	type AlertRuleKind,
+	type LogScopeRef,
 	type AlertCondition,
 	type AlertInstanceView,
 	type AlertMatcher,
@@ -26,6 +36,7 @@ export const DEFAULT_RULE: AlertRuleSpec = {
 	description: '',
 	enabled: true,
 	severity: 'warning',
+	kind: 'metric',
 	query: {
 		mode: 'builder',
 		builder: {
@@ -52,7 +63,8 @@ export const DEFAULT_RULE: AlertRuleSpec = {
 	source: null
 };
 
-const SPEC_KEYS = Object.keys(DEFAULT_RULE) as Array<keyof AlertRuleSpec>;
+/** Every spec field, including the optional ones `DEFAULT_RULE` leaves out. */
+const SPEC_KEYS = [...Object.keys(DEFAULT_RULE), 'pattern'] as Array<keyof AlertRuleSpec>;
 
 function clone<T>(value: T): T {
 	return JSON.parse(JSON.stringify(value)) as T;
@@ -82,7 +94,7 @@ export function ruleDraft(input: Partial<AlertRuleInput> | undefined): AlertRule
 /** Only the spec fields of a rule view (drops id, version, state, counts…). */
 export function specOf(rule: AlertRuleSpec): AlertRuleSpec {
 	const out: Record<string, unknown> = {};
-	for (const key of SPEC_KEYS) out[key] = clone(rule[key]);
+	for (const key of SPEC_KEYS) if (rule[key] !== undefined) out[key] = clone(rule[key]);
 	return out as unknown as AlertRuleSpec;
 }
 
@@ -163,11 +175,19 @@ export function metricText(query: PanelQuery, datasets?: DatasetInfo[]): string 
 
 /** `Traffic · Error rate by host · > 5%`: dataset · metric · condition. */
 export function querySummary(
-	rule: Pick<AlertRuleSpec, 'query' | 'condition'>,
+	rule: Pick<AlertRuleSpec, 'query' | 'condition'> & { kind?: AlertRuleKind },
 	datasets?: DatasetInfo[]
 ): string {
 	const unit = valueUnit(rule.query, datasets);
 	const condition = conditionText(rule.condition, unit);
+	const logs = logsBuilderOf(rule.query);
+	if (isLogAlertKind(rule.kind) && logs) {
+		const { q, scopes } = builderLogsOf(logs);
+		const where = `${q.trim() ? `“${q.trim()}”` : 'all lines'}${scopes.length ? ` in ${scopes.length} scope${scopes.length === 1 ? '' : 's'}` : ''}`;
+		if (rule.kind === 'log_pattern_new') return `New log pattern · ${where} · ${condition} lines`;
+		const by = logs.groupBy.length ? ` by ${logs.groupBy.join(', ')}` : '';
+		return `Log lines · ${where}${by} · ${condition}`;
+	}
 	if (rule.query.mode !== 'builder') return `SQL · ${condition}`;
 	const { builder } = rule.query;
 	const dataset = datasets?.find((item) => item.name === builder.dataset)?.label ?? builder.dataset;
@@ -367,6 +387,8 @@ export function draftFromPanel(input: {
 	const builder = { ...query.builder, metrics: [query.builder.metrics[0]!] };
 	return {
 		name: input.title.trim().slice(0, 120),
+		// A logs dataset panel becomes a log count alert (docs/LOGS.md §9.1).
+		...(builder.dataset === 'logs' ? { kind: 'log_count' as const } : {}),
 		query: alertQuery({ mode: 'builder', builder }),
 		variables: clone(input.variables),
 		condition: { op: 'gt', threshold: 0 },
@@ -376,3 +398,122 @@ export function draftFromPanel(input: {
 
 /** Session storage key for a draft handed from a dashboard panel to the rule editor. */
 export const DRAFT_KEY = 'yoal:alert-draft';
+
+// --- log alerts (docs/LOGS.md §9.1) -----------------------------------------------------------
+
+export const RULE_KINDS: Array<{ value: AlertRuleKind; label: string; help: string }> = [
+	{
+		value: 'metric',
+		label: 'Metric',
+		help: 'A telemetry query: traffic, databases, storage or brokers.'
+	},
+	{
+		value: 'log_count',
+		label: 'Log line count',
+		help: 'How many lines match a log query over the window. Works without ClickHouse.'
+	},
+	{
+		value: 'log_pattern_new',
+		label: 'New log pattern',
+		help: 'A message pattern never seen before in the scope appears. Needs ClickHouse.'
+	}
+];
+
+/** A new log rule's draft: the query, scopes and window from the Explorer. */
+export function logRuleDraft(input: {
+	kind?: 'log_count' | 'log_pattern_new';
+	q?: string;
+	scopes?: LogScopeRef[];
+	windowSeconds?: number;
+}): AlertRuleSpec {
+	const kind = input.kind ?? 'log_count';
+	const q = input.q?.trim() ?? '';
+	const window = Math.min(86_400, Math.max(60, Math.round(input.windowSeconds ?? 300)));
+	return ruleDraft({
+		name: (q ? `Logs: ${q}` : kind === 'log_pattern_new' ? 'New log pattern' : 'Log lines').slice(
+			0,
+			120
+		),
+		kind,
+		query: logAlertQuery({ q, scopes: input.scopes ?? [] }),
+		condition:
+			kind === 'log_pattern_new' ? { op: 'gte', threshold: 5 } : { op: 'gt', threshold: 0 },
+		windowSeconds: window,
+		forSeconds: 0,
+		...(kind === 'log_pattern_new'
+			? {
+					pattern: { afterDeployMinutes: null, lookbackDays: 7 },
+					notifyOnResolve: false,
+					repeatMinutes: 0
+				}
+			: {})
+	});
+}
+
+/** `?kind=log_count&q=…&scope=…&window=300` for "Create alert" in the Explorer. */
+export function logRuleSearch(input: {
+	kind?: 'log_count' | 'log_pattern_new';
+	q: string;
+	scopes: LogScopeRef[];
+	windowSeconds: number;
+}): string {
+	const params = new URLSearchParams();
+	params.set('kind', input.kind ?? 'log_count');
+	if (input.q.trim()) params.set('q', input.q.trim());
+	for (const scope of input.scopes) params.append('scope', formatLogScope(scope));
+	params.set('window', String(Math.round(input.windowSeconds)));
+	return params.toString();
+}
+
+/** The log rule draft a `/alerts/rules/new` URL asks for, or null when it is not one. */
+export function logRuleFromSearch(params: {
+	get(name: string): string | null;
+	getAll(name: string): string[];
+}): AlertRuleSpec | null {
+	const kind = params.get('kind');
+	if (kind !== 'log_count' && kind !== 'log_pattern_new') return null;
+	const scopes = params
+		.getAll('scope')
+		.map((value) => parseLogScope(value))
+		.filter((scope): scope is LogScopeRef => scope !== null);
+	const window = Number(params.get('window'));
+	return logRuleDraft({
+		kind,
+		q: (params.get('q') ?? '').slice(0, 4_000),
+		scopes,
+		windowSeconds: Number.isFinite(window) && window > 0 ? window : 300
+	});
+}
+
+/**
+ * The Explorer at an alert instance's fire time (§9.3): the rule's query and scopes over the window
+ * that made it fire, up to now while it is active. Null for metric rules.
+ */
+export function instanceLogsHref(
+	rule: Pick<AlertRuleSpec, 'kind' | 'query' | 'windowSeconds'>,
+	instance: Pick<
+		AlertInstanceView,
+		'labels' | 'state' | 'since' | 'activeSince' | 'lastEvaluatedAt'
+	>
+): string | null {
+	if (!isLogAlertKind(rule.kind)) return null;
+	const started = Date.parse(instance.activeSince ?? instance.since);
+	if (!Number.isFinite(started)) return null;
+	const active = instance.state !== 'normal';
+	const to = active ? null : Date.parse(instance.lastEvaluatedAt);
+	const narrow =
+		rule.kind === 'log_pattern_new' && instance.labels.pattern
+			? `pattern:${instance.labels.pattern}`
+			: Object.entries(instance.labels)
+					.filter(([, value]) => value !== '')
+					.map(([field, value]) => `${field}:${formatLogQueryValue(value)}`)
+					.join(' ');
+	return logAlertExplorerHref(
+		rule,
+		{
+			from: started - rule.windowSeconds * 1000,
+			to: to !== null && Number.isFinite(to) ? to : null
+		},
+		narrow
+	);
+}

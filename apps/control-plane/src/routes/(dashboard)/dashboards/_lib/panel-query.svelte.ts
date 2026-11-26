@@ -1,5 +1,10 @@
 import { browser } from '$app/env';
-import type { ObservabilityQueryRequest, PanelQuery, QueryVariables } from '@yoal/contracts';
+import {
+	logsBuilderOf,
+	type ObservabilityQueryRequest,
+	type PanelQuery,
+	type QueryVariables
+} from '@yoal/contracts';
 import { createQuery, keepPreviousData } from '@tanstack/svelte-query';
 import { getSchema, keys, runQuery } from './api.js';
 import type { ResolvedRange } from './time.js';
@@ -74,7 +79,8 @@ export function createPanelQuery(
 	const schema = createSchemaQuery();
 	return createQuery(() => {
 		const { query, range, width, variables, enabled = true } = input();
-		const installed = schema.data?.installed !== false;
+		// The logs dataset reads through the Logs Explorer, which works without ClickHouse.
+		const installed = schema.data?.installed !== false || logsBuilderOf(query) !== null;
 		const request =
 			query && range && width > 0 ? buildRequest(query, range, width, variables) : null;
 		return {

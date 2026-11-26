@@ -44,6 +44,8 @@ describe('builder compilation', () => {
 		];
 		expect(specs.some((spec) => spec.dataset === 'brokers')).toBe(true);
 		for (const spec of specs) {
+			// Log alert templates are log queries (observability-logs.test.ts covers them).
+			if (spec.dataset === 'logs') continue;
 			const compiled = compileBuilder(builderSpecSchema.parse(spec), ctx({ variables: { database: '$__all' } }));
 			expect(compiled.sql).toContain('FROM');
 		}

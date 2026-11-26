@@ -10,6 +10,7 @@
 	import { resolve } from '$app/paths';
 	import { page } from '$app/state';
 	import BellOffIcon from '@lucide/svelte/icons/bell-off';
+	import ScrollTextIcon from '@lucide/svelte/icons/scroll-text';
 	import CheckCheckIcon from '@lucide/svelte/icons/check-check';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
 	import UndoIcon from '@lucide/svelte/icons/undo-2';
@@ -35,7 +36,8 @@
 		unitOf,
 		onsilence,
 		showRule = true,
-		label = 'Alert series'
+		label = 'Alert series',
+		logsOf
 	}: {
 		rows: AlertInstanceView[];
 		/** A ticking clock, for "for 12 min". */
@@ -47,6 +49,8 @@
 		/** Rule and severity columns (off on a rule's own page). */
 		showRule?: boolean;
 		label?: string;
+		/** The Explorer at the series' fire time, for log rules (docs/LOGS.md §9.3). */
+		logsOf?: (instance: AlertInstanceView) => string | null;
 	} = $props();
 
 	const queryClient = useQueryClient();
@@ -128,7 +132,7 @@
 			cell: sinceCell,
 			class: 'hidden text-xs text-muted-foreground lg:table-cell'
 		},
-		...(canSilence || assistantEnabled
+		...(canSilence || assistantEnabled || logsOf
 			? [{ id: 'actions', header: '', srHeader: 'Actions', cell: actionsCell, class: 'w-0 pr-4' }]
 			: [])
 	]);
@@ -186,7 +190,19 @@
 {/snippet}
 {#snippet actionsCell(row: AlertInstanceView)}
 	{@const pending = busy === `${row.ruleId}:${row.fingerprint}`}
+	{@const logs = logsOf?.(row) ?? null}
 	<span class="flex justify-end gap-1">
+		{#if logs}
+			<Button
+				variant="ghost"
+				size="sm"
+				href={logs}
+				title="The rule's log query at fire time, in the Logs Explorer"
+				aria-label="Logs for {row.ruleName}: {labelLine(row.labels, row.labelNames)}"
+			>
+				<ScrollTextIcon /><span class="hidden xl:inline">Logs</span>
+			</Button>
+		{/if}
 		{#if assistantEnabled && alerting(row)}
 			<Button
 				variant="ghost"

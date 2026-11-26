@@ -25,6 +25,7 @@ import {
 import { ClickHouseAbortedError, ClickHouseError, ClickHouseUnavailableError, type ClickHouseCompactResult } from './clickhouse.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
+import { logsDatasetQueryText, runLogsDatasetQuery } from './observability-logs.ts';
 import { DATASETS, compileBuilder, datasetCatalog, expandSqlMacros } from './observability-query.ts';
 import { TELEMETRY_NOT_INSTALLED } from './telemetry.ts';
 import { newId, parseJson } from './util.ts';
@@ -195,6 +196,12 @@ export class ObservabilityService {
 
 	async query(principal: Principal, input: ObservabilityQueryInput, signal?: AbortSignal): Promise<QueryResult> {
 		requireMetrics(principal);
+		// The logs dataset reads through the Logs Explorer as the caller (docs/LOGS.md §9.2). It does
+		// not need the telemetry store: lite mode answers counts by time and built-in fields.
+		if (input.query.mode === 'builder' && input.query.builder.dataset === 'logs') {
+			const { fromMs, toMs } = parseRange(input.range);
+			return runLogsDatasetQuery(this.ctx, principal, input.query.builder, { fromMs, toMs, maxDataPoints: input.maxDataPoints });
+		}
 		const telemetry = this.ctx.telemetry;
 		if (!telemetry || !(await telemetry.ready()))
 			throw new CoreError('telemetry_unavailable', telemetry?.error?.message ?? TELEMETRY_NOT_INSTALLED, 503);
@@ -204,7 +211,8 @@ export class ObservabilityService {
 			if (input.query.mode === 'builder') {
 				const spec = input.query.builder;
 				const names = this.#visible(principal);
-				const scopeColumn = DATASETS[spec.dataset as ObservabilityDataset].scope;
+				// Logs returned above; every other dataset filters on an id column.
+				const scopeColumn = DATASETS[spec.dataset as ObservabilityDataset].scope as 'project_id' | 'database_id' | 'storage_id' | 'broker_id';
 				const scopeNames = {
 					project_id: names.project,
 					database_id: names.database,
@@ -404,6 +412,10 @@ export class ObservabilityService {
 			return;
 		}
 		try {
+			if (query.builder.dataset === 'logs') {
+				logsDatasetQueryText(query.builder, query.builder.timeSeries ? 60 : null);
+				return;
+			}
 			compileBuilder(query.builder, {
 				database: 'yoal',
 				fromMs: this.ctx.now() - 3_600_000,

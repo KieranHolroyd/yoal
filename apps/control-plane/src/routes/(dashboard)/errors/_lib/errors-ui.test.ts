@@ -5,6 +5,7 @@ mock.module('$app/paths', () => ({ resolve: (path: string) => path.replace('/(da
 const {
 	activeFilters,
 	dayLabels,
+	eventLogsHref,
 	frameRuns,
 	issuesHref,
 	hourLabels,
@@ -230,5 +231,29 @@ describe('issuesHref', () => {
 		expect(
 			activeFilters(filters, () => 'Web').map((chip) => `${chip.label}:${chip.value}`)
 		).toEqual(['Search:boom', 'Target:Web', 'Level:error']);
+	});
+});
+
+describe('logs pivot (docs/LOGS.md §9.3)', () => {
+	const at = Date.parse('2026-11-26T12:00:00Z');
+	const linked = { projectId: 'prj_1', projectSlug: 'shop', targetKind: 'project' as const };
+
+	test('an event opens its project ±60 s, or its request when it carries an id', () => {
+		const around = new URL(eventLogsHref(linked, { at, tags: {} })!, 'https://x.test');
+		expect(around.pathname).toBe('/logs');
+		expect(around.searchParams.getAll('scope')).toEqual(['project:prj_1']);
+		expect(Date.parse(around.searchParams.get('from')!)).toBe(at - 60_000);
+		expect(Date.parse(around.searchParams.get('to')!)).toBe(at + 60_000);
+		const request = new URL(
+			eventLogsHref(linked, { at, tags: { request_id: 'req_9' } })!,
+			'https://x.test'
+		);
+		expect(request.searchParams.get('q')).toBe('request:req_9');
+	});
+
+	test('standalone targets have no project logs', () => {
+		expect(
+			eventLogsHref({ ...linked, projectSlug: null, targetKind: 'standalone' }, { at, tags: {} })
+		).toBeNull();
 	});
 });

@@ -8,10 +8,15 @@
 	import {
 		alertOperatorSymbols,
 		alertOperators,
-		alertQueryProblem,
 		alertRuleInputSchema,
+		alertRuleProblem,
+		builderLogsOf,
+		isLogAlertKind,
+		logAlertQuery,
+		logsBuilderOf,
 		alertSeverities,
 		type AlertOperator,
+		type AlertRuleKind,
 		type AlertPreview,
 		type AlertRuleSpec,
 		type AlertRuleView,
@@ -44,8 +49,11 @@
 	import AlertQueryBuilder from './AlertQueryBuilder.svelte';
 	import DurationField from './DurationField.svelte';
 	import Labels from './Labels.svelte';
+	import LogRuleFields from './LogRuleFields.svelte';
 	import {
+		DEFAULT_RULE,
 		NO_DATA_MODES,
+		RULE_KINDS,
 		durationText,
 		fromDisplayThreshold,
 		issueMap,
@@ -89,8 +97,36 @@
 	let sqlText = $state(start.query.mode === 'sql' ? start.query.sql : '');
 	/** The builder query to return to after trying SQL. */
 	let lastBuilder = $state<BuilderSpec | null>(
-		start.query.mode === 'builder' ? start.query.builder : null
+		start.query.mode === 'builder' && start.query.builder.dataset !== 'logs'
+			? start.query.builder
+			: null
 	);
+
+	const logKind = $derived(isLogAlertKind(spec.kind));
+	const logBuilder = $derived(logsBuilderOf(spec.query));
+
+	/**
+	 * Switch between a metric rule and the log kinds (docs/LOGS.md §9.1). The metric builder is kept
+	 * so switching back restores it; log kinds start from an empty log query.
+	 */
+	function setKind(kind: AlertRuleKind) {
+		if (kind === spec.kind) return;
+		if (isLogAlertKind(kind)) {
+			if (spec.query.mode === 'builder' && !logBuilder) lastBuilder = spec.query.builder;
+			if (!logBuilder) spec.query = logAlertQuery();
+			if (kind === 'log_pattern_new') {
+				spec.pattern ??= { afterDeployMinutes: null, lookbackDays: 7 };
+				if (spec.condition.op !== 'gte' && spec.condition.op !== 'gt') spec.condition.op = 'gte';
+				if (logBuilder) spec.query = logAlertQuery({ ...builderLogsOf(logBuilder) });
+			} else delete spec.pattern;
+		} else {
+			spec.query = lastBuilder
+				? { mode: 'builder', builder: lastBuilder }
+				: JSON.parse(JSON.stringify(DEFAULT_RULE.query));
+			delete spec.pattern;
+		}
+		spec.kind = kind;
+	}
 
 	const canSql = $derived(overview?.canUseSql ?? false);
 	const canEdit = $derived(overview?.canEdit ?? false);
@@ -136,8 +172,8 @@
 			found['condition.threshold'] = 'Enter a number.';
 		const parsed = alertRuleInputSchema.safeParse(next);
 		if (!parsed.success) Object.assign(found, { ...issueMap(parsed.error.issues), ...found });
-		const problem = alertQueryProblem(next.query);
-		if (problem) found.query ??= problem;
+		const problem = alertRuleProblem(next);
+		if (problem) found[problem.path] ??= problem.message;
 		if (next.keepFiringSeconds > 0 && next.keepFiringSeconds < next.intervalSeconds)
 			found.keepFiringSeconds ??=
 				'Keep firing for at least one evaluation interval, or 0 to resolve straight away.';
@@ -156,6 +192,8 @@
 		'name',
 		'description',
 		'severity',
+		'kind',
+		'pattern',
 		'query',
 		'condition',
 		'windowSeconds',
@@ -242,6 +280,7 @@
 		const typed = Number(thresholdText);
 		return querySummary(
 			{
+				kind: spec.kind,
 				query: spec.query,
 				condition: {
 					op: spec.condition.op,
@@ -404,7 +443,40 @@
 					>
 				</Card.Header>
 				<Card.Content class="grid gap-5">
-					{#if canSql || spec.query.mode === 'sql'}
+					<fieldset class="space-y-1.5">
+						<legend class="mb-1 text-sm font-medium">Kind</legend>
+						<div class="inline-flex w-fit flex-wrap rounded-lg bg-muted p-0.5" role="radiogroup">
+							{#each RULE_KINDS as option (option.value)}
+								<button
+									type="button"
+									role="radio"
+									aria-checked={spec.kind === option.value}
+									title={option.help}
+									disabled={sqlLocked}
+									class="rounded-md px-3 py-1 text-xs font-medium {spec.kind === option.value
+										? 'bg-background shadow-xs'
+										: 'text-muted-foreground hover:text-foreground'}"
+									onclick={() => setKind(option.value)}>{option.label}</button
+								>
+							{/each}
+						</div>
+						<p class="text-xs text-muted-foreground">
+							{RULE_KINDS.find((option) => option.value === spec.kind)?.help}
+						</p>
+						{#if errorFor('kind')}<p class="text-xs text-destructive">{errorFor('kind')}</p>{/if}
+					</fieldset>
+
+					{#if spec.kind !== 'metric' && logBuilder}
+						<LogRuleFields
+							kind={spec.kind}
+							builder={logBuilder}
+							pattern={spec.pattern}
+							windowSeconds={spec.windowSeconds}
+							error={errorFor('query')}
+							onchange={(builder) => (spec.query = { mode: 'builder', builder })}
+							onpattern={(pattern) => (spec.pattern = pattern)}
+						/>
+					{:else if canSql || spec.query.mode === 'sql'}
 						<div
 							class="inline-flex w-fit rounded-lg bg-muted p-0.5"
 							role="tablist"
@@ -434,7 +506,9 @@
 						</div>
 					{/if}
 
-					{#if spec.query.mode === 'builder'}
+					{#if logKind}
+						<!-- The log fields above are the query. -->
+					{:else if spec.query.mode === 'builder'}
 						<AlertQueryBuilder
 							builder={spec.query.builder}
 							{schema}
@@ -512,7 +586,13 @@
 					<fieldset class="space-y-2 border-t pt-4">
 						<legend class="sr-only">Condition</legend>
 						<div class="flex flex-wrap items-center gap-2 text-sm">
-							<span>Alert when the value</span>
+							<span
+								>{spec.kind === 'log_pattern_new'
+									? 'Alert when a new pattern’s line count'
+									: spec.kind === 'log_count'
+										? 'Alert when the line count'
+										: 'Alert when the value'}</span
+							>
 							<NativeSelect.Root bind:value={spec.condition.op} aria-label="Operator">
 								{#each alertOperators as op (op)}
 									<NativeSelect.Option value={op}

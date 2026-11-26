@@ -1,7 +1,8 @@
 import {
 	alertOperatorSymbols,
-	alertQueryProblem,
 	alertRuleInputSchema,
+	alertRuleProblem,
+	isLogAlertKind,
 	alertSilenceCreateSchema,
 	compareAlert,
 	type AlertChannelInfo,
@@ -42,6 +43,7 @@ import { ConflictError, CoreError, NotFoundError, ValidationError } from './erro
 import { DATASETS, expandSqlMacros } from './observability-query.ts';
 import { toQueryResult, type ObservabilityService } from './observability.ts';
 import { buildSystemPrincipal } from './iam/system.ts';
+import { LogAlertEvaluator } from './log-alerts.ts';
 import { TELEMETRY_NOT_INSTALLED } from './telemetry.ts';
 import { newId, parseJson } from './util.ts';
 
@@ -56,6 +58,11 @@ import { newId, parseJson } from './util.ts';
  * The evaluator is fail-safe in both directions: a failing query keeps every series in its last
  * state (an outage of the telemetry store never resolves or fires anything), and a rule that keeps
  * failing for ten minutes says so once.
+ *
+ * Log rules (`log_count`, `log_pattern_new`; docs/LOGS.md §9.1) share all of this. Only how a rule
+ * becomes series differs (`log-alerts.ts`): they read through the Logs Explorer, so they evaluate
+ * without the telemetry store (lite mode), and their notifications link to the Explorer with the
+ * rule's query, scopes and the evaluated window.
  */
 
 const MINUTE_MS = 60_000;
@@ -362,6 +369,15 @@ interface OrgNames {
 	broker: Map<string, string>;
 }
 
+/** One evaluation's series, from a metric query or a log rule. */
+interface RuleObservation {
+	series: Array<{ labels: Record<string, string>; value: number | null; link?: string | null }>;
+	sql: string;
+	notice?: string;
+	/** Explorer link for the whole rule over the evaluated window (log rules). */
+	link: string | null;
+}
+
 export interface EvaluationReport {
 	evaluated: number;
 	failed: number;
@@ -373,11 +389,18 @@ export class AlertService {
 	#running = false;
 	#lastPrune = 0;
 	#routingCache: SystemAlertRouting | null = null;
+	#logAlerts: LogAlertEvaluator | null = null;
 
 	constructor(
 		private readonly ctx: CoreContext,
 		private readonly observability: ObservabilityService,
 	) {}
+
+	/** Built on first use: the Logs Explorer is wired onto the context after this service. */
+	get #logs(): LogAlertEvaluator {
+		this.#logAlerts ??= new LogAlertEvaluator(this.ctx);
+		return this.#logAlerts;
+	}
 
 	// --- access -------------------------------------------------------------------------------
 
@@ -648,9 +671,14 @@ export class AlertService {
 	// --- rules: write ---------------------------------------------------------------------------
 
 	#validate(principal: Principal, spec: AlertRuleSpec, previous?: AlertRuleSpec): void {
-		const problem = alertQueryProblem(spec.query);
-		if (problem) throw new ValidationError(problem);
-		if (spec.query.mode === 'sql') {
+		const problem = alertRuleProblem(spec);
+		if (problem) throw new ValidationError(problem.message, [{ path: problem.path.split('.'), message: problem.message }]);
+		if (isLogAlertKind(spec.kind)) {
+			// The author must be able to read what the rule reads; an edit that keeps the query keeps
+			// the rule another owner wrote (like SQL rules below).
+			const unchanged = previous?.kind === spec.kind && JSON.stringify(previous.query) === JSON.stringify(spec.query);
+			if (!unchanged) this.#logs.validate(principal, spec);
+		} else if (spec.query.mode === 'sql') {
 			const unchanged = previous?.query.mode === 'sql' && previous.query.sql === spec.query.sql;
 			if (!unchanged && !this.observability.canUseSql(principal))
 				throw new CoreError('forbidden', 'SQL alert rules read every org’s telemetry, so only platform admins can write them. Use the query builder.', 403);
@@ -695,7 +723,9 @@ export class AlertService {
 		const { name, enabled, ...rest } = spec;
 		// A changed query or condition starts the series over: old states describe another question.
 		const reset =
+			previous.kind !== spec.kind ||
 			JSON.stringify(previous.query) !== JSON.stringify(spec.query) ||
+			JSON.stringify(previous.pattern ?? null) !== JSON.stringify(spec.pattern ?? null) ||
 			JSON.stringify(previous.variables) !== JSON.stringify(spec.variables) ||
 			!enabled;
 		const result = this.ctx.sqlite.run(
@@ -1067,6 +1097,16 @@ export class AlertService {
 		}
 	}
 
+	/** A rule's series now: its metric query, or its log rule through the Logs Explorer. */
+	async #observe(orgId: string, spec: AlertRuleSpec, now: number): Promise<RuleObservation> {
+		if (isLogAlertKind(spec.kind)) {
+			const observed = await this.#logs.observe(this.#orgPrincipal(orgId), spec, now);
+			return { series: observed.series, sql: observed.query, link: observed.link, ...(observed.notice ? { notice: observed.notice } : {}) };
+		}
+		const result = await this.#run(orgId, spec, now);
+		return { series: seriesFromResult(result), sql: result.sql, link: null, ...(result.notice ? { notice: result.notice } : {}) };
+	}
+
 	/** Evaluate a rule (saved or not) once, changing nothing. */
 	async preview(principal: Principal, input: { ruleId?: string; rule?: unknown }): Promise<AlertPreview> {
 		this.#requireRead(principal);
@@ -1083,10 +1123,10 @@ export class AlertService {
 		} else throw new ValidationError('Pass a rule or a ruleId.');
 		if (input.ruleId) saved = this.#instances([input.ruleId]).get(input.ruleId) ?? [];
 		const now = this.ctx.now();
-		const result = await this.#run(principal.orgId, spec, now);
+		const result = await this.#observe(principal.orgId, spec, now);
 		const names = this.#names(principal.orgId);
 		const states = new Map(saved.map((instance) => [instance.fingerprint, instance.state]));
-		const series = seriesFromResult(result).map(({ labels, value }) => {
+		const series = result.series.map(({ labels, value }) => {
 			const fingerprint = fingerprintOf(labels);
 			return {
 				fingerprint,
@@ -1123,16 +1163,24 @@ export class AlertService {
 				.all(now);
 			if (due.length === 0) return { evaluated: 0, failed: 0, notifications: 0 };
 
-			const telemetry = this.ctx.telemetry;
-			if (!telemetry || !(await telemetry.ready())) {
-				await this.#telemetryDown(now, due, telemetry?.error?.message ?? TELEMETRY_NOT_INSTALLED);
-				return { evaluated: 0, failed: 0, notifications: 0, skipped: 'telemetry_unavailable' };
+			// Log rules read through the Logs Explorer (SQLite or ClickHouse) and never wait for the
+			// telemetry store; metric rules are skipped, keeping their states, while it is down.
+			const metricDue = due.filter((row) => !isLogAlertKind(this.#spec(row).kind));
+			let telemetryReady = true;
+			if (metricDue.length > 0) {
+				const telemetry = this.ctx.telemetry;
+				telemetryReady = Boolean(telemetry && (await telemetry.ready()));
+				if (!telemetryReady) await this.#telemetryDown(now, metricDue, telemetry?.error?.message ?? TELEMETRY_NOT_INSTALLED);
+				else await this.#telemetryUp(now);
 			}
-			await this.#telemetryUp(now);
+			if (!telemetryReady && metricDue.length === due.length)
+				return { evaluated: 0, failed: 0, notifications: 0, skipped: 'telemetry_unavailable' };
 
 			const report: EvaluationReport = { evaluated: 0, failed: 0, notifications: 0 };
+			if (!telemetryReady) report.skipped = 'telemetry_unavailable';
 			for (const row of due) {
 				const spec = this.#spec(row);
+				if (!telemetryReady && !isLogAlertKind(spec.kind)) continue;
 				const claimed = this.ctx.sqlite.run('UPDATE alert_rules SET next_eval_at = ? WHERE id = ? AND next_eval_at = ?', [
 					now + spec.intervalSeconds * 1000,
 					row.id,
@@ -1170,8 +1218,9 @@ export class AlertService {
 	}
 
 	async #evaluate(row: RuleRow, spec: AlertRuleSpec, now: number): Promise<number> {
-		const result = await this.#run(row.org_id, spec, now);
-		const observed = seriesFromResult(result);
+		const observation = await this.#observe(row.org_id, spec, now);
+		const observed = observation.series;
+		const links = new Map(observed.map((series) => [fingerprintOf(series.labels), series.link ?? null]));
 		const existing = new Map((this.#instances([row.id]).get(row.id) ?? []).map((instance) => [instance.fingerprint, instance]));
 		const names = this.#names(row.org_id);
 		const seen = new Set<string>();
@@ -1199,7 +1248,8 @@ export class AlertService {
 		}
 		// An ungrouped builder rule with no rows at all is one series without data. (A grouped or
 		// SQL rule with no rows has no series: nothing reported yet is not an outage.)
-		const ungrouped = spec.query.mode === 'builder' && spec.query.builder.groupBy.length === 0;
+		// New-pattern rules have one series per new pattern; none at all is simply nothing new.
+		const ungrouped = spec.kind !== 'log_pattern_new' && spec.query.mode === 'builder' && spec.query.builder.groupBy.length === 0;
 		if (ungrouped && observed.length === 0 && existing.size === 0 && spec.noData !== 'ok' && spec.noData !== 'keep') {
 			next.push(advanceInstance(newInstance('{}', {}, now), { value: null }, spec, now));
 		}
@@ -1246,7 +1296,7 @@ export class AlertService {
 
 		let sent = 0;
 		if (firing.length > 0) {
-			await this.#notify(row, spec, firing, 'firing', names, unit, now);
+			await this.#notify(row, spec, firing, 'firing', names, unit, now, { link: observation.link, links });
 			for (const instance of firing) {
 				instance.notifiedAt = now;
 				instance.notifiedState = instance.state;
@@ -1254,7 +1304,7 @@ export class AlertService {
 			sent++;
 		}
 		if (resolved.length > 0) {
-			await this.#notify(row, spec, resolved, 'resolved', names, unit, now);
+			await this.#notify(row, spec, resolved, 'resolved', names, unit, now, { link: observation.link, links });
 			sent++;
 		}
 
@@ -1379,6 +1429,7 @@ export class AlertService {
 		names: OrgNames,
 		unit: string,
 		now: number,
+		logs: { link: string | null; links: Map<string, string | null> } = { link: null, links: new Map() },
 	): Promise<void> {
 		const describe = (instance: InstanceRecord) => labelText(instance.labels, this.#labelNames(instance.labels, names));
 		const single = instances.length === 1 ? instances[0]! : null;
@@ -1399,10 +1450,14 @@ export class AlertService {
 			return `- ${who}: ${formatAlertValue(instance.value, unit)} for ${formatDuration(now - (instance.activeSince ?? instance.stateSince))}`;
 		});
 		if (instances.length > MAX_LISTED_SERIES) lines.push(`- …and ${instances.length - MAX_LISTED_SERIES} more`);
+		// Log rules link to the Explorer with the rule's query, scopes and the evaluated window
+		// (docs/LOGS.md §9.1); one series links to its own narrowed view.
+		const logsUrl = (single ? logs.links.get(single.fingerprint) : null) ?? logs.link;
 		const detail = [
 			status === 'resolved' ? `${row.name} has resolved.` : `${row.name}: ${conditionText(spec, unit)} over the last ${formatDuration(spec.windowSeconds * 1000)}.`,
 			...lines,
 			...(status === 'firing' && spec.runbook.trim() ? ['', `Runbook: ${spec.runbook.trim()}`] : []),
+			...(logsUrl ? ['', `Logs: ${logsUrl}`] : []),
 			'',
 			this.url(row.id),
 		].join('\n');
@@ -1425,6 +1480,7 @@ export class AlertService {
 			severity: alert.severity,
 			status,
 			url: alert.url ?? null,
+			...(logsUrl ? { logsUrl } : {}),
 			labels: single?.labels ?? {},
 			series: instances.map((instance) => ({ labels: instance.labels, state: instance.state, value: instance.value })),
 		});

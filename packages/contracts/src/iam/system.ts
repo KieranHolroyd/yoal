@@ -19,8 +19,9 @@ export interface SystemPrincipalSpec {
 export const systemPrincipals = {
 	'system:alerts': {
 		name: 'system:alerts',
-		description: 'Resolves project, database, storage and broker names and runs alert queries.',
-		permissions: ['project:read', 'database:read', 'storage:read', 'broker:read', 'metrics:read'],
+		description: 'Resolves project, database, storage and broker names and runs alert queries, including log alerts (docs/LOGS.md §9.1).',
+		// Log alerts read the rule's scopes through the Logs Explorer; `logs:query` runs `| stats` and `| patterns`.
+		permissions: ['project:read', 'database:read', 'storage:read', 'broker:read', 'metrics:read', 'logs:read', 'logs:query'],
 	},
 	'system:failover': {
 		name: 'system:failover',

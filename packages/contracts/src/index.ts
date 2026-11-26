@@ -106,6 +106,8 @@ export * from './github-import.ts';
 export * from './forges.ts';
 export * from './templates.ts';
 export * from './observability.ts';
+export * from './observability-logs.ts';
+export * from './log-links.ts';
 export * from './metrics-export.ts';
 export * from './observability-templates.ts';
 export * from './platform-policies.ts';

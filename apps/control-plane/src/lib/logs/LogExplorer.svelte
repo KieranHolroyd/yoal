@@ -66,6 +66,7 @@
 	import { SEVERITY_SERIES, histogramBuckets } from './histogram.js';
 	import { isTypingTarget, logShortcutFor } from './keyboard.js';
 	import LiteBanner from './LiteBanner.svelte';
+	import LogActions from './LogActions.svelte';
 	import LogStream, {
 		STREAM_COLUMNS,
 		type StreamColumn,
@@ -961,6 +962,13 @@
 						scopeSel = [scope];
 						runAt = Date.now();
 					}}
+				/>
+				<LogActions
+					filter={streamQuery}
+					scopes={effectiveScopes}
+					{span}
+					analytics={mode === 'analytics'}
+					tableQuery={mode === 'analytics' ? tableQueryText : ''}
 				/>
 				<DropdownMenu.Root>
 					<DropdownMenu.Trigger>

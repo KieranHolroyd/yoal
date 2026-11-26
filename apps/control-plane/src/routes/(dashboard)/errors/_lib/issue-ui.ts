@@ -1,9 +1,12 @@
-import type {
-	AppErrorFrameView,
-	AppErrorIssueView,
-	AppErrorLevel,
-	AppErrorStatus,
-	AppErrorTargetView
+import {
+	appErrorLogLink,
+	logExplorerHref,
+	type AppErrorEventView,
+	type AppErrorFrameView,
+	type AppErrorIssueView,
+	type AppErrorLevel,
+	type AppErrorStatus,
+	type AppErrorTargetView
 } from '@yoal/contracts';
 
 /** Presentation rules for the Errors page, kept pure so they are tested without a browser. */
@@ -253,4 +256,23 @@ export function issuesHref(
 	if (over.offset) params.set('offset', String(over.offset));
 	if (over.issue) params.set('issue', over.issue);
 	return `?${params.toString()}`;
+}
+
+/** Tags an SDK or middleware may carry the request id in (`X-Request-Id`, docs/LOGS.md §4.3). */
+const REQUEST_ID_TAGS = ['request_id', 'request.id', 'requestId', 'x-request-id', 'x_request_id'];
+
+/**
+ * The app's lines around one error event (docs/LOGS.md §9.3): the same project ±60 s, or that
+ * request's lines across edge and app when the event carries a request id. Null for standalone
+ * targets, which have no Yoal project to read.
+ */
+export function eventLogsHref(
+	issue: Pick<AppErrorIssueView, 'projectId' | 'projectSlug' | 'targetKind'>,
+	event: Pick<AppErrorEventView, 'at' | 'tags'>
+): string | null {
+	if (issue.targetKind === 'standalone' || !issue.projectSlug) return null;
+	const requestId = REQUEST_ID_TAGS.map((key) => event.tags[key]).find(
+		(value): value is string => typeof value === 'string' && value.trim() !== ''
+	);
+	return logExplorerHref(appErrorLogLink({ projectId: issue.projectId, at: event.at, requestId }));
 }

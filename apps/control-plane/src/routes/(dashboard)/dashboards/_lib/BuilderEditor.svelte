@@ -20,6 +20,7 @@
 	import * as NativeSelect from '#lib/components/ui/native-select/index.js';
 	import { Switch } from '#lib/components/ui/switch/index.js';
 	import FilterRow from './FilterRow.svelte';
+	import LogsBuilderFields from './LogsBuilderFields.svelte';
 	import { AGG_LABELS, aggregationsFor, defaultBuilder, measureOf, metricColumn } from './panel.js';
 	import type { ResolvedRange } from './time.js';
 
@@ -38,6 +39,8 @@
 	} = $props();
 
 	const dataset = $derived(schema?.datasets.find((item) => item.name === builder.dataset));
+	/** The logs dataset filters with a log query instead of filter rows (docs/LOGS.md §9.2). */
+	const isLogs = $derived(builder.dataset === 'logs');
 	const update = (patch: Partial<BuilderSpec>) => onchange({ ...builder, ...patch });
 
 	function setDataset(name: ObservabilityDataset) {
@@ -139,6 +142,14 @@
 		{/if}
 	</div>
 
+	{#if isLogs}
+		<LogsBuilderFields
+			{builder}
+			dimensions={dataset?.dimensions.map((dimension) => dimension.name) ?? []}
+			{onchange}
+		/>
+	{/if}
+
 	<fieldset class="space-y-1.5">
 		<legend class="mb-1.5 text-xs font-medium text-muted-foreground">Metrics</legend>
 		{#each builder.metrics as metric, index (index)}
@@ -220,7 +231,7 @@
 		</div>
 	</fieldset>
 
-	<fieldset class="space-y-1.5">
+	<fieldset class="space-y-1.5 {isLogs ? 'hidden' : ''}">
 		<legend class="mb-1.5 text-xs font-medium text-muted-foreground">Filters</legend>
 		{#each builder.filters as filter, index (index)}
 			<FilterRow
