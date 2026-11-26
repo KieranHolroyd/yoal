@@ -221,7 +221,16 @@ describe('isHighEntropySecret', () => {
 	test('random base64 is secret; ids, hashes and words are not', () => {
 		expect(isHighEntropySecret(FIXED_TOKEN)).toBe(true);
 		let caught = 0;
-		for (let i = 0; i < 200; i++) if (isHighEntropySecret(token43())) caught++;
+		// Seeded, so the share is the same on every run (random bytes made this flaky).
+		let seed = 0x2545f491;
+		const nextByte = () => {
+			seed ^= seed << 13;
+			seed ^= seed >>> 17;
+			seed ^= seed << 5;
+			return (seed >>> 0) & 0xff;
+		};
+		const seededToken = () => Buffer.from(Array.from({ length: 32 }, nextByte)).toString('base64url');
+		for (let i = 0; i < 200; i++) if (isHighEntropySecret(seededToken())) caught++;
 		expect(caught).toBeGreaterThan(190);
 		expect(isHighEntropySecret('550e8400-e29b-41d4-a716-446655440000')).toBe(false);
 		expect(isHighEntropySecret('3f2a9c1d8e7b6a5f4e3d2c1b0a9f8e7d6c5b4a39')).toBe(false);
