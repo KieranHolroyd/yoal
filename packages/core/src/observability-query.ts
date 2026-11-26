@@ -1,3 +1,4 @@
+import { logsDatasetDimensions } from '@yoal/contracts';
 import type {
 	BuilderFilter,
 	BuilderMetric,
@@ -36,7 +37,7 @@ const FIXED_INTERVALS: Record<string, number> = {
 	'1d': 86_400,
 };
 
-type Family = 'traffic' | 'db_metrics' | 'storage_metrics' | 'broker_metrics';
+type Family = 'traffic' | 'db_metrics' | 'storage_metrics' | 'broker_metrics' | 'logs';
 
 interface MeasureDef {
 	name: string;
@@ -53,8 +54,8 @@ interface MeasureDef {
 interface DatasetDef {
 	info: Omit<DatasetInfo, 'measures'>;
 	family: Family;
-	/** The column the caller's scope filters on. */
-	scope: 'project_id' | 'database_id' | 'storage_id' | 'broker_id';
+	/** The column the caller's scope filters on (`logs` uses the caller's log boundary instead). */
+	scope: 'project_id' | 'database_id' | 'storage_id' | 'broker_id' | 'log_boundary';
 	/** Datasets over the top_paths/top_referrers maps: one row per (bucket, key). */
 	mapColumn?: { column: 'top_paths' | 'top_referrers'; key: string };
 	measures: MeasureDef[];
@@ -286,6 +287,28 @@ export const DATASETS: Record<ObservabilityDataset, DatasetDef> = {
 		scope: 'broker_id',
 		measures: brokerMeasures,
 	},
+	logs: {
+		info: {
+			name: 'logs',
+			label: 'Logs',
+			description:
+				'Log lines from every source you can read (docs/LOGS.md §9.2): filter with a log query, count lines or distinct values, group by severity, source, scope, time or any @attribute.',
+			dimensions: logsDatasetDimensions.map((dimension) => ({ ...dimension })),
+			tables: { minute: 'logs', hour: 'logs' },
+		},
+		family: 'logs',
+		scope: 'log_boundary',
+		measures: [
+			{ name: 'count', label: 'Log lines', kind: 'derived', unit: 'short', description: 'Matching lines' },
+			{
+				name: 'count_distinct',
+				label: 'Distinct values',
+				kind: 'derived',
+				unit: 'short',
+				description: 'Distinct values of a field (set "of", e.g. @user.id)',
+			},
+		],
+	},
 };
 
 export function datasetCatalog(): DatasetInfo[] {
@@ -375,6 +398,8 @@ function measureExpression(def: MeasureDef, agg: MetricAggregation, rateSeconds:
 export function compileBuilder(spec: BuilderSpec, ctx: CompileContext): CompiledQuery {
 	const def = DATASETS[spec.dataset];
 	if (!def) throw new ValidationError(`Unknown dataset ${spec.dataset}`);
+	// The logs dataset is a log query (observability-logs.ts), never SQL over the telemetry tables.
+	if (def.family === 'logs') throw new ValidationError('The logs dataset runs through the Logs Explorer, not the metrics compiler.');
 	const dimensions = new Set(def.info.dimensions.map((dimension) => dimension.name));
 	const measures = new Map(def.measures.map((measure) => [measure.name, measure]));
 	if (spec.metrics.length === 0 && spec.groupBy.length === 0) throw new ValidationError('Pick at least one metric or group-by field.');

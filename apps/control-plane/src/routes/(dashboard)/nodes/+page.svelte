@@ -4,7 +4,8 @@
 	import type { NodeView } from '@yoal/core';
 	import type { NodeRole } from '@yoal/contracts';
 	import { NODE_STORAGE_DEFAULTS, compareSemver, parseSemver } from '@yoal/contracts';
-	import { invalidateAll } from '$app/navigation';
+	import { logExplorerHref, nodeLogLink } from '@yoal/contracts';
+	import { goto, invalidateAll } from '$app/navigation';
 	import CircleArrowUpIcon from '@lucide/svelte/icons/circle-arrow-up';
 	import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
@@ -19,6 +20,7 @@
 	import PencilIcon from '@lucide/svelte/icons/pencil';
 	import PlusIcon from '@lucide/svelte/icons/plus';
 	import RefreshCwIcon from '@lucide/svelte/icons/refresh-cw';
+	import ScrollTextIcon from '@lucide/svelte/icons/scroll-text';
 	import ServerIcon from '@lucide/svelte/icons/server';
 	import ShieldAlertIcon from '@lucide/svelte/icons/shield-alert';
 	import SignpostIcon from '@lucide/svelte/icons/signpost';
@@ -397,6 +399,16 @@
 								<DropdownMenu.Item onSelect={() => copy(node.id)}>
 									<CopyIcon />Copy node ID
 								</DropdownMenu.Item>
+								{#if data.canReadPlatformLogs}
+									<!-- The node's own services (agent, helper, Caddy…) in the Logs Explorer (§9.3). -->
+									<DropdownMenu.Item
+										onSelect={() =>
+											// eslint-disable-next-line svelte/no-navigation-without-resolve -- /logs plus its query string
+											goto(logExplorerHref(nodeLogLink({ nodeId: node.id })))}
+									>
+										<ScrollTextIcon />Platform logs
+									</DropdownMenu.Item>
+								{/if}
 								{@const nodeUpdate = updateState(node)}
 								{#if (nodeUpdate.kind === 'available' && nodeUpdate.selfUpdate) || nodeUpdate.kind === 'failed'}
 									<DropdownMenu.Item onSelect={() => updateAgent(node, nodeUpdate.target)}>

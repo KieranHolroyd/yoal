@@ -380,6 +380,7 @@
 		links={data.trafficLinks}
 		projectNames={data.projectNames}
 		variant="overview"
+		logScopes={[]}
 	/>
 
 	<div class="grid items-start gap-5 xl:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)]">

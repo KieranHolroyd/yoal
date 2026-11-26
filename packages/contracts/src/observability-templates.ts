@@ -33,6 +33,7 @@ const DEFAULTS: Record<VizType, { size: PanelSize; height: number }> = {
 	bar: { size: 'half', height: 8 },
 	table: { size: 'half', height: 9 },
 	text: { size: 'full', height: 3 },
+	logs: { size: 'full', height: 10 },
 };
 
 export const panelDraftSchema = z

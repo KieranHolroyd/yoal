@@ -12,10 +12,15 @@ import {
 	draftFromPanel,
 	durationText,
 	fromDisplayThreshold,
+	instanceLogsHref,
 	issueMap,
 	labelLine,
+	logRuleDraft,
+	logRuleFromSearch,
+	logRuleSearch,
 	querySummary,
 	ruleDraft,
+	specOf,
 	splitDuration,
 	toDisplayThreshold,
 	valueUnit
@@ -266,5 +271,61 @@ describe('issues and drafts', () => {
 				panelId: 'p'
 			})
 		).toBeNull();
+	});
+});
+
+describe('log alerts (docs/LOGS.md §9.1)', () => {
+	test('"Create alert" in the Explorer round-trips through the new-rule URL', () => {
+		const search = logRuleSearch({
+			q: 'level:error service:api',
+			scopes: [{ kind: 'project', id: 'prj_1' }],
+			windowSeconds: 900
+		});
+		const draft = logRuleFromSearch(new URLSearchParams(search))!;
+		expect(draft.kind).toBe('log_count');
+		expect(draft.windowSeconds).toBe(900);
+		expect(draft.query.mode === 'builder' && draft.query.builder.logs).toEqual({
+			q: 'level:error service:api',
+			scopes: [{ kind: 'project', id: 'prj_1' }]
+		});
+		expect(alertRuleInputSchema.safeParse(draft).success).toBe(true);
+		expect(logRuleFromSearch(new URLSearchParams('template=site_down'))).toBeNull();
+		const pattern = logRuleFromSearch(new URLSearchParams('kind=log_pattern_new&window=5'))!;
+		expect([pattern.kind, pattern.windowSeconds, pattern.condition.op, pattern.pattern]).toEqual([
+			'log_pattern_new',
+			60,
+			'gte',
+			{ afterDeployMinutes: null, lookbackDays: 7 }
+		]);
+	});
+
+	test('summaries and fire-time links for log rules; specOf keeps pattern options', () => {
+		const rule = logRuleDraft({ q: 'level:error', scopes: [{ kind: 'project', id: 'prj_1' }] });
+		expect(querySummary({ ...rule, condition: { op: 'gt', threshold: 50 } })).toBe(
+			'Log lines · “level:error” in 1 scope · > 50'
+		);
+		const since = '2026-11-26T12:00:00.000Z';
+		const firing = {
+			labels: {},
+			state: 'firing' as const,
+			since,
+			activeSince: since,
+			lastEvaluatedAt: since
+		};
+		const href = new URL(instanceLogsHref(rule, firing)!, 'https://x.test');
+		expect(href.pathname).toBe('/logs');
+		expect(href.searchParams.get('q')).toBe('level:error');
+		expect(Date.parse(href.searchParams.get('from')!)).toBe(Date.parse(since) - 300_000);
+		expect(href.searchParams.get('to')).toBe('now');
+		const grouped = new URL(
+			instanceLogsHref(rule, { ...firing, state: 'normal', labels: { service: 'my api' } })!,
+			'https://x.test'
+		);
+		expect(grouped.searchParams.get('q')).toBe('level:error service:"my api"');
+		expect(grouped.searchParams.get('to')).toBe(since);
+		expect(instanceLogsHref(DEFAULT_RULE, firing)).toBeNull();
+		const pattern = logRuleDraft({ kind: 'log_pattern_new' });
+		expect(specOf(pattern).pattern).toEqual({ afterDeployMinutes: null, lookbackDays: 7 });
+		expect('pattern' in specOf(DEFAULT_RULE)).toBe(false);
 	});
 });

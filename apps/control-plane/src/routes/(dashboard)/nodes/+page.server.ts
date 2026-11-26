@@ -1,6 +1,7 @@
 import { fail } from '@sveltejs/kit';
 import type { NodeView } from '@yoal/core';
 import type { DiskView, NodeCapacityView, NodeRole, NodeRolloutView } from '@yoal/contracts';
+import { canViewPlatform } from '@yoal/contracts';
 import { core } from '#lib/server/core.js';
 import { rolloutActions } from './_rollout.server.js';
 import {
@@ -60,6 +61,8 @@ export const load: PageServerLoad = ({ locals }) => {
 		rolloutDefaults: core.cluster.get().updates,
 		/** Starting, resuming and cancelling need `platform:updates` from a dashboard session. */
 		canUpdateFleet: !denied && core.ctx.platformIam.allows(principal, 'platform:updates'),
+		/** A node's own services' logs are `platform` scopes: platform admins only (docs/LOGS.md §10.5). */
+		canReadPlatformLogs: !denied && canViewPlatform(principal) && principal.permissions.has('logs:read'),
 		/** The node region field shows only while YOAL_FEATURE_REGIONS is on (HA-PLAN H26). */
 		regionsEnabled: core.regions.enabled()
 	};

@@ -1,5 +1,7 @@
 <script lang="ts">
 	import type { TrafficReport } from '@yoal/core';
+	import { logExplorerHref, trafficErrorsLogLink, type LogScopeRef } from '@yoal/contracts';
+	import ScrollTextIcon from '@lucide/svelte/icons/scroll-text';
 	import ArrowUpRightIcon from '@lucide/svelte/icons/arrow-up-right';
 	import ChartNoAxesCombinedIcon from '@lucide/svelte/icons/chart-no-axes-combined';
 	import GlobeIcon from '@lucide/svelte/icons/globe';
@@ -33,7 +35,8 @@
 		ranges,
 		links,
 		projectNames = {},
-		variant = 'project'
+		variant = 'project',
+		logScopes
 	}: {
 		traffic: {
 			permitted: boolean;
@@ -55,6 +58,11 @@
 		links: Record<string, string>;
 		projectNames?: Record<string, ProjectRef>;
 		variant?: 'project' | 'overview';
+		/**
+		 * Scopes for the "5xx logs" pivot (docs/LOGS.md §9.3): the edge access lines that were
+		 * server errors over this range. `[]` is every scope the viewer can read; absent hides it.
+		 */
+		logScopes?: LogScopeRef[];
 	} = $props();
 
 	const numberFormat = new Intl.NumberFormat('en-GB');
@@ -76,6 +84,18 @@
 		}).format(new Date(Date.parse(range.to) + 60_000))} UTC`
 	);
 	const errorRate = $derived(totals.requests > 0 ? (totals.status5xx / totals.requests) * 100 : 0);
+	const errorLogs = $derived(
+		logScopes
+			? logExplorerHref(
+					trafficErrorsLogLink({
+						scopes: logScopes,
+						from: Date.parse(range.from),
+						// `to` is the last bucket's start: include that whole minute.
+						to: Date.parse(range.to) + 60_000
+					})
+				)
+			: null
+	);
 
 	const statuses = $derived([
 		{ label: '2xx', value: totals.status2xx, tone: 'bg-success' },
@@ -218,6 +238,17 @@
 				: 'hour'} · {numberFormat.format(totals.requests)} total · up to {lastReported}"
 			icon={ChartNoAxesCombinedIcon}
 		>
+			{#snippet actions()}
+				{#if errorLogs && totals.status5xx > 0}
+					<Button
+						variant="outline"
+						size="sm"
+						href={errorLogs}
+						title="Edge access lines that returned 5xx in this range, in the Logs Explorer"
+						><ScrollTextIcon />5xx logs</Button
+					>
+				{/if}
+			{/snippet}
 			<TrafficChart series={report.series} interval={range.interval} gaps={traffic.gaps ?? []} />
 		</Panel>
 

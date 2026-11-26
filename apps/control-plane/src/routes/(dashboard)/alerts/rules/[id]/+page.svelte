@@ -4,7 +4,13 @@
 	 * series (with acknowledge and silence), the rule's settings and its history. `?edit=1` swaps
 	 * the body for the rule editor.
 	 */
-	import type { AlertInstanceView, AlertRuleSpec, AlertRuleView } from '@yoal/contracts';
+	import {
+		isLogAlertKind,
+		logAlertExplorerHref,
+		type AlertInstanceView,
+		type AlertRuleSpec,
+		type AlertRuleView
+	} from '@yoal/contracts';
 	import { createQuery, useQueryClient } from '@tanstack/svelte-query';
 	import { goto } from '$app/navigation';
 	import { resolve } from '$app/paths';
@@ -13,6 +19,7 @@
 	import BellOffIcon from '@lucide/svelte/icons/bell-off';
 	import LayoutDashboardIcon from '@lucide/svelte/icons/layout-dashboard';
 	import PencilIcon from '@lucide/svelte/icons/pencil';
+	import ScrollTextIcon from '@lucide/svelte/icons/scroll-text';
 	import Notice from '#lib/components/yoal/Notice.svelte';
 	import { Badge } from '#lib/components/ui/badge/index.js';
 	import { Button } from '#lib/components/ui/button/index.js';
@@ -38,6 +45,7 @@
 		durationText,
 		labelLine,
 		matchersFor,
+		instanceLogsHref,
 		querySummary,
 		specOf,
 		STATE_RANK,
@@ -191,6 +199,14 @@
 					>
 				</div>
 			{/snippet}
+			{#if isLogAlertKind(rule.kind)}
+				<Button
+					variant="outline"
+					href={logAlertExplorerHref(rule, { from: now - rule.windowSeconds * 1000, to: null })}
+					title="This rule's log query and scopes over its window, in the Logs Explorer"
+					><ScrollTextIcon />View logs</Button
+				>
+			{/if}
 			{#if overview?.canSilence}
 				<Button variant="outline" onclick={() => silence(null)}><BellOffIcon />Silence</Button>
 			{/if}
@@ -215,7 +231,8 @@
 			>
 		{/if}
 
-		<Card.Root>
+		<!-- A new-pattern rule has no single value over time to chart; its series are the patterns. -->
+		<Card.Root class={rule.kind === 'log_pattern_new' ? 'hidden' : ''}>
 			<Card.Header>
 				<Card.Title class="flex items-center gap-2 text-sm"
 					><ActivityIcon class="size-4 text-brand" />Last 6 hours</Card.Title
@@ -261,6 +278,7 @@
 							onsilence={silence}
 							showRule={false}
 							label="Series of {rule.name}"
+							logsOf={(row) => instanceLogsHref(rule!, row)}
 						/>
 					</Card.Root>
 				{/if}

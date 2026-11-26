@@ -43,6 +43,7 @@
 	import { ruleActions } from './_lib/rule-actions.js';
 	import RuleMenuItems from './_lib/RuleMenuItems.svelte';
 	import {
+		instanceLogsHref,
 		matchersFor,
 		labelLine,
 		querySummary,
@@ -421,6 +422,10 @@
 						{unitOf}
 						onsilence={silence}
 						label="Active alerts"
+						logsOf={(row) => {
+							const owner = rules.find((item) => item.id === row.ruleId);
+							return owner ? instanceLogsHref(owner, row) : null;
+						}}
 					/>
 				</Card.Root>
 			{/if}

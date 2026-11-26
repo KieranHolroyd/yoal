@@ -349,6 +349,7 @@
 							ranges={data.trafficRanges}
 							links={data.trafficLinks}
 							variant="project"
+							logScopes={[{ kind: 'project', id: fn.id }]}
 						/>
 					{:else}
 						<Card.Root>

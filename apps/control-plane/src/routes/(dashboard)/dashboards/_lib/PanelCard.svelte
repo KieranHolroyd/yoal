@@ -4,11 +4,12 @@
 	 * visualisation. In edit mode the header is the drag handle (`data-drag-handle`) the grid
 	 * listens for.
 	 */
-	import type {
-		DashboardPanel,
-		ObservabilitySchema,
-		QueryResult,
-		QueryVariables
+	import {
+		logsBuilderOf,
+		type DashboardPanel,
+		type ObservabilitySchema,
+		type QueryResult,
+		type QueryVariables
 	} from '@yoal/contracts';
 	import BellPlusIcon from '@lucide/svelte/icons/bell-plus';
 	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
@@ -36,6 +37,7 @@
 	import type { Names } from './series.js';
 	import type { ResolvedRange } from './time.js';
 	import { interpolate } from './variables.js';
+	import LogsViz from './viz/LogsViz.svelte';
 	import PanelViz from './viz/PanelViz.svelte';
 
 	let {
@@ -74,12 +76,16 @@
 
 	let width = $state(0);
 	const isText = $derived(panel.viz === 'text');
+	/** A Logs panel reads its own lines (docs/LOGS.md §9.2); it runs no metrics query. */
+	const isLogs = $derived(panel.viz === 'logs');
+	/** The logs dataset works without the telemetry store (lite mode). */
+	const logsDataset = $derived(logsBuilderOf(panel.query) !== null);
 	const data = createPanelQuery(() => ({
 		query: panel.query,
 		range,
 		width,
 		variables,
-		enabled: !isText
+		enabled: !isText && !isLogs
 	}));
 
 	const result = $derived(data.data as QueryResult | undefined);
@@ -176,7 +182,7 @@
 			</Tooltip.Root>
 		{/if}
 		<span class="ml-auto flex shrink-0 items-center gap-0.5">
-			{#if data.isFetching && !isText}
+			{#if data.isFetching && !isText && !isLogs}
 				<Spinner class="size-3 text-muted-foreground" aria-label="Loading" />
 			{/if}
 			<DropdownMenu.Root>
@@ -201,7 +207,7 @@
 					{#if canEdit && onedit}
 						<DropdownMenu.Item onSelect={onedit}><PencilIcon />Edit</DropdownMenu.Item>
 					{/if}
-					{#if !isText && oninspect}
+					{#if !isText && !isLogs && oninspect}
 						<DropdownMenu.Item onSelect={() => oninspect?.(result, error)}>
 							<SearchCodeIcon />Inspect
 						</DropdownMenu.Item>
@@ -230,7 +236,9 @@
 	<div class="relative min-h-0 flex-1 px-2 pb-2 {fill ? 'min-h-[50vh]' : ''}">
 		{#if isText}
 			<PanelViz {panel} {range} {text} {names} />
-		{:else if schema?.installed === false}
+		{:else if isLogs}
+			<LogsViz query={panel.query} {range} />
+		{:else if schema?.installed === false && !logsDataset}
 			<p class="grid size-full place-items-center px-3 text-center text-xs text-muted-foreground">
 				Telemetry is not installed, so there is no data to show.
 			</p>

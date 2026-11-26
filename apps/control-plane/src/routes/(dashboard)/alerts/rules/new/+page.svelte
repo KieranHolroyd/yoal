@@ -2,7 +2,8 @@
 	/**
 	 * A new alert rule: blank, `?template=<id>` (an outage preset), `?duplicate=<rule id>`, or
 	 * `?draft=1` (a draft handed over in session storage, e.g. "Create alert…" on a dashboard
-	 * panel).
+	 * panel), or `?kind=log_count&q=…&scope=…&window=…` ("Create alert" in the Logs Explorer,
+	 * docs/LOGS.md §9.1).
 	 */
 	import { alertRuleTemplate, type AlertRuleInput, type AlertRuleView } from '@yoal/contracts';
 	import { createQuery, useQueryClient } from '@tanstack/svelte-query';
@@ -18,12 +19,13 @@
 	import AlertsNotices from '../../_lib/AlertsNotices.svelte';
 	import { getOverview, getRule, keys } from '../../_lib/api.js';
 	import RuleEditor from '../../_lib/RuleEditor.svelte';
-	import { DRAFT_KEY, ruleDraft, specOf } from '../../_lib/rules.js';
+	import { DRAFT_KEY, logRuleFromSearch, ruleDraft, specOf } from '../../_lib/rules.js';
 
 	const queryClient = useQueryClient();
 	const params = page.url.searchParams;
 	const template = alertRuleTemplate(params.get('template') ?? '');
 	const duplicateId = params.get('duplicate');
+	const logDraft = logRuleFromSearch(params);
 
 	/** A draft from a dashboard panel, read once. */
 	function readDraft(): AlertRuleInput | null {
@@ -61,6 +63,7 @@
 			return ruleDraft({ ...spec, name: `${spec.name} (copy)`.slice(0, 120) });
 		}
 		if (template) return ruleDraft(template.rule);
+		if (logDraft) return logDraft;
 		if (draft) return ruleDraft(draft);
 		return ruleDraft(undefined);
 	});
@@ -72,13 +75,17 @@
 				? `New rule: ${template.title}`
 				: draft
 					? 'New alert from a panel'
-					: 'New alert rule'
+					: logDraft
+						? 'New log alert'
+						: 'New alert rule'
 	);
 	const description = $derived(
 		template?.description ??
 			(draft
 				? 'Prefilled from the panel’s query, its first metric and the dashboard’s current variable values. Set a threshold and save.'
-				: 'A rule checks one metric per series on a schedule and notifies your channels when it crosses a threshold.')
+				: logDraft
+					? 'Prefilled from the Logs Explorer: its query, scopes and time window. Set a threshold and save.'
+					: 'A rule checks one metric per series on a schedule and notifies your channels when it crosses a threshold.')
 	);
 
 	function saved(rule: AlertRuleView) {

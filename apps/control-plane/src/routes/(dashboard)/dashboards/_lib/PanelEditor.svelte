@@ -4,13 +4,15 @@
 	 * under it, options on the right. Edits stay local until Apply (Esc also applies); the
 	 * dashboard is only saved by its own Save button.
 	 */
-	import type {
-		DashboardPanel,
-		ObservabilitySchema,
-		PanelQuery,
-		QueryResult,
-		QueryVariables,
-		VizType
+	import {
+		logAlertQuery,
+		logsBuilderOf,
+		type DashboardPanel,
+		type ObservabilitySchema,
+		type PanelQuery,
+		type QueryResult,
+		type QueryVariables,
+		type VizType
 	} from '@yoal/contracts';
 	import CircleAlertIcon from '@lucide/svelte/icons/circle-alert';
 	import TriangleAlertIcon from '@lucide/svelte/icons/triangle-alert';
@@ -36,6 +38,7 @@
 	import { formatInterval, type ResolvedRange } from './time.js';
 	import { UNITS } from './units.js';
 	import { interpolate } from './variables.js';
+	import LogsViz from './viz/LogsViz.svelte';
 	import PanelViz from './viz/PanelViz.svelte';
 
 	let {
@@ -85,7 +88,7 @@
 		range,
 		width: previewWidth,
 		variables,
-		enabled: draft.viz !== 'text'
+		enabled: draft.viz !== 'text' && draft.viz !== 'logs'
 	}));
 	const result = $derived(data.data as QueryResult | undefined);
 	const error = $derived(data.error ? errorText(data.error, 'The query failed.') : null);
@@ -108,7 +111,11 @@
 
 	function setViz(viz: VizType) {
 		draft.viz = viz;
-		if (viz !== 'text' && !draft.query) {
+		if (viz === 'logs' && !logsBuilderOf(draft.query)) {
+			// A Logs panel shows a log query's lines: start it on the logs dataset (docs/LOGS.md §9.2).
+			draft.query = logAlertQuery();
+			ran = clone(draft.query);
+		} else if (viz !== 'text' && !draft.query) {
 			draft.query = { mode: 'builder', builder: defaultBuilder(schema?.datasets[0]) };
 			ran = clone(draft.query);
 		}
@@ -200,7 +207,9 @@
 									{range}
 									text={interpolate(String(draft.options?.text ?? ''), variables)}
 								/>
-							{:else if schema?.installed === false}
+							{:else if draft.viz === 'logs'}
+								<LogsViz query={ran} {range} />
+							{:else if schema?.installed === false && !logsBuilderOf(ran)}
 								<p
 									class="grid size-full place-items-center px-3 text-center text-xs text-muted-foreground"
 								>
