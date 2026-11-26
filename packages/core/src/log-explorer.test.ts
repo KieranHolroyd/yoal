@@ -4,11 +4,12 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createDb } from '@yoal/db';
-import { nodeLogBatchSchema, type LogSearchResult } from '@yoal/contracts';
+import { LOG_TAIL_MAX_LIFETIME_MS, LOG_TAIL_MAX_PER_PRINCIPAL, nodeLogBatchSchema, type LogSearchResult } from '@yoal/contracts';
 import { buildPrincipal } from './orgs.ts';
 import { createCore, type Core } from './index.ts';
 import { LocalObjectStore } from './object-store.ts';
 import { CoreError } from './errors.ts';
+import { ClickHouseError, ClickHouseUnavailableError } from './clickhouse.ts';
 import { LOG_TAIL_CATCH_UP_LIMIT } from './log-explorer.ts';
 import { LogStoreUnsupported, type LogStore } from './log-store/types.ts';
 
@@ -237,12 +238,47 @@ describe('store selection', () => {
 		}, false);
 		expect((await core.logExplorer.search(otherOrg, recent())).engine).toBe('sqlite');
 		hooks.logStoreClickhouse = fakeStore(async () => {
-			throw new Error('ClickHouse down');
+			throw new ClickHouseUnavailableError('ClickHouse at http://ch is unreachable: ECONNREFUSED');
 		});
 		const fallback = await core.logExplorer.search(otherOrg, recent());
 		expect(fallback.engine).toBe('sqlite');
 		expect(bodies(fallback)).toEqual(['org2 secret timeout']);
 		expect(fallback.warnings.map((warning) => warning.code)).toContain('partial');
+	});
+
+	test('lite-mode reads never reach back past the hot tail, and say so', async () => {
+		delete hooks.logStoreClickhouse;
+		const month = await core.logExplorer.search(otherOrg, { from: clock - 30 * 86_400_000, to: clock + 1 });
+		expect(month.engine).toBe('sqlite');
+		expect(bodies(month)).toEqual(['org2 secret timeout']);
+		expect(month.warnings).toContainEqual(expect.objectContaining({ code: 'partial', message: expect.stringContaining('Lite mode keeps 7 days') }));
+		expect((await core.logExplorer.search(otherOrg, recent())).warnings).toEqual([]);
+	});
+
+	test('a query ClickHouse stopped (timeout, limits) or refused is not rerun on SQLite', async () => {
+		let sqliteReads = 0;
+		const original = core.logExplorer.sqliteStore.search.bind(core.logExplorer.sqliteStore);
+		core.logExplorer.sqliteStore.search = async (...args) => {
+			sqliteReads += 1;
+			return original(...args);
+		};
+		try {
+			hooks.logStoreClickhouse = fakeStore(async () => {
+				throw new ClickHouseError('The query took longer than 30 s and was stopped.', 159, 408);
+			});
+			await expect(core.logExplorer.search(otherOrg, recent())).rejects.toMatchObject({ status: 422, code: 'query_failed' });
+			hooks.logStoreClickhouse = fakeStore(async () => {
+				throw new ClickHouseError('Memory limit (for query) exceeded', 241, 500);
+			});
+			await expect(core.logExplorer.search(otherOrg, recent())).rejects.toMatchObject({ status: 503 });
+			hooks.logStoreClickhouse = fakeStore(async () => {
+				throw new Error('a bug');
+			});
+			await expect(core.logExplorer.search(otherOrg, recent())).rejects.toThrow('a bug');
+			expect(sqliteReads).toBe(0);
+		} finally {
+			core.logExplorer.sqliteStore.search = original;
+		}
 	});
 
 	test('an async healthy() is awaited: an unreachable ClickHouse is lite mode, not a failed read', async () => {
@@ -383,6 +419,44 @@ describe('live tail', () => {
 			expect(second.initial.records.at(-1)!.body).toBe(`flood ${LOG_TAIL_CATCH_UP_LIMIT + 2}`);
 		} finally {
 			second.close();
+		}
+	});
+
+	test('a principal holds at most 20 tails, and each ends after its lifetime', async () => {
+		const sessions = Array.from({ length: LOG_TAIL_MAX_PER_PRINCIPAL }, () => core.logExplorer.openTail(viewer, { q: 'limits' }));
+		try {
+			expect(() => core.logExplorer.openTail(viewer, { q: 'limits' })).toThrow(expect.objectContaining({ status: 429 }));
+			// Someone else in the org is not held back by it.
+			core.logExplorer.openTail(owner, { q: 'limits' }).close();
+			const first = sessions[0]!;
+			expect(first.expiresAt).toBe(clock + LOG_TAIL_MAX_LIFETIME_MS);
+			expect((await first.next(0)).ended).toBeUndefined();
+			clock += LOG_TAIL_MAX_LIFETIME_MS;
+			expect((await first.next(60_000)).ended).toBe('max_lifetime');
+		} finally {
+			for (const session of sessions) session.close();
+		}
+		expect(() => core.logExplorer.openTail(viewer, { q: 'limits' }).close()).not.toThrow();
+	});
+
+	test('a zero or out-of-range resume seq never replays (or counts) the whole table', () => {
+		const insert = opened.sqlite.prepare(
+			`INSERT INTO log_events (org_id, project_id, source, stream, level, message, ts) VALUES ('org_1', ?, 'system', 'system', 'info', ?, ?)`,
+		);
+		opened.sqlite.transaction(() => {
+			for (let index = 0; index < LOG_TAIL_CATCH_UP_LIMIT + 500; index += 1) insert.run(ids.api!, `forged ${index}`, clock + index);
+		})();
+		const forged = (vector: Record<string, number>) => `t.${Buffer.from(JSON.stringify(vector)).toString('base64url')}`;
+		for (const lastEventId of [forged({ le: 0 }), forged({ le: 9_000_000_000 })]) {
+			const session = core.logExplorer.openTail(owner, { q: 'forged', lastEventId });
+			try {
+				// Resumes LOG_TAIL_CATCH_UP_LIMIT rows before the newest: the newest lines, nothing counted past them.
+				expect(session.initial.records.length).toBe(LOG_TAIL_CATCH_UP_LIMIT);
+				expect(session.initial.dropped).toBe(0);
+				expect(session.initial.records.at(-1)!.body).toBe(`forged ${LOG_TAIL_CATCH_UP_LIMIT + 499}`);
+			} finally {
+				session.close();
+			}
 		}
 	});
 

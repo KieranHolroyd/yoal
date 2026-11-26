@@ -158,7 +158,12 @@ a later migration (§15.5); it has not been done.
 The write path stays where it was. SQLite holds a short window: 3 days by default when the search index is installed,
 and 7 without it (per org, 1–14 days, D251). It serves live tail, context lookups and drains, and is what lite mode
 searches. The global 500,000-row cap is gone: each scope keeps at most 100,000 newest rows per table
-(`LOG_SCOPE_ROW_CAP`, D251). Kubernetes and pipeline lines keep their own fixed retention.
+(`LOG_SCOPE_ROW_CAP`, D251). Kubernetes and pipeline lines keep their own fixed retention. A lite-mode read never
+reaches back past the org's hot days on the hot-tail tables (the read starts at `now - hotDays`, with a `partial`
+warning saying so), and `fields` summarises the built-ins in one GROUP BY scan. A ClickHouse read that fails falls
+back to SQLite only when ClickHouse is unreachable; a query it stopped or refused (timeout, memory or row limits) is
+an error, not a heavier rerun on the control plane. Every ingest path stores a record's `ts` at most 5 minutes
+ahead of the control plane's clock (`capLogTs`), so a skewed node cannot pin lines above every real one.
 
 **Concern (open).** Log rows sit in the platform state database, which Litestream streams. At high volume that
 streaming replicates disposable data and competes with state writes. Spike S2 was meant to measure this and has not
@@ -238,6 +243,12 @@ before the read. A subscriber that falls more than 2,000 lines behind gets a "sa
 like CloudWatch Live Tail. The bus is per control-plane process, which is correct with one active control plane.
 The standby (CLUSTERING §6) starts with an empty bus and clients reconnect. There is no MCP tail.
 
+Every subscriber's predicate runs on the ingest path, so tails are limited: at most 20 open per principal and 200
+per org (`LOG_TAIL_MAX_PER_PRINCIPAL`, `LOG_TAIL_MAX_PER_ORG`); opening one more is a 429 `too_many_tails`. A stream
+ends after 6 hours with `end` `{ code: 'max_lifetime' }`, and the Explorer and `yoal logs -f` reconnect silently
+from their cursor, which runs authorisation again. A reconnect whose resume seq is zero, ahead of the newest row or
+more than 50,000 rows behind resumes 2,000 rows before the newest instead of replaying the table.
+
 ---
 
 ## 5. Sources
@@ -268,7 +279,10 @@ or the managed overlay and otherwise using `{http.request.uuid}`, and echoes it 
 log the header join the request. Every non-2xx/3xx response is shipped, and 2xx/3xx at the route's
 `accessLogSampleRate` (default 10%, deterministic per request id; set in log settings, D251). Records post per host
 with the sampled-out count as `dropped`, and a host no project serves lands in the node's `edge` scope under the
-sentinel org. Aggregates are still computed from 100% of lines, so traffic charts stay exact.
+sentinel org. Only a node that serves the host may post its lines: a node in the ingress set (every site), or a
+worker holding the project's workload, spread copy or mid-move copy, or the project pinned to it, the same rule the
+desired state uses for routes. Any other node gets a 403 and nothing is stored or counted. Aggregates are still
+computed from 100% of lines, so traffic charts stay exact.
 
 **OTLP logs (D249).** The agent listens on loopback (`127.0.0.1:8085`, the same listener as the `/tail` sink) for
 OTLP/HTTP logs in JSON (gzip accepted). Protobuf is a 415 until spike S4. Process, container and compose apps get
@@ -313,6 +327,16 @@ A bare word of letters and digits matches a whole token: body tokens are the run
 not letters or digits, so `timeout` matches `upstream-Timeout:` but not `timeouts` or `UpstreamTimeout`. Anything
 else, a quoted phrase or a word such as `user@example.com`, is a case-insensitive substring. The top comment of
 `packages/contracts/src/log-query.ts` is the full semantic reference every engine follows.
+
+**Regex limits.** Search runs regexes in ClickHouse (RE2, linear), but the same regex also runs in backtracking
+JavaScript for live tail, rule previews and ingest rules, on the ingest path. So the parser accepts only a safe subset
+(`checkRegexSafety` in `packages/contracts/src/log-regex.ts`, shared with redact rules): at most 512 characters; no
+lookaround or backreferences; no `|` or quantifier inside a repeated or optional group (`(a+)+`, `(a|aa)*`,
+`(\.\d+)?`); at most 2 unbounded repeats (`*`, `+`, `{n,}`); and a static worst-case cost check that refuses
+neighbouring repeats that can overlap, such as `.*x.*y` or `\w+\w+` (a repeat followed by a required character it
+cannot match, like `\d+ms` or `[^"]*"`, is fine). Common patterns such as `time(out|d out)`, `\d{3}ms`, `user=\w+`,
+`^GET .* 500$` and `[a-f0-9]{8}` pass. JavaScript tests only the first 2 KiB of each value, while ClickHouse sees all
+of it, so a match past 2 KiB shows in search but not in live tail or rules.
 
 ### 6.2 Pipe stages (ClickHouse)
 
@@ -507,8 +531,9 @@ are edited in **Settings → Logs** or `/api/v1/logs/settings`.
 | Search | ClickHouse `yoal.logs` | 14 days | 1–90 days, per org, and per project |
 | Archive | Parquet in the object store, hourly files per org per day | off | 30–400 days (90 when turned on) |
 
-The hot tail is pruned by the maintenance sweep: rows past the org's hot days, then each scope's rows past 100,000
-per table. Search retention is a daily lightweight `DELETE` per org (and per project with a shorter window); the
+The hot tail is pruned by the maintenance sweep: rows past the org's hot days on every sweep, then each scope's rows
+past 100,000 per table at most every 15 minutes. The cap pass only visits scopes whose `log_ingest_daily` lines over
+the hot window exceed the cap, plus a full GROUP BY at most once a day for rows written without counting. Search retention is a daily lightweight `DELETE` per org (and per project with a shorter window); the
 table's 90-day TTL is a backstop. The archive writes yesterday's `yoal.logs` rows as zstd Parquet, one file per hour
 with rows (`logs-archive/<org>/<YYYY-MM-DD>/<HH>.parquet`), through the telemetry store's Parquet export, and
 records each day in `log_archive_days` (migration 0143). **Rehydrate on query**: when a search reaches past the search
@@ -516,7 +541,11 @@ window, the answer carries an `archive` warning with an estimate (`POST /api/v1/
 seconds), and the archived part runs only when the request says `archive: true`. It is the same compiled search over
 the files instead of `yoal.logs`, read with ClickHouse's `url()` table function over 15-minute presigned GET URLs
 (not `s3()`, which would put the bucket's keys in `system.query_log`), with a 20 GiB scan budget; an estimate over
-the budget is refused. Platform logs follow the platform row.
+the budget is refused. The rehydrate query runs as the writer user, because `url()` needs a grant that `yoal_reader`
+must not have: the reader runs the platform SQL tab (D101), and a URL grant there would let that SQL fetch any
+address the ClickHouse host reaches. Each rehydrate query instead carries `readonly = 2` (reads only;
+`readonly = 1` also forbids table functions) and explicit `max_execution_time`, `max_bytes_to_read`,
+`max_memory_usage` (256 MiB), `max_threads` and `max_result_rows` caps. Platform logs follow the platform row.
 
 ### 10.2 Quotas (QUOTAS.md)
 
@@ -525,7 +554,9 @@ budget of **5,120 MB**, and per scope a 100,000-row cap per table in the hot tai
 500,000-row cap. An org or project may only lower the platform values. The rate is an in-memory token bucket; the
 daily total is seeded from `log_ingest_daily` so a restart does not reset it. Over-quota lines are dropped at ingest
 and counted in `log_drop_counts`, and one `system` record per minute per scope says how many lines were dropped and
-why. **Settings → Usage** shows log GB/day per project, for showback (`/api/v1/logs/usage`).
+why. Edge `access` lines have their own bucket and daily total per scope (`access:<kind>:<id>`) with the same
+limits, because outsiders choose how many 4xx lines a site logs: a flood cannot spend the project's runtime-log
+quota. Showback stays one row per scope. **Settings → Usage** shows log GB/day per project, for showback (`/api/v1/logs/usage`).
 `YOAL_FEATURE_QUOTAS=0` stops enforcement; counting continues.
 
 ### 10.3 Exclusion and sampling
@@ -551,9 +582,13 @@ Redaction runs at ingest, before SQLite, drains and the indexer, on every append
   with `user:password@`, `Authorization`/`Cookie`/`Set-Cookie` values, `Bearer` credentials, credential-named keys
   (`password=`, `token=`, `api_key=`…), and long high-entropy strings in `key=` positions. UUIDs, git SHAs and
   content hashes pass through.
-- Org `redact` rules (regex), with the rule preview.
+- Org `redact` rules (regex), with the rule preview. A rule must be in the same safe regex subset as queries
+  (§6.1), and is applied to the first 2 KiB of a line; the known-secret matcher and the built-in detectors cover
+  the whole line.
 
-Each match becomes `[REDACTED:<kind>]`. S5 measured 1.25 µs a line at p50 with 50 secrets (§12).
+Each match becomes `[REDACTED:<kind>]`. S5 measured 1.25 µs a line at p50 with 50 secrets (§12). The
+credential-key detector bounds its key prefix to 64 characters, so an adversarial 16 KiB line (`a_a_a…token`) costs
+about 1.5 ms rather than 180 ms.
 
 ### 10.5 Access
 

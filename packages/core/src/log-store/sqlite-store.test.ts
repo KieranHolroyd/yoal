@@ -6,6 +6,7 @@ import {
 	decodeTailCursor,
 	encodeLogCursor,
 	encodeTailCursor,
+	boundedTailResume,
 	InvalidLogCursorError,
 	lookupLogScopeNames,
 	pickHistogramInterval,
@@ -208,5 +209,51 @@ describe('SqliteLogStore live-tail helpers', () => {
 			{ kind: 'edge', id: 'x' },
 		]);
 		expect(Object.fromEntries(names)).toEqual({ 'project:prj_a': 'api', 'database:db_1': 'main-db', 'platform:node_2': 'edge-b' });
+	});
+});
+
+describe('lite-mode scan bounds', () => {
+	test('reads on the hot-tail tables start no earlier than the hot window, with a warning', async () => {
+		// The clock sits 5 s after the fixtures start; a 3 s window keeps T0+2 s onwards.
+		const clamped = new SqliteLogStore(sqlite, undefined, { now: () => T0 + 5_000, hotWindowMs: () => 3_000 });
+		const result = await clamped.search(read(org1), { limit: 50, order: 'desc' });
+		// The pipeline line (own retention) is never clamped; hot-tail rows before T0+2 s are.
+		expect(result.records.map((record) => record.id)).toEqual(['le:5', 'lr:2', 'le:4', 'pll:1', 'le:3', 'sle:1', 'le:2']);
+		expect(result.warnings).toEqual([expect.objectContaining({ code: 'partial' })]);
+		expect((await clamped.histogram(read(org1), { buckets: 10 })).total).toBe(7);
+		expect((await clamped.fields(read(org1), { fields: ['level'], topValues: 10 })).total).toBe(7);
+		// A read already inside the window is untouched and unwarned.
+		const inside = await clamped.search({ ...read(org1), from: T0 + 3_000 }, { limit: 50, order: 'desc' });
+		expect(inside.warnings).toEqual([]);
+	});
+
+	test('fields summarises every built-in in one scan', async () => {
+		const prepared: string[] = [];
+		const spy = new Proxy(sqlite, {
+			get(target, key) {
+				if (key === 'prepare')
+					return (sql: string) => {
+						prepared.push(sql);
+						return target.prepare(sql);
+					};
+				const value = Reflect.get(target, key, target);
+				return typeof value === 'function' ? value.bind(target) : value;
+			},
+		});
+		const counted = new SqliteLogStore(spy);
+		const result = await counted.fields(read(org1), { topValues: 10 });
+		expect(result.total).toBe(8);
+		expect(result.fields.find((field) => field.name === 'level')?.topValues[0]).toEqual({ value: 'info', count: 3 });
+		expect(result.fields.find((field) => field.name === 'service')?.topValues[0]).toEqual({ value: 'api', count: 5 });
+		// One GROUP BY over the union, plus the scope-name lookups for `service`.
+		expect(prepared.filter((sql) => sql.includes('UNION ALL'))).toHaveLength(1);
+	});
+
+	test('a zero, future or far-behind resume seq replays only the newest rows', () => {
+		const vector = { le: 100_000, lr: 10 };
+		expect(boundedTailResume({ le: 99_000, lr: 4 }, vector, 2_000)).toEqual({ le: 99_000, lr: 4 });
+		expect(boundedTailResume({ le: 0, lr: 11 }, vector, 2_000)).toEqual({ le: 98_000, lr: 0 });
+		expect(boundedTailResume({ le: 1 }, vector, 2_000)).toEqual({ le: 98_000, lr: 0 });
+		expect(boundedTailResume({}, { le: 5 }, 2_000)).toEqual({ le: 0 });
 	});
 });

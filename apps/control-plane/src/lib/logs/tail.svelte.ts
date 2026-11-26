@@ -1,11 +1,14 @@
 import type { LogEngine, LogRecord, LogScopeRef, LogTailEvents } from '@yoal/contracts';
 import { streamUrl } from './api.js';
+import { tailEndIsRoutine } from './tail-end.js';
 
 /**
  * The live tail over `GET /api/v1/logs/stream` (docs/LOGS.md §4.4, LP4). The server sends
  * `ready`, `records`, `sampled` and `end` events with an `id:` per batch, so an `EventSource`
  * that drops reconnects by itself with `Last-Event-ID` and misses nothing. If the browser gives
- * up (the connection closed for good), this reconnects with the last cursor, backing off.
+ * up (the connection closed for good), this reconnects with the last cursor, backing off. An `end`
+ * with code `max_lifetime` (the server closes every tail after 6 h so access is re-checked) is
+ * routine: it reconnects at once from the cursor, without showing an end.
  */
 
 export type TailStatus = 'idle' | 'connecting' | 'live' | 'ended' | 'error';
@@ -100,6 +103,13 @@ export class LogTail {
 		source.addEventListener('end', (event) => {
 			if (!mine()) return;
 			const data = parse<'end'>(event);
+			if (tailEndIsRoutine(data)) {
+				source.close();
+				this.#source = null;
+				this.status = 'connecting';
+				this.#open();
+				return;
+			}
 			this.endReason = data?.reason ?? 'ended';
 			this.status = 'ended';
 			source.close();

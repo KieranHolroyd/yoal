@@ -12,6 +12,12 @@ import { lookupLogScopeNames } from './log-store/sqlite-store.ts';
  * - **Daily bytes:** `ingestMbPerDay` per UTC day. The running total is in memory and seeded on
  *   first sight from `log_ingest_daily` (0143), so a restart does not reset a day's budget.
  *
+ * Edge `access` lines get their own bucket and daily total per scope (`bucket: 'access'`, key
+ * `access:<kind>:<id>`), with the same limits: outsiders choose how many 4xx lines a site logs, so
+ * a flood must not exhaust the project's runtime-log quota. Showback (`log_ingest_daily`) stays
+ * one row per scope; after a restart the access total is seeded from the day's `access` rows in
+ * `log_records` and the runtime total is the scope's row minus that.
+ *
  * A batch keeps its earliest lines and drops the rest once a limit is hit. Drops are counted in
  * `log_drop_counts` (reason `quota`, also `exclude` and `sample` for rules) per scope per minute,
  * and at most one `system` line per minute per scope says how many lines were dropped and why
@@ -28,6 +34,8 @@ export interface LogIngestScope {
 	scopeId: string;
 	/** The project whose settings apply; null for service and platform scopes (org settings). */
 	projectId: string | null;
+	/** A separate quota bucket within the scope (`access` for edge request lines); default the scope's own. */
+	bucket?: 'access';
 }
 
 export type LogDropReason = 'quota' | 'exclude' | 'sample';
@@ -58,6 +66,9 @@ interface PendingNotice {
 }
 
 export const scopeKeyOf = (scope: Pick<LogIngestScope, 'scopeKind' | 'scopeId'>) => `${scope.scopeKind}:${scope.scopeId}`;
+/** The quota bucket key: the scope's, or `access:<kind>:<id>` for its access lines. */
+export const quotaKeyOf = (scope: Pick<LogIngestScope, 'scopeKind' | 'scopeId' | 'bucket'>) =>
+	scope.bucket ? `${scope.bucket}:${scopeKeyOf(scope)}` : scopeKeyOf(scope);
 export const dayStart = (ms: number) => Math.floor(ms / DAY_MS) * DAY_MS;
 
 export class LogQuotaService {
@@ -80,14 +91,14 @@ export class LogQuotaService {
 		if (sizes.length === 0) return 0;
 		if (!this.enforced) return sizes.length;
 		const settings = this.ctx.logSettings.effective(scope.orgId, scope.projectId);
-		const key = scopeKeyOf(scope);
+		const key = quotaKeyOf(scope);
 		const rate = settings.ingestLinesPerSecond;
 		const burst = Math.max(1, settings.ingestBurst);
 		const budget = settings.ingestMbPerDay * 1_000_000;
 		const bucket = this.#bucket(key, burst, now);
 		bucket.tokens = Math.min(burst, bucket.tokens + (Math.max(0, now - bucket.at) / 1000) * rate);
 		bucket.at = now;
-		const total = this.#dayTotal(key, now);
+		const total = this.#dayTotal(scope, key, now);
 		let admitted = 0;
 		for (const size of sizes) {
 			if (bucket.tokens < 1) break;
@@ -247,18 +258,20 @@ export class LogQuotaService {
 		return bucket;
 	}
 
-	#dayTotal(key: string, now: number): DayTotal {
+	#dayTotal(scope: LogIngestScope, key: string, now: number): DayTotal {
 		const day = dayStart(now);
 		let total = this.#days.get(key);
 		if (!total || total.day !== day) {
 			if (this.#days.size > MAX_TRACKED_SCOPES) this.#days.clear();
-			const [kind, ...rest] = key.split(':');
 			let seeded = 0;
 			try {
-				seeded =
+				const scopeBytes =
 					this.ctx.sqlite
 						.query<{ bytes: number }, [string, string, number]>('SELECT bytes FROM log_ingest_daily WHERE scope_kind = ? AND scope_id = ? AND day = ?')
-						.get(kind ?? '', rest.join(':'), day)?.bytes ?? 0;
+						.get(scope.scopeKind, scope.scopeId, day)?.bytes ?? 0;
+				// Only scopes that receive access lines pay for the split (project and edge scopes).
+				const accessBytes = scope.scopeKind === 'project' || scope.scopeKind === 'edge' ? this.#accessBytes(scope, day) : 0;
+				seeded = scope.bucket === 'access' ? accessBytes : Math.max(0, scopeBytes - accessBytes);
 			} catch {
 				seeded = 0;
 			}
@@ -266,6 +279,18 @@ export class LogQuotaService {
 			this.#days.set(key, total);
 		}
 		return total;
+	}
+
+	/** Bytes of the scope's `access` lines stored since `day` (the guard's size: body + attributes). */
+	#accessBytes(scope: LogIngestScope, day: number): number {
+		return (
+			this.ctx.sqlite
+				.query<{ bytes: number | null }, [string, string, number]>(
+					`SELECT SUM(length(body) + length(attributes)) AS bytes FROM log_records
+					 WHERE scope_kind = ? AND scope_id = ? AND source = 'access' AND ts >= ?`,
+				)
+				.get(scope.scopeKind, scope.scopeId, day)?.bytes ?? 0
+		);
 	}
 }
 

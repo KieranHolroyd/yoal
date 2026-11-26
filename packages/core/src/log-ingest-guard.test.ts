@@ -7,7 +7,7 @@ import { DEFAULT_FEATURES, nodeLogBatchSchema, type FeatureFlags, type LogRecord
 import { buildPrincipal } from './orgs.ts';
 import { createCore, type Core } from './index.ts';
 import { LocalObjectStore } from './object-store.ts';
-import { deriveLogFingerprintKey } from './log-ingest-guard.ts';
+import { capLogTs, deriveLogFingerprintKey, LOG_MAX_FUTURE_MS } from './log-ingest-guard.ts';
 import { LogIndexer, type LogIndexWriter } from './log-indexer.ts';
 import type { ClickHouseCompactResult } from './clickhouse.ts';
 
@@ -137,6 +137,34 @@ describe('quotas (docs/LOGS.md §10.2)', () => {
 		expect(row?.bytes).toBe(62 * 16_000);
 		expect(row?.droppedLines).toBe(9);
 		expect(row?.name).toBe('quota-bytes');
+	});
+
+	test('edge access lines have their own bucket, so a 4xx flood cannot spend the runtime quota', async () => {
+		const target = await app('quota-access');
+		core.logSettings.update(owner, { level: 'project', project: { id: target.id, orgId: target.orgId } }, { ingestBurst: 5, ingestLinesPerSecond: 1, ingestMbPerDay: 1 });
+		const edge = core.ingressSet.nodes()[0]!;
+		const flood = (count: number, body = 'GET /nope 404 1ms') =>
+			core.logs.appendRecords(
+				edge,
+				nodeLogBatchSchema.parse({
+					target: { kind: 'site', host: `${target.slug}.sites.test` },
+					records: Array.from({ length: count }, () => ({ ts: clock, source: 'access', severityNumber: 13, body })),
+				}),
+			).stored;
+		expect(flood(50)).toBe(5);
+		expect(drops(target, 'quota')).toBe(45);
+		// The runtime bucket is untouched.
+		expect(runtime(target, ['a', 'b', 'c', 'd', 'e'])).toBe(5);
+		expect(runtime(target, ['f'])).toBe(0);
+
+		// Daily bytes are split too, and stay split across a restart.
+		core.logSettings.update(owner, { level: 'project', project: { id: target.id, orgId: target.orgId } }, { ingestBurst: 10_000, ingestLinesPerSecond: 10_000 });
+		clock += 1_000;
+		const big = 'x'.repeat(16_000);
+		expect(flood(70, big)).toBe(62);
+		core.logQuotas.reset();
+		expect(flood(1, big)).toBe(0); // the 1 MB access budget is spent, seeded from log_records
+		expect(runtime(target, [big])).toBe(1);
 	});
 
 	test('YOAL_FEATURE_QUOTAS=0 stops enforcement but keeps counting', async () => {
@@ -299,5 +327,42 @@ describe('redaction at ingest (docs/LOGS.md §10.4)', () => {
 		// Records are evaluated as LogRecords for rules.
 		const record: Pick<LogRecord, 'body'> = { body: stored(target).at(-1)! };
 		expect(record.body).not.toContain('abcdefghijklmnop');
+	});
+});
+
+describe('event time (docs/LOGS.md §4)', () => {
+	test('capLogTs keeps past times, caps the future at now + 5 minutes, and repairs junk', () => {
+		expect(LOG_MAX_FUTURE_MS).toBe(300_000);
+		expect(capLogTs(clock - 1_000, clock)).toBe(clock - 1_000);
+		expect(capLogTs(clock + 60_000, clock)).toBe(clock + 60_000);
+		expect(capLogTs(clock + 86_400_000 * 365, clock)).toBe(clock + LOG_MAX_FUTURE_MS);
+		expect(capLogTs(Number.NaN, clock)).toBe(clock);
+		expect(capLogTs(undefined, clock)).toBe(clock);
+	});
+
+	test('runtime lines, parsed timestamps and node records never land in the far future', async () => {
+		const target = await app('future-ts');
+		const future = clock + 30 * 86_400_000;
+		const batch: RuntimeLogBatch = {
+			workloadId: target.workloadId,
+			lines: [
+				{ message: 'skewed clock', stream: 'stdout', level: 'info', ts: future },
+				{ message: 'on time', stream: 'stdout', level: 'info', ts: clock - 1_000 },
+			],
+		} as RuntimeLogBatch;
+		expect(core.logs.appendRuntime(target.nodeId, batch)).toBe(2);
+		const times = opened.sqlite.query<{ ts: number }, [string]>('SELECT ts FROM log_events WHERE project_id = ? ORDER BY seq').all(target.id);
+		expect(times.map((row) => row.ts)).toEqual([clock + LOG_MAX_FUTURE_MS, clock - 1_000]);
+
+		const edge = core.ingressSet.nodes()[0]!;
+		core.logs.appendRecords(
+			edge,
+			nodeLogBatchSchema.parse({
+				target: { kind: 'site', host: `${target.slug}.sites.test` },
+				records: [{ ts: future, source: 'access', severityNumber: 9, body: 'GET /later 200 1ms' }],
+			}),
+		);
+		const record = opened.sqlite.query<{ ts: number }, [string]>("SELECT ts FROM log_records WHERE scope_id = ? AND body = 'GET /later 200 1ms'").get(target.id);
+		expect(record?.ts).toBe(clock + LOG_MAX_FUTURE_MS);
 	});
 });

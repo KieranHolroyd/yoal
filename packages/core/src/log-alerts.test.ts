@@ -320,3 +320,42 @@ describe('log_pattern_new', () => {
 		expect(evaluator.latestDeploy('org_1', [{ kind: 'database', id: 'db_1' }], clock - 30 * MINUTE, clock)).toBeNull();
 	});
 });
+
+describe('log rule content needs logs:read', () => {
+	test('metrics:read alone cannot preview or list what a log rule reads', async () => {
+		// An on-call dashboard token: alerts and metrics, no logs.
+		const metricsOnly = buildPrincipal({ kind: 'user', userId: 'user_metrics', orgId: 'org_1', role: 'viewer', granted: ['metrics:read', 'alert:read'] });
+		expect(core.ctx.iam.can(metricsOnly, 'metrics:read', { type: 'org' })).toBe(true);
+		expect(core.ctx.iam.can(metricsOnly, 'logs:read', { type: 'org' })).toBe(false);
+		const rule = core.alerts.createRule(owner, {
+			...errorsRule([{ kind: 'project', id: ids.shop! }], { name: 'Secret errors' }),
+			query: logAlertQuery({ q: 'level:error', scopes: [{ kind: 'project', id: ids.shop! }], groupBy: ['body'] }),
+			condition: { op: 'gte', threshold: 1 },
+		});
+		line('org_1', ids.shop!, 'password reset for alice@example.com failed', 'error');
+		clock += MINUTE;
+		await core.alerts.evaluateDue();
+		const secretSeries = (instances: Array<{ labels: Record<string, string> }>) => instances.find((instance) => instance.labels.body?.includes('alice@example.com'));
+		expect(secretSeries(core.alerts.getRule(owner, rule.id).instances)).toBeDefined();
+
+		// Preview, saved or unsaved, needs logs:read (and logs:query for a grouped rule) on the scopes.
+		await expect(core.alerts.preview(metricsOnly, { ruleId: rule.id })).rejects.toMatchObject({ status: 403 });
+		await expect(core.alerts.preview(metricsOnly, { rule: errorsRule([{ kind: 'project', id: ids.shop! }]) })).rejects.toMatchObject({ status: 403 });
+		await expect(core.alerts.preview(metricsOnly, { rule: errorsRule([]) })).rejects.toMatchObject({ status: 403 });
+		// Listing keeps the state but withholds the labels and event details.
+		const view = core.alerts.getRule(metricsOnly, rule.id);
+		expect(view.state).toBe('firing');
+		expect(view.counts.firing).toBeGreaterThan(0);
+		expect(view.instances).toEqual([]);
+		const overview = await core.alerts.overview(metricsOnly);
+		expect(overview.active.some((instance) => instance.ruleId === rule.id)).toBe(false);
+		const events = core.alerts.history(metricsOnly, { ruleId: rule.id });
+		expect(events.length).toBeGreaterThan(0);
+		expect(JSON.stringify(events)).not.toContain('alice@example.com');
+		// A reader with logs:read and logs:query still sees everything.
+		expect(secretSeries((await core.alerts.preview(viewer, { ruleId: rule.id })).series)).toBeDefined();
+		expect(secretSeries(core.alerts.getRule(viewer, rule.id).instances)).toBeDefined();
+		expect(JSON.stringify(core.alerts.history(viewer, { ruleId: rule.id }))).toContain('alice@example.com');
+		core.alerts.deleteRule(owner, rule.id);
+	});
+});

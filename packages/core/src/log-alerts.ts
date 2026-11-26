@@ -115,6 +115,17 @@ export class LogAlertEvaluator {
 		const logs = logsBuilderOf(spec.query)!;
 		const compiled = logsBuilderQuery(logs, null);
 		if (!compiled.ok) throw new ValidationError(compiled.error, [{ path: ['query'], message: compiled.error }]);
+		this.requireReader(principal, spec);
+	}
+
+	/**
+	 * The caller can read (and, where the rule groups or finds patterns, query) every scope the rule
+	 * reads, else 403. Previews and instance labels quote log content, so a rule's results are only
+	 * shown to people who could have run its query themselves.
+	 */
+	requireReader(principal: Principal, spec: AlertRuleSpec): void {
+		const logs = logsBuilderOf(spec.query);
+		if (!logs) throw new ValidationError('A log alert rule needs a logs query.');
 		const { scopes } = builderLogsOf(logs);
 		const permissions = logAlertPermissions(spec);
 		if (scopes.length === 0) {
@@ -131,6 +142,16 @@ export class LogAlertEvaluator {
 		const missing = scopes.find((scope) => !readable.has(`${scope.kind}:${scope.id}`));
 		if (missing)
 			throw new CoreError('forbidden', `You cannot read logs in ${missing.kind} ${missing.id}, so a rule cannot read them for you.`, 403);
+	}
+
+	/** `requireReader` as a yes/no. */
+	canRead(principal: Principal, spec: AlertRuleSpec): boolean {
+		try {
+			this.requireReader(principal, spec);
+			return true;
+		} catch {
+			return false;
+		}
 	}
 
 	/** Evaluate a log rule at `now` as `principal` (the org's `system:alerts` principal). */

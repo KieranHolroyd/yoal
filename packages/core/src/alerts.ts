@@ -428,6 +428,15 @@ export class AlertService {
 		if (!this.canSilence(principal)) throw new CoreError('forbidden', 'Only org owners, admins and deployers can silence or acknowledge alerts.', 403);
 	}
 
+	/**
+	 * A log rule whose scopes the caller cannot read: its series labels (field values, pattern
+	 * templates) and event details quote log content, so they are withheld (`metrics:read` alone
+	 * is not enough). Counts and states stay visible.
+	 */
+	#hidesLogContent(principal: Principal, spec: AlertRuleSpec): boolean {
+		return isLogAlertKind(spec.kind) && !this.#logs.canRead(principal, spec);
+	}
+
 	/** Dashboard page for a rule, for notification links. */
 	url(ruleId?: string): string {
 		const origin = this.ctx.config.platformOrigin.replace(/\/$/, '');
@@ -604,9 +613,10 @@ export class AlertService {
 		const summary = this.#summary(principal, row, instances, userNames);
 		const names = this.#names(principal.orgId);
 		const silences = this.#activeSilences(principal.orgId);
+		const hidden = this.#hidesLogContent(principal, this.#spec(row));
 		return {
 			...summary,
-			instances: instances.map((instance) => this.#instanceView(summary, instance, names, silences, userNames)),
+			instances: hidden ? [] : instances.map((instance) => this.#instanceView(summary, instance, names, silences, userNames)),
 		};
 	}
 
@@ -636,6 +646,7 @@ export class AlertService {
 		const active: AlertInstanceView[] = [];
 		for (const row of rows) {
 			const spec = this.#spec(row);
+			if (this.#hidesLogContent(principal, spec)) continue;
 			for (const instance of instances.get(row.id) ?? []) {
 				if (instance.state === 'normal') continue;
 				active.push(this.#instanceView({ id: row.id, name: row.name, severity: spec.severity }, instance, names, silences, userNames));
@@ -884,19 +895,29 @@ export class AlertService {
 				WHERE ${where.join(' AND ')} ORDER BY e.at DESC, e.rowid DESC LIMIT ${limit}`,
 			)
 			.all(...args);
+		// Events of log rules the caller cannot read keep their state, not their log content.
+		const hiddenRules = new Set<string>();
+		const ruleIds = [...new Set(rows.flatMap((row) => (row.rule_id ? [row.rule_id] : [])))];
+		if (ruleIds.length > 0) {
+			const ruleRows = this.ctx.sqlite
+				.query<RuleRow, string[]>(`SELECT * FROM alert_rules WHERE id IN (${ruleIds.map(() => '?').join(', ')})`)
+				.all(...ruleIds);
+			for (const rule of ruleRows) if (this.#hidesLogContent(principal, this.#spec(rule))) hiddenRules.add(rule.id);
+		}
 		return rows.map((row) => ({
 			id: row.id,
 			kind: row.kind as AlertEventKind,
 			ruleId: row.rule_id,
 			ruleName: row.rule_name,
-			fingerprint: row.fingerprint,
-			labels: parseJson<Record<string, string>>(row.labels_json, {}),
+			// A series fingerprint is its labels as JSON, so it is withheld with them.
+			...(row.rule_id && hiddenRules.has(row.rule_id)
+				? { fingerprint: null, labels: {}, detail: 'Hidden: you cannot read the logs this rule reads.' }
+				: { fingerprint: row.fingerprint, labels: parseJson<Record<string, string>>(row.labels_json, {}), detail: row.detail }),
 			from: (row.from_state as AlertState | null) ?? null,
 			to: (row.to_state as AlertState | null) ?? null,
 			value: row.value,
 			severity: row.severity as AlertSeverity,
 			title: row.title,
-			detail: row.detail,
 			delivery: row.delivery_json ? parseJson<Record<string, string>>(row.delivery_json, {}) : null,
 			at: new Date(row.at).toISOString(),
 		}));
@@ -1121,6 +1142,9 @@ export class AlertService {
 		} else if (input.ruleId) {
 			spec = this.#spec(this.#ruleRow(principal, input.ruleId));
 		} else throw new ValidationError('Pass a rule or a ruleId.');
+		// Log rules evaluate as the org (`system:alerts`); the preview shows counts, labels and
+		// templates, so the caller must be able to read every scope the rule reads.
+		if (isLogAlertKind(spec.kind)) this.#logs.requireReader(principal, spec);
 		if (input.ruleId) saved = this.#instances([input.ruleId]).get(input.ruleId) ?? [];
 		const now = this.ctx.now();
 		const result = await this.#observe(principal.orgId, spec, now);

@@ -193,7 +193,9 @@ describe('LogService.appendRecords', () => {
 	});
 
 	test('site hosts resolve to the project that serves them', async () => {
-		const nodeId = joinNode('edge-a');
+		joinNode('edge-a');
+		// The ingress (the first edge node) serves every site.
+		const nodeId = core.ingressSet.nodes()[0]!;
 		const p = await project('shop');
 		opened.sqlite.run(
 			`INSERT INTO domains (id, org_id, project_id, hostname, kind, status, redirect_www, created_at) VALUES ('dom_1', ?, ?, 'shop.example.com', 'apex', 'active', 1, ?)`,
@@ -228,6 +230,38 @@ describe('LogService.appendRecords', () => {
 		expect(rows("stream = 'site:control.example.net'")).toEqual([
 			expect.objectContaining({ org_id: PLATFORM_LOG_ORG_ID, scope_kind: 'edge', scope_id: nodeId, project_id: null }),
 		]);
+	});
+
+	test('only a node that serves the host may post its access lines', async () => {
+		const edge = core.ingressSet.nodes()[0]!;
+		const worker = joinNode('worker-site');
+		expect(core.ingressSet.isIngress(worker)).toBe(false);
+		const p = await project('spoofed');
+		const post = (nodeId: string) =>
+			core.logs.appendRecords(
+				nodeId,
+				batch({
+					target: { kind: 'site', host: 'spoofed.sites.test' },
+					records: [{ ts: clock, source: 'access', severityNumber: 13, body: 'GET /x 404 1ms' }],
+					dropped: 50,
+				}),
+			);
+		// A worker without the project's route is refused, and nothing is stored or counted.
+		expect(failure(() => post(worker))).toMatchObject({ status: 403 });
+		expect(rows('scope_id = ?', p.id)).toEqual([]);
+		expect(opened.sqlite.query('SELECT * FROM log_drop_counts WHERE scope_id = ?').all(p.id)).toEqual([]);
+		expect(opened.sqlite.query("SELECT * FROM log_ingest_daily WHERE scope_id = ?").all(p.id)).toEqual([]);
+		// The ingress serves every site.
+		expect(post(edge)).toEqual({ stored: 1 });
+		// A worker holding the project's workload serves its route too.
+		addWorkload('wl_site_1', p, worker);
+		expect(post(worker)).toEqual({ stored: 1 });
+		// A host no project serves lands on the posting node's own edge scope.
+		const other = joinNode('worker-stray');
+		expect(
+			core.logs.appendRecords(other, batch({ target: { kind: 'site', host: 'stray.example.org' }, records: [{ ts: clock, source: 'access', severityNumber: 9, body: 'GET / 200 1ms' }] })),
+		).toEqual({ stored: 1 });
+		expect(rows("stream = 'site:stray.example.org'")).toEqual([expect.objectContaining({ org_id: PLATFORM_LOG_ORG_ID, scope_kind: 'edge', scope_id: other })]);
 	});
 
 	test('platform units land in the node platform scope under the sentinel org', () => {

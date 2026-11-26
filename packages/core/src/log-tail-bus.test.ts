@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import type { LogRecord } from '@yoal/contracts';
+import { LOG_TAIL_MAX_PER_ORG, LOG_TAIL_MAX_PER_PRINCIPAL, type LogRecord } from '@yoal/contracts';
 import { LogTailBus } from './log-tail-bus.ts';
 import type { UnifiedLogRow } from './log-store/sqlite-sources.ts';
 import type { LogReadBoundary } from './log-store/types.ts';
@@ -116,5 +116,24 @@ describe('LogTailBus', () => {
 	test('publishing with no subscriber does no work', () => {
 		const bus = new LogTailBus();
 		expect(() => bus.publish([row(1, { body: undefined as unknown as string })])).not.toThrow();
+	});
+
+	test('at most 20 tails per principal and 200 per org, each refused with a 429', () => {
+		const bus = new LogTailBus();
+		const open = (principal: string, orgId = 'org_1') => bus.subscribe({ boundary: projectA, predicate: everything, owner: { principal, orgId } });
+		const mine = Array.from({ length: LOG_TAIL_MAX_PER_PRINCIPAL }, () => open('alice'));
+		expect(() => open('alice')).toThrow(expect.objectContaining({ status: 429, code: 'too_many_tails' }));
+		// Closing one frees a slot; other people and other orgs are counted on their own.
+		mine[0]!.close();
+		expect(() => open('alice')).not.toThrow();
+		expect(() => open('bob')).not.toThrow();
+		expect(() => open('alice', 'org_2')).not.toThrow();
+		for (let index = bus.size; index < LOG_TAIL_MAX_PER_ORG + 1; index += 1) open(`user_${index}`);
+		expect(() => open('carol')).toThrow(expect.objectContaining({ status: 429, message: expect.stringContaining('organisation') }));
+		expect(() => open('dave', 'org_2')).not.toThrow();
+		// Internal subscribers without an owner are not counted.
+		expect(() => bus.subscribe({ boundary: projectA, predicate: everything })).not.toThrow();
+		bus.closeAll();
+		expect(bus.size).toBe(0);
 	});
 });

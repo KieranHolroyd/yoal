@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test';
 import { randomBytes } from 'node:crypto';
 import {
 	BUILTIN_REDACTION_KINDS,
+	MAX_REDACTION_RULE_INPUT,
 	MAX_REDACTION_RULE_PATTERN,
 	RedactionRuleError,
 	createRedactor,
@@ -326,9 +327,20 @@ describe('org regex rules', () => {
 		expect(() => createRedactor({ rules: [{ name: 'x', pattern: '(a+)+' }] })).toThrow(RedactionRuleError);
 	});
 
-	test('rules only see the first 16 KiB of a line', () => {
+	test('rules must be in the safe regex subset shared with the query parser', () => {
+		for (const pattern of ['(a|a)*$', '(a|aa)*c', 'a*a*a*a*c', '.*x.*y', '\\w+\\w+c', 'a(?=b)', '(a)\\1']) {
+			expect(redactionRuleError({ name: 'x', pattern })).not.toBeNull();
+		}
+		expect(redactionRuleError({ name: 'x', pattern: 'a*a*c', flags: 'i' })).toContain('backtrack');
+		for (const pattern of ['acct_[0-9]{8}', 'sess-[a-f0-9]{32}', 'token=\\w+', '"secret":"[^"]*"']) {
+			expect(redactionRuleError({ name: 'x', pattern })).toBeNull();
+		}
+	});
+
+	test('rules only see the first 2 KiB of a line', () => {
+		expect(MAX_REDACTION_RULE_INPUT).toBe(2048);
 		const r = createRedactor({ rules: [{ name: 'marker', pattern: 'NEEDLE' }] });
-		const line = `NEEDLE ${'x'.repeat(17 * 1024)} NEEDLE`;
+		const line = `NEEDLE ${'x'.repeat(MAX_REDACTION_RULE_INPUT)} NEEDLE`;
 		const out = r.redact(line).text;
 		expect(out.startsWith(R('rule:marker'))).toBe(true);
 		expect(out.endsWith('NEEDLE')).toBe(true);
@@ -361,5 +373,41 @@ describe('redactor behaviour', () => {
 		const r = createRedactor({ rules: [{ name: 'x', pattern: 'zzz\\d' }] });
 		for (let i = 0; i < 3; i++) expect(r.redact('a zzz1 b').text).toBe(`a ${R('rule:x')} b`);
 		expect(r.redact('nothing here').hits).toEqual([]);
+	});
+});
+
+describe('adversarial lines (timing guard)', () => {
+	test('every detector stays linear-ish on 16 KiB lines built against it', () => {
+		const r = createRedactor({ rules: [{ name: 'acct', pattern: 'acct_[0-9]{8}' }] });
+		const size = 16 * 1024;
+		const fill = (unit: string, tail = '') => unit.repeat(Math.ceil(size / unit.length)).slice(0, size - tail.length) + tail;
+		const lines = [
+			fill('a.', 'token'),
+			fill('a_', 'token'),
+			fill('a-', 'password'),
+			fill('api-key'),
+			fill('token='),
+			fill('secret'),
+			fill('authorization: '),
+			fill('cookie=a; '),
+			fill('bearer '),
+			fill('k=' + 'A1b2'.repeat(10) + ' '),
+			`a=${'A1b2'.repeat(4094)}A1b===`,
+			fill('yoal_'),
+			fill('eyJaaaaaaaaa.'),
+			fill('a://b:c'),
+			fill('pass:"\\'),
+			fill('acct_1234567'),
+		];
+		for (const line of lines) {
+			expect(line.length).toBe(size);
+			let best = Infinity;
+			for (let run = 0; run < 3; run++) {
+				const started = performance.now();
+				r.redact(line);
+				best = Math.min(best, performance.now() - started);
+			}
+			expect({ line: line.slice(0, 24), slow: best > 5 }).toEqual({ line: line.slice(0, 24), slow: false });
+		}
 	});
 });

@@ -17,8 +17,14 @@ const COALESCE_MS = 200;
  *
  * Events follow `LogTailEvents`: `ready` `{ cursor, engine }`, then `records`
  * `{ records, cursor }` (each with `id: <cursor>`), `sampled` `{ dropped }` when the subscriber
- * fell behind or a reconnect missed more than 2,000 lines, and `end` `{ reason }`. Nothing polls
- * SQLite: appends publish to an in-process bus and each stream gets only what its query matches.
+ * fell behind or a reconnect missed more than 2,000 lines, and `end` `{ reason, code? }`. Nothing
+ * polls SQLite: appends publish to an in-process bus and each stream gets only what its query
+ * matches.
+ *
+ * Limits (docs/LOGS.md §4.4): opening more than LOG_TAIL_MAX_PER_PRINCIPAL tails per principal or
+ * LOG_TAIL_MAX_PER_ORG per org is a 429 (`too_many_tails`), and a stream ends after
+ * LOG_TAIL_MAX_LIFETIME_MS with `end` `{ code: 'max_lifetime' }`; the client reconnects with its
+ * cursor, which re-runs authorisation.
  */
 export const GET: RequestHandler = (event) =>
 	route(() => {
@@ -60,17 +66,22 @@ export const GET: RequestHandler = (event) =>
 					while (!signal.aborted && !closed) {
 						const wait = Math.max(0, HEARTBEAT_MS - (Date.now() - lastWrite));
 						let batch = await session.next(wait, signal);
-						if (batch.records.length > 0 || batch.dropped > 0) {
+						if ((batch.records.length > 0 || batch.dropped > 0) && !batch.ended) {
 							await sleep(COALESCE_MS, signal);
 							const more = await session.next(0, signal);
 							batch = {
 								records: [...batch.records, ...more.records],
 								dropped: batch.dropped + more.dropped,
 								cursor: more.cursor,
+								...(more.ended ? { ended: more.ended } : {}),
 							};
 						}
 						if (batch.dropped > 0) send('sampled', { dropped: batch.dropped });
 						if (batch.records.length > 0) send('records', { records: batch.records, cursor: batch.cursor }, batch.cursor);
+						if (batch.ended) {
+							send('end', { reason: 'This live tail reached its time limit; reconnecting.', code: 'max_lifetime' }, batch.cursor);
+							break;
+						}
 						if (Date.now() - lastWrite >= HEARTBEAT_MS) write(`: ping ${Date.now()}\n\n`);
 					}
 				} catch (error) {

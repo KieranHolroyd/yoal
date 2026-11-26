@@ -317,8 +317,8 @@ describe('parseLogQuery: errors', () => {
 	});
 
 	test('regex safety', () => {
-		expect(error('@m:/(a+)+/').message).toBe('Nested repetition like (a+)+ is not allowed');
-		expect(error('@m:/(a*){2,}/').message).toBe('Nested repetition like (a+)+ is not allowed');
+		expect(error('@m:/(a+)+/').message).toStartWith('Nested repetition like (a+)+ is not allowed');
+		expect(error('@m:/(a*){2,}/').message).toStartWith('Nested repetition like (a+)+ is not allowed');
 		expect(error('@m:/a(?=b)/').message).toBe('Lookaround is not supported (RE2)');
 		expect(error('@m:/(a)\\1/').message).toBe('Backreferences are not supported (RE2)');
 		expect(error('@m:/a[/').message).toStartWith('Invalid regex');

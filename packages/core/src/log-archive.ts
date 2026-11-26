@@ -48,6 +48,8 @@ const THROUGHPUT_BYTES_PER_SECOND = 60 * 1024 ** 2;
 const SECONDS_PER_FILE = 0.25;
 /** Decompressed bytes per Parquet byte the budget allows ClickHouse to read. */
 const READ_EXPANSION = 12;
+/** Memory one rehydrate query may use (the ad-hoc SQL cap; the server's default cap is 768 MiB). */
+const ARCHIVE_MAX_MEMORY_BYTES = 268_435_456;
 const PRESIGN_SECONDS = 900;
 const DAY_MS = 86_400_000;
 const HOUR_MS = 3_600_000;
@@ -316,10 +318,21 @@ export class LogArchiveService {
 		const compiled = compileSearch(read, { limit, order }, { textIndex: null });
 		const source = `(${urls.map((url) => `SELECT * FROM url(${sqlString(url)}, 'Parquet')`).join(' UNION ALL ')})`;
 		const sql = compiled.sql.replace(`\nFROM ${LOGS_TABLE}\n`, `\nFROM ${source}\n`);
+		// This runs as the writer, not `yoal_reader`: `url()` needs a grant the reader must not have.
+		// The reader runs the platform SQL tab (D101), so a URL grant there would let that SQL fetch
+		// any address the ClickHouse host can reach. The writer is held in check per query instead:
+		// `readonly = 2` (reads only; `readonly = 1` also forbids table functions), and explicit
+		// time, read, memory, thread and result-row caps, whatever defaults `runQuery` adds.
 		const settings: ClickHouseSettings = {
+			readonly: 2,
 			max_execution_time: Math.min(600, Math.max(30, estimate.seconds * 3)),
 			max_bytes_to_read: Math.max(estimate.bytes, 1) * READ_EXPANSION,
 			read_overflow_mode: 'throw',
+			max_memory_usage: ARCHIVE_MAX_MEMORY_BYTES,
+			max_threads: 2,
+			// Only the final result counts (a FROM subquery is not capped), so this never truncates the scan.
+			max_result_rows: compiled.limit + 1,
+			result_overflow_mode: 'break',
 		};
 		const result = await writer.runQuery(sql, { asReader: false, params: compiled.params, settings });
 		const rows = result.data.map((row) => recordFromRow(row as unknown[]));

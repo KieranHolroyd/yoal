@@ -24,7 +24,7 @@ import { JOB_LOG_LINES_MAX } from './jobs.ts';
 import { sqliteLogSource, type SqliteLogTag, type UnifiedLogRow } from './log-store/sqlite-sources.ts';
 import { insertNodeLogRecords, resolveNodeLogTarget } from './log-record-ingest.ts';
 import { featureEnabled } from './config.ts';
-import { messageRowAccess, type GuardAccess, type GuardOptions } from './log-ingest-guard.ts';
+import { capLogTs, messageRowAccess, type GuardAccess, type GuardOptions } from './log-ingest-guard.ts';
 import type { LogIngestScope } from './log-quotas.ts';
 import { LOG_SCOPE_ROW_CAP } from './log-retention.ts';
 
@@ -197,7 +197,7 @@ export class LogService {
 				stream: chunk.stream,
 				level: parsed.level ?? levelForBuildLine(line, chunk.stream),
 				message: sanitize(parsed.message),
-				ts: parsed.ts ?? now,
+				ts: capLogTs(parsed.ts ?? now, now),
 			};
 		});
 		const rows = this.guard(projectScope(build.orgId, build.projectId), parsedRows, logEventAccess());
@@ -267,7 +267,7 @@ export class LogService {
 				message: replica > 0
 					? `[r${replica}] ${sanitize(parsed.message)}`
 					: sanitize(parsed.message),
-				ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? now,
+				ts: capLogTs(Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? now, now),
 			};
 		});
 		const rows = this.guard(projectScope(workload.orgId, workload.projectId), parsedRows, logEventAccess());
@@ -306,7 +306,7 @@ export class LogService {
 				stream: line.stream,
 				level: parsed.level ?? line.level,
 				message: sanitize(parsed.message),
-				ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? now,
+				ts: capLogTs(Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? now, now),
 			};
 		});
 		const rows = this.guard(projectScope(run.orgId, run.projectId), parsedRows, logEventAccess());
@@ -350,7 +350,7 @@ export class LogService {
 					stream: line.stream,
 					level: parsed.level ?? line.level,
 					message: sanitize(parsed.message),
-					ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? this.ctx.now(),
+					ts: capLogTs(Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? this.ctx.now(), this.ctx.now()),
 				};
 			};
 			if (this.ctx.kubernetes.isMachineId(batch.workloadId)) {
@@ -397,7 +397,7 @@ export class LogService {
 				stream: line.stream,
 				level: parsed.level ?? line.level,
 				message: sanitize(parsed.message),
-				ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? now,
+				ts: capLogTs(Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? now, now),
 			};
 		});
 		const rows = this.guard({ orgId: service.orgId, scopeKind: kind, scopeId: service.id, projectId: null }, parsedRows, serviceEventAccess());

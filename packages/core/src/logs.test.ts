@@ -331,6 +331,42 @@ describe('per-scope caps and append listeners (docs/LOGS.md §4.4, §10.2)', () 
 		expect(kept).toEqual(['noisy 7', 'noisy 8', 'noisy 9', 'noisy 10', 'noisy 11']);
 	});
 
+	test('the sweep prunes by age every time, but caps at most every 15 minutes and only counted scopes', () => {
+		let now = clock + 20_000_000;
+		const insert = opened.sqlite.prepare(
+			`INSERT INTO log_events (org_id, project_id, source, stream, level, message, ts) VALUES ('org_1', ?, 'runtime', 'stdout', 'info', ?, ?)`,
+		);
+		const rows = (project: string): number =>
+			opened.sqlite.query<{ n: number }, [string]>('SELECT COUNT(*) AS n FROM log_events WHERE project_id = ?').get(project)!.n;
+		const burst = (project: string, count: number) =>
+			opened.sqlite.transaction(() => {
+				for (let index = 0; index < count; index += 1) insert.run(project, `${project} ${index}`, now + index);
+			})();
+		// The first sweep runs the full pass.
+		core.logs.prune(now, undefined, 5);
+		burst('prj_capped', 12);
+		burst('prj_uncounted', 12);
+		// Within 15 minutes: no cap pass, but the age DELETE still runs.
+		insert.run('prj_old', 'ancient', now - 400 * 86_400_000);
+		now += 60_000;
+		core.logs.prune(now, undefined, 5);
+		expect(rows('prj_old')).toBe(0);
+		expect(rows('prj_capped')).toBe(12);
+		// After 15 minutes the cap pass runs for scopes whose counted lines exceed the cap only.
+		opened.sqlite.run(
+			`INSERT INTO log_ingest_daily (org_id, scope_kind, scope_id, project_id, day, lines, bytes) VALUES ('org_1', 'project', 'prj_capped', 'prj_capped', ?, 12, 120)`,
+			[Math.floor(now / 86_400_000) * 86_400_000],
+		);
+		now += 15 * 60_000;
+		core.logs.prune(now, undefined, 5);
+		expect(rows('prj_capped')).toBe(5);
+		expect(rows('prj_uncounted')).toBe(12);
+		// The daily full pass catches rows written without counting.
+		now += 86_400_000;
+		core.logs.prune(now, undefined, 5);
+		expect(rows('prj_uncounted')).toBe(5);
+	});
+
 	test('every append path hands its inserted rows to onAppend listeners, unified', async () => {
 		const { project, deploymentId } = await projectWithBuild();
 		const received: Array<{ tag: string; body: string; scope: string }> = [];

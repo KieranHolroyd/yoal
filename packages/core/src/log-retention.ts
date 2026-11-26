@@ -11,7 +11,10 @@ import { chDateTime64 } from './telemetry.ts';
  *   effective `hotDays` go, then each scope keeps at most `cap` newest rows per table, so a noisy
  *   project trims only its own history (the old global 500,000-row cap is gone). Orgs without an
  *   override share one DELETE; each override is one more. Kubernetes and pipeline lines keep their
- *   own retention, as before.
+ *   own retention, as before. The age DELETE runs every sweep; the cap pass at most every
+ *   LOG_CAP_INTERVAL_MS, and only for scopes whose `log_ingest_daily` lines over the hot window
+ *   exceed the cap (an indexed read of a few rows), with a full GROUP BY over each table at most
+ *   once a day as a safety net for rows written without counting.
  * - **Search (ClickHouse `yoal.logs`)** — `pruneSearchIndex`, once per UTC day: a lightweight
  *   `DELETE` per org past its `searchDays` (and per project with a shorter window). The table's
  *   90-day TTL stays as the backstop.
@@ -24,12 +27,28 @@ const DAY_MS = 86_400_000;
 /** `alert_state` key holding the UTC day the search index was last pruned. */
 export const LOG_SEARCH_PRUNE_STATE_KEY = 'logs.search_prune_day';
 
-/** Tables the hot-tail prune trims, with the columns that identify a scope in each. */
-export const PRUNED_LOG_TABLES: ReadonlyArray<{ table: string; scope: readonly string[] }> = [
-	{ table: 'log_events', scope: ['project_id'] },
-	{ table: 'service_log_events', scope: ['kind', 'service_id'] },
-	{ table: 'broker_log_events', scope: ['broker_id'] },
-	{ table: 'log_records', scope: ['scope_kind', 'scope_id'] },
+/** The per-scope cap pass runs at most this often from the sweep (the age DELETE runs every time). */
+export const LOG_CAP_INTERVAL_MS = 15 * 60_000;
+/** The full GROUP BY cap pass (uncounted rows) runs at most this often. */
+export const LOG_CAP_FULL_INTERVAL_MS = DAY_MS;
+
+/**
+ * Tables the hot-tail prune trims, with the columns that identify a scope in each and, for the
+ * counter-driven cap pass, the column values of a `(scope_kind, scope_id)` scope (null: not here).
+ */
+export const PRUNED_LOG_TABLES: ReadonlyArray<{
+	table: string;
+	scope: readonly string[];
+	values: (kind: string, id: string) => string[] | null;
+}> = [
+	{ table: 'log_events', scope: ['project_id'], values: (kind, id) => (kind === 'project' ? [id] : null) },
+	{
+		table: 'service_log_events',
+		scope: ['kind', 'service_id'],
+		values: (kind, id) => (kind === 'database' || kind === 'storage' ? [kind, id] : null),
+	},
+	{ table: 'broker_log_events', scope: ['broker_id'], values: (kind, id) => (kind === 'broker' ? [id] : null) },
+	{ table: 'log_records', scope: ['scope_kind', 'scope_id'], values: (kind, id) => [kind, id] },
 ];
 
 /** What retention needs from the telemetry store (a `TelemetryStore` satisfies it). */
@@ -42,6 +61,9 @@ export interface LogRetentionWriter {
 type RetentionContext = Pick<CoreContext, 'sqlite' | 'now'> & { logSettings: LogSettingsService } & Partial<Pick<CoreContext, 'telemetry'>>;
 
 export class LogRetentionService {
+	#capAt: number | null = null;
+	#fullCapAt: number | null = null;
+
 	constructor(
 		private readonly ctx: RetentionContext,
 		private readonly writer: () => LogRetentionWriter | null | undefined = () => ctx.telemetry,
@@ -49,31 +71,71 @@ export class LogRetentionService {
 
 	/**
 	 * Delete hot-tail rows past retention, then cap each scope. With `retentionMs` every org uses
-	 * that window (the old behaviour, kept for callers and tests that pass one); otherwise each org
-	 * uses its effective `hotDays`. Returns the rows removed.
+	 * that window and every scope is capped now with a full scan (the old behaviour, kept for
+	 * callers and tests that pass one); otherwise each org uses its effective `hotDays`, and the cap
+	 * pass is throttled and counter-driven (see the module comment). Returns the rows removed.
 	 */
 	pruneHotTail(now = this.ctx.now(), retentionMs?: number, cap = LOG_SCOPE_ROW_CAP): number {
 		const limit = Math.max(1, Math.floor(cap));
 		const windows = retentionMs === undefined ? this.hotWindows() : { fallback: retentionMs, orgs: new Map<string, number>() };
 		let removed = 0;
+		for (const { table } of PRUNED_LOG_TABLES) removed += this.#pruneAge(table, now, windows);
+		const explicit = retentionMs !== undefined;
+		if (!explicit && this.#capAt !== null && now - this.#capAt < LOG_CAP_INTERVAL_MS && now >= this.#capAt) return removed;
+		this.#capAt = now;
+		const full = explicit || this.#fullCapAt === null || now - this.#fullCapAt >= LOG_CAP_FULL_INTERVAL_MS || now < this.#fullCapAt;
+		if (full) {
+			this.#fullCapAt = now;
+			removed += this.#capAll(limit);
+		} else {
+			removed += this.#capCounted(limit, now, windows);
+		}
+		return removed;
+	}
+
+	/** Every scope over the cap, found with one GROUP BY per table. */
+	#capAll(limit: number): number {
+		let removed = 0;
 		for (const { table, scope } of PRUNED_LOG_TABLES) {
-			removed += this.#pruneAge(table, now, windows);
 			const columns = scope.join(', ');
-			const match = scope.map((column) => `${column} = ?`).join(' AND ');
 			const over = this.ctx.sqlite
 				.query<Record<string, string>, [number]>(`SELECT ${columns} FROM ${table} GROUP BY ${columns} HAVING COUNT(*) > ?`)
 				.all(limit);
-			for (const row of over) {
-				const values = scope.map((column) => row[column] ?? null);
-				removed += this.ctx.sqlite.run(
-					`DELETE FROM ${table} WHERE ${match} AND seq <= (
-					   SELECT seq FROM ${table} WHERE ${match} ORDER BY seq DESC LIMIT 1 OFFSET ?
-					 )`,
-					[...values, ...values, limit],
-				).changes;
-			}
+			for (const row of over) removed += this.#capScope(table, scope, scope.map((column) => row[column] ?? ''), limit);
 		}
 		return removed;
+	}
+
+	/**
+	 * Only scopes whose admitted lines (`log_ingest_daily`) over the longest hot window exceed the
+	 * cap: they are the only ones that can be over it. Each is one indexed DELETE per table.
+	 */
+	#capCounted(limit: number, now: number, windows: { fallback: number; orgs: Map<string, number> }): number {
+		const longest = Math.max(windows.fallback, ...windows.orgs.values());
+		const since = Math.floor((now - longest) / DAY_MS) * DAY_MS;
+		const candidates = this.ctx.sqlite
+			.query<{ scope_kind: string; scope_id: string }, [number, number]>(
+				'SELECT scope_kind, scope_id FROM log_ingest_daily WHERE day >= ? GROUP BY scope_kind, scope_id HAVING SUM(lines) > ?',
+			)
+			.all(since, limit);
+		let removed = 0;
+		for (const candidate of candidates)
+			for (const { table, scope, values } of PRUNED_LOG_TABLES) {
+				const match = values(candidate.scope_kind, candidate.scope_id);
+				if (match) removed += this.#capScope(table, scope, match, limit);
+			}
+		return removed;
+	}
+
+	/** Keep the newest `limit` rows of one scope in one table. */
+	#capScope(table: string, scope: readonly string[], values: string[], limit: number): number {
+		const match = scope.map((column) => `${column} = ?`).join(' AND ');
+		return this.ctx.sqlite.run(
+			`DELETE FROM ${table} WHERE ${match} AND seq <= (
+			   SELECT seq FROM ${table} WHERE ${match} ORDER BY seq DESC LIMIT 1 OFFSET ?
+			 )`,
+			[...values, ...values, limit],
+		).changes;
 	}
 
 	/**

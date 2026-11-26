@@ -1,4 +1,5 @@
 import { createHmac, randomBytes } from 'node:crypto';
+import { checkRegexSafety, LOG_REGEX_JS_SUBJECT_MAX } from '@yoal/contracts';
 
 /**
  * Log redaction at ingest (docs/LOGS.md §10.4, LP10). `LogService.append*` runs every body through
@@ -22,7 +23,9 @@ import { createHmac, randomBytes } from 'node:crypto';
  *    `Set-Cookie` and Yoal token header values, `Bearer` credentials, values of credential-named
  *    keys (`password=`, `secret:`, `api_key=`, `token=`…), and long high-entropy strings in
  *    `key=` positions. Each detector has a cheap gate so a plain line skips it.
- * 3. **Org regex rules**, compiled once; length caps stand in for a regex timeout.
+ * 3. **Org regex rules**, compiled once. JS has no regex timeout, so a rule must be in the safe
+ *    subset (`checkRegexSafety`, shared with the query parser) and sees only the first
+ *    MAX_REDACTION_RULE_INPUT (2 KiB) of a line. Layers 1 and 2 cover the whole line.
  *
  * Detectors are tuned against false positives: UUIDs, git SHAs, content hashes (`sha256:…`, SRI
  * `sha512-…`), request and trace ids and Yoal metric names such as `yoal_storage_used_bytes` pass
@@ -115,8 +118,8 @@ export const MIN_SECRET_LENGTH = 8;
 const SECRET_WINDOW = MIN_SECRET_LENGTH;
 export const MAX_REDACTION_RULES = 50;
 export const MAX_REDACTION_RULE_PATTERN = 512;
-/** Org rules only see this much of a line (bodies are capped at 16 KB anyway). */
-export const MAX_REDACTION_RULE_INPUT = 16 * 1024;
+/** Org rules only see this much of a line: the JS regex subject cap shared with live tail and rules. */
+export const MAX_REDACTION_RULE_INPUT = LOG_REGEX_JS_SUBJECT_MAX;
 
 export class RedactionRuleError extends Error {
 	constructor(
@@ -336,7 +339,9 @@ const BEARER = /(?<![\w-])(bearer)(\s+)([A-Za-z0-9._~+\/-]{16,}=*)/gi;
 
 // Credential-named keys. The key must END with the sensitive word (`db_password`, `apiKey`,
 // `AWS_SECRET_ACCESS_KEY`), so `max_tokens`, `token_count`, `secretName` and `PWD` never match.
-const CREDENTIAL_KEY = String.raw`[A-Za-z0-9_.-]*?(?:password|passwd|passphrase|secret|token|api[_.-]?key|apikey|access[_.-]?key|secret[_.-]?key|private[_.-]?key|signing[_.-]?key|encryption[_.-]?key|master[_.-]?key|credentials?|auth|signature)`;
+// The prefix is bounded: unbounded, every start in a long `a_a_a…token` run rescans to the end
+// (quadratic, 180 ms on a 16 KiB line); at 64 a line costs one short scan per start.
+const CREDENTIAL_KEY = String.raw`[A-Za-z0-9_.-]{0,64}?(?:password|passwd|passphrase|secret|token|api[_.-]?key|apikey|access[_.-]?key|secret[_.-]?key|private[_.-]?key|signing[_.-]?key|encryption[_.-]?key|master[_.-]?key|credentials?|auth|signature)`;
 const CREDENTIAL = new RegExp(
 	String.raw`(?<![A-Za-z0-9])(${CREDENTIAL_KEY})(["']?\s*[:=]\s*)(?:"((?:[^"\\\n]|\\.)*)"|'([^'\n]*)'|([^\s"',;&}\])]+))`,
 	'gi',
@@ -493,8 +498,6 @@ const DETECTORS: Detector[] = [
 // -------------------------------------------------------------------------------- org rules
 
 const RULE_NAME = /^[a-z0-9][a-z0-9_-]{0,39}$/;
-/** A quantified group that is itself quantified, e.g. `(a+)+`, `(.*)*`: the classic catastrophic shape. */
-const NESTED_QUANTIFIER = /\((?:[^()\\]|\\.)*[+*}](?:[^()\\]|\\.)*\)\s*[+*{]/;
 
 /** Why an org rule is unusable, or null when it is fine. Use it to validate before saving. */
 export function redactionRuleError(rule: RedactionRule): string | null {
@@ -503,13 +506,15 @@ export function redactionRuleError(rule: RedactionRule): string | null {
 	if (typeof rule.pattern !== 'string' || rule.pattern.length === 0) return 'A rule needs a pattern.';
 	if (rule.pattern.length > MAX_REDACTION_RULE_PATTERN) return `A rule pattern is at most ${MAX_REDACTION_RULE_PATTERN} characters.`;
 	if (rule.flags !== undefined && !/^[imsu]*$/.test(rule.flags)) return 'Rule flags may only be i, m, s and u.';
-	if (NESTED_QUANTIFIER.test(rule.pattern)) return 'Nested quantifiers such as (a+)+ can hang ingest; rewrite the pattern without them.';
 	let compiled: RegExp;
 	try {
 		compiled = new RegExp(rule.pattern, rule.flags ?? '');
 	} catch (error) {
 		return `Invalid regular expression: ${error instanceof Error ? error.message : String(error)}`;
 	}
+	// Rules run on the ingest path in backtracking JS: only the safe subset (LOGS.md §10.4).
+	const unsafe = checkRegexSafety(rule.pattern, rule.flags ?? '');
+	if (unsafe) return `${unsafe}; it could hang ingest.`;
 	if (compiled.test('')) return 'The pattern matches an empty string, so it would redact nothing useful.';
 	return null;
 }

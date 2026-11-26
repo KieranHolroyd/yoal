@@ -65,7 +65,7 @@ import {
 	type Permission,
 	type Principal,
 } from '@yoal/contracts';
-import { textRowAccess } from './log-ingest-guard.ts';
+import { capLogTs, textRowAccess } from './log-ingest-guard.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import { entriesFromZip } from './artifact.ts';
@@ -1526,7 +1526,7 @@ export class PipelineEngine {
 				step: line.step,
 				stream: line.stream,
 				text: line.text,
-				ts: line.ts ?? now,
+				ts: capLogTs(line.ts, now),
 			})),
 			textRowAccess('pll', 'text', () => ({ source: 'pipeline', stream: `pipeline-job:${job.id}` })),
 		);

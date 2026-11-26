@@ -331,13 +331,24 @@ export interface LogCapabilities {
 	platformAdmin: boolean;
 }
 
+/**
+ * A live tail ends after this long, with `end` code `max_lifetime`; the client reconnects with its
+ * cursor, which re-authorises the stream (docs/LOGS.md §4.4).
+ */
+export const LOG_TAIL_MAX_LIFETIME_MS = 6 * 3_600_000;
+/** Concurrent live tails one principal may hold; past it, opening one is a 429. */
+export const LOG_TAIL_MAX_PER_PRINCIPAL = 20;
+/** Concurrent live tails per org; past it, opening one is a 429. */
+export const LOG_TAIL_MAX_PER_ORG = 200;
+
 /** Live tail (SSE) event payloads. Event names are the keys. */
 export interface LogTailEvents {
 	ready: { cursor: string; engine: LogEngine };
 	records: { records: LogRecord[]; cursor: string };
 	/** The subscriber fell behind; `dropped` lines were skipped to stay live. */
 	sampled: { dropped: number };
-	end: { reason: string };
+	/** `code: 'max_lifetime'` is a routine close: reconnect with the last cursor, silently. */
+	end: { reason: string; code?: 'max_lifetime' };
 }
 
 /** Saved queries (§7.2). */

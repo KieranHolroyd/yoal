@@ -143,5 +143,13 @@ describe('LogArchiveService (docs/LOGS.md §10.1)', () => {
 		// Tenancy and the filter are still ANDed in, as parameters.
 		expect(Object.values(query.params ?? {})).toContain('org_1');
 		expect(query.settings).toMatchObject({ read_overflow_mode: 'throw' });
+		// It runs as the writer (url() needs it), so the query carries its own guard rails.
+		expect(query.settings).toMatchObject({
+			readonly: 2,
+			max_execution_time: expect.any(Number),
+			max_memory_usage: 268_435_456,
+			max_result_rows: 11,
+			result_overflow_mode: 'break',
+		});
 	});
 });

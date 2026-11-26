@@ -93,7 +93,7 @@ import {
 	type WorkloadStatus,
 } from '@yoal/contracts';
 import { featureEnabled } from './config.ts';
-import { messageRowAccess } from './log-ingest-guard.ts';
+import { capLogTs, messageRowAccess } from './log-ingest-guard.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import { resolvePlacement, type PlacementCandidate } from './placement.ts';
@@ -2105,7 +2105,7 @@ export class KubernetesService {
 					container: line.container,
 					stream: line.stream,
 					message: line.message,
-					ts: Number.isFinite(ts) ? ts : now,
+					ts: capLogTs(ts, now),
 				};
 			}),
 			messageRowAccess('kpl', (row) => ({ stream: `pod:${row.namespace}/${row.pod}/${row.container}`, channel: row.stream ?? null })),

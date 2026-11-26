@@ -137,7 +137,8 @@ jobs:
 		expect(build.job.key).toBe('build');
 		expect(build.context.yoal.sha).toBe('a'.repeat(40));
 		expect(await claimJob()).toBeNull(); // deploy waits for build
-		engine.appendLogs(engine.authenticateJob(build.token), { lines: [{ step: 0, stream: 'stdout', text: 'hello' }] });
+		// A runner clock a day ahead is stored at most 5 minutes in the future (docs/LOGS.md §4).
+		engine.appendLogs(engine.authenticateJob(build.token), { lines: [{ step: 0, stream: 'stdout', text: 'hello', ts: clock + 86_400_000 }] });
 		engine.reportStep(engine.authenticateJob(build.token), 0, { status: 'completed', conclusion: 'success' });
 		finish(build, 'success', { version: '1.2.3' });
 
@@ -151,6 +152,7 @@ jobs:
 		expect(run.conclusion).toBe('success');
 		const logs = core.pipelines.jobLogs(owner, r.name, run.id, run.jobs[0]!.id);
 		expect(logs.lines.map((line) => line.text)).toEqual(['hello']);
+		expect(logs.lines[0]!.ts).toBeLessThanOrEqual(clock + 5 * 60_000);
 		expect(logs.complete).toBe(true);
 		// The token keeps accepting a final log flush, but not new work.
 		expect(() => engine.authenticateJob(build.token)).toThrow();

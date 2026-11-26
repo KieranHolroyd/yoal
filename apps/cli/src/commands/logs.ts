@@ -398,6 +398,8 @@ async function followLogs(client: ApiClient, input: FollowInput): Promise<void> 
 			const abort = () => controller.abort();
 			stop.signal.addEventListener('abort', abort, { once: true });
 			let idle: ReturnType<typeof setTimeout> | undefined;
+			// The server closes every tail after its lifetime (`max_lifetime`); resume at once, quietly.
+			let routine = false;
 			const arm = () => {
 				clearTimeout(idle);
 				idle = setTimeout(abort, IDLE_MS);
@@ -429,6 +431,10 @@ async function followLogs(client: ApiClient, input: FollowInput): Promise<void> 
 					} else if (event.event === 'sampled') {
 						process.stderr.write(`… ${Number(data?.dropped ?? 0).toLocaleString('en-US')} lines skipped to keep up.\n`);
 					} else if (event.event === 'end') {
+						if (data?.code === 'max_lifetime') {
+							routine = true;
+							break;
+						}
 						process.stderr.write(`The stream ended: ${String(data?.reason ?? 'no reason given')}\n`);
 						break;
 					}
@@ -444,6 +450,7 @@ async function followLogs(client: ApiClient, input: FollowInput): Promise<void> 
 				controller.abort();
 			}
 			if (stop.signal.aborted) return;
+			if (routine) continue;
 			failures += 1;
 			if (failures > MAX_CONSECUTIVE_FAILURES) throw new CliError('Lost the log stream and could not reconnect.', { code: 'network' });
 			process.stderr.write(`Reconnecting${cursor ? ' (resuming)' : ''}…\n`);

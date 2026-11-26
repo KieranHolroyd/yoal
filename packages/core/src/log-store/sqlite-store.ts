@@ -19,6 +19,7 @@ import {
 	type LogSearchResult,
 	type LogSeverity,
 	type LogTableResult,
+	type LogWarning,
 	type BuiltinLogField,
 } from '@yoal/contracts';
 import {
@@ -151,6 +152,37 @@ const FIELD_SUMMARY_DEFAULTS: readonly BuiltinLogField[] = [
 ];
 
 const MAX_TABLE_ROWS = 10_000;
+/** Distinct built-in combinations the one-scan `fields()` keeps; past it the counts are approximate. */
+const MAX_FIELD_GROUPS = 20_000;
+/** Tables the hot-tail prune trims by `hotDays` (log-retention.ts); k8s and pipeline lines keep their own retention. */
+const HOT_TAIL_TAGS: ReadonlySet<SqliteLogTag> = new Set<SqliteLogTag>(['le', 'sle', 'ble', 'lr']);
+/** A live-tail resume point further behind than this (seqs per table) is not replayed. */
+export const LOG_TAIL_RESUME_WINDOW = 50_000;
+
+export interface SqliteLogStoreOptions {
+	/**
+	 * The hot-tail window (ms) for a boundary: reads on the hot-tail tables never start earlier
+	 * than `now - window`, so a wide lite-mode read cannot scan past retention. Null: no clamp.
+	 */
+	hotWindowMs?: (boundary: LogReadBoundary) => number | null;
+	now?: () => number;
+}
+
+/**
+ * A live-tail resume vector made safe to replay: a table whose seq is missing, zero, ahead of the
+ * newest row or more than LOG_TAIL_RESUME_WINDOW behind resumes `backfill` rows before the newest
+ * instead, so a forged or stale `Last-Event-ID` can never ask for a whole-table scan.
+ */
+export function boundedTailResume(after: LogSeqVector, upTo: LogSeqVector, backfill: number): LogSeqVector {
+	const out: LogSeqVector = {};
+	for (const [tag, high] of Object.entries(upTo) as Array<[SqliteLogTag, number | undefined]>) {
+		const top = high ?? 0;
+		const low = after[tag];
+		const valid = low !== undefined && low > 0 && low <= top && top - low <= LOG_TAIL_RESUME_WINDOW;
+		out[tag] = valid ? low : Math.max(0, top - backfill);
+	}
+	return out;
+}
 
 export class SqliteLogStore implements LogStore {
 	readonly engine = 'sqlite' as const;
@@ -158,7 +190,36 @@ export class SqliteLogStore implements LogStore {
 	constructor(
 		private readonly sqlite: Database,
 		private readonly sources: readonly SqliteLogSource[] = SQLITE_LOG_SOURCES,
+		private readonly options: SqliteLogStoreOptions = {},
 	) {}
+
+	/**
+	 * The earliest `ts` a hot-tail read may start at for this boundary, or null for no clamp. Rows
+	 * older than the window are pruned anyway; clamping keeps a 30-day lite-mode query on the index.
+	 */
+	private hotFloor(read: LogStoreRead): number | null {
+		const window = this.options.hotWindowMs?.(read.boundary) ?? null;
+		if (window === null || !Number.isFinite(window)) return null;
+		return (this.options.now?.() ?? Date.now()) - window;
+	}
+
+	/** The time range one source reads: the request, clamped to the hot tail for pruned tables. */
+	private rangeFor(source: SqliteLogSource, read: LogStoreRead, floor: number | null): { from: number; to: number } {
+		if (floor === null || !HOT_TAIL_TAGS.has(source.tag) || read.from >= floor) return read;
+		return { from: Math.min(floor, read.to), to: read.to };
+	}
+
+	/** A `partial` warning when the read reached back past the hot tail. */
+	private clampWarning(read: LogStoreRead, floor: number | null): LogWarning[] {
+		if (floor === null || read.from >= floor) return [];
+		const days = Math.round((this.options.hotWindowMs?.(read.boundary) ?? 0) / 86_400_000);
+		return [
+			{
+				code: 'partial',
+				message: `Lite mode keeps ${days === 1 ? '1 day' : `${days} days`} of logs, so this read starts at ${new Date(floor).toISOString()}.`,
+			},
+		];
+	}
 
 	// ---------------------------------------------------------------- rows
 
@@ -178,9 +239,10 @@ export class SqliteLogStore implements LogStore {
 		const extra: SqlFragment[] = cursor
 			? [{ sql: `(u.ts, u.tag, u.seq) ${comparison} (?, ?, ?)`, params: [cursor.ts, cursor.tag, cursor.seq] }]
 			: [];
+		const floor = this.hotFloor(read);
 		const branches: SqlFragment[] = [];
 		for (const source of this.sources) {
-			const where = compileSourceWhere(source, read.boundary, filter, read, extra);
+			const where = compileSourceWhere(source, read.boundary, filter, this.rangeFor(source, read, floor), extra);
 			if (!where) continue;
 			branches.push({
 				sql: `SELECT * FROM (${where.sql} ORDER BY u.ts ${direction}, u.seq ${direction} LIMIT ?)`,
@@ -212,7 +274,7 @@ export class SqliteLogStore implements LogStore {
 			records,
 			cursor: cursors,
 			engine: this.engine,
-			warnings: [],
+			warnings: this.clampWarning(read, floor),
 			elapsedMs: Math.round(performance.now() - started),
 		};
 	}
@@ -281,10 +343,14 @@ export class SqliteLogStore implements LogStore {
 			for (const severity of logSeverities) bucketTotal += bucket[severity] ?? 0;
 			buckets.push({ ts, counts: bucket, total: bucketTotal });
 		}
-		return { from: read.from, to: read.to, intervalMs, buckets, total, engine: this.engine, warnings: [] };
+		return { from: read.from, to: read.to, intervalMs, buckets, total, engine: this.engine, warnings: this.clampWarning(read, this.hotFloor(read)) };
 	}
 
-	/** Top values for the built-ins (lite mode has no attribute discovery). */
+	/**
+	 * Top values for the built-ins (lite mode has no attribute discovery), from ONE scan: a GROUP BY
+	 * over every requested built-in at once, folded per field here. Past MAX_FIELD_GROUPS distinct
+	 * combinations the most common ones are kept and a `capped` warning says the counts are partial.
+	 */
 	async fields(read: LogStoreRead, input: Pick<LogFieldsInput, 'fields' | 'topValues'>): Promise<LogFieldsResult> {
 		const union = this.union(read);
 		const topValues = Math.max(1, Math.min(input.topValues ?? 10, 50));
@@ -297,54 +363,64 @@ export class SqliteLogStore implements LogStore {
 				names.push(normalised as BuiltinLogField);
 			else skipped.push(name);
 		}
-		const total = union
-			? (this.get1<{ n: number }>(`SELECT COUNT(*) AS n FROM (${union.sql}) u`, union.params)?.n ?? 0)
-			: 0;
-		const fields: LogFieldSummary[] = [];
-		for (const name of [...new Set(names)]) {
-			if (!union) {
-				fields.push({ name, kind: 'builtin', type: name === 'replica' ? 'number' : 'string', present: 0, topValues: [] });
-				continue;
-			}
-			if (name === 'service') {
-				fields.push(this.serviceSummary(union, topValues));
-				continue;
-			}
-			const expression = builtinGroupExpression(name);
-			if (!expression) continue;
-			const rows = this.all<{ value: string | number; n: number }>(
-				`SELECT ${expression} AS value, COUNT(*) AS n FROM (${union.sql}) u
-				 WHERE ${expression} IS NOT NULL GROUP BY value ORDER BY n DESC, value LIMIT ?`,
-				[...union.params, topValues],
+		const unique = [...new Set(names)];
+		const warnings: LogWarning[] = [...this.clampWarning(read, this.hotFloor(read))];
+		if (skipped.length)
+			warnings.push({ code: 'needs_clickhouse', message: `Field summaries for ${skipped.join(', ')} need the search index (ClickHouse).` });
+		const grouped = unique.flatMap((name) => {
+			const expression = name === 'service' ? null : builtinGroupExpression(name);
+			return expression ? [{ name, expression }] : [];
+		});
+		const wantService = unique.includes('service');
+		const columns = [
+			...grouped.map((field, index) => `${field.expression} AS f${index}`),
+			...(wantService ? ['u.scope_kind AS sk', 'u.scope_id AS si'] : []),
+		];
+		const keys = [...grouped.map((_, index) => `f${index}`), ...(wantService ? ['sk', 'si'] : [])];
+		let rows: Array<Record<string, string | number | null>> = [];
+		let total = 0;
+		let capped = false;
+		if (union) {
+			rows = this.all<Record<string, string | number | null>>(
+				`SELECT ${[...columns, 'COUNT(*) AS n'].join(', ')} FROM (${union.sql}) u
+				 ${keys.length ? `GROUP BY ${keys.join(', ')} ORDER BY n DESC` : ''} LIMIT ?`,
+				[...union.params, MAX_FIELD_GROUPS + 1],
 			);
-			const present =
-				name === 'level'
-					? total
-					: (this.get1<{ n: number }>(
-							`SELECT COUNT(*) AS n FROM (${union.sql}) u WHERE ${expression} IS NOT NULL`,
-							union.params,
-						)?.n ?? 0);
+			capped = rows.length > MAX_FIELD_GROUPS;
+			if (capped) rows = rows.slice(0, MAX_FIELD_GROUPS);
+			total = rows.reduce((sum, row) => sum + Number(row.n ?? 0), 0);
+		}
+		if (capped) warnings.push({ code: 'capped', message: 'Too many distinct values to count exactly in lite mode; the counts cover the most common ones.' });
+		const fields: LogFieldSummary[] = [];
+		for (const name of unique) {
+			const type = name === 'replica' ? 'number' : 'string';
+			if (name === 'service') {
+				fields.push(this.serviceSummary(rows, topValues));
+				continue;
+			}
+			const index = grouped.findIndex((field) => field.name === name);
+			if (index < 0) continue;
+			const counts = new Map<string, number>();
+			let present = 0;
+			for (const row of rows) {
+				const value = row[`f${index}`];
+				if (value === null || value === undefined) continue;
+				const n = Number(row.n ?? 0);
+				present += n;
+				counts.set(String(value), (counts.get(String(value)) ?? 0) + n);
+			}
 			fields.push({
 				name,
 				kind: 'builtin',
-				type: name === 'replica' ? 'number' : 'string',
-				present,
-				topValues: rows.map((row) => ({ value: String(row.value), count: row.n })),
+				type,
+				present: name === 'level' ? total : present,
+				topValues: [...counts]
+					.sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0))
+					.slice(0, topValues)
+					.map(([value, count]) => ({ value, count })),
 			});
 		}
-		return {
-			fields,
-			total,
-			engine: this.engine,
-			warnings: skipped.length
-				? [
-						{
-							code: 'needs_clickhouse',
-							message: `Field summaries for ${skipped.join(', ')} need the search index (ClickHouse).`,
-						},
-					]
-				: [],
-		};
+		return { fields, total, engine: this.engine, warnings };
 	}
 
 	/**
@@ -426,7 +502,7 @@ export class SqliteLogStore implements LogStore {
 			columns,
 			rows: rows.map((row) => order.map((key) => row[key] ?? null)),
 			engine: this.engine,
-			warnings: [],
+			warnings: this.clampWarning(read, this.hotFloor(read)),
 			elapsedMs: Math.round(performance.now() - started),
 		};
 	}
@@ -496,9 +572,10 @@ export class SqliteLogStore implements LogStore {
 	/** Every in-boundary branch, filtered and time-bounded, as one UNION ALL (or null for none). */
 	private union(read: LogStoreRead): SqlFragment | null {
 		const filter = compileSqliteFilter(read.ast.filter);
+		const floor = this.hotFloor(read);
 		const branches: SqlFragment[] = [];
 		for (const source of this.sources) {
-			const where = compileSourceWhere(source, read.boundary, filter, read);
+			const where = compileSourceWhere(source, read.boundary, filter, this.rangeFor(source, read, floor));
 			if (where) branches.push(where);
 		}
 		if (branches.length === 0) return null;
@@ -508,20 +585,26 @@ export class SqliteLogStore implements LogStore {
 		};
 	}
 
-	private serviceSummary(union: SqlFragment, topValues: number): LogFieldSummary {
-		const rows = this.all<{ scope_kind: string; scope_id: string; n: number }>(
-			`SELECT u.scope_kind, u.scope_id, COUNT(*) AS n FROM (${union.sql}) u
-			 GROUP BY u.scope_kind, u.scope_id ORDER BY n DESC LIMIT ?`,
-			[...union.params, topValues],
-		);
+	/** `service` from the combined scan's scope columns: the top scopes, by display name. */
+	private serviceSummary(rows: ReadonlyArray<Record<string, string | number | null>>, topValues: number): LogFieldSummary {
+		const byScope = new Map<string, { kind: string; id: string; n: number }>();
+		for (const row of rows) {
+			const kind = String(row.sk ?? '');
+			const id = String(row.si ?? '');
+			const key = `${kind}:${id}`;
+			const entry = byScope.get(key) ?? { kind, id, n: 0 };
+			entry.n += Number(row.n ?? 0);
+			byScope.set(key, entry);
+		}
+		const top = [...byScope.values()].sort((a, b) => b.n - a.n).slice(0, topValues);
 		const names = lookupLogScopeNames(
 			this.sqlite,
-			rows.map((row) => ({ kind: row.scope_kind as LogScopeKind, id: row.scope_id })),
+			top.map((row) => ({ kind: row.kind as LogScopeKind, id: row.id })),
 		);
 		const counts = new Map<string, number>();
 		let present = 0;
-		for (const row of rows) {
-			const name = names.get(`${row.scope_kind}:${row.scope_id}`) ?? row.scope_id;
+		for (const row of top) {
+			const name = names.get(`${row.kind}:${row.id}`) ?? row.id;
 			counts.set(name, (counts.get(name) ?? 0) + row.n);
 			present += row.n;
 		}

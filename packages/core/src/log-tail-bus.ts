@@ -1,4 +1,5 @@
-import { formatLogScope, type LogRecord, type LogScopeKind } from '@yoal/contracts';
+import { formatLogScope, LOG_TAIL_MAX_PER_ORG, LOG_TAIL_MAX_PER_PRINCIPAL, type LogRecord, type LogScopeKind } from '@yoal/contracts';
+import { CoreError } from './errors.ts';
 import type { LogReadBoundary } from './log-store/types.ts';
 import { unifiedRowToLogRecord, type SqliteLogTag, type UnifiedLogRow } from './log-store/sqlite-sources.ts';
 import type { LogSeqVector } from './log-store/sqlite-store.ts';
@@ -11,6 +12,10 @@ import type { LogSeqVector } from './log-store/sqlite-store.ts';
  * Each subscriber has a bounded queue. When it falls more than `capacity` lines behind, the oldest
  * queued lines are dropped and counted, so the client shows a "sampled" notice and stays live,
  * like CloudWatch Live Tail. The bus is per process, which is right with one active control plane.
+ *
+ * Every subscriber runs its predicate on the ingest path, so the bus admits at most
+ * LOG_TAIL_MAX_PER_PRINCIPAL per principal and LOG_TAIL_MAX_PER_ORG per org (`owner`); past
+ * either, `subscribe` throws a 429.
  */
 
 export const LOG_TAIL_QUEUE_CAPACITY = 2_000;
@@ -29,6 +34,8 @@ export interface LogTailFilter {
 	/** From `compileLogPredicate`; a throwing predicate counts as "no match". */
 	predicate: (record: LogRecord) => boolean;
 	capacity?: number;
+	/** Who holds it, for the concurrency limits. Unset (internal callers) is not counted. */
+	owner?: { principal: string; orgId: string };
 }
 
 export class LogTailSubscription {
@@ -38,6 +45,7 @@ export class LogTailSubscription {
 	readonly #scopes: ReadonlySet<string>;
 	readonly #predicate: (record: LogRecord) => boolean;
 	readonly #capacity: number;
+	readonly owner: { principal: string; orgId: string } | null;
 	#queue: TailItem[] = [];
 	#dropped = 0;
 	#floor: LogSeqVector = {};
@@ -52,6 +60,7 @@ export class LogTailSubscription {
 		this.#scopes = new Set(filter.boundary.scopes.map(formatLogScope));
 		this.#predicate = filter.predicate;
 		this.#capacity = Math.max(1, filter.capacity ?? LOG_TAIL_QUEUE_CAPACITY);
+		this.owner = filter.owner ?? null;
 	}
 
 	get closed(): boolean {
@@ -159,6 +168,23 @@ export class LogTailBus {
 	}
 
 	subscribe(filter: LogTailFilter): LogTailSubscription {
+		if (filter.owner) {
+			let mine = 0;
+			let org = 0;
+			for (const subscriber of this.#subscribers) {
+				if (subscriber.owner?.orgId !== filter.owner.orgId) continue;
+				org += 1;
+				if (subscriber.owner.principal === filter.owner.principal) mine += 1;
+			}
+			if (mine >= LOG_TAIL_MAX_PER_PRINCIPAL)
+				throw new CoreError(
+					'too_many_tails',
+					`You have ${LOG_TAIL_MAX_PER_PRINCIPAL} live tails open, the most one person can hold. Close one (another tab or \`yoal logs -f\`) and try again.`,
+					429,
+				);
+			if (org >= LOG_TAIL_MAX_PER_ORG)
+				throw new CoreError('too_many_tails', `This organisation has ${LOG_TAIL_MAX_PER_ORG} live tails open, the most it can hold. Try again when one closes.`, 429);
+		}
 		const subscription = new LogTailSubscription(this, filter);
 		this.#subscribers.add(subscription);
 		return subscription;

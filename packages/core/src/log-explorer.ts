@@ -2,6 +2,8 @@ import {
 	canViewPlatform,
 	compileLogPredicate,
 	formatLogScope,
+	LOG_SETTINGS_PLATFORM_ID,
+	LOG_TAIL_MAX_LIFETIME_MS,
 	logContextInputSchema,
 	logFieldsInputSchema,
 	logHistogramInputSchema,
@@ -31,6 +33,7 @@ import {
 } from '@yoal/contracts';
 import type * as z from 'zod';
 import type { CoreContext } from './context.ts';
+import { ClickHouseError, ClickHouseUnavailableError } from './clickhouse.ts';
 import { CoreError, ForbiddenError, ValidationError } from './errors.ts';
 import { PLATFORM_LOG_ORG_ID } from './log-record-ingest.ts';
 import { compareLogs, whyLogs, type LogAnalysisHost } from './log-analysis.ts';
@@ -42,6 +45,7 @@ import {
 	decodeLogCursor,
 	decodeTailCursor,
 	encodeTailCursor,
+	boundedTailResume,
 	InvalidLogCursorError,
 	lookupLogScopeNames,
 	SqliteLogStore,
@@ -104,6 +108,8 @@ export interface LogTailBatch {
 	records: LogRecord[];
 	dropped: number;
 	cursor: string;
+	/** Set when the stream must end after sending this batch (LOG_TAIL_MAX_LIFETIME_MS). */
+	ended?: 'max_lifetime';
 }
 
 /** An open live tail: the catch-up batch, then `next()` until the client goes away. */
@@ -112,6 +118,8 @@ export interface LogTailSession {
 	/** Resume cursor as of the open (send as the first event id). */
 	cursor: string;
 	initial: LogTailBatch;
+	/** When `next()` starts answering `ended: 'max_lifetime'` (epoch ms, the core clock). */
+	expiresAt: number;
 	next(timeoutMs: number, signal?: AbortSignal): Promise<LogTailBatch>;
 	close(): void;
 }
@@ -141,7 +149,19 @@ export class LogExplorerService {
 	readonly saved: LogSavedQueryService;
 
 	constructor(private readonly ctx: CoreContext) {
-		this.sqliteStore = new SqliteLogStore(ctx.sqlite);
+		// Lite-mode reads never reach back past the hot tail (the org's `hotDays`; for a platform
+		// admin's cross-org read, the longer of the org's and the platform's).
+		this.sqliteStore = new SqliteLogStore(ctx.sqlite, undefined, {
+			now: () => ctx.now(),
+			hotWindowMs: (boundary) => {
+				const settings = ctx.logSettings;
+				if (!settings) return null;
+				const days = boundary.crossOrg
+					? Math.max(settings.effective(boundary.orgId).hotDays, settings.effective(LOG_SETTINGS_PLATFORM_ID).hotDays)
+					: settings.effective(boundary.orgId).hotDays;
+				return days * 86_400_000;
+			},
+		});
 		this.saved = new LogSavedQueryService(ctx);
 		// Every append path publishes what it inserted; the bus fans it out to live tails (§4.4).
 		ctx.logs.onAppend.push(
@@ -414,7 +434,11 @@ export class LogExplorerService {
 		if (!parsed.ok) throw queryError(parsed.error);
 		const resolved = this.resolveBoundary(principal, input.scopes ?? []);
 		const filter = parsed.ast.filter;
-		const subscription = this.tailBus.subscribe({ boundary: resolved.boundary, predicate: compileLogPredicate(filter) });
+		const subscription = this.tailBus.subscribe({
+			boundary: resolved.boundary,
+			predicate: compileLogPredicate(filter),
+			owner: { principal: tailOwnerKey(principal), orgId: principal.orgId },
+		});
 		let initial: LogTailBatch;
 		let upTo: LogSeqVector;
 		try {
@@ -428,9 +452,10 @@ export class LogExplorerService {
 			let dropped = 0;
 			try {
 				if (resume) {
+					// A zero, future or far-behind seq (forged or stale) resumes near the newest row.
 					const caughtUp = this.sqliteStore.tailCatchUp(
 						{ boundary: resolved.boundary, ast, from: 0, to: Number.MAX_SAFE_INTEGER },
-						resume,
+						boundedTailResume(resume, upTo, LOG_TAIL_CATCH_UP_LIMIT),
 						upTo,
 						LOG_TAIL_CATCH_UP_LIMIT,
 						{ count: true },
@@ -473,15 +498,21 @@ export class LogExplorerService {
 	}
 
 	private session(subscription: LogTailSubscription, names: Map<string, string>, initial: LogTailBatch): LogTailSession {
+		const expiresAt = this.ctx.now() + LOG_TAIL_MAX_LIFETIME_MS;
 		return {
 			engine: 'sqlite',
 			cursor: initial.cursor,
 			initial,
+			expiresAt,
 			next: async (timeoutMs, signal) => {
-				await subscription.wait(timeoutMs, signal);
+				const left = expiresAt - this.ctx.now();
+				if (left > 0) await subscription.wait(Math.min(timeoutMs, left), signal);
 				const { records, dropped } = subscription.take();
 				this.name(records, names);
-				return { records, dropped, cursor: encodeTailCursor(subscription.vector) };
+				const batch: LogTailBatch = { records, dropped, cursor: encodeTailCursor(subscription.vector) };
+				// Past its lifetime the stream ends; the client reconnects, which re-authorises it.
+				if (this.ctx.now() >= expiresAt) batch.ended = 'max_lifetime';
+				return batch;
 			},
 			close: () => subscription.close(),
 		};
@@ -547,8 +578,10 @@ export class LogExplorerService {
 	}
 
 	/**
-	 * Run a read on the chosen store. A ClickHouse failure that is not "unsupported" falls back to
-	 * SQLite with a `partial` warning (fail-open, LP2); lite-mode gaps become a 422.
+	 * Run a read on the chosen store. An unreachable ClickHouse falls back to SQLite with a `partial`
+	 * warning (fail-open, LP2); a query ClickHouse refused or stopped (timeout, memory or row
+	 * limits) is not rerun on SQLite, where it would cost the control plane more. Lite-mode gaps
+	 * become a 422.
 	 */
 	private async run<T extends { engine: LogEngine; warnings: LogWarning[] }>(
 		prepared: PreparedRead,
@@ -571,7 +604,12 @@ export class LogExplorerService {
 			} catch (error) {
 				if (error instanceof LogStoreUnsupported) throw needsClickhouse(error);
 				if (error instanceof InvalidLogCursorError) throw invalidCursor(error);
-				console.error('[logs] ClickHouse read failed; answering from SQLite', error);
+				if (!isClickHouseUnreachable(error)) {
+					if (error instanceof ClickHouseError)
+						throw new CoreError('query_failed', `The search index stopped this query: ${error.message}`, error.isQueryError ? 422 : 503);
+					throw error;
+				}
+				console.error('[logs] ClickHouse unreachable; answering from SQLite', error);
 				const fallback = await this.runSqlite(op);
 				if (fallback && typeof fallback === 'object' && Array.isArray((fallback as { warnings?: unknown }).warnings))
 					(fallback as unknown as { warnings: LogWarning[] }).warnings.push({
@@ -700,4 +738,18 @@ function searchCursorTs(cursor: string | null | undefined): number | null {
 		}
 	}
 	return null;
+}
+
+/** Connection-level failures only (refused, DNS, reset), looking through `cause`. */
+function isClickHouseUnreachable(error: unknown): boolean {
+	for (let current: unknown = error, depth = 0; current && depth < 5; depth++) {
+		if (current instanceof ClickHouseUnavailableError) return true;
+		current = (current as { cause?: unknown }).cause;
+	}
+	return false;
+}
+
+/** One person (or one key / OAuth client) for the live-tail concurrency limit. */
+function tailOwnerKey(principal: Principal): string {
+	return `${principal.kind}:${principal.userId}:${principal.keyId ?? principal.clientId ?? ''}`;
 }

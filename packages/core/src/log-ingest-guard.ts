@@ -38,6 +38,19 @@ export const MAX_FINGERPRINTED_SECRETS = 2_000;
 const HKDF_SALT = 'yoal/logs';
 const HKDF_INFO = 'log-redaction-secret-fingerprints-v1';
 
+/** How far ahead of the control plane's clock a record's `ts` may be (node clock skew). */
+export const LOG_MAX_FUTURE_MS = 5 * 60_000;
+
+/**
+ * A record's event time as stored by every ingest path: at most `now + LOG_MAX_FUTURE_MS`. A
+ * future `ts` would otherwise sort above every real line for days, dodge age retention and pin
+ * live-tail and search pages; an unusable value (not finite) becomes `now`.
+ */
+export function capLogTs(ts: number | null | undefined, now: number): number {
+	if (ts === null || ts === undefined || !Number.isFinite(ts)) return now;
+	return Math.min(ts, now + LOG_MAX_FUTURE_MS);
+}
+
 /** The fingerprint key: HKDF-SHA256 of the master key, 32 bytes (docs/LOGS.md §10.4). */
 export function deriveLogFingerprintKey(masterKey: Uint8Array): Uint8Array {
 	return new Uint8Array(hkdfSync('sha256', masterKey, HKDF_SALT, HKDF_INFO, 32));
@@ -202,12 +215,26 @@ export class LogIngestGuard {
 				}
 				kept = next;
 			}
-			// 2. Quota (§10.2): the earliest lines that fit.
+			// 2. Quota (§10.2): the earliest lines that fit. Edge `access` lines use their own bucket,
+			//    so outside traffic cannot spend the scope's runtime-log quota.
 			if (kept.length > 0) {
-				const admitted = this.ctx.logQuotas.admit(scope, kept.map((row) => access.size(row)), now);
-				if (admitted < kept.length) {
-					for (const row of kept.slice(admitted)) drop('quota', row);
-					kept = kept.slice(0, admitted);
+				const isAccess = kept.map((row) => access.unified(row, scope).source === 'access');
+				const admitted = { access: 0, scope: 0 };
+				const accessRows = kept.filter((_, index) => isAccess[index]);
+				const scopeRows = kept.filter((_, index) => !isAccess[index]);
+				if (accessRows.length > 0)
+					admitted.access = this.ctx.logQuotas.admit({ ...scope, bucket: 'access' }, accessRows.map((row) => access.size(row)), now);
+				if (scopeRows.length > 0) admitted.scope = this.ctx.logQuotas.admit(scope, scopeRows.map((row) => access.size(row)), now);
+				if (admitted.access < accessRows.length || admitted.scope < scopeRows.length) {
+					const next: T[] = [];
+					let seenAccess = 0;
+					let seenScope = 0;
+					kept.forEach((row, index) => {
+						const fits = isAccess[index] ? seenAccess++ < admitted.access : seenScope++ < admitted.scope;
+						if (fits) next.push(row);
+						else drop('quota', row);
+					});
+					kept = next;
 				}
 			}
 		}

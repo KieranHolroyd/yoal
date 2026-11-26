@@ -21,6 +21,7 @@ import {
 	type LogRecord,
 	type LogSeverity,
 } from './log-record.ts';
+import { checkRegexSafety, logRegexSubject } from './log-regex.ts';
 
 /**
  * The log-query language (docs/LOGS.md §6, LP3): parser, canonical formatter, JS predicate and
@@ -116,8 +117,14 @@ import {
  *   regex                   unanchored search (`RegExp.test`, ClickHouse `match`), CASE-SENSITIVE
  *                           unless the pattern starts with RE2 flags like `(?i)` (see
  *                           `logRegexSource`). The parser rejects patterns over
- *                           LOG_REGEX_MAX_LENGTH, invalid ones, lookaround, backreferences and
- *                           nested unbounded repetition such as `(a+)+`. ClickHouse only.
+ *                           LOG_REGEX_MAX_LENGTH, invalid ones, and anything outside the safe
+ *                           subset of `checkRegexSafety` (log-regex.ts): lookaround, backreferences,
+ *                           repeated groups holding `|` or a quantifier (`(a+)+`, `(a|aa)*`), more
+ *                           than 2 unbounded repeats, and overlapping repeats like `.*x.*y`.
+ *                           The JS predicate tests only the first LOG_REGEX_JS_SUBJECT_MAX (2 KiB)
+ *                           characters of each value; ClickHouse (RE2, linear) tests all of it, so
+ *                           a match past 2 KiB shows in search but not in live tail or rules.
+ *                           Search: ClickHouse only.
  *   gt/gte/lt/lte           numeric: the stored value is parsed with `parseLogNumber` (decimal,
  *                           optional sign/fraction/exponent, surrounding whitespace ignored); a
  *                           value that is not a number is false. AST value is a number.
@@ -1144,7 +1151,7 @@ function checkFilterLimits(filter: LogQueryNode, parser: Parser, start: number):
 	}
 }
 
-/** RE2-compatibility and safety checks for a regex leaf; null when acceptable. */
+/** RE2-compatibility and safety checks for a regex leaf (the safe subset in log-regex.ts); null when acceptable. */
 export function checkLogRegex(pattern: string): string | null {
 	if (pattern.length > LOG_REGEX_MAX_LENGTH) return `Regex is longer than ${LOG_REGEX_MAX_LENGTH} characters`;
 	const { source, flags } = logRegexSource(pattern);
@@ -1153,53 +1160,7 @@ export function checkLogRegex(pattern: string): string | null {
 	} catch (error) {
 		return `Invalid regex: ${error instanceof Error ? error.message.replace(/^Invalid regular expression: /, '') : 'syntax error'}`;
 	}
-	// Walk the pattern: skip escapes and character classes, track groups.
-	const groups: boolean[] = [];
-	let lastGroupHadRepeat = false;
-	let hadRepeat = false;
-	for (let i = 0; i < source.length; i++) {
-		const ch = source[i]!;
-		if (ch === '\\') {
-			const next = source[i + 1];
-			if (next !== undefined && /[1-9]/.test(next)) return 'Backreferences are not supported (RE2)';
-			if (next === 'k' && source[i + 2] === '<') return 'Backreferences are not supported (RE2)';
-			i++;
-			lastGroupHadRepeat = false;
-			continue;
-		}
-		if (ch === '[') {
-			i++;
-			if (source[i] === '^') i++;
-			if (source[i] === ']') i++;
-			while (i < source.length && source[i] !== ']') {
-				if (source[i] === '\\') i++;
-				i++;
-			}
-			lastGroupHadRepeat = false;
-			continue;
-		}
-		if (ch === '(') {
-			if (source.startsWith('(?=', i) || source.startsWith('(?!', i) || source.startsWith('(?<=', i) || source.startsWith('(?<!', i)) {
-				return 'Lookaround is not supported (RE2)';
-			}
-			groups.push(hadRepeat);
-			hadRepeat = false;
-			lastGroupHadRepeat = false;
-			continue;
-		}
-		if (ch === ')') {
-			lastGroupHadRepeat = hadRepeat;
-			hadRepeat = (groups.pop() ?? false) || hadRepeat;
-			continue;
-		}
-		const unbounded = ch === '*' || ch === '+' || (ch === '{' && /^\{\d+,\}/.test(source.slice(i)));
-		if (unbounded) {
-			if (lastGroupHadRepeat) return 'Nested repetition like (a+)+ is not allowed';
-			hadRepeat = true;
-		}
-		lastGroupHadRepeat = false;
-	}
-	return null;
+	return checkRegexSafety(source, flags);
 }
 
 function levenshtein(a: string, b: string): number {
@@ -1460,7 +1421,8 @@ function compileField(node: Extract<LogQueryNode, { type: 'field' }>): Predicate
 			} catch {
 				return () => false;
 			}
-			return any((value) => re.test(String(value)));
+			// Backtracking JS only sees the head of a value; ClickHouse (RE2) sees all of it.
+			return any((value) => re.test(logRegexSubject(String(value))));
 		}
 		default: {
 			const target = typeof node.value === 'number' ? node.value : parseLogNumber(node.value);

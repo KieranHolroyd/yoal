@@ -1,5 +1,5 @@
-import { and, eq, sql } from 'drizzle-orm';
-import { databases, domains, logRecords, nodes, projects, storageInstances, workloads } from '@yoal/db';
+import { and, eq, or, sql } from 'drizzle-orm';
+import { databases, domains, logRecords, nodes, projects, storageInstances, workloadReplicas, workloads } from '@yoal/db';
 import {
 	isPlatformLogUnit,
 	parseWorkloadReplicaId,
@@ -12,7 +12,7 @@ import {
 import type { CoreContext } from './context.ts';
 import { CoreError } from './errors.ts';
 import type { UnifiedLogRow } from './log-store/sqlite-sources.ts';
-import { recordRowAccess } from './log-ingest-guard.ts';
+import { capLogTs, recordRowAccess } from './log-ingest-guard.ts';
 import type { ProjectRow } from './projects.ts';
 
 /**
@@ -69,8 +69,11 @@ export function normalizeLogHost(host: string): string {
  *   check as `appendRuntime`; managed storage and databases resolve to their own scope.
  * - `site`: the project that serves the host (verified custom domain or its `www.` redirect
  *   sibling, preview host, environment host or `<slug>.<contentDomain>`, through
- *   `AccessService.resolveContentHost`). A host no project serves (the control plane's own host,
- *   a stray Host header) goes to the node's `edge` scope under `PLATFORM_LOG_ORG_ID`.
+ *   `AccessService.resolveContentHost`). Only a node that serves that project's route may post
+ *   for it (`nodeServesProject`), otherwise 403: any authenticated node could else write access
+ *   lines, and spend quota, in another org's project. A host no project serves (the control
+ *   plane's own host, a stray Host header) goes to the posting node's own `edge` scope under
+ *   `PLATFORM_LOG_ORG_ID`, which spoofs nothing.
  * - `platform`: `platform:<nodeId>` under `PLATFORM_LOG_ORG_ID`, stream `unit:<unit>`.
  */
 export function resolveNodeLogTarget(ctx: CoreContext, nodeId: string, target: NodeLogBatch['target']): ResolvedLogTarget | null {
@@ -138,6 +141,8 @@ function resolveSite(ctx: CoreContext, nodeId: string, host: string): ResolvedLo
 	const route = ctx.access.resolveContentHost(host);
 	const project = route?.project ?? wwwSiblingProject(ctx, host);
 	const deploymentId = route?.deploymentId ?? project?.productionDeploymentId ?? null;
+	if (project && !nodeServesProject(ctx, nodeId, project))
+		throw new CoreError('forbidden', 'This node does not serve that host.', 403);
 	if (project)
 		return {
 			orgId: project.orgId,
@@ -163,6 +168,28 @@ function resolveSite(ctx: CoreContext, nodeId: string, host: string): ResolvedLo
 		source: null,
 		resource: { 'http.host': host },
 	};
+}
+
+/**
+ * Does the node's Caddy carry a route for the project (the same rule the desired state uses,
+ * `desired-state/context.ts`)? Every ingress-set node serves every site (D-C0 roles); a worker
+ * serves a project whose workload, spread copy or mid-move copy it holds, or one pinned to it.
+ */
+export function nodeServesProject(ctx: CoreContext, nodeId: string, project: Pick<ProjectRow, 'id' | 'placement'>): boolean {
+	if (ctx.ingressSet.isIngress(nodeId)) return true;
+	if (project.placement === nodeId) return true;
+	const workload = ctx.db
+		.select({ id: workloads.id })
+		.from(workloads)
+		.where(and(eq(workloads.projectId, project.id), or(eq(workloads.nodeId, nodeId), eq(workloads.movingFromNodeId, nodeId))))
+		.get();
+	if (workload) return true;
+	const replica = ctx.db
+		.select({ nodeId: workloadReplicas.nodeId })
+		.from(workloadReplicas)
+		.where(and(eq(workloadReplicas.projectId, project.id), eq(workloadReplicas.nodeId, nodeId)))
+		.get();
+	return Boolean(replica);
 }
 
 /** `www.example.com` when `example.com` is a verified custom domain that redirects www. */
@@ -225,7 +252,7 @@ export function buildLogRecordRows(
 		const resource = { ...boundedMap(record.resource, MAX_RESOURCE_KEYS), ...stamped };
 		return {
 			tag: 'lr',
-			ts: Number.isFinite(record.ts) && record.ts > 0 ? Math.floor(record.ts) : now,
+			ts: capLogTs(Number.isFinite(record.ts) && record.ts > 0 ? Math.floor(record.ts) : now, now),
 			observed_ts: now,
 			org_id: resolved.orgId,
 			scope_kind: resolved.scopeKind,
