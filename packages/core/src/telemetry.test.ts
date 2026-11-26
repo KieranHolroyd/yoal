@@ -676,8 +676,9 @@ describe('TelemetryStore analytics ingestion (injected client)', () => {
 		expect(store.available).toBe(true);
 
 		const ddl = fake.calls.filter((call) => call.statement.trimStart().startsWith('CREATE TABLE'));
-		// traffic, db_metrics, storage_metrics and broker_metrics (1m + 1h each), analytics, tails.
-		expect(ddl).toHaveLength(10);
+		// traffic, db_metrics, storage_metrics and broker_metrics (1m + 1h each), analytics, tails,
+		// and the Logs Explorer's logs + log_patterns (docs/LOGS.md §4.2).
+		expect(ddl).toHaveLength(12);
 
 		const analytics = fake.calls.find((call) => call.statement.includes('.function_analytics'))!;
 		expect(analytics.statement).toContain('ts DateTime64(3)');
@@ -880,5 +881,107 @@ describe('TelemetryStore tail ingestion (injected client)', () => {
 		await expect(store.ingestTails([makeTailEvent(1)])).resolves.toBeUndefined();
 		expect(store.available).toBe(true);
 		expect(store.error?.message).toContain('Syntax error');
+	});
+});
+
+describe('Logs Explorer search-index tables (docs/LOGS.md §4.2)', () => {
+	/** A fake server that records every statement and answers per the given rules. */
+	function fakeServer(answer: (sql: string) => Response | null) {
+		const statements: string[] = [];
+		const fetcher: typeof fetch = Object.assign(
+			async (input: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+				const url = new URL(String(input));
+				const sql = url.searchParams.get('query') ?? String(init?.body ?? '');
+				statements.push(sql);
+				return answer(sql) ?? new Response('', { status: 200 });
+			},
+			{ preconnect: () => undefined },
+		);
+		return { statements, fetcher };
+	}
+
+	test('creates yoal.logs with a text index, and log_patterns', async () => {
+		const server = fakeServer((sql) =>
+			sql.startsWith('SHOW CREATE TABLE')
+				? new Response(`${JSON.stringify({ statement: "CREATE TABLE yoal.logs (... INDEX body_text body TYPE text(tokenizer = 'splitByNonAlpha') ...)" })}\n`)
+				: null,
+		);
+		const store = new TelemetryStore({ clickhouse: { url: 'http://ch', user: 'yoal', password: '', fetch: server.fetcher } });
+		expect(await store.logsReady()).toBe(true);
+		expect(store.logsTextIndex).toBe('text');
+		const logs = server.statements.find((sql) => sql.includes('CREATE TABLE IF NOT EXISTS yoal.logs'))!;
+		expect(logs).toContain("INDEX body_text body TYPE text(tokenizer = 'splitByNonAlpha', preprocessor = lower(body)) GRANULARITY 1");
+		expect(logs).toContain('ORDER BY (org_id, scope_kind, scope_id, ts)');
+		expect(logs).toContain('PARTITION BY toDate(ts)');
+		expect(logs).toContain('TTL toDateTime(ts) + INTERVAL 90 DAY');
+		expect(logs).toContain('non_replicated_deduplication_window = 1000');
+		expect(logs).toContain('attributes Map(LowCardinality(String), String)');
+		expect(logs).toContain("ts DateTime64(3, 'UTC')");
+		expect(server.statements.some((sql) => sql.includes('CREATE TABLE IF NOT EXISTS yoal.log_patterns') && sql.includes('ReplacingMergeTree(last_seen)'))).toBe(true);
+	});
+
+	test('falls back to tokenbf_v1 when the server rejects the text index', async () => {
+		const server = fakeServer((sql) => {
+			if (sql.includes('TYPE text(')) return new Response("Code: 80. DB::Exception: Unknown Index type 'text'. (INCORRECT_QUERY)", { status: 400 });
+			if (sql.startsWith('SHOW CREATE TABLE'))
+				return new Response(`${JSON.stringify({ statement: 'CREATE TABLE yoal.logs (... INDEX body_text lower(body) TYPE tokenbf_v1(65536, 2, 0) GRANULARITY 1 ...)' })}\n`);
+			return null;
+		});
+		const store = new TelemetryStore({ clickhouse: { url: 'http://ch', user: 'yoal', password: '', fetch: server.fetcher } });
+		expect(await store.logsReady()).toBe(true);
+		expect(store.logsTextIndex).toBe('tokenbf');
+		expect(server.statements.filter((sql) => sql.includes('CREATE TABLE IF NOT EXISTS yoal.logs'))).toHaveLength(2);
+		expect(server.statements.some((sql) => sql.includes('INDEX body_text lower(body) TYPE tokenbf_v1(65536, 2, 0)'))).toBe(true);
+	});
+
+	test('a log-table failure leaves the index off but telemetry working', async () => {
+		const errors: Error[] = [];
+		const server = fakeServer((sql) =>
+			sql.includes('yoal.logs') ? new Response('Code: 36. DB::Exception: bad arguments. (BAD_ARGUMENTS)', { status: 400 }) : null,
+		);
+		const store = new TelemetryStore({
+			clickhouse: { url: 'http://ch', user: 'yoal', password: '', fetch: server.fetcher },
+			onError: (error) => errors.push(error),
+		});
+		expect(await store.ready()).toBe(true);
+		expect(await store.logsReady()).toBe(false);
+		expect(store.logsError).toContain('bad arguments');
+		expect(errors.some((error) => error.message.includes('log index unavailable'))).toBe(true);
+		await expect(store.insertLogRows('logs', [{ id: 'x' }])).rejects.toThrow('bad arguments');
+	});
+
+	test('inserts pass the dedup settings through and surface failures', async () => {
+		const server = fakeServer((sql) => (sql.startsWith('INSERT INTO yoal.logs') ? new Response('Code: 27. DB::Exception: Cannot parse input', { status: 400 }) : null));
+		const store = new TelemetryStore({ clickhouse: { url: 'http://ch', user: 'yoal', password: '', fetch: server.fetcher } });
+		await expect(store.insertLogRows('logs', [{ id: 'x' }], { insert_deduplication_token: 't' })).rejects.toThrow('Cannot parse input');
+		expect(store.available).toBe(true);
+	});
+});
+
+describe.skipIf(!hasClickHouse)('Logs Explorer search-index tables on a real server', () => {
+	test('text index on this server, and a replayed insert is deduplicated', async () => {
+		const store = testTelemetryStore();
+		try {
+			expect(await store.logsReady()).toBe(true);
+			expect(store.logsTextIndex).not.toBeNull();
+			const row = {
+				id: 'le:1',
+				ts: '2026-11-25 10:00:00.000',
+				observed_ts: '2026-11-25 10:00:00.000',
+				org_id: 'o',
+				scope_kind: 'project',
+				scope_id: 'p',
+				source: 'runtime',
+				severity_number: 9,
+				severity_text: 'info',
+				body: 'hello',
+			};
+			await store.insertLogRows('logs', [row], { insert_deduplicate: 1, insert_deduplication_token: 'log_events:0-1' });
+			await store.insertLogRows('logs', [row], { insert_deduplicate: 1, insert_deduplication_token: 'log_events:0-1' });
+			const result = await store.runQuery('SELECT count() FROM logs', { asReader: true });
+			expect(result.data[0]).toEqual([1]);
+		} finally {
+			await disposeTelemetryStore(store);
+		}
 	});
 });

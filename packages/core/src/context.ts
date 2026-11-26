@@ -6,6 +6,8 @@ import type { QuotaService } from './quota.ts';
 import type { UsageService } from './usage.ts';
 import type { ConditionalStore, ObjectStore } from './object-store.ts';
 import type { TelemetryStore } from './telemetry.ts';
+import type { ClickHouseLogStore } from './log-store/clickhouse-store.ts';
+import type { LogIndexer } from './log-indexer.ts';
 import type { MetricsExporter } from './metrics-export.ts';
 import type { PlatformPolicyService } from './platform-policies.ts';
 import type { ProjectService } from './projects.ts';
@@ -120,6 +122,13 @@ export interface CoreContext {
 	quota: QuotaService;
 	usage: UsageService;
 	telemetry?: TelemetryStore;
+	/**
+	 * The Logs Explorer's ClickHouse store over `yoal.logs` (docs/LOGS.md §4.2). Set only where the
+	 * telemetry store is installed; the Explorer uses it while `healthy()`, otherwise lite mode.
+	 */
+	logStoreClickhouse?: ClickHouseLogStore;
+	/** The search-index indexer (docs/LOGS.md §4.2); ticked by the control plane's primary. */
+	logIndexer?: LogIndexer;
 	/** Prometheus `/metrics` renderer and its settings (docs/METRICS.md). */
 	metricsExport: MetricsExporter;
 	/** Retention, alert thresholds, ingress, assistant caps and defaults the owner sets in Settings. */

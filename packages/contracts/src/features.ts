@@ -334,6 +334,16 @@ export const FEATURE_FLAGS = {
 		area: 'platform',
 		description:
 			'Regions group zones: a node region, spread: region, a database standby region that never auto-promotes, and the fenced, human-confirmed region promotion (HA-PLAN H26). Once a region value is stored, downgrading the control plane is unsupported until it is put back.'
+	},
+	LOG_INDEX: {
+		name: 'LOG_INDEX',
+		// docs/LOGS.md §4.2 (LP2): the cursor indexer copies the SQLite hot tail into ClickHouse
+		// `yoal.logs`. It only runs where the optional telemetry store is installed; 0 stops it and
+		// sends every Explorer read to lite mode, without losing a line (SQLite stays the write path).
+		default: true,
+		area: 'platform',
+		description:
+			'Copy log lines into the ClickHouse search index (yoal.logs) for the Logs Explorer: facets, patterns, stats and fast search (docs/LOGS.md §4.2). Needs the telemetry store.'
 	}
 } as const satisfies Record<string, FeatureFlagDefinition>;
 

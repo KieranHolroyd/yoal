@@ -13,6 +13,9 @@ import {
 	clickhouseFromEnv,
 	coreConfigFromEnv,
 	createCore,
+	ClickHouseLogStore,
+	LogIndexer,
+	featureEnabled,
 	type Notifier
 } from '@yoal/core';
 import {
@@ -146,6 +149,17 @@ export const telemetry = new TelemetryStore({
 	onError: (error) => console.error('[telemetry]', error.message)
 });
 core.ctx.telemetry = telemetry;
+// The Logs Explorer search index (docs/LOGS.md §4.2): only where ClickHouse is installed. The
+// indexer is ticked from hooks.server.ts on the primary; `LOG_INDEX=0` stops it and sends every
+// Explorer read back to lite mode (SQLite).
+if (telemetry.installed) {
+	const logIndexEnabled = () => featureEnabled(core.ctx.config, 'LOG_INDEX');
+	core.ctx.logStoreClickhouse = new ClickHouseLogStore(telemetry, {
+		enabled: logIndexEnabled,
+		indexLagMs: () => core.ctx.logIndexer?.lagMs() ?? null
+	});
+	core.ctx.logIndexer = new LogIndexer(core.ctx, telemetry, { enabled: logIndexEnabled });
+}
 // Never connect while SvelteKit analyses the build.
 if (!building) {
 	void telemetry.open().catch((error) => console.error('[telemetry] open failed:', error));
