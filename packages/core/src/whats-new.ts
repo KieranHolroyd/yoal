@@ -3,8 +3,11 @@ import { settings } from '@yoal/db';
 import {
 	WHATS_NEW_BASELINE_VERSION,
 	WHATS_NEW_ITEMS,
+	compareSemver,
+	parseSemver,
 	whatsNewItem,
 	whatsNewItemsBetween,
+	whatsNewItemsThrough,
 	type Principal,
 	type WhatsNewDecision,
 	type WhatsNewItem,
@@ -142,10 +145,16 @@ export class WhatsNewService {
 		const stored = this.ledger();
 		const items = this.window(stored).map((item) => this.itemView(principal, item, stored));
 		const pending = items.filter((item) => item.decision === null);
+		// History stops at whichever is older: what was reviewed, or what is running (a downgrade).
+		const running = parseSemver(this.current());
+		const seen = parseSemver(stored.lastSeenVersion);
+		const through =
+			running && seen && compareSemver(seen, running) > 0 ? this.current() : stored.lastSeenVersion;
 		return {
 			currentVersion: this.current(),
 			lastSeenVersion: stored.lastSeenVersion,
 			items,
+			earlier: whatsNewItemsThrough(WHATS_NEW_ITEMS, through),
 			pending: pending.length,
 			attention: pending.filter((item) => item.attention === 'consent').length,
 			canDecide: this.ctx.platformIam.canAdminister(principal)

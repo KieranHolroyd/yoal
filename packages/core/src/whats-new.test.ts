@@ -8,6 +8,7 @@ import {
 	WHATS_NEW_ITEMS,
 	parseSemver,
 	whatsNewItemsBetween,
+	whatsNewItemsThrough,
 	type WhatsNewItem
 } from '@yoal/contracts';
 import { createCore, type Core } from './index.ts';
@@ -137,6 +138,13 @@ describe('whatsNewItemsBetween', () => {
 	test('an invalid version hides the flow rather than guessing at history', () => {
 		expect(whatsNewItemsBetween(items, '0.13.5', 'not-a-version')).toEqual([]);
 	});
+
+	test('history is everything at or below a version, newest first', () => {
+		expect(whatsNewItemsThrough(items, '0.14.0').map((item) => item.id)).toEqual(['new', 'old']);
+		expect(whatsNewItemsThrough(items, '0.13.9').map((item) => item.id)).toEqual(['old']);
+		expect(whatsNewItemsThrough(items, '0.13.5')).toEqual([]);
+		expect(whatsNewItemsThrough(items, 'nope')).toEqual([]);
+	});
 });
 
 describe('WhatsNewService', () => {
@@ -194,6 +202,22 @@ describe('WhatsNewService', () => {
 		const view = core.whatsNew.acknowledge(admin);
 		expect(view.items).toEqual([]);
 		expect(view.lastSeenVersion).toBe('0.13.6');
+	});
+
+	test('reviewed changes move to the history instead of disappearing', () => {
+		const core = setup();
+		expect(core.whatsNew.view(admin).earlier).toEqual([]);
+		core.whatsNew.decide(admin, 'usage-analytics', 'declined');
+		const view = core.whatsNew.acknowledge(admin);
+		expect(view.earlier.map((item) => item.id)).toEqual(['usage-analytics']);
+	});
+
+	test('history never includes a release newer than the one running', () => {
+		const core = setup('0.16.13');
+		core.whatsNew.markInstalled();
+		const earlier = core.whatsNew.view(admin).earlier.map((item) => item.id);
+		expect(earlier).toContain('cloud-shell');
+		expect(earlier).not.toContain('overlay-mesh');
 	});
 
 	test('a platform viewer can read but not decide', () => {

@@ -103,5 +103,8 @@ Rules of thumb:
 - The user menu gets a **What’s new** entry with the pending count.
 - `/whats-new` is readable by any platform role (`platform:read`); only a principal that can change
   the setting (`platform:settings`) sees the decision buttons.
+- Below the pending changes, `/whats-new` lists **earlier releases**: catalog items at or below the
+  last reviewed version (`WhatsNewView.earlier`, never newer than the running release), read-only.
+  Once an install is caught up the page is a changelog rather than an empty state.
 - `whats-new.decide`, `whats-new.acknowledge` and `whats-new.installed` are audit rows. A consent
   enable also writes the setting’s own `usage.analytics.update` row.

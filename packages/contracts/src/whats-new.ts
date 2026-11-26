@@ -136,6 +136,11 @@ export interface WhatsNewView {
 	lastSeenVersion: string;
 	/** Items in `(lastSeenVersion, currentVersion]`, newest release first. */
 	items: WhatsNewItemView[];
+	/**
+	 * Catalog items already reviewed (`since <= lastSeenVersion`, never newer than the running
+	 * release), newest first. Read-only history, so the page stays useful once caught up.
+	 */
+	earlier: WhatsNewItem[];
 	/** Items with no decision yet. */
 	pending: number;
 	/** Pending consent items, which cannot be dismissed as read. */
@@ -162,6 +167,24 @@ export function whatsNewItemsBetween(
 			const since = parseSemver(item.since);
 			if (!since || compareSemver(since, to) > 0) return false;
 			return from ? compareSemver(since, from) > 0 : true;
+		})
+		.sort((a, b) => compareSemver(b.since, a.since));
+}
+
+/**
+ * Catalog items at or below `version`, newest release first: the history an install has already
+ * reviewed. A bad version string yields nothing.
+ */
+export function whatsNewItemsThrough(
+	items: readonly WhatsNewItem[],
+	version: string
+): WhatsNewItem[] {
+	const to = parseSemver(version);
+	if (!to) return [];
+	return items
+		.filter((item) => {
+			const since = parseSemver(item.since);
+			return since !== null && compareSemver(since, to) <= 0;
 		})
 		.sort((a, b) => compareSemver(b.since, a.since));
 }
