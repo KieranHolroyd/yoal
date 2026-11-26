@@ -237,6 +237,8 @@ export * from './service-actions.ts';
 export * from './backup-targets.ts';
 export * from './audit.ts';
 export * from './log-drains.ts';
+export * from './log-patterns.ts';
+export * from './log-redaction.ts';
 export * from './webhook-signature.ts';
 export * from './upgrades.ts';
 export * from './blueprints.ts';
