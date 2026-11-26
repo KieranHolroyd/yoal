@@ -155,6 +155,8 @@ export class MaintenanceService {
 		this.ctx.projects.pruneExpiredRedirects();
 		const uploadsExpired = this.ctx.uploads.expireStale();
 		const logsPruned = this.ctx.logs.prune(this.ctx.now());
+		// Quota notices for bursts that stopped before their minute was up (docs/LOGS.md §10.2).
+		this.ctx.logGuard.flushNotices(this.ctx.now());
 		// Server errors: 30 days of events and hourly counts, 90 days of quiet issues (D171).
 		this.ctx.serverErrors.prune(this.ctx.now());
 		this.ctx.appErrors.prune(this.ctx.now());
@@ -290,6 +292,15 @@ export class MaintenanceService {
 			} catch (error) {
 				console.error('[maintenance] telemetry failed:', error);
 			}
+		}
+
+		// Log search-index retention and the Parquet archive (docs/LOGS.md §10.1): once per UTC day
+		// each, fail-open, retried on the next sweep.
+		try {
+			await this.ctx.logRetention.pruneSearchIndex();
+			await this.ctx.logArchive.tick();
+		} catch (error) {
+			console.error('[maintenance] log retention/archive failed:', error);
 		}
 
 		return {

@@ -6,6 +6,7 @@
 	import DatabaseIcon from '@lucide/svelte/icons/database';
 	import DownloadIcon from '@lucide/svelte/icons/download';
 	import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
+	import LogsIcon from '@lucide/svelte/icons/logs';
 	import PackageIcon from '@lucide/svelte/icons/package';
 	import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
 	import type { Component } from 'svelte';
@@ -263,6 +264,44 @@
 		{#snippet footer()}
 			Export CSV downloads the current reading of every metric, with its limit.
 		{/snippet}
+	</Panel>
+
+	<Panel
+		title="Logs, last 7 days"
+		icon={LogsIcon}
+		description="Log volume kept per project (and per database, bucket, broker or cluster), for showback. Limits and rules are in Settings → Logs."
+		count={data.logs?.rows.length ?? 0}
+		flush
+	>
+		{#if !data.logs || data.logs.rows.length === 0}
+			<div class="p-4">
+				<EmptyState compact icon={LogsIcon} title="No log volume yet" description="Counted from lines logged after this version." />
+			</div>
+		{:else}
+			<Table.Root>
+				<Table.Header>
+					<Table.Row>
+						<Table.Head class="pl-4">Scope</Table.Head>
+						<Table.Head class="text-right">Per day</Table.Head>
+						<Table.Head class="text-right">7 days</Table.Head>
+						<Table.Head class="pr-4 text-right">Dropped lines</Table.Head>
+					</Table.Row>
+				</Table.Header>
+				<Table.Body>
+					{#each data.logs.rows as row (`${row.scope.kind}:${row.scope.id}`)}
+						<Table.Row>
+							<Table.Cell class="pl-4">
+								{row.name ?? row.scope.id}
+								<span class="text-xs text-muted-foreground">{row.scope.kind}</span>
+							</Table.Cell>
+							<Table.Cell class="text-right tabular-nums">{formatBytes(row.bytesPerDay)}/day</Table.Cell>
+							<Table.Cell class="text-right tabular-nums">{formatBytes(row.bytes)}</Table.Cell>
+							<Table.Cell class="pr-4 text-right tabular-nums">{row.droppedLines.toLocaleString()}</Table.Cell>
+						</Table.Row>
+					{/each}
+				</Table.Body>
+			</Table.Root>
+		{/if}
 	</Panel>
 </div>
 

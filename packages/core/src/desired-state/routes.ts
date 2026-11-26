@@ -135,6 +135,7 @@ export class RouteState extends DesiredStatePart {
 				.from(deployments)
 				.where(and(eq(deployments.projectId, project.id), eq(deployments.status, 'active')))
 				.all();
+			const accessLogSampleRate = this.ctx.logSettings?.edgeSampleRateFor(project.orgId, project.id);
 			for (const deployment of rows) {
 				const release = this.ctx.db.select().from(releases).where(eq(releases.id, deployment.releaseId)).get();
 				if (!release) continue;
@@ -204,6 +205,9 @@ export class RouteState extends DesiredStatePart {
 								{ healthPath: deploymentSpec.healthPath }
 							: {}),
 					...functionRoute,
+					// docs/LOGS.md LP6: the project's edge 2xx sample rate, only when it is not the agent's
+					// default (10%), so desired state is unchanged until someone sets one.
+					...(accessLogSampleRate !== undefined ? { accessLogSampleRate } : {}),
 				} satisfies Omit<RouteSpec, 'host' | 'access' | 'accessMode'>;
 				baseByDeployment.set(deployment.id, base);
 				if (deploymentSpec?.compose) composeByDeployment.set(deployment.id, deploymentSpec.compose);

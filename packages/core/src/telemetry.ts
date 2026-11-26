@@ -1806,6 +1806,38 @@ export class TelemetryStore {
 		}
 	}
 
+	/**
+	 * Run a statement on the search-index tables as the writer: retention's lightweight `DELETE`
+	 * per org (docs/LOGS.md §10.1, Lane C). Throws like `insertLogRows`, so the caller can retry.
+	 */
+	async execLogs(sql: string, params: ClickHouseParams = {}, settings: ClickHouseSettings = {}): Promise<void> {
+		if (!(await this.logsReady()))
+			throw new ClickHouseUnavailableError(this.#logsError ?? this.error?.message ?? 'The log search index is unavailable');
+		try {
+			await this.#write().with({ database: this.database }).exec(sql, { params, settings });
+		} catch (error) {
+			if (error instanceof ClickHouseUnavailableError) this.#markUnavailable(error);
+			throw error;
+		}
+	}
+
+	/**
+	 * A `SELECT … FORMAT Parquet` over the search index as bytes (zstd), as the writer: the daily
+	 * log archive (§10.1) reuses the telemetry Parquet path (`exportParquet`) this way. Throws.
+	 */
+	async queryLogsParquet(sql: string, params: ClickHouseParams = {}): Promise<Uint8Array> {
+		if (!(await this.logsReady()))
+			throw new ClickHouseUnavailableError(this.#logsError ?? this.error?.message ?? 'The log search index is unavailable');
+		try {
+			return await this.#write()
+				.with({ database: this.database })
+				.queryBytes(sql, { params, settings: { ...READ_SETTINGS, output_format_parquet_compression_method: 'zstd' } });
+		} catch (error) {
+			if (error instanceof ClickHouseUnavailableError) this.#markUnavailable(error);
+			throw error;
+		}
+	}
+
 	async #guarded<T>(operation: string, fallback: T, fn: () => Promise<T>): Promise<T> {
 		if (this.#closed) return fallback;
 		await this.open();

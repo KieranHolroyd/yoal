@@ -289,7 +289,8 @@ export class LogExplorerService {
 				patterns: full,
 				compare: full,
 				why: full,
-				archive: false,
+				// Rehydrating archived days (docs/LOGS.md §10.1, log-archive.ts).
+				archive: full && (this.ctx.logArchive?.available() ?? false),
 			},
 			scopes,
 			platformAdmin: canViewPlatform(principal),
@@ -307,9 +308,16 @@ export class LogExplorerService {
 				422,
 			);
 		this.auditPlatform(principal, prepared, 'search');
-		const result = await this.run(prepared, (store) =>
+		let result = await this.run(prepared, (store) =>
 			store.search(prepared.read, { limit: value.limit, cursor: value.cursor, order: value.order }),
 		);
+		// A range past the search window: an `archive` estimate, or the archived rows when confirmed (§10.1).
+		if (result.engine === 'clickhouse' && this.ctx.logArchive)
+			result = await this.ctx.logArchive.applyToSearch(prepared.read, value, result).catch((error: unknown) => {
+				console.error('[logs] archive read failed', error);
+				result.warnings.push({ code: 'archive', message: 'The archive could not be read; showing the search index only.' });
+				return result;
+			});
 		this.name(result.records, prepared.names);
 		return result;
 	}

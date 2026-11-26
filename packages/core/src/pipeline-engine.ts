@@ -65,6 +65,7 @@ import {
 	type Permission,
 	type Principal,
 } from '@yoal/contracts';
+import { textRowAccess } from './log-ingest-guard.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import { entriesFromZip } from './artifact.ts';
@@ -1516,14 +1517,19 @@ export class PipelineEngine {
 		if (count >= MAX_LOG_LINES_PER_JOB) return 0;
 		const now = this.ctx.now();
 		const room = MAX_LOG_LINES_PER_JOB - count;
-		const lines = batch.lines.slice(0, room).map((line) => ({
-			jobId: job.id,
-			runId: job.runId,
-			step: line.step,
-			stream: line.stream,
-			text: line.text,
-			ts: line.ts ?? now,
-		}));
+		// Rules, quota and redaction (docs/LOGS.md §10.2–§10.4) on top of the runner's own masking (D152).
+		const lines = this.ctx.logGuard.admit(
+			{ orgId: job.orgId, scopeKind: 'pipeline', scopeId: job.repositoryId, projectId: null },
+			batch.lines.slice(0, room).map((line) => ({
+				jobId: job.id,
+				runId: job.runId,
+				step: line.step,
+				stream: line.stream,
+				text: line.text,
+				ts: line.ts ?? now,
+			})),
+			textRowAccess('pll', 'text', () => ({ source: 'pipeline', stream: `pipeline-job:${job.id}` })),
+		);
 		if (batch.lines.length > room)
 			lines.push({
 				jobId: job.id,

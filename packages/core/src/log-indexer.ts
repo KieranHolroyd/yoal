@@ -55,6 +55,11 @@ export interface LogIndexerOptions {
 	/** Kill switch; defaults to the `LOG_INDEX` feature flag. */
 	enabled?: () => boolean;
 	sources?: readonly SqliteLogSource[];
+	/**
+	 * False keeps an (enriched) record out of ClickHouse: `index_only` rules (docs/LOGS.md §10.3,
+	 * Lane C). Defaults to `ctx.logRules.keepInIndex` when the context has it.
+	 */
+	filter?: (record: LogRecord) => boolean;
 }
 
 export interface LogIndexTableStatus {
@@ -105,7 +110,7 @@ const SCOPE_NAME_SQL: Partial<Record<string, string>> = {
 	platform: 'SELECT name FROM nodes WHERE id = ?',
 };
 
-type IndexerContext = Pick<CoreContext, 'sqlite' | 'config' | 'now'>;
+type IndexerContext = Pick<CoreContext, 'sqlite' | 'config' | 'now'> & Partial<Pick<CoreContext, 'logRules'>>;
 
 export class LogIndexer {
 	readonly #ctx: IndexerContext;
@@ -116,6 +121,7 @@ export class LogIndexer {
 	readonly #startBacklog: number;
 	readonly #enabled: () => boolean;
 	#miner: PatternMiner | null;
+	readonly #filter: (record: LogRecord) => boolean;
 	/** A failed batch's exact seq range, retried as-is so its dedup token is stable. */
 	readonly #pending = new Map<string, { from: number; to: number }>();
 	readonly #failures = new Map<string, { attempts: number; queryErrors: number; nextAt: number }>();
@@ -133,6 +139,7 @@ export class LogIndexer {
 		this.#startBacklog = Math.max(0, options.startBacklogRows ?? DEFAULT_START_BACKLOG);
 		this.#enabled = options.enabled ?? (() => featureEnabled(ctx.config, 'LOG_INDEX'));
 		this.#miner = options.miner ?? null;
+		this.#filter = options.filter ?? ((record) => ctx.logRules?.keepInIndex(record) ?? true);
 	}
 
 	/** Integration injects the Drain miner here (docs/LOGS.md §8.1); null turns mining off. */
@@ -233,14 +240,16 @@ export class LogIndexer {
 		this.#pending.set(table, { from, to });
 		const token = `${table}:${from}-${to}`;
 		try {
-			const mined = rows.map((row) => this.#record(row));
+			const all = rows.map((row) => this.#record(row));
+			// `index_only` rules keep a line in the hot tail and drains but out of the index (§10.3).
+			const mined = all.filter((entry) => this.#keep(entry.record));
 			const records = mined.map((entry) => entry.record);
 			const patternRows = await this.#patternRows(mined);
 			const dedup = { insert_deduplicate: 1, insert_deduplication_token: token };
 			await this.#writer.insertLogRows('logs', records.map(clickhouseRow), dedup);
 			if (patternRows.length)
 				await this.#writer.insertLogRows('log_patterns', patternRows, { insert_deduplicate: 1, insert_deduplication_token: `${token}:patterns` });
-			const newest = records.reduce((max, record) => Math.max(max, record.ts), 0);
+			const newest = all.reduce((max, entry) => Math.max(max, entry.record.ts), 0);
 			this.#moveCursor(table, from, to, null, newest || null);
 			this.#pending.delete(table);
 			this.#failures.delete(table);
@@ -274,6 +283,14 @@ export class LogIndexer {
 		this.#failures.set(table, failure);
 		this.#setError(table, null, message.slice(0, 500));
 		return { count: 0, next: null, done: true };
+	}
+
+	#keep(record: LogRecord): boolean {
+		try {
+			return this.#filter(record);
+		} catch {
+			return true;
+		}
 	}
 
 	/** A hot-tail row → the enriched record to index, with its template when a miner is set. */

@@ -77,6 +77,9 @@ export function logInputFromQuery(params: URLSearchParams, kind: LogRequestKind,
 		if (cursor) input.cursor = cursor;
 		const order = params.get('order');
 		if (order) input.order = order;
+		// docs/LOGS.md §10.1: read the archived part of the range too (after seeing the estimate).
+		const archive = params.get('archive');
+		if (archive === '1' || archive === 'true') input.archive = true;
 	}
 	if (kind === 'histogram') {
 		const buckets = numeric(params.get('buckets'));

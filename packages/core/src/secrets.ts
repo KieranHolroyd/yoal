@@ -86,6 +86,7 @@ export class SecretService {
 		});
 		// Workloads referencing this name restart with the new version (activation fingerprint).
 		this.ctx.projects.bump(principal.orgId);
+		if (type === 'secret') this.secretsChanged(principal.orgId);
 		return {
 			id,
 			name: input.name,
@@ -192,6 +193,44 @@ export class SecretService {
 			result: 'ok',
 		});
 		this.ctx.projects.bump(principal.orgId);
+		if (row.type === 'secret') this.secretsChanged(principal.orgId);
+	}
+
+	/**
+	 * Every live `secret`-type value of an org, every project and version, for the log redaction
+	 * fingerprints (docs/LOGS.md §10.4). Internal only: the caller fingerprints the values and drops
+	 * them; never exposed by REST/MCP. `env`-type values are configuration, not secrets, and are left
+	 * out (masking `production` in every log line would be noise). An org with no secrets never
+	 * creates a data key here.
+	 */
+	valuesForLogRedaction(orgId: string, limit = 2_000): string[] {
+		const rows = this.ctx.db
+			.select({ ciphertext: secrets.ciphertext, nonce: secrets.nonce })
+			.from(secrets)
+			.where(and(eq(secrets.orgId, orgId), eq(secrets.type, 'secret'), isNull(secrets.deletedAt)))
+			.orderBy(sql`${secrets.version} DESC`)
+			.limit(Math.max(0, limit))
+			.all();
+		if (rows.length === 0) return [];
+		const key = this.orgKey(orgId);
+		const values: string[] = [];
+		for (const row of rows) {
+			try {
+				values.push(new TextDecoder().decode(decrypt(key, row.ciphertext, row.nonce)));
+			} catch {
+				// A row that no longer decrypts cannot be in a log line we could match anyway.
+			}
+		}
+		return values;
+	}
+
+	/** Tell the log redactor an org's secret values changed, so it rebuilds its fingerprints. */
+	private secretsChanged(orgId: string): void {
+		try {
+			this.ctx.logGuard?.secretsChanged(orgId);
+		} catch (error) {
+			console.error('[secrets] log redaction fingerprints not rebuilt', error);
+		}
 	}
 
 	/** Seal an internal value (database credentials, D58) with the org data key: `nonce.ciphertext`. */

@@ -85,6 +85,12 @@ import { BuildService } from './builds.ts';
 import { PipelineService } from './pipelines.ts';
 import { LogService } from './logs.ts';
 import { LogExplorerService } from './log-explorer.ts';
+import { LogSettingsService } from './log-settings.ts';
+import { LogQuotaService } from './log-quotas.ts';
+import { LogRuleService } from './log-rules.ts';
+import { LogIngestGuard } from './log-ingest-guard.ts';
+import { LogRetentionService } from './log-retention.ts';
+import { LogArchiveService } from './log-archive.ts';
 import { LogDrainService } from './log-drains.ts';
 import { ConfigExportService } from './config-export.ts';
 import { ConfigImportService } from './config-import/service.ts';
@@ -227,6 +233,12 @@ export * from './logs.ts';
 export * from './log-explorer.ts';
 export * from './log-tail-bus.ts';
 export * from './log-saved-queries.ts';
+export * from './log-settings.ts';
+export * from './log-quotas.ts';
+export * from './log-rules.ts';
+export * from './log-ingest-guard.ts';
+export * from './log-retention.ts';
+export * from './log-archive.ts';
 export * from './log-store/types.ts';
 export * from './log-store/sqlite-sources.ts';
 export * from './log-store/sqlite-compiler.ts';
@@ -324,6 +336,12 @@ export interface Core {
 	logs: LogService;
 	/** The Logs Explorer (docs/LOGS.md): `/api/v1/logs/*`, live tail and saved queries. */
 	logExplorer: LogExplorerService;
+	logSettings: LogSettingsService;
+	logQuotas: LogQuotaService;
+	logRules: LogRuleService;
+	logGuard: LogIngestGuard;
+	logRetention: LogRetentionService;
+	logArchive: LogArchiveService;
 	environments: EnvironmentService;
 	source: SourceService;
 	audit: AuditService;
@@ -528,6 +546,15 @@ export function createCore(options: CoreOptions): Core {
 	ctx.moves = new ServiceMoveService(ctx);
 	ctx.storageObjects = new StorageObjectsService(ctx);
 	ctx.domains = new DomainService(ctx);
+	// Logs cost and safety (docs/LOGS.md §10) first: every append path calls the guard.
+	ctx.logSettings = new LogSettingsService(ctx);
+	ctx.logQuotas = new LogQuotaService(ctx);
+	ctx.logRules = new LogRuleService(ctx);
+	ctx.logGuard = new LogIngestGuard(ctx);
+	ctx.logRetention = new LogRetentionService(ctx);
+	ctx.logArchive = new LogArchiveService(ctx);
+	// A new edge sample rate reaches the nodes' routes on their next pull (LP6).
+	ctx.logSettings.onChange.push(({ id }) => ctx.projects?.bump(id));
 	ctx.logs = new LogService(ctx);
 	ctx.logExplorer = new LogExplorerService(ctx);
 	ctx.builds = new BuildService(ctx);
@@ -644,6 +671,12 @@ export function createCore(options: CoreOptions): Core {
 		pipelines: ctx.pipelines,
 		logs: ctx.logs,
 		logExplorer: ctx.logExplorer,
+		logSettings: ctx.logSettings,
+		logQuotas: ctx.logQuotas,
+		logRules: ctx.logRules,
+		logGuard: ctx.logGuard,
+		logRetention: ctx.logRetention,
+		logArchive: ctx.logArchive,
 		environments: ctx.environments,
 		source,
 		audit: ctx.audit,

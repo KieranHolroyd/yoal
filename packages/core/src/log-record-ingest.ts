@@ -12,6 +12,7 @@ import {
 import type { CoreContext } from './context.ts';
 import { CoreError } from './errors.ts';
 import type { UnifiedLogRow } from './log-store/sqlite-sources.ts';
+import { recordRowAccess } from './log-ingest-guard.ts';
 import type { ProjectRow } from './projects.ts';
 
 /**
@@ -270,7 +271,16 @@ export function insertNodeLogRecords(
 ): AppendRecordsResult {
 	const now = ctx.now();
 	const node = ctx.db.select({ id: nodes.id, name: nodes.name }).from(nodes).where(eq(nodes.id, nodeId)).get();
-	const rows = buildLogRecordRows(resolved, { id: nodeId, name: node?.name ?? null }, batch.records, now);
+	const built = buildLogRecordRows(resolved, { id: nodeId, name: node?.name ?? null }, batch.records, now);
+	// Rules, quota and redaction before anything is stored (docs/LOGS.md §10.2–§10.4).
+	const rows = ctx.logGuard
+		? ctx.logGuard.admit(
+				{ orgId: resolved.orgId, scopeKind: resolved.scopeKind, scopeId: resolved.scopeId, projectId: resolved.projectId },
+				built,
+				recordRowAccess,
+				{ now },
+			)
+		: built;
 	const inserted: UnifiedLogRow[] = [];
 	ctx.db.transaction((tx) => {
 		for (let index = 0; index < rows.length; index += INSERT_CHUNK) {
