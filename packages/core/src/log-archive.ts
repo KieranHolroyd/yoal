@@ -26,7 +26,7 @@ import { chDateTime64, type AdHocQueryOptions } from './telemetry.ts';
  *   (`logs-archive/<org>/<YYYY-MM-DD>/<HH>.parquet`), written through the telemetry store's Parquet
  *   path (`queryLogsParquet`, the same `FORMAT Parquet` export the traffic archive uses). An hour
  *   at a time keeps memory bounded. The day and its files are recorded in `log_archive_days`
- *   (0144). A day that fails is retried on the next sweep; the two days before are re-checked.
+ *   (0143). A day that fails is retried on the next sweep; the two days before are re-checked.
  * - **Prune**: days older than the org's `archiveDays` lose their objects and row.
  * - **Rehydrate on query** (§10.1): when a search reaches past the search window, the Explorer
  *   shows `estimate()` (bytes, files, seconds) as an `archive` warning, and runs the archived part

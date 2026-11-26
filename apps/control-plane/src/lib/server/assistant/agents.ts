@@ -103,7 +103,9 @@ one line per panel, and point out panels the preview shows as empty.
 export const LOG_QUERY_GUIDE = `
 Log queries (query_logs, get_log_patterns, compare_logs, explain_log_spike, and the Logs Explorer
 at /logs) use one grammar. Terms are ANDed.
-- Text: \`timeout\` or \`"connection reset"\` searches the message (case-insensitive substring).
+- Text: a bare word such as \`timeout\` matches it as a whole word (case-insensitive, so it does
+  not match \`timeouts\`); a quoted phrase such as \`"connection reset"\` or a word with punctuation
+  such as \`user@example.com\` matches anywhere in the message (case-insensitive substring).
 - \`level:error\` means error or worse; \`level:=warn\` exactly warn. Levels: trace debug info warn
   error fatal.
 - Built-in fields: service (project slug or service name), deployment, build, job, node, replica,

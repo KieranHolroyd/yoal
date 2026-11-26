@@ -46,7 +46,7 @@
 **Ops**
 - [x] Agent telemetry: pre-aggregated access buckets → ClickHouse (DuckDB until D101); rollups + Parquet to R2 (OTLP wire export remains)
 - [x] Observability dashboards (D101): see [Observability & dashboards](#observability--dashboards-d101-opsmd-36)
-- [x] Dashboard: fleet, projects, deployments, traffic/errors, audit log (live logs arrive with v2 runtime)
+- [x] Dashboard: fleet, projects, deployments, traffic/errors, audit log, live logs (now the Logs Explorer, see [Logs Explorer](#logs-explorer-logsmd-d243d254))
 - [x] Prometheus `/metrics` on control plane and agents (optional OTLP exporter remains)
 - [x] Alerts: email (SES SMTP) + webhook; node offline > 2 min, disk > 85%, backup/drill failure (`OnFailure=` → `yoal-alert`)
 - [x] Cert expiring < 14 d (agent TLS probe) and 5xx spike after promote; drill results in Settings → Backups
@@ -204,6 +204,23 @@
 - [ ] Natural-language panel edits in the panel editor ("show this per host", "make it p95") through the assistant
 - [ ] MCP resource `yoal://dashboards/{id}` and a prompt template for "build a dashboard for …"
 - [ ] Per-panel `explain` tool: summarise what a panel shows over a range (trends, spikes) for incident triage
+
+## Logs Explorer ([LOGS.md](./LOGS.md), D243–D254)
+- [x] One OTel-shaped `LogRecord` over every log table, `log_records` for new sources, the sentinel `platform` org (D243)
+- [x] SQLite hot tail plus the optional ClickHouse `yoal.logs` search index fed by a cursor indexer; lite mode without it (D244)
+- [x] One log-query grammar (filters and `| fields | dedup | stats | patterns | sort | limit`) shared by the dashboard, CLI, MCP, assistant, alerts and dashboards (D245)
+- [x] Live tail over an in-process bus with per-subscriber predicates and seq-vector resume (D246)
+- [x] Platform unit logs for platform admins (D247); edge access records with `X-Request-Id` (D248); the agent's OTLP/HTTP JSON logs receiver and `OTEL_*` injection (D249)
+- [x] Drain patterns at index time, Patterns, Analytics and deploy-aware Compare tabs, Why? (D250)
+- [x] Retention tiers, archive with rehydrate, per-project ingest quotas, exclude/sample/index-only rules with preview (D251); redaction at ingest (D252)
+- [x] `LogExplorer` on `/logs` and every resource page, saved queries, export, keyboard map (D253)
+- [x] `log_count` and `log_pattern_new` alert rules, the `logs` dashboard dataset and Logs panel, pivots (D254)
+- [x] `yoal logs [scope…] -q -f`, `yoal logs patterns|context|compare`; MCP `query_logs`, `get_log_patterns`, `get_log_context`, `compare_logs`, `explain_log_spike`; assistant log queries
+- [ ] Spikes S2 (SQLite and Litestream load; a `logs.db` split if needed) and S4 (OTLP protobuf decode), and S1 at 10–50 M rows
+- [ ] OTLP protobuf; function tails exploded into records; audit log and email events as read-only sources
+- [ ] Drains for `log_records`, pipeline and Kubernetes lines; folding the sibling log tables into `log_records`
+- [ ] Node-event histogram markers, the "no timestamp within 50 ms" multiline rule, an external trace UI link, "Purge lines matching…"
+- [ ] e2e on mac-dev and linux-box
 
 ## Disks ([STORAGE.md](./STORAGE.md))
 - [x] Disks with a `fast`/`bulk` tier derived from the hardware and editable; the system disk on every node; fail-closed mount verification (D72, D76, D78, D169)

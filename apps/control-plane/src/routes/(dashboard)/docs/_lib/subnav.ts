@@ -64,6 +64,7 @@ const PAGE_ICONS: Record<string, SubnavIcon> = {
 	'data/brokers-and-events': WebhookIcon,
 	'data/email': MailIcon,
 	'observe/dashboards-and-logs': ChartAreaIcon,
+	'observe/logs': FileTextIcon,
 	'observe/metrics': ActivityIcon,
 	'observe/alerts': BellIcon,
 	'clients/cli': TerminalIcon,

@@ -6,13 +6,10 @@ import {
 	parseLogQuery,
 	resolveLogTimeRange,
 	type LogCompareInput,
-	type LogCompareResult,
 	type LogLevel,
 	type LogRecord,
 	type LogScopeKind,
 	type LogScopeRef,
-	type LogWhyInput,
-	type LogWhyResult,
 	type Principal
 } from '@yoal/contracts';
 import { CoreError, ValidationError } from '@yoal/core';
@@ -242,28 +239,7 @@ export function compactLogRecord(record: LogRecord): Record<string, unknown> {
 	return out;
 }
 
-// --- Compare and Why? (Lane A) ---------------------------------------------------------------
-
-/**
- * `compare` and `why` land on `LogExplorerService` with Lane A (docs/LOGS.md §8.2–§8.3). Read
- * through this narrow accessor so the tools compile and fail clearly until then.
- */
-interface LogAnalysis {
-	compare?: (principal: Principal, input: LogCompareInput) => Promise<LogCompareResult>;
-	why?: (principal: Principal, input: LogWhyInput) => Promise<LogWhyResult>;
-}
-
-export function logAnalysis<K extends keyof LogAnalysis>(name: K): NonNullable<LogAnalysis[K]> {
-	const service = core.logExplorer as unknown as LogAnalysis;
-	const method = service[name];
-	if (typeof method !== 'function')
-		throw new CoreError(
-			'not_available',
-			`Log ${name === 'why' ? 'Why?' : 'Compare'} is not available on this control plane yet.`,
-			501
-		);
-	return method.bind(core.logExplorer) as NonNullable<LogAnalysis[K]>;
-}
+// --- Compare and Why? ---------------------------------------------------------------------
 
 /** `previous`, a shift such as `1d`/`7d`, `deploy:<id>` or `<from>..<to>` → the contract's baseline. */
 export function parseLogBaseline(text: string, now: number): LogCompareInput['baseline'] {

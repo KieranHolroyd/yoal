@@ -223,6 +223,10 @@ the default below (on). Set `0` to turn a feature off, then restart
 | `YOAL_FEATURE_UPGRADE_ROLLBACK` | **on** | platform | Reserved for dashboard-triggered automatic rollback after `/readyz` fails. The CLI updater rollback path is the tested default. |
 | `YOAL_FEATURE_BLUEPRINTS` | **on** | automation | Plan and apply blueprint files (`yoal.blueprint.yaml`, OPERATIONS §12), including `--prune`. |
 | `YOAL_FEATURE_MEDIA` | **on** | storage | Image/video uploads, transforms and delivery. |
+| `YOAL_FEATURE_LOG_INDEX` | **on** | platform | Logs Explorer search index ([LOGS.md](./LOGS.md) §4.2, D244): the cursor indexer copies the SQLite hot tail into ClickHouse `yoal.logs`. Runs only where the telemetry store is installed. Set `0` to stop indexing and send every Explorer read to lite mode (SQLite); no line is lost, and the index catches up when it is back on. |
+| `YOAL_FEATURE_PLATFORM_LOGS` | **on** | platform | Ship the journald output of Yoal's own units to the admin-only `platform` log scope (D247). Read by the control plane, which then discards platform batches and tells agents to back off to a probe once a minute; an agent with `0` in its own environment stops reading too. |
+| `YOAL_FEATURE_EDGE_REQUEST_LOGS` | **on** | platform | Edge request logs (D248): Caddy injects and echoes `X-Request-Id`, and the agent ships every non-2xx/3xx access line plus a sample of the rest. **Read by the agent from its own environment**: set it in each node's `/etc/yoal/yoal.env` (a worker's own file, not only the control plane's) and restart `yoal-agent`. Traffic aggregates are unaffected. |
+| `YOAL_FEATURE_OTLP_LOGS` | **on** | workloads | OTLP logs (D249): the agent's loopback OTLP/HTTP JSON logs receiver and the `OTEL_*` variables apps get at the next apply. **Read by the agent from its own environment**, like `EDGE_REQUEST_LOGS`. `0` answers 404 on the receiver and stops injecting the variables. |
 
 `YOAL_FEATURE_DB_CONSOLE` (the DBGate studio, D60) is retired. It is ignored if still set, and
 the control plane logs a warning at startup; remove it from `yoal.env`. An unknown
@@ -237,6 +241,31 @@ deploy whose replica count exceeds the eligible nodes under `node` spread. With
 still spreads: each node holding a copy gets its own loopback endpoint (D218). A container app
 with such an attachment stays on the attachment's node until cross-node container attachments
 exist (HA-PLAN H24).
+
+#### Logs Explorer on a node
+
+The Logs Explorer ([LOGS.md](./LOGS.md)) needs nothing beyond the flags above, but a few node-side facts matter when
+something is missing:
+
+- **Platform logs.** Each agent asks the helper for the journald output of a fixed list of units (`yoal-agent`,
+  `yoal-helper`, `yoal-control-plane`, `yoal-control-plane-standby`, `yoal-builder`, `caddy`, `yoal-mail`,
+  `yoal-clickhouse`, `yoal-registry`, `yoal-litestream`) every 5 s and keeps a cursor per unit in its data dir, so a
+  restart does not re-ship. Platform admins read them in **Logs** with a `platform:<node>` scope, or from the node's
+  page; every read is audited as `logs.read_platform`. The helper owns the unit list and refuses any other name.
+- **Edge access records** come from the Caddy JSON access log, so they need `YOAL_CADDY_ACCESS_LOG` in the node's
+  environment (the installer sets `/var/log/caddy/yoal-access.log`). Without it there are no request records and no
+  `X-Request-Id` in the log, though Caddy still injects the header.
+- **`<agent data dir>/logs.key`.** A 32-byte node-local secret the agent creates on first use. It keys the client-IP
+  hash on access records and the per-workload OTLP ingest keys in the injected endpoint. It never leaves the node, so
+  a node token rotation does not change the keys apps hold. Deleting it changes every key: apps get 401 until they
+  restart with the new endpoint. If the agent cannot create it, log records are disabled
+  with a warning in the agent journal.
+- **`<control-plane data dir>/log-patterns.json`.** The Drain pattern miner's snapshot, written every 10 minutes and on
+  graceful shutdown and restored at boot so pattern ids stay stable. It is disposable: deleting it only means new
+  templates are learned again (ids are hashes of the template, so they come back the same).
+- **Retention and quotas** are per org and project in **Settings → Logs** (platform defaults for platform admins):
+  hot tail 3 days with ClickHouse and 7 without, search 14 days, archive off, 1,000 lines/s with a 20,000-line burst
+  and 5,120 MB a day per project, edge sample 10%. Dropped lines are counted, never silent.
 
 ### 2.5.1 PITR repository
 

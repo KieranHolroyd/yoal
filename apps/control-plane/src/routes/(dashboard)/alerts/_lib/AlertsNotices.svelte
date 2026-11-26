@@ -1,7 +1,8 @@
 <script lang="ts">
 	/**
 	 * Calm notices for the alerts pages: the optional telemetry store missing or not answering
-	 * (rules cannot evaluate; series keep their last state), and no notification channels
+	 * (metric rules cannot evaluate and keep their last state; log count rules still evaluate
+	 * through the Logs Explorer, docs/LOGS.md §9.1), and no notification channels
 	 * configured (alerts show here, but nobody is told). Platform admins are sent to the Channels
 	 * tab to set them up.
 	 */
@@ -38,7 +39,8 @@
 			<p class="min-w-0 flex-1 text-sm">
 				Metric alerts read the optional telemetry store (ClickHouse), which is not installed.
 				<span class="text-muted-foreground"
-					>Rules can be written now and start evaluating once it is.</span
+					>Metric rules can be written now and start evaluating once it is. Log count rules
+					already evaluate over the recent log tail; new-pattern rules need ClickHouse.</span
 				>
 			</p>
 			{#if owner}
@@ -54,7 +56,8 @@
 	{:else}
 		<Notice tone="warning" title="The telemetry store is not answering">
 			{overview.telemetryError ?? 'ClickHouse is unavailable on this control plane.'}
-			Rules keep their last state until it is back: nothing fires or resolves in the meantime.
+			Metric rules keep their last state until it is back: none of them fires or resolves in the
+			meantime. Log count rules keep evaluating over the recent log tail.
 		</Notice>
 	{/if}
 {/if}

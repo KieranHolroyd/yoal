@@ -160,7 +160,6 @@ import {
 	compactLogRecord,
 	explorerUrl,
 	legacyLogRead,
-	logAnalysis,
 	logInstantInput,
 	logScopesInput,
 	logWindowInput,
@@ -5772,7 +5771,10 @@ function buildServer(
 		'A rule runs one builder query over a trailing window and compares one value per series (one series per groupBy combination) with a threshold. ' +
 		'query: {mode:"builder", builder:{dataset, metrics:[exactly one {field, agg}], groupBy?:[dimension], filters?}} (see describe_telemetry); percentunit values are 0–1, so a 5% error rate is threshold 0.05. ' +
 		'noData: ok (quiet is fine), nodata (alert as "no data"), alerting (missing data means down: use for up/traffic outage rules), keep. ' +
-		'channels: platform notifier names from list_alerts (empty = all).';
+		'channels: platform notifier names from list_alerts (empty = all). ' +
+		'Log rules (docs/LOGS.md §9.1): kind:"log_count" counts matching log lines over the window (works without ClickHouse); ' +
+		'kind:"log_pattern_new" fires per log pattern never seen in the scope before (pattern:{afterDeployMinutes?, lookbackDays}; needs ClickHouse). ' +
+		'Both take query {mode:"builder", builder:{dataset:"logs", metrics:[{field:"count", agg:"count"}], groupBy?:[field], logs:{q:"<log query filter>", scopes:[{kind, id}]}}}.';
 
 	tool(
 		'list_alerts',
@@ -5837,11 +5839,14 @@ function buildServer(
 		{
 			title: 'Create alert rule',
 			description:
-				`Create a metric alert rule (org owners/admins). Start from a template id (site_down, high_error_rate, slow_responses, traffic_stopped, database_down, pooler_down, database_connections, database_deadlocks, storage_down) and override fields, or give the full rule. ${ALERT_RULE_HELP} ` +
+				`Create a metric or log alert rule (org owners/admins). Start from a template id (site_down, high_error_rate, slow_responses, traffic_stopped, database_down, pooler_down, database_connections, database_deadlocks, storage_down; log_errors for a log_count rule, log_new_pattern_after_deploy for a log_pattern_new rule) and override fields, or give the full rule. ${ALERT_RULE_HELP} ` +
 				'The result includes a preview: the series the rule sees right now and which would breach.',
 			inputSchema: z.object({
 				template: z.enum(alertRuleTemplates.map((template) => template.id) as [string, ...string[]]).optional(),
-				rule: alertRuleInputSchema.partial().default({}).describe('Rule fields; with a template, only the ones to change'),
+				rule: alertRuleInputSchema
+					.partial()
+					.default({})
+					.describe('Rule fields; with a template, only the ones to change. kind: metric (default), log_count or log_pattern_new'),
 			}),
 			annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: false },
 			scopeChallenge: requires('metrics:read'),
@@ -6328,8 +6333,7 @@ function buildServer(
 				const now = core.ctx.now();
 				const refs = resolveLogScopes(principal, scopes);
 				const window = resolveLogWindow({ from, to, range }, now);
-				const compare = logAnalysis('compare');
-				const result = await compare(principal, { q, scopes: refs, ...window, baseline: parseLogBaseline(baseline, now), limit });
+				const result = await core.logExplorer.compare(principal, { q, scopes: refs, ...window, baseline: parseLogBaseline(baseline, now), limit });
 				return {
 					...result,
 					rows: includeSteady ? result.rows : result.rows.filter((row) => row.change !== 'steady'),
@@ -6367,8 +6371,7 @@ function buildServer(
 				const refs = resolveLogScopes(principal, scopes);
 				const picked = resolveLogWindow({ from: selection.from, to: selection.to }, now);
 				const window = spikeWindow({ from, to, range }, picked, now);
-				const why = logAnalysis('why');
-				const result = await why(principal, {
+				const result = await core.logExplorer.why(principal, {
 					q,
 					scopes: refs,
 					...window,

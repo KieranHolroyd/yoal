@@ -501,19 +501,81 @@ yoal open my-site --preview
 ## logs
 
 ```sh
-yoal logs <project> [-n <lines>] [--json]
+yoal logs [scope…] [-q <query>] [--since <time>] [--until <time>] [-f] [-n <lines>] [--order asc|desc] [--json]
+yoal logs patterns [scope…] [-q <filter>] [--since <time>] [--until <time>] [-n <rows>] [--json]
+yoal logs context <record id> [--before <n>] [--after <n>] [--json]
+yoal logs compare [scope…] [-q <filter>] --baseline <baseline> [--since <time>] [--until <time>] [--all] [--json]
 ```
 
-Prints a project's most recent runtime log lines, oldest first, each prefixed with its time and level when available. Output from scheduled job runs is not included. Static sites have no application logs. Needs `logs:read`.
+Reads every log you can see through the [Logs Explorer](/observe/logs) API: app output, builds, jobs, pipelines, managed services, Kubernetes, edge requests and, for platform admins, Yoal's own services. The query is checked before anything is sent, and a mistake is shown with a caret under it. Lines print oldest first with their time, level and, when more than one scope is read, the scope, coloured by severity. Needs `logs:read`; a query with pipe stages, `patterns` and `compare` also need `logs:query`.
+
+With no scope, `yoal logs` reads everything you may read. Scopes:
+
+| Scope | Reads |
+| --- | --- |
+| `<project>` or `project:<project>` | A project, by slug or id. |
+| `db:<name>` | A managed database. |
+| `storage:<name>` | An object storage instance. |
+| `broker:<name>` | A queue broker. |
+| `k8s:<name>` | A Kubernetes cluster. |
+| `pipeline:<repo>` | A pipeline repository. |
+| `function:<project>` | A function project. |
+| `platform:<node>` | A node's platform services. Platform admins only. |
+| `edge:<node>` | Edge requests for hosts no project serves. Platform admins only. |
 
 | Flag | Description |
 | --- | --- |
-| `-n`, `--lines <n>` | How many lines to fetch: an integer from 1 to 10,000. Default 200. The server returns at most 2,000. |
-| `--json` | Print the API response as JSON, including each event's stream and source and a paging cursor. |
+| `-q`, `--query <query>` | A log query, such as `level:error -@path:/health "timeout"` or `service:api \| stats count() by bin(5m), level`. See [query syntax](/observe/logs#query-syntax). |
+| `--since <time>` | Start: a duration back from now (`15m`, `1h`, `24h`, `7d`), epoch milliseconds or an ISO time. Default 24 hours for lines, 1 hour for pipe queries, `patterns` and `compare`. |
+| `--until <time>` | End. Default now. Cannot be combined with `-f`. |
+| `-f`, `--follow` | Keep printing new lines as they arrive. Starts with the newest 20 lines (or `--limit`), reconnects by itself and resumes where it left off. Cannot be combined with pipe stages. |
+| `-n`, `--limit <n>` | Lines to show, 1 to 10,000. Default 200. `--lines` is the same. Past 1,000, the CLI pages for you. |
+| `--order asc\|desc` | `desc` (the default) shows the newest lines; `asc` the oldest lines from `--since`. |
+| `--json` | Print the API response as JSON; with `-f`, one record per line (NDJSON). |
+| `--no-color` | No severity colours. `NO_COLOR=1` does the same. |
+
+A query with pipe stages prints a table instead of lines.
 
 ```sh
-yoal logs my-api
-yoal logs my-api -n 1000
+yoal logs api -q 'level:error' --since 1h
+yoal logs api db:main -f
+yoal logs -q '@http.status:>=500 | stats count() by bin(1m)' --since 6h
+yoal logs my-api -n 1000 --json
 ```
 
-To follow logs live, use the dashboard. See [logs](/observe/dashboards-and-logs#yoal-logs).
+### logs patterns
+
+Groups the matching lines by message template, most frequent first, with a count each. Pass only a filter with `-q`; the CLI adds `| patterns` itself. Needs the ClickHouse search index.
+
+```sh
+yoal logs patterns api --since 24h
+yoal logs patterns api -q 'level:warn' -n 20
+```
+
+### logs context
+
+Prints the lines before and after one record in its stream, like `grep -C`. The record id is the `id` from `--json` output or the Explorer (for example `le:48213`). `--before` and `--after` default to 20 each, up to 500.
+
+```sh
+yoal logs context le:48213 --before 50
+```
+
+### logs compare
+
+Shows what changed against a baseline: patterns that are new, rising, falling or gone, with their counts in each window. Needs the ClickHouse search index.
+
+| `--baseline` | Compares with |
+| --- | --- |
+| `previous` | The window just before. |
+| `1d`, `7d` | The same window that long ago. |
+| `deploy:<id>` | Before and after that deployment went live. |
+| `<from>..<to>` | A custom range (ISO times or epoch milliseconds). |
+
+`--all` also lists the patterns that did not change.
+
+```sh
+yoal logs compare api --baseline deploy:dep_8f2k1c
+yoal logs compare api -q 'level:error' --baseline 1d --since 2h
+```
+
+The service commands `yoal db logs`, `yoal storage logs`, `yoal broker logs`, `yoal k8s logs`, `yoal jobs logs` and `yoal run` keep their own flags. For the dashboard view and alerts from logs, see [the Logs Explorer](/observe/logs).

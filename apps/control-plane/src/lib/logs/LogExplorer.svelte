@@ -335,6 +335,8 @@
 	let pending = $state.raw<LogRecord[]>([]);
 	let olderCursor = $state<string | null>(null);
 	let newerCursor = $state<string | null>(null);
+	/** The hot-tail position at page-load time, for a tail when the page has no `newer` cursor. */
+	let tailCursor = $state<string | null>(null);
 	let trimmed = $state(false);
 	let loading = $state(false);
 	let loadingOlder = $state(false);
@@ -373,6 +375,7 @@
 		pending = [];
 		olderCursor = null;
 		newerCursor = null;
+		tailCursor = null;
 		trimmed = false;
 		streamError = null;
 		warnings = [];
@@ -388,6 +391,7 @@
 						signal
 					);
 					if (gen !== generation) return;
+					if (cursor === undefined) tailCursor = page.tailCursor ?? null;
 					all = all.concat(page.records.filter((record) => !ids.has(record.id)));
 					setRecords(all);
 					engine = page.engine;
@@ -404,6 +408,7 @@
 				setRecords([...page.records].reverse());
 				olderCursor = page.cursor.older;
 				newerCursor = page.cursor.newer;
+				tailCursor = page.tailCursor ?? null;
 				engine = page.engine;
 				warnings = page.warnings;
 				elapsedMs = page.elapsedMs;
@@ -533,7 +538,11 @@
 			untrack(() => tail.stop());
 			return;
 		}
-		untrack(() => tail.start({ scopes: effectiveScopes, q: streamQuery, cursor: newerCursor }));
+		// After the page's newest line; with no such line (an empty window, or the index lagging),
+		// from the hot-tail position at page-load time rather than "now" at connect.
+		untrack(() =>
+			tail.start({ scopes: effectiveScopes, q: streamQuery, cursor: newerCursor ?? tailCursor })
+		);
 		return () => tail.stop();
 	});
 

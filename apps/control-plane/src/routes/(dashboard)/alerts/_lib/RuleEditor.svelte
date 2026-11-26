@@ -798,9 +798,9 @@
 					<Button variant="outline" class="w-full" onclick={runPreview} disabled={previewing}>
 						{#if previewing}<Spinner />{:else}<PlayIcon />{/if}Preview now
 					</Button>
-					{#if overview && !overview.telemetryAvailable}
+					{#if overview && !overview.telemetryAvailable && !logKind}
 						<p class="text-xs text-muted-foreground">
-							Telemetry is not available, so a preview cannot run yet.
+							Telemetry is not available, so a metric preview cannot run yet.
 						</p>
 					{/if}
 					{#if previewError}

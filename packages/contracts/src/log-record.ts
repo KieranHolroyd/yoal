@@ -215,6 +215,13 @@ export interface LogSearchResult {
 	/** Non-fatal notes for the UI (`index_behind`, `sampled`, `capped`…). */
 	warnings: LogWarning[];
 	elapsedMs: number;
+	/**
+	 * On a first page (no `cursor` in the request): the SQLite hot-tail position taken just before
+	 * the read, as a live-tail cursor. A tail opened with it resumes from page-load time even when
+	 * the page has no `newer` cursor (an empty window, or the search index lagging), so lines
+	 * written between the read and the tail connecting are not lost.
+	 */
+	tailCursor?: string;
 }
 
 export interface LogWarning {

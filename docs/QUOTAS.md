@@ -71,6 +71,31 @@ so the behaviour over the quota is:
 The window is rolling, so deploys resume by themselves as old traffic leaves it. The total is
 cached for 60 seconds per scope (`UsageService.egressUsed`), shared by the check and the usage view.
 
+### Log ingest
+
+Log ingest has its own limits, set in log settings rather than `org_quotas` ([LOGS.md](./LOGS.md) §10.2, D251).
+They apply per project, or per service scope (database, storage, broker, Kubernetes cluster, pipeline) using the
+org's values, on every append path:
+
+| Setting | Default | Enforced |
+|---|---|---|
+| `ingestLinesPerSecond` | 1,000 lines/s | in-memory token bucket per scope |
+| `ingestBurst` | 20,000 lines | the bucket's size |
+| `ingestMbPerDay` | 5,120 MB (10^6 bytes) per UTC day | running total, seeded from `log_ingest_daily` so a restart does not reset it |
+
+The platform row holds the ceiling; an org or project may only lower it (Settings → Logs, `/api/v1/logs/settings`).
+A batch keeps its earliest lines and drops the rest once a limit is hit. Dropped lines are counted in
+`log_drop_counts` (reason `quota`, also `exclude` and `sample` for ingest rules) per scope per minute, and at most
+one `system` line a minute per scope says how many were dropped and why. Nothing is refused with a 409: an app's
+logging never fails. The buckets are per control-plane process, so a standby starts with full ones.
+
+The hot tail also has a row cap: each scope keeps at most 100,000 newest rows per table, which replaced the old
+global 500,000-row cap, so one noisy project cannot evict another's history.
+
+Admitted lines and bytes per scope per day (`log_ingest_daily`, migration 0143) feed showback: **Settings → Usage**
+shows log GB/day per project, and `GET /api/v1/logs/usage?days=7[&project=<slug>]` lists admitted and dropped lines
+and bytes per day. `YOAL_FEATURE_QUOTAS=0` stops enforcement; the counting continues.
+
 ## Usage
 
 `UsageService` (`packages/core/src/usage.ts`) computes:

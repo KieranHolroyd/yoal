@@ -167,7 +167,7 @@ Every item below would erase the footprint advantage, create a second security m
 |---|---|---|
 | Kubernetes, Swarm, HPA, general scheduler | Contradicts the no-Kubernetes, tiny-footprint design | Hardware-aware placement once at deploy time, node labels and zones, multi-node replicas, opt-in failover (CLUSTERING.md) |
 | Global anycast CDN or WAF/bot engine | One node cannot absorb volumetric DDoS; an edge network is a different company | CDN presets, Caddy rate limits, CrowdSec, Cloudflare/Bunny/Fastly |
-| Full APM, trace storage, log warehouse | Export beats build; Railway and Coolify both defer to external tools | OTLP/Prometheus export, short hot window, log drains |
+| Full APM and trace storage | Export beats build; Railway and Coolify both defer to external tools. (Logs are the exception: the Logs Explorer is built in, D243–D254, as a SQLite hot tail plus an optional ClickHouse index on the store telemetry already uses, never a separate log product or a hard dependency.) | OTLP/Prometheus export, `trace_id`/`span_id` on log records for joining an external trace tool, log drains |
 | Billing, payments, metered SaaS pricing | Self-hosted has no bill; quotas and showback are the useful translation | Quotas, budgets, chargeback CSV |
 | On-call scheduling and escalation | A product in itself; conflicts with low-resource operations | PagerDuty/Alertmanager webhook |
 | General workflow engine or a Yoal-built queue product | Vercel Queues and Cloudflare Workflows are large products | Cron, one-off jobs, webhooks, managed NATS brokers (D111, [BROKERS.md](./BROKERS.md)) |

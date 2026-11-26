@@ -480,7 +480,7 @@ These tools read and change who may do what in the organisation (see [identity a
 | `delete_dashboard` | Delete a dashboard permanently. Its telemetry is untouched. Asks to confirm | `metrics:read` |
 | `list_alerts` | Show what is alerting now, and every alert rule with its state | `metrics:read` |
 | `get_alert_rule` | Show one rule with its series, current values and recent history | `metrics:read` |
-| `create_alert_rule` | Create a metric alert rule. The result previews the series that would breach | `metrics:read` |
+| `create_alert_rule` | Create a metric or log alert rule (`log_count`, `log_pattern_new`; templates `log_errors`, `log_new_pattern_after_deploy`). The result previews the series that would breach | `metrics:read` |
 | `update_alert_rule` | Change a rule. Pause or resume it with `enabled` | `metrics:read` |
 | `silence_alerts` | Mute notifications for a window, for one rule or by label | `metrics:read` |
 | `list_alert_silences` | List active and upcoming silences; `includeExpired` adds those that ended in the last 30 days | `metrics:read` |

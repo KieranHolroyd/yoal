@@ -3760,7 +3760,7 @@ export const logDropCounts = sqliteTable(
 	],
 );
 
-/** Lines and bytes admitted per scope per UTC day (0144, §10.2 budget and showback). */
+/** Lines and bytes admitted per scope per UTC day (0143, §10.2 budget and showback). */
 export const logIngestDaily = sqliteTable(
 	'log_ingest_daily',
 	{
@@ -3778,7 +3778,7 @@ export const logIngestDaily = sqliteTable(
 	],
 );
 
-/** Archived UTC days per org with their hourly Parquet files (0144, §10.1). */
+/** Archived UTC days per org with their hourly Parquet files (0143, §10.1). */
 export const logArchiveDays = sqliteTable(
 	'log_archive_days',
 	{

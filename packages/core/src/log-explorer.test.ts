@@ -245,6 +245,36 @@ describe('store selection', () => {
 		expect(fallback.warnings.map((warning) => warning.code)).toContain('partial');
 	});
 
+	test('an async healthy() is awaited: an unreachable ClickHouse is lite mode, not a failed read', async () => {
+		// The real ClickHouseLogStore.healthy() returns a promise. A pending promise is truthy, so
+		// an unawaited check counted an unreachable ClickHouse as healthy.
+		let searched = false;
+		const unreachable = {
+			...fakeStore(async () => {
+				searched = true;
+				throw new Error('should not be called');
+			}),
+			healthy: async () => false,
+		};
+		hooks.logStoreClickhouse = unreachable;
+		const result = await core.logExplorer.search(otherOrg, recent());
+		expect(result.engine).toBe('sqlite');
+		expect(result.warnings.map((warning) => warning.code)).not.toContain('partial');
+		expect(searched).toBe(false);
+		const capabilities = await core.logExplorer.capabilities(otherOrg);
+		expect(capabilities.engine).toBe('sqlite');
+		expect(capabilities.clickhouse).toMatchObject({ installed: true, healthy: false });
+
+		hooks.logStoreClickhouse = { ...unreachable, healthy: async () => true, search: fakeStore(async () => ({
+			records: [],
+			cursor: { older: null, newer: null },
+			engine: 'clickhouse',
+			warnings: [],
+			elapsedMs: 0,
+		})).search };
+		expect((await core.logExplorer.search(otherOrg, recent())).engine).toBe('clickhouse');
+	});
+
 	test('what a store cannot answer is a 422 needs_clickhouse', async () => {
 		hooks.logStoreClickhouse = fakeStore(async () => {
 			throw new LogStoreUnsupported('Regular expressions need the search index.', 'regex');
@@ -279,6 +309,21 @@ describe('live tail', () => {
 			core.logs.appendServiceSystem({ kind: 'database', serviceId: 'db_main', orgId: 'org_1', message: 'restarted' });
 			const batch = await session.next(1_000);
 			expect(batch.records.map((record) => [record.id.split(':')[0], record.body])).toEqual([['sle', 'restarted']]);
+		} finally {
+			session.close();
+		}
+	});
+
+	test('a first page with no newer cursor carries the hot-tail position to resume from', async () => {
+		const page = await core.logExplorer.search(owner, recent({ q: 'page-load-gap' }));
+		expect(page.records).toEqual([]);
+		expect(page.cursor.newer).toBeNull();
+		expect(page.tailCursor?.startsWith('t.')).toBe(true);
+		// Written after the page was read but before the tail connected.
+		line(owner, ids.api!, 'page-load-gap written in between');
+		const session = core.logExplorer.openTail(owner, { q: 'page-load-gap', lastEventId: page.tailCursor });
+		try {
+			expect(session.initial.records.map((record) => record.body)).toEqual(['page-load-gap written in between']);
 		} finally {
 			session.close();
 		}

@@ -512,8 +512,15 @@ listen port and peer list); an external/BYO join omits both and keeps `publicAdd
   `building` / `succeeded` / `failed` / `cancelled`.
 - `POST /api/agent/logs` — runtime log drain: `{ workloadId, cursor?, lines[] }`. The node token
   must own the workload; the server resolves its project and deployment.
-- Dashboard live logs use `GET /projects/:slug/logs/stream?source=runtime|build&…` (SSE, session
-  authenticated). The stream sends `id: <cursor>` so `EventSource` reconnects resume without a gap.
+- `POST /api/agent/log-records` — structured records (`nodeLogBatchSchema`): `{ target, records[], dropped? }` where
+  `target` is `{ kind: "workload", workloadId }` (OTLP logs; the node must run the workload, else 403),
+  `{ kind: "site", host }` (edge access records; the host resolves to the project serving it, otherwise the node's
+  `edge` scope) or `{ kind: "platform", unit }` (one of the fixed platform units, else 400). → `{ ok, stored }`, plus
+  `disabled: true` when the source is switched off (`PLATFORM_LOGS`) so the agent backs off. Rules, quotas and
+  redaction apply as for every other append path (LOGS.md §10).
+- Dashboard live logs use `GET /api/v1/logs/stream` (SSE, see [Logs Explorer](#logs-explorer)); the older
+  `GET /projects/:slug/logs/stream?source=runtime|build&…` still answers. Both send `id: <cursor>` so `EventSource`
+  reconnects resume without a gap.
 
 ## v2 machine endpoints
 
@@ -577,6 +584,44 @@ admin (or a platform admin); acknowledging and silencing also allow deployers.
 | PUT | `/alerts/system` | platform owner | `{ routing?: { <kind>: { enabled, channels } }, policies?: { diskAlertPercent?, … } }` |
 | POST | `/alerts/channels/test` | platform owner | `{ channel? }`: test one channel or all → `{ delivery }` |
 | GET | `/alerts/history?rule=&kind=&before=&limit=` | `metrics:read` | Events newest first: `state`, `notification` (with per-channel `delivery`), `error`, `ack`, `silence`, and `system` (platform admins) |
+
+## Logs Explorer
+
+Unified log reads, live tail, saved queries and log cost settings ([LOGS.md](./LOGS.md), D243–D254). Types and zod
+schemas are in `packages/contracts/src/log-record.ts`, `log-settings.ts` and `log-analysis.ts`; the query grammar is
+`log-query.ts`. Session cookies and API keys both work.
+
+Read routes take the same inputs. **GET** reads the query string: `q` (a log query), `scope` repeated as `kind:id`
+(`project:prj_…`, `database:…`, `storage:…`, `broker:…`, `k8s:…`, `pipeline:<repository id>`, `function:…`, and for
+platform admins `platform:<node id>` and `edge:<node id>`; none means everything the caller may read), `from`/`to`
+(epoch ms or ISO) or `range` (`15m`, `24h`, `7d`; the default window is the last 24 hours). **POST** takes the same
+fields as a JSON body, with `scopes` as `{ kind, id }` objects or `kind:id` strings. A scope the caller cannot read is
+dropped silently, never a 403. An invalid query is a 422 with the offending offsets; what lite mode (SQLite, no
+ClickHouse) cannot answer is a 422 `needs_clickhouse`.
+
+| Method | Path | Permission | Notes |
+|---|---|---|---|
+| GET/POST | `/logs/search` | `logs:read` | Plus `limit` (≤ 1,000, default 200), `cursor`, `order` (`desc` default, `asc`), `archive` (`1`/`true`: also read archived days after the estimate) → `LogSearchResult` `{ records, cursor: { older, newer }, engine, warnings, elapsedMs, tailCursor? }`. A query with pipe stages is a 422 `pipes_need_table`. `tailCursor` (first page only) is the hot-tail position before the read, to start `/logs/stream` from |
+| GET/POST | `/logs/table` | `logs:read` + `logs:query` | Pipe-stage queries (`\| stats`, `\| patterns`, `\| dedup`, `\| fields`) → `LogTableResult` `{ columns, rows, sampleIds?, sparklines?, engine, warnings }`. A query without pipes is a 422 `pipes_required`. Lite mode answers `\| stats count() by bin(…)`, `\| sort` and `\| limit` only |
+| GET/POST | `/logs/histogram` | `logs:read` | Plus `buckets` (10–500, default 60) → counts per bucket by severity, plus deploy and alert `markers` |
+| GET/POST | `/logs/fields` | `logs:read` | Plus `field` (repeated) and `topValues` (1–50) → facet summaries: top values and shares per field; ClickHouse also discovers the top 30 attribute keys, with sparklines. Lite mode covers the built-in fields only |
+| GET/POST | `/logs/context` | `logs:read` | `id`, `before`, `after` (0–500, default 50) → `{ anchor, before, after }` in the record's stream, like `grep -C`. A record the caller cannot read is `anchor: null` |
+| GET | `/logs/capabilities` | `logs:read` | `{ engine: clickhouse\|sqlite, clickhouse: { installed, healthy, indexLagMs }, features, scopes, platformAdmin }`: what this install answers and the scope picker list |
+| GET | `/logs/stream` | `logs:read` | SSE live tail. `q`, `scope`, `backfill` (newest N matching lines of the last 24 h first, 0–1,000) and `cursor` (or the `Last-Event-ID` header; a tail cursor, a search page's `newer` cursor, or a page's `tailCursor`). Events: `ready` `{ cursor, engine }`, `records` `{ records, cursor }` with `id: <cursor>`, `sampled` `{ dropped }`, `end` `{ reason }`; a comment heartbeat every 15 s |
+| GET/POST | `/logs/compare` | `logs:read` + `logs:query` | Patterns in `from..to` against a baseline: POST `logCompareInputSchema`; GET the read query string plus `baseline=previous\|offset:<ms>\|deploy:<id>\|range:<from>-<to>` and `limit` → `LogCompareResult` (rows classified `new`, `rising`, `falling`, `gone`, `steady`). ClickHouse only |
+| GET/POST | `/logs/why` | `logs:read` + `logs:query` | Field values over-represented in `selection` against the rest of `from..to`: POST `logWhyInputSchema`; GET the read query string plus `selection=<from>-<to>` (epoch ms), `field` (repeated) and `limit` → `LogWhyResult` ranked by lift. ClickHouse only |
+| GET/POST | `/logs/saved` | `logQuery:read` / `logQuery:create` | List `{ queries }` (yours and the org's shared ones), or create from `{ name, q, scopes, range, columns, visibility: personal\|org }` → 201 `{ query }` |
+| GET/PATCH/DELETE | `/logs/saved/:id` | owner of the query: `logQuery:update` / `logQuery:delete`; someone else's org query: `logQuery:manage` | `{ query }` or `{ ok: true }`. Another person's personal query, or another org's, is 404 |
+| GET/POST | `/logs/rules` | `logs:read` / `logs:configure` | Ingest and index rules: list `{ rules }` (`?project=<slug>` for one project's own), or create `{ name, kind: exclude\|sample\|index_only\|redact, query, pattern?, sampleRate?, project? }` → 201 `{ rule }` |
+| GET/PATCH/DELETE | `/logs/rules/:id` | `logs:read` / `logs:configure` | One rule as `{ rule }`; PATCH takes a `LogRuleUpdate` |
+| POST | `/logs/rules/preview` | `logs:read` | A draft rule replayed over the last 15 minutes of the hot tail → the share it would drop or keep out of the index, and the top patterns it matches |
+| GET/PUT/PATCH | `/logs/settings` | `logs:read` / `logs:configure`; `?scope=platform`: platform admin | Retention, archive, ingest quotas and edge sampling. `?project=<slug>` for a project's row, `?scope=platform` for the platform defaults, otherwise the caller's org. GET → `LogSettingsView` (each level as stored, the effective values and their sources, `canEdit`); PUT/PATCH take a `LogSettingsPatch` (`null` clears a key so it inherits; a key the level may not set is a 422) and answer the new view |
+| POST | `/logs/archive/estimate` | `logs:read` | `{ scopes, from, to }` or `range` → `LogArchiveEstimate` `{ bytes, files, seconds, budgetBytes, reason }` for the archived part of the range |
+| GET | `/logs/usage` | `project:read` | Admitted lines and bytes and dropped lines per scope per UTC day, for showback. `?days=7` (1–90), `?project=<slug>` |
+
+The older per-resource routes (`/projects/:slug/logs`, `/databases/:name/logs`, `/storage/:name/logs`,
+`/brokers/:name/logs`, the Kubernetes and pipeline log routes) keep their shapes. MCP has the read-only tools
+`query_logs`, `get_log_patterns`, `get_log_context`, `compare_logs` and `explain_log_spike`.
 
 ## High availability and observability (W15)
 

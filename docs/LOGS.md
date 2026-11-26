@@ -1,19 +1,20 @@
 # Yoal — Logs Explorer
 
-Status: **plan, 2026-11-25.** Nothing here is built. The mechanisms are **proposals (LP1–LP12)**. Each one
-becomes a D-number when its spike (§12) passes and it is built. The phases are **L0–L7** (§11). Sections describe the
-target design in the present tense. "Today" means verified in the tree on 2026-11-25. Kieran settled the open
-questions on 2026-11-25 (§15), so the plan is agreed and L0/L1 can start.
+Status: **built, 2026-11-26.** Phases L1–L7 are built and merged; §11.1 lists what is built and what is not. The
+mechanisms that were proposals LP1–LP12 are now **D243–D254** ([DECISIONS.md](./DECISIONS.md); §13 maps the old
+numbers, which code comments still cite). Sections describe the system as built. §1 records the tree before the build
+(verified 2026-11-25). Kieran settled the open questions on 2026-11-25 (§15). The lane briefs and merge order are in
+[build-plan/LOGS-WAVES.md](./build-plan/LOGS-WAVES.md).
 
 Related: [DESIGN.md](./DESIGN.md) §8 (observability), D15, D16, D101 (ClickHouse telemetry), D109 (alert rules),
-D141 (log drains), D153 (pipeline logs), [APP-ERRORS.md](./APP-ERRORS.md), [SERVER-ERRORS.md](./SERVER-ERRORS.md),
+D141 (log drains), D153 (pipeline logs), D243–D254 (this feature), [API.md](./API.md#logs-explorer), [APP-ERRORS.md](./APP-ERRORS.md), [SERVER-ERRORS.md](./SERVER-ERRORS.md),
 [ALERTS.md](./ALERTS.md), [QUOTAS.md](./QUOTAS.md), [IAM.md](./IAM.md), [ASSISTANT.md](./ASSISTANT.md).
 
-**Contents:** [0 Summary](#0-summary) · [1 Today](#1-today) · [2 Goals](#2-goals-and-non-goals) ·
+**Contents:** [0 Summary](#0-summary) · [1 Before the build](#1-before-the-build) · [2 Goals](#2-goals-and-non-goals) ·
 [3 Record model](#3-one-record-model) · [4 Pipeline](#4-ingest-pipeline-and-stores) · [5 Sources](#5-sources) ·
 [6 Query language](#6-query-language) · [7 Explorer UI](#7-the-explorer) · [8 Analysis](#8-analysis) ·
 [9 Act on logs](#9-acting-on-logs) · [10 Cost and safety](#10-cost-retention-and-safety) · [11 Phases](#11-phases) ·
-[12 Spikes](#12-spikes) · [13 Proposals](#13-proposals) · [14 Alternatives](#14-alternatives-considered) ·
+[12 Spikes](#12-spikes) · [13 Decisions](#13-decisions) · [14 Alternatives](#14-alternatives-considered) ·
 [15 Risks and open questions](#15-risks-and-open-questions) · [Appendix: research](#appendix-research)
 
 ---
@@ -26,34 +27,34 @@ search it, at `/logs` for a whole org and embedded, pre-scoped, on every resourc
 groups, Insights queries, Live Tail and pattern compare with Loki Drilldown's per-field volume breakdowns,
 Datadog's facets and saved views, and Honeycomb's "what's different about this spike".
 
-Five ideas carry the plan:
+Five ideas carry the design:
 
 1. **One record model, shaped like OpenTelemetry** (§3). Scope, severity number, body, attributes, resource, and
    trace and request IDs.
-2. **SQLite stays the hot tail; ClickHouse becomes the search index** (§4). Ingest still writes SQLite, as it does
-   today, so live tail and drains (D141) keep working without ClickHouse. A cursor **indexer** copies, parses,
+2. **SQLite stays the hot tail; ClickHouse becomes the search index** (§4). Ingest still writes SQLite, as it did
+   before, so live tail and drains (D141) keep working without ClickHouse. A cursor **indexer** copies, parses,
    pattern-mines and redacts rows into a ClickHouse `logs` table. This is the same at-least-once cursor machinery
    drains use, so a ClickHouse outage only delays search. It never loses lines.
 3. **One query language, compiled on the server** (§6). Datadog/Railway-style filters (`level:error service:api
    -path:/health "timeout"`) plus Insights-style pipe stages (`| stats count() by bin(5m), level`, `| patterns`).
    The grammar lives in `@yoal/contracts`, so the dashboard, CLI, MCP and assistant share one parser. Tenancy is
    ANDed in on the server, exactly like the D101 dashboard builder.
-4. **One Explorer component** (§7) replaces the four viewers that exist today (`LogsPanel`, `ServiceLogs`, `PodLogs`,
-   `JobLogs`). It has a time histogram you can brush to zoom, a facet sidebar, live tail, row context, and Stream,
+4. **One Explorer component** (§7) replaces the four viewers that existed before (`LogsPanel`, `ServiceLogs` and
+   `PodLogs` are deleted; `JobLogs` is a thin wrapper that keeps pipeline step grouping). It has a time histogram you can brush to zoom, a facet sidebar, live tail, row context, and Stream,
    Patterns, Analytics and Compare modes.
-5. **Logs you can act on** (§9). Saved queries become alert rules (a count threshold, or "a new pattern appeared
-   after a deploy"), dashboard panels and log-based metrics, and every row pivots to its deploy, request, app error
-   and node.
+5. **Logs you can act on** (§9). Queries become alert rules (a count threshold, or "a new pattern appeared after a
+   deploy"), dashboard panels and log-based metrics, and every row pivots to its deploy, request, app error and
+   node.
 
 Without ClickHouse, the Explorer still runs, in a smaller "lite" mode over SQLite: scope, time range, built-in
-filters, histogram, live tail and context. Facets on parsed fields, patterns, stats and compare need ClickHouse, and
-the UI says so with a link to Settings → Telemetry. This keeps D101's "optional and fail-open" promise.
+filters, text search, histogram, `| stats count() by bin()`, live tail and context. Facets on parsed fields, regex,
+patterns, most stats, Compare and Why? need ClickHouse, and the UI says so with a link to Settings → Telemetry. This keeps D101's "optional and fail-open" promise.
 
 ---
 
-## 1. Today
+## 1. Before the build
 
-What is in the tree (verified 2026-11-25):
+What was in the tree before the build (verified 2026-11-25). The rest of this document describes what replaced it.
 
 - **Five sibling SQLite tables of the same shape**:
   - `log_events` (runtime, build, system, job runs; migration 0005, and 0059 for `job_run_id`)
@@ -82,8 +83,8 @@ What is in the tree (verified 2026-11-25):
   `get_{database,broker,storage}_logs`. CLI `yoal logs` (no `--follow`), `yoal db|storage|broker|k8s|jobs|run
   logs` (with `-f`). Permission `logs:read` (org, project and environment scope).
 
-[FEATURE-RESEARCH.md](./FEATURE-RESEARCH.md) lists "log warehouse" under *Do not build* in favour of export. This
-plan replaces that row once it is adopted (§13). Drains and OTLP export stay, but an operator should not need a
+[FEATURE-RESEARCH.md](./FEATURE-RESEARCH.md) listed "log warehouse" under *Do not build* in favour of export. That
+row now excludes only APM and trace storage (D244). Drains and OTLP export stay, but an operator should not need a
 second product to answer "what happened at 14:02".
 
 ---
@@ -103,7 +104,7 @@ second product to answer "what happened at 14:02".
 
 **Non-goals**
 
-- Distributed trace storage and a span waterfall. The plan carries `trace_id` and `span_id` so a trace store can join
+- Distributed trace storage and a span waterfall. Records carry `trace_id` and `span_id` so a trace store can join
   later, and so external trace tools can be linked.
 - A general SIEM, including correlation rules across orgs.
 - Replacing drains. Drains remain the way to send logs elsewhere (D141).
@@ -117,173 +118,207 @@ second product to answer "what happened at 14:02".
 
 | Field | Notes |
 |---|---|
-| `id` | Stable: `<table>:<seq>` today, and a ULID for new sources. Drains already promise a stable `id`. |
-| `ts`, `observedTs` | Event time (parsed from the line when present, otherwise `observedTs`) and receive time, in ns. |
-| `orgId` | Always set by the server. |
+| `id` | Stable: `<table tag>:<seq>`, for example `le:48213` (`log_events`) or `lr:91` (`log_records`). Drains already promise a stable `id`. |
+| `ts`, `observedTs` | Event time (parsed from the line when present, otherwise `observedTs`) and receive time, in epoch **milliseconds**, as every table stores them (ClickHouse `DateTime64(3)`). |
+| `orgId` | Always set by the server. Platform records, and edge records whose host matches no project, use the sentinel `'platform'`, which no tenant boundary includes (§10.5). |
 | `scope` | `{ kind, id }` where `kind` is `project · database · storage · broker · k8s · pipeline · function · edge · platform`. This plays the role of CloudWatch's log group. |
 | `stream` | A finer stream inside the scope: deployment + replica, build, job run, pipeline job + step, pod, node service. This plays the role of a CloudWatch log stream. |
 | `source` | `runtime · build · job · pipeline · system · access · otlp · audit · platform` |
-| `severityNumber`, `severityText` | OTel 1–24. The current `debug/info/warn/error` levels map to 5/9/13/17, and `fatal` is added (21). |
+| `severityNumber`, `severityText` | OTel 1–24. `trace/debug/info/warn/error/fatal` map to 1/5/9/13/17/21. |
 | `body` | The message text, still capped at 16 KB. Structured OTLP bodies are stored as JSON text. |
 | `attributes` | Per-record fields: parsed JSON or logfmt keys, `http.*`, and user keys from OTLP. |
 | `resource` | `service.name` (project slug or service name), `deployment.id`, `host.name` (node), `container.id`, `k8s.*` |
-| `traceId`, `spanId`, `requestId` | Extracted at index time (§4.3). |
-| `patternId` | Drain template hash (§8.1). |
+| `traceId`, `spanId`, `requestId` | Extracted at index time (§4.3), or set by the source (OTLP, edge access records). |
+| `patternId` | Drain template id, 16 hex characters (§8.1). |
 
-The existing tables are not rewritten in L1. An adapter maps each one onto `LogRecord`, and new sources write a new
-generic SQLite table, `log_records`. It has no CHECKs on `kind` or `source`, which is the lesson of 0028. Once L3
-ships, the siblings can be folded into it by a later migration.
+The existing tables are not rewritten. An adapter maps each one onto `LogRecord`
+(`packages/core/src/log-store/sqlite-sources.ts`), and new sources write a generic SQLite table, `log_records`
+(migration 0142). It has no CHECKs on `kind` or `source`, which is the lesson of 0028. Folding the siblings into it is
+a later migration (§15.5); it has not been done.
 
 ---
 
 ## 4. Ingest pipeline and stores
 
 ```
- node: journald / builder / step runner / OTLP / Caddy access file
-        │  (agent drain, unchanged transport: POST /api/agent/logs)
+ node: journald / builder / step runner / OTLP / Caddy access file / platform units
+        │  (POST /api/agent/logs; structured records: POST /api/agent/log-records)
         ▼
- control plane: LogService.append*  ── redaction (LP10) ── quota check (LP9)
-        │                         └──► in-memory tail bus ──► SSE / CLI -f / MCP tail
+ control plane: LogService.append*  ── ingest guard: rules (D251) · quota (D251) · redaction (D252)
+        │                         └──► in-memory tail bus ──► SSE (Explorer, yoal logs -f)
         ▼
  SQLite hot tail (log_events, …, log_records)  ── cursor ──► drains (D141, unchanged)
         │
         └── cursor ──► indexer: parse · severity · ids · multiline · patterns ──► ClickHouse yoal.logs
-                                                                          └──► daily Parquet archive (LP9)
+                                                                          └──► daily Parquet archive (D251)
 ```
 
-### 4.1 SQLite is the hot tail (LP2)
+### 4.1 SQLite is the hot tail (D244)
 
-The write path stays where it is. SQLite holds a short window: the default is 3 days when ClickHouse is installed,
-and the current 7 days without it. It serves live tail, context lookups and drains, and is what lite mode searches.
-The global 500,000-row cap becomes a **per-scope cap** (LP9).
+The write path stays where it was. SQLite holds a short window: 3 days by default when the search index is installed,
+and 7 without it (per org, 1–14 days, D251). It serves live tail, context lookups and drains, and is what lite mode
+searches. The global 500,000-row cap is gone: each scope keeps at most 100,000 newest rows per table
+(`LOG_SCOPE_ROW_CAP`, D251). Kubernetes and pipeline lines keep their own fixed retention.
 
-**Concern.** Log rows sit in the platform state database, which Litestream streams. At high volume that streaming
-replicates disposable data and competes with state writes. Spike S2 measures this. If it is a problem, the log
-tables move to an attached `logs.db` that Litestream does not stream. The rows are already disposable: drains and
-the indexer have read them.
+**Concern (open).** Log rows sit in the platform state database, which Litestream streams. At high volume that
+streaming replicates disposable data and competes with state writes. Spike S2 was meant to measure this and has not
+run. If it is a problem, the log tables move to an attached `logs.db` that Litestream does not stream. The rows are
+already disposable: drains and the indexer have read them.
 
-### 4.2 The indexer feeds ClickHouse (LP2)
+### 4.2 The indexer feeds ClickHouse (D244)
 
-The indexer is a control-plane loop built like the drain worker (`packages/core/src/log-drains.ts`). It keeps one
-cursor per source table in SQLite, reads batches of up to 5,000 rows, enriches them, and inserts into `yoal.logs`
-with an `insert_deduplication_token` derived from the cursor range, so a replay after a crash is idempotent. It
-moves the cursor only after ClickHouse acknowledges. It is fail-open: a ClickHouse outage stalls the cursor and the
-Explorer shows "search index N minutes behind". Live tail is unaffected.
+The indexer (`packages/core/src/log-indexer.ts`) is a control-plane loop built like the drain worker
+(`packages/core/src/log-drains.ts`), ticked on the primary from `hooks.server.ts`. It keeps one cursor per hot-tail
+table in `log_index_cursors`, reads batches of up to 5,000 rows (up to 20 batches per table per tick, so a lagging
+index catches up), enriches them, and inserts into `yoal.logs` with `insert_deduplication_token = <table>:<from>-<to>`.
+A failed batch is retried over exactly the same range, so a replay is dropped by ClickHouse. It moves the cursor only
+after ClickHouse acknowledges, with a conditional update so a second process never rewinds it. A table seen for the
+first time starts 50,000 rows behind its newest row, so the indexer never reindexes years. A batch ClickHouse keeps
+rejecting as malformed is skipped after a few attempts and recorded in `last_error`. It is fail-open: a ClickHouse
+outage stalls the cursors, `lagMs()` grows and reads that reach the recent past carry an `index_behind` warning
+(past 60 s). Live tail is unaffected. It is off where telemetry is not installed and behind `LOG_INDEX`.
 
-`yoal.logs` (sketch; S1 confirms the index types on 26.8):
+`yoal.logs` as built (`logsTableSql` in `packages/core/src/telemetry.ts`):
 
 ```sql
 CREATE TABLE yoal.logs (
-  ts DateTime64(9), observed_ts DateTime64(3), id String,
+  ts DateTime64(3), observed_ts DateTime64(3), id String,
   org_id LowCardinality(String), scope_kind LowCardinality(String), scope_id String,
   stream_id String, project_id String, deployment_id String, node_id LowCardinality(String),
   source LowCardinality(String), severity_number UInt8, severity_text LowCardinality(String),
-  body String, pattern_id UInt64,
+  body String, pattern_id String,
   trace_id String, span_id String, request_id String,
   attributes Map(LowCardinality(String), String),
   resource Map(LowCardinality(String), String),
-  INDEX body_text body TYPE text(tokenizer = 'splitByNonAlpha') GRANULARITY 1,   -- fallback: tokenbf_v1
+  INDEX body_text body TYPE text(tokenizer = 'splitByNonAlpha', preprocessor = lower(body)) GRANULARITY 1,
+                                                    -- fallback when the server rejects it: tokenbf_v1 over lower(body)
+  INDEX id_bf id TYPE bloom_filter(0.01) GRANULARITY 4,
   INDEX req request_id TYPE bloom_filter GRANULARITY 4,
   INDEX trace trace_id TYPE bloom_filter GRANULARITY 4,
   INDEX attr_keys mapKeys(attributes) TYPE bloom_filter GRANULARITY 4
 ) ENGINE = MergeTree
 PARTITION BY toDate(ts)
 ORDER BY (org_id, scope_kind, scope_id, ts)
-TTL toDateTime(ts) + INTERVAL 14 DAY      -- backstop; per-scope prune is explicit (LP9)
+TTL toDateTime(ts) + INTERVAL 90 DAY      -- backstop; search retention is an explicit daily DELETE (D251)
+SETTINGS non_replicated_deduplication_window = 1000, ttl_only_drop_parts = 1
 ```
 
-Hot attribute keys (`http.status`, `http.path`, `duration_ms`) may be promoted to typed materialized columns once S1
-shows they are worth it. Spike S1 also decides `Map` versus ClickHouse's `JSON` type.
+`yoal.log_patterns` is a `ReplacingMergeTree(last_seen)` keyed by `(org_id, scope_kind, scope_id, pattern_id)`.
+Attributes stay a `Map`; no hot keys are promoted to typed columns, and ClickHouse's `JSON` type was not adopted.
+S1 did not show a need for either.
 
 ### 4.3 Enrichment, in index order
 
-1. **Multiline join.** Continuation lines are joined to the previous record from the same stream and replica:
-   indented lines, `at …` / `Caused by:` / `Traceback`, and lines that start without a timestamp within 50 ms. This
-   happens in the agent's drain, before shipping, because only it sees the exact unit order. That is a small change
-   to `apps/agent/src/log-drain.ts` with a 1 s flush cap.
-2. **Parse.** A body that is a JSON object, or logfmt with at least two `k=v` pairs, becomes attributes. The body
-   becomes `msg`, `message` or `event` if one exists, and otherwise stays the original text. `parseLogLine` already
-   recovers level and timestamp, and this extends it.
-3. **Severity.** Take the parsed `level`, `severity` or `lvl`, then the existing heuristic, then the stream
-   (stderr → warn only when nothing else applies), and map to an OTel number.
-4. **IDs.** `trace_id` comes from `traceparent`, `trace_id`, `traceId` or `dd.trace_id`. `request_id` comes from
-   `request_id`, `requestId`, `req_id`, or the `X-Request-Id` value Yoal injects at the edge (LP6).
-5. **Redaction** has already run at ingest (LP10), so the indexer never sees secrets.
-6. **Pattern.** A Drain template ID (§8.1).
+1. **Multiline join.** Continuation lines are joined to the previous line of the same unit and stream: lines that
+   start with whitespace or a tab, `at …` frames, `Caused by:`, `Traceback (most recent call last):`, `File "…"`
+   frames and `... N more`. A joined record is capped at 16 KiB and 200 lines, and flushes on a 1 s gap or at the end
+   of a batch. This happens in the agent's drain (`apps/agent/src/log-drain.ts`), before shipping, because only it
+   sees the exact unit order. The planned "line without a timestamp within 50 ms" rule is not built.
+2. **Parse** (`packages/core/src/log-enrich.ts`). A body that is a JSON object, or logfmt with at least two `k=v`
+   pairs, becomes attributes, flattened with dots (at most 64 keys, 4 KiB a value). The body becomes `msg`,
+   `message`, `event` or `error` if one exists, and otherwise stays the original text.
+3. **Severity.** Take the parsed `level`, `severity`, `lvl` or `log.level`, otherwise keep the level the line
+   arrived with (the ingest heuristic), and map to an OTel number.
+4. **IDs.** `trace_id` comes from `traceparent`, `trace_id`, `traceId` or `dd.trace_id`, and `span_id` likewise.
+   `request_id` comes from `request_id`, `requestId`, `req_id`, `x-request-id` or `http.request_id`, which covers
+   the `X-Request-Id` value Yoal injects at the edge (D248).
+5. **Redaction** has already run at ingest (D252), so the indexer never sees secrets. `index_only` rules (D251) keep
+   a record out of the insert here.
+6. **Pattern.** A Drain template id (§8.1).
 
-### 4.4 Live tail (LP4)
+### 4.4 Live tail (D246)
 
-`LogService.append*` publishes the rows it inserts to an in-process bus. Each SSE, CLI `-f` or MCP tail subscriber
-compiles its query once to a JavaScript predicate (§6.3) and receives only matching rows. No subscriber polls the
-database any more. Reconnects resume by `Last-Event-ID`, a per-table seq vector, using a SQLite catch-up read and
-then the bus. A subscriber that falls more than 2,000 lines behind gets a "sampled" marker and the newest lines,
+Every `LogService.append*` path, including pipeline lines and Kubernetes pod logs, publishes the rows it inserts to an
+in-process bus (`packages/core/src/log-tail-bus.ts`). Each SSE subscriber (`/api/v1/logs/stream`, used by the
+Explorer and `yoal logs -f`) compiles its query once to a JavaScript predicate (§6.3) and receives only matching rows.
+No subscriber polls the database any more. Reconnects resume by `Last-Event-ID`, a per-table seq vector, using a
+SQLite catch-up read and then the bus. A tail can also start after a search page: from the page's `newer` cursor, or,
+when the page had none (an empty window, or a lagging index), from its `tailCursor`, the hot-tail position taken
+before the read. A subscriber that falls more than 2,000 lines behind gets a "sampled" marker and the newest lines,
 like CloudWatch Live Tail. The bus is per control-plane process, which is correct with one active control plane.
-The standby (CLUSTERING §6) starts with an empty bus and clients reconnect.
+The standby (CLUSTERING §6) starts with an empty bus and clients reconnect. There is no MCP tail.
 
 ---
 
 ## 5. Sources
 
-| Source | Scope | Today | Plan | Phase |
+| Source | Scope | Before | Built | Status |
 |---|---|---|---|---|
-| App runtime (process, container, compose, replicas) | project | `log_events` | adapter, then `log_records` | L1 |
-| Builds | project | `log_events` + `builds.log` (2 MB copy) | adapter; `builds.log` kept as the tail summary only | L1 |
-| Jobs and cron runs | project | `log_events.job_run_id` | adapter | L1 |
-| Databases, storage, brokers | database / storage / broker | sibling tables | adapter | L1 |
-| Kubernetes lifecycle and pod logs | k8s | `k8s_log_events`, `k8s_pod_logs` | adapter | L1 |
-| Pipelines | pipeline (repository) | `pipeline_log_lines` (90 d fixed) | adapter; retention moves under LP9 | L1 |
-| Function tails | function project | ClickHouse JSON blobs | indexer explodes `logs_json` into records | L3 |
-| **Edge requests** | edge (per site/project) | 1-minute aggregates only | raw access lines, IPs hashed as today | L3 |
-| **OTLP logs from apps** | project | not built | agent loopback receiver | L3 |
-| **Yoal's own services** | platform (per node) | journald on the node, never shipped | drain the fixed units | L3 |
-| Audit log | org | `audit_log` | read-only source in the Explorer, no copy | L3 |
-| Email events | org | SQLite + ClickHouse `email_events` | read-only source, no copy | L3 |
+| App runtime (process, container, compose, replicas) | project | `log_events` | adapter | built |
+| Builds | project | `log_events` + `builds.log` (2 MB copy) | adapter; `builds.log` kept as the tail summary | built |
+| Jobs and cron runs | project | `log_events.job_run_id` | adapter | built |
+| Databases, storage, brokers | database / storage / broker | sibling tables | adapter | built |
+| Kubernetes lifecycle and pod logs | k8s | `k8s_log_events`, `k8s_pod_logs` | adapter | built |
+| Pipelines | pipeline (repository) | `pipeline_log_lines` (90 d fixed) | adapter; retention still fixed | built |
+| Function runtime lines | function | `log_events` of function projects | adapter (read as `function` scopes) | built |
+| Function tails | function project | ClickHouse JSON blobs | indexer explodes `logs_json` into records | **not built** |
+| **Edge requests** | project (by host), else edge per node | 1-minute aggregates only | `access` records in `log_records`, IPs hashed (D248) | built |
+| **OTLP logs from apps** | project | not built | agent loopback receiver, keyed path (D249) | built (JSON only) |
+| **Yoal's own services** | platform (per node) | journald on the node, never shipped | drain the fixed units (D247) | built |
+| Audit log | org | `audit_log` | read-only source in the Explorer, no copy | **not built** |
+| Email events | org | SQLite + ClickHouse `email_events` | read-only source, no copy | **not built** |
 | Console and cloud-shell sessions | — | memory only | out of scope (session recording is its own feature) | — |
 
-**Edge requests (LP6).** Caddy already writes the JSON access log the agent tails for aggregates. The agent also
-ships each line as an `access` record. Its body is `GET /path 502 1234ms`, and its attributes are `http.method`,
-`http.route`, `http.status`, `duration_ms`, `bytes`, `client.ip_hash`, `user_agent.family`, `request_id`. Caddy
-injects `X-Request-Id: {http.request.uuid}` upstream (keeping an incoming one when the site trusts it), so app lines
-that log the header join the request. By default every non-2xx response and a configurable sample of 2xx responses
-(default 10%) are shipped. Aggregates are still computed from 100% of lines, so traffic charts stay exact.
+**Edge requests (D248).** Caddy writes the JSON access log the agent tails for aggregates (it needs
+`YOAL_CADDY_ACCESS_LOG`, which the installer sets). The agent also ships lines as `access` records. The body is
+`GET /path 502 1234ms`, and the attributes are `http.method`, `http.route`, `http.status`, `duration_ms`, `bytes`,
+`client.ip_hash` (the aggregator's hash), `user_agent.family`, `http.host` and `request_id`. Caddy sets
+`X-Request-Id` upstream on site and unavailable routes, keeping an incoming one only from ingress `trustedProxies`
+or the managed overlay and otherwise using `{http.request.uuid}`, and echoes it in the response, so app lines that
+log the header join the request. Every non-2xx/3xx response is shipped, and 2xx/3xx at the route's
+`accessLogSampleRate` (default 10%, deterministic per request id; set in log settings, D251). Records post per host
+with the sampled-out count as `dropped`, and a host no project serves lands in the node's `edge` scope under the
+sentinel org. Aggregates are still computed from 100% of lines, so traffic charts stay exact.
 
-**OTLP logs (LP7).** The agent listens on loopback (the same listener as the `/tail` sink) for OTLP/HTTP logs, in
-JSON first and protobuf after S4. Workloads get `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME`, as DESIGN §8
-promised. The node stamps `org`, `project`, `deployment` and `node`, and never trusts resource attributes for
-tenancy. This fills the D16 receiver gap for logs, and metrics and traces can follow on the same listener.
+**OTLP logs (D249).** The agent listens on loopback (`127.0.0.1:8085`, the same listener as the `/tail` sink) for
+OTLP/HTTP logs in JSON (gzip accepted). Protobuf is a 415 until spike S4. Process, container and compose apps get
+`OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_EXPORTER_OTLP_LOGS_ENDPOINT` pointing at `/otlp/<workload id>/<key>` (the
+key is an HMAC of the workload id under the node-local `logs.key`), and `OTEL_SERVICE_NAME`, as DESIGN §8 promised;
+an app's own values are never replaced. Only the keyed path accepts records: a bare `/v1/logs` is a 401, and traces
+and metrics sent to the keyed path are answered 200 and discarded. The control plane resolves org, project and
+deployment from the workload and never trusts resource attributes for tenancy. This fills the D16 receiver gap for
+logs; metrics and traces can follow on the same listener.
 
-**Platform logs (LP5).** The agent drains a fixed allow-list of units: `yoal-agent`, `yoal-helper`,
-`yoal-control-plane`, `caddy`, `yoal-mail`, `yoal-clickhouse`, the registry unit and `yoal-builder`. Each is
-scoped `platform` with `host.name` set to the node. Only platform admins see them. Platform logs are the first
-place to look when a 5xx appears in the agent journal (memory: prod server runbook). Today that means SSH.
+**Platform logs (D247).** The helper reads journald for a fixed allow-list of units (`GET /v1/platform-logs/<unit>`):
+`yoal-agent`, `yoal-helper`, `yoal-control-plane`, `yoal-control-plane-standby`, `yoal-builder`, `caddy`,
+`yoal-mail`, `yoal-clickhouse`, `yoal-registry` and `yoal-litestream`. The agent polls every 5 s, keeps a cursor per
+unit in its data dir, and posts to `/api/agent/log-records`. Each record is scoped `platform:<node id>` under the
+sentinel org, with stream `unit:<name>`. Only platform admins see them, and each read is audited. Platform logs are
+the first place to look when a 5xx appears in the agent journal, which used to mean SSH.
 
 ---
 
 ## 6. Query language
 
-One grammar, called **log query** (LP3). It is parsed to an AST in `@yoal/contracts/log-query`, autocompleted from
+One grammar, called **log query** (D245). It is parsed to an AST in `@yoal/contracts/log-query`, autocompleted from
 the same AST, and compiled on the server. A user never sends SQL, except platform admins in the SQL tab (D101 rule).
 
 ### 6.1 Filters
 
 ```
-timeout                         body contains "timeout" (token match; case-insensitive)
-"connection reset"              phrase
+timeout                         body has the whole word "timeout" (token match; case-insensitive)
+"connection reset"              phrase: case-insensitive substring (so is any word with punctuation)
 level:error                     severity ≥ ERROR (level:warn means ≥ WARN; level:=warn means exactly WARN)
-service:api  deployment:dep_…   built-in fields: scope, service, deployment, node, replica, source, stream,
-                                build, job, pipeline, pod, pattern, trace, request
+service:api  deployment:dep_…   built-in fields: level, body, service, scope, kind, project, deployment, build,
+                                job, node, replica, source, stream, channel, pattern, trace, span, request
 @http.status:>=500              attribute, with comparison operators > >= < <= on numbers
 @user.id:123 @path:/api/*       wildcard
 @msg:/time(out|d out)/          regex (ClickHouse only; marked in the UI)
+@user.id:*                      the field exists
 -@path:/health                  negation, also NOT
 a OR b, (a b) c                 boolean logic with implicit AND
 ```
+
+A bare word of letters and digits matches a whole token: body tokens are the runs between ASCII characters that are
+not letters or digits, so `timeout` matches `upstream-Timeout:` but not `timeouts` or `UpstreamTimeout`. Anything
+else, a quoted phrase or a word such as `user@example.com`, is a case-insensitive substring. The top comment of
+`packages/contracts/src/log-query.ts` is the full semantic reference every engine follows.
 
 ### 6.2 Pipe stages (ClickHouse)
 
 ```
 | fields ts, level, @http.status, body          choose columns
-| stats count() by bin(5m), level              aggregate: count, count_distinct, avg, p50/p95/p99, min, max, sum
+| stats count() by bin(5m), level              aggregate: count, count_distinct, avg, p50/p90/p95/p99, min, max, sum
 | stats p95(@duration_ms) by @http.route | sort p95 desc | limit 10
 | patterns                                      group by template, with counts and sparklines
 | dedup body                                    collapse repeats, with counts
@@ -295,25 +330,35 @@ to AWS read it immediately. The filter syntax follows Datadog, Railway and Verce
 
 ### 6.3 Compilation
 
-- **ClickHouse:** AST → parameterised SQL over `yoal.logs`, with `org_id` and the caller's permitted scopes ANDed in
-  by `compileLogQuery(principal, ast)`. Run as `yoal_reader` with time, memory and row limits (D101).
-- **SQLite (lite mode):** the same AST → a UNION over the adapters, supporting built-in fields, body substring
-  (`instr`), level, time range and `| sort`/`| limit`/`| stats count() by bin()`. Anything else returns a typed
-  `needs_clickhouse` error that the UI shows inline.
-- **JS predicate:** AST → `(r: LogRecord) => boolean` for live tail and preview (§10.3).
+- **ClickHouse** (`log-store/clickhouse-compiler.ts`): AST → parameterised SQL over `yoal.logs`, with `org_id` and
+  the boundary's scopes ANDed into every statement. Tokens use `hasToken`/`hasTokenCaseInsensitive`, substrings
+  `positionCaseInsensitive`/`ILIKE`, regex `match()`. Run as `yoal_reader` with time, memory and row limits (D101).
+- **SQLite, lite mode** (`log-store/sqlite-compiler.ts`): the same AST → a UNION ALL over the adapters whose scope
+  kinds meet the boundary, supporting built-in fields, text (tokens emulated with a separator-rewritten `LIKE`),
+  level bands, wildcards, time range, attributes on the sources that store them (`log_records`,
+  `pipeline_log_lines`), and `| stats count() by bin()`, `| sort`, `| limit`. Anything else, regex included, returns
+  a typed `needs_clickhouse` error (422) that the UI shows inline.
+- **JS predicate** (`compileLogPredicate`): AST → `(r: LogRecord) => boolean` for live tail and rule preview (§10.3).
+
+One corpus test asserts that the predicate, the SQLite compiler and the ClickHouse SQL agree, and runs live when a
+ClickHouse server answers. Pipe stages and Why? need `logs:query` as well as `logs:read`.
 
 ### 6.4 Natural language
 
-The assistant (L7) turns "errors from api in the last hour after the 14:00 deploy" into a log query, and shows it as
-an editable query with the prompt kept as a comment, CloudWatch Query Assist style. It is never run automatically.
+The assistant (L7) has a grammar summary in its system prompt whenever `query_logs` is offered
+(`LOG_QUERY_GUIDE`). Asked for a query ("errors from api in the last hour after the 14:00 deploy"), it quotes the
+request, gives the query in a code block and links it to the Explorer, CloudWatch Query Assist style. It never runs
+a query it wrote for the user; it runs `query_logs` itself only to answer a question. The Explorer's **Ask AI**
+actions (summarise errors in this window; explain this line or pattern) prefill the assistant panel.
 
 ---
 
 ## 7. The Explorer
 
-One Svelte component, `LogExplorer` (`apps/control-plane/src/lib/logs/`), built on the existing TanStack Query and
-Virtual conventions. It mounts at `/logs`, where scope is open, and locked to a scope on project, database,
-storage, broker, k8s, pipeline-job and function pages. Those pages lose their bespoke viewers.
+One Svelte component, `LogExplorer` (`apps/control-plane/src/lib/logs/`, D253), built on the existing TanStack Query
+and Virtual conventions. It mounts at `/logs` (a top-level nav entry for `logs:read`), where scope is open, and
+locked to a scope with a preset query on project, function, deployment, build, database, storage, broker,
+Kubernetes cluster and pod, and pipeline-job pages. Those pages lost their bespoke viewers.
 
 ### 7.1 Layout
 
@@ -331,14 +376,14 @@ storage, broker, k8s, pipeline-job and function pages. Those pages lose their be
 └──────────────┴───────────────────────────────────────────────────────────────────────────────────────┘
 ```
 
-### 7.2 Must-haves (L1–L2)
+### 7.2 Features
 
 - **Scope tree** with counts: org → project or service → deployment or replica → stream. Platform scopes are shown
   to platform admins only.
 - **Time picker**: relative (`15m`, `1h`, `24h`, `7d`), absolute, "around this time ±5 m", a UTC/local toggle, and
   brush-zoom on the histogram.
-- **Histogram** stacked by level, with deploy markers (from `deployments`), alert-fired markers and node-event
-  markers.
+- **Histogram** stacked by level, with deploy markers (from `deployments`) and alert-fired markers. Node-event
+  markers are not built.
 - **Virtualised stream** in both directions: newest first, jump to time, infinite scroll in both directions by
   cursor.
 - **Live tail** with pause on scroll or selection, an "N new" counter, resume, and a visible notice when sampled.
@@ -354,137 +399,177 @@ storage, broker, k8s, pipeline-job and function pages. Those pages lose their be
   terms.
 - **URL state**: query, scope, time, mode and selected row are all in the URL, so a link is a shareable
   investigation.
-- **Saved queries**: personal or org, with name, query, scope, time and columns. They appear in the palette and can
-  be turned into alerts or panels (§9).
+- **Saved queries**: personal or org, with name, query, scope, time and columns (`log_saved_queries`, the
+  `logQuery` resource). They appear in the `⌘K` palette. The toolbar's **Create alert** and the Analytics tab's
+  **Add to dashboard** turn the current query into an alert rule or a panel (§9).
 - **Download**: NDJSON or CSV of the current query, capped at 100,000 rows (a larger export is a drain).
 
 ### 7.3 Keyboard
 
 `/` focus query · `⌘↵` run · `j`/`k` move · `o` or `↵` expand · `c` context · `f` filter to the focused value ·
 `x` exclude it · `space` pause or resume tail · `t` time picker · `[`/`]` previous or next time window ·
-`⌘K` palette (saved queries, scopes, "go to deployment…") · `?` help. The keys are deliberately vim-adjacent,
+`⌘K` palette (saved queries and scopes) · `?` help · `esc` close. The keys are deliberately vim-adjacent,
 like the HyperDX TUI.
 
 ---
 
 ## 8. Analysis
 
-### 8.1 Patterns (LP8)
+### 8.1 Patterns (D250)
 
-The indexer runs an online Drain miner (fixed-depth parse tree; He et al. 2017) per `(org, scope)`. It masks
-numbers, UUIDs, hex, IPs, durations, quoted strings and paths, and stores `pattern_id` on each row. Templates live in
-`yoal.log_patterns` (`pattern_id`, `scope`, `template`, `first_seen`, `last_seen`, `sample_id`). The miner is capped
-per scope (LRU at 5,000 templates) and rebuilt from the last hour on restart. The Patterns tab is
-`| patterns`: the template with masked placeholders highlighted, a count, a sparkline, and first-seen. Row actions
-are "only this pattern" and "hide this pattern" (Better Stack). S3 measures the cost per line in Bun.
+The indexer runs an online Drain miner (`packages/core/src/log-patterns.ts`; fixed-depth parse tree, He et al. 2017)
+per `(org, scope)`: depth 4, similarity 0.4, at most 100 children a node. It masks numbers, hex, UUIDs, IPs,
+durations, timestamps, quoted strings, paths and emails (`<NUM> <HEX> <UUID> <IP> <DUR> <TS> <STR> <PATH> <EMAIL>`),
+and stores `pattern_id` on each row: a stable FNV-1a 64-bit hex hash of the template, so ids agree across restarts.
+Templates live in `yoal.log_patterns` with first and last seen. The miner is capped per scope (LRU at 5,000
+templates). Its state is saved to `<dataDir>/log-patterns.json` every 10 minutes and on graceful shutdown and
+restored at boot, instead of being rebuilt from the last hour. The Patterns tab is `| patterns`: the template with
+masked placeholders highlighted, a count, a 24-bucket sparkline, and first-seen. Row actions are "only this pattern"
+(`pattern:<id>`) and "hide this pattern" (`-pattern:<id>`), as in Better Stack. S3 measured 2.38 µs a line (§12).
 
 ### 8.2 Compare
 
-Compare runs the same query over two windows: the previous period, the same time yesterday or last week, or
-**before and after a deploy** (deploy-aware compare). It shows patterns that are **new, rising, falling and gone**,
-with deltas. That is CloudWatch's Compare, made deploy-aware. "What did this deploy change in my logs?" is the
+Compare (`POST /api/v1/logs/compare`, `packages/core/src/log-analysis.ts`) runs the same query over two windows: the
+previous period, the same window shifted back (yesterday, last week), a custom range, or **before and after a
+deploy** (`deploy:<id>`, which reads the deployment's live time from SQLite). It classifies patterns by per-minute
+rate as **new** (absent from the baseline), **gone**, **rising** (at least 2× and at least 5 lines), **falling**
+(at most 0.5×) or steady, with counts per window. The URL form is
+`mode=compare&baseline=previous|offset:<ms>|deploy:<id>|range:<from>-<to>`. It needs ClickHouse and `logs:query`. That is CloudWatch's Compare, made deploy-aware. "What did this deploy change in my logs?" is the
 single most useful question a PaaS log tool can answer.
 
 ### 8.3 Why? (field differences)
 
-Brush a region of the histogram and choose **Why?**. The selection is compared against the rest of the window across
-every built-in field and the top attribute keys, by value share. The result is a ranked list such as
+Brush a region of the histogram and choose **Why?** (`POST /api/v1/logs/why`). The selection is compared against the
+rest of the window across the built-in fields and the top 20 attribute keys, by value share, ranked by lift. The result is a ranked list such as
 "`node = edge-b` is 92% of the selection vs 31% baseline", "`deployment = dep_x` 100% vs 0%" and
-"`@http.route = /v1/orders` 88% vs 12%". This is Honeycomb BubbleUp's idea, implemented as two `topK` queries per
-key on ClickHouse.
+"`@http.route = /v1/orders` 88% vs 12%". This is Honeycomb BubbleUp's idea, implemented as count queries per
+key on ClickHouse with the boundary ANDed into each. It needs ClickHouse and `logs:query`.
 
 ### 8.4 Analytics
 
 `| stats` results render as a time series when grouped by `bin()`, otherwise as a table or bar chart, using the D101
-panel renderers. "Add to dashboard" copies the query into a panel (§9.2).
+panel renderers. "Add to dashboard" turns the query into a `logs` dataset panel (§9.2).
 
 ---
 
 ## 9. Acting on logs
 
-### 9.1 Log alerts (extends D109)
+### 9.1 Log alerts (D254, extends D109)
 
-Two new rule kinds sit on the existing alert-rule machinery and notifiers (ALERTS.md):
+Two rule kinds sit on the existing alert-rule machinery and notifiers ([ALERTS.md](./ALERTS.md) §1, Log rules). A log rule's
+query is a `logs` builder query (`query.builder.logs: { q, scopes }`), evaluated by the existing rule loop through
+`LogExplorerService` as the org's `system:alerts` principal (`packages/core/src/log-alerts.ts`):
 
-- **`log_count`**: a saved query's count over a window crosses a threshold (`level:error service:api > 50 in 5m`).
-  It is evaluated by the existing rule loop as a ClickHouse count, and in lite mode as a SQLite count.
-- **`log_pattern_new`**: a pattern never seen before in the scope appears at least N times. It can be limited to the
-  30 minutes after a deploy. This is noise-resistant in a way keyword alerts are not.
+- **`log_count`**: the query's count over the window, `<filter> | stats count() [by …]`, crosses a threshold
+  (`level:error service:api > 50 in 5m`). One series, or one per group-by field. ClickHouse when it answers, SQLite in
+  lite mode.
+- **`log_pattern_new`**: a pattern not seen in the scope during the lookback (default 7 days) appears at least N times
+  in the window. With `afterDeployMinutes` it looks only while a deploy in scope went live within that many minutes,
+  and the window starts at the deploy. This is noise-resistant in a way keyword alerts are not. It needs ClickHouse.
 
-Alert payloads carry an Explorer link with the query, scope and time window filled in.
+Templates: `log_errors` (more than 50 error lines in 5 minutes) and `log_new_pattern_after_deploy`. `alert_rules`
+keeps the kind inside `spec_json`, so there is no migration. Notifications and alert instances carry an Explorer link
+with the query, scopes and window filled in, and the Explorer toolbar has **Create alert**.
 
 ### 9.2 Log-based metrics and panels
 
-- A **log metric** is a saved query plus `| stats` turned into a series. It is computed at query time from
-  `yoal.logs` (no materialisation until S1 shows a need). It appears in the dashboard builder as a new **`logs`
-  dataset**, so builder panels can count log lines with the caller's scope ANDed in.
-- A **Logs panel** type in dashboards shows a live, scoped, saved query inline.
+- A **log metric** is a query plus `| stats` turned into a series. It is computed at query time through the Explorer
+  (nothing is materialised). It appears in the dashboard builder as the **`logs` dataset** (measures `count` and
+  `count_distinct` of a field; group by severity, source, scope, `bin` or any `@attribute`), so builder panels count
+  log lines with the caller's boundary ANDed in.
+- A **Logs panel** type in dashboards shows a scoped query's newest lines inline.
 
 ### 9.3 Pivots
 
 | From | To |
 |---|---|
 | Log row with `request_id` | every line of that request across edge and app; the edge access record |
-| Log row with `trace_id` | all lines in the trace; an external trace UI link if one is configured (later, Yoal's own trace store) |
+| Log row with `trace_id` | all lines in the trace (`trace:<id>`); an external trace UI link is not built |
 | Log row | its deployment, build, node, replica, job run or pipeline step |
 | Traffic chart 5xx spike | Explorer with `source:access @http.status:>=500` over the brushed window |
 | App error event (APP-ERRORS) | lines from the same project ±60 s, the same `request_id` when present |
 | Alert instance | the rule's query at fire time |
-| Deployment page | "Logs for this deploy" and "Compare with previous deploy" |
+| Deployment page | "Logs for this deploy" and Compare against the time before it went live (`mode=compare&baseline=deploy:<id>`) |
+| Node page | that node's platform logs (platform admins) |
 
 ---
 
 ## 10. Cost, retention and safety
 
-### 10.1 Retention tiers (LP9)
+### 10.1 Retention tiers (D251)
+
+Settings live in `log_settings` (`packages/core/src/log-settings.ts`) with platform → org → project inheritance, and
+are edited in **Settings → Logs** or `/api/v1/logs/settings`.
 
 | Tier | Store | Default | Configurable |
 |---|---|---|---|
-| Hot tail | SQLite | 3 days with ClickHouse, 7 without | 1–14 days, per org |
-| Search | ClickHouse `yoal.logs` | 14 days | 1–90 days, per org, and per project within the org's maximum |
-| Archive | Parquet in the object store, daily per org | off | 30–400 days |
+| Hot tail | SQLite | 3 days with the search index, 7 without | 1–14 days, per org |
+| Search | ClickHouse `yoal.logs` | 14 days | 1–90 days, per org, and per project |
+| Archive | Parquet in the object store, hourly files per org per day | off | 30–400 days (90 when turned on) |
 
-The archive reuses the telemetry Parquet job (DESIGN §8). **Rehydrate on query**: when a time range reaches into the
-archive, the Explorer shows an estimate ("scans ~1.2 GB, ~20 s") and runs it only after confirmation, through
-ClickHouse's `s3()` table function with a per-query scan budget (Datadog's rehydration, without a copy step).
-Platform logs follow a platform policy.
+The hot tail is pruned by the maintenance sweep: rows past the org's hot days, then each scope's rows past 100,000
+per table. Search retention is a daily lightweight `DELETE` per org (and per project with a shorter window); the
+table's 90-day TTL is a backstop. The archive writes yesterday's `yoal.logs` rows as zstd Parquet, one file per hour
+with rows (`logs-archive/<org>/<YYYY-MM-DD>/<HH>.parquet`), through the telemetry store's Parquet export, and
+records each day in `log_archive_days` (migration 0143). **Rehydrate on query**: when a search reaches past the search
+window, the answer carries an `archive` warning with an estimate (`POST /api/v1/logs/archive/estimate`: bytes, files,
+seconds), and the archived part runs only when the request says `archive: true`. It is the same compiled search over
+the files instead of `yoal.logs`, read with ClickHouse's `url()` table function over 15-minute presigned GET URLs
+(not `s3()`, which would put the bucket's keys in `system.query_log`), with a 20 GiB scan budget; an estimate over
+the budget is refused. Platform logs follow the platform row.
 
 ### 10.2 Quotas (QUOTAS.md)
 
-Per project there is an ingest rate (lines/s, burst) and a daily byte budget, and per scope a row cap in the hot
-tail. These replace the global 500,000-row cap. Over-quota lines are dropped at ingest and counted, and one
-`system` record per minute says "dropped N lines (quota)". The usage page shows log GB/day per project, for
-showback.
+Per project (or service scope) there is an ingest rate, **1,000 lines/s with a 20,000-line burst**, and a daily
+budget of **5,120 MB**, and per scope a 100,000-row cap per table in the hot tail. These replace the global
+500,000-row cap. An org or project may only lower the platform values. The rate is an in-memory token bucket; the
+daily total is seeded from `log_ingest_daily` so a restart does not reset it. Over-quota lines are dropped at ingest
+and counted in `log_drop_counts`, and one `system` record per minute per scope says how many lines were dropped and
+why. **Settings → Usage** shows log GB/day per project, for showback (`/api/v1/logs/usage`).
+`YOAL_FEATURE_QUOTAS=0` stops enforcement; counting continues.
 
 ### 10.3 Exclusion and sampling
 
-An org or project rule is a log query plus an action: **drop**, or **sample N%**, or **index only**, which keeps the
-line in the hot tail and drains but not in ClickHouse. Rules apply at the indexer, except drop rules, which apply at
-ingest so drains honour them too. Before saving, the UI **previews** the rule against the last 15 minutes of live
-tail: "would drop 41% of lines, mostly pattern 'GET /health 200'". Datadog has exclusion filters but no preview.
+An org or project rule (`log_rules`, `/api/v1/logs/rules`) is a log query plus an action: **exclude**, **sample**
+(keep N%), or **index only**, which keeps the line in the hot tail and drains but not in ClickHouse; or a
+**redact** regex (§10.4). Exclude and sample apply at ingest, so drains honour them too; index only applies at the
+indexer. Before saving, the UI **previews** the rule by replaying the last 15 minutes of the hot tail through the
+predicate: "would drop 41% of lines, mostly pattern 'GET /health 200'". Datadog has exclusion filters but no
+preview.
 
-### 10.4 Redaction (LP10)
+### 10.4 Redaction (D252)
 
-Redaction runs at ingest, before SQLite, drains and the indexer:
+Redaction runs at ingest, before SQLite, drains and the indexer, on every append path (`LogIngestGuard` in
+`packages/core/src/log-ingest-guard.ts`, `createRedactor` in `log-redaction.ts`):
 
-- Built-in detectors: JWTs, `Bearer` tokens, AWS and GCP key shapes, Yoal API and node tokens, URLs with
-  `user:password@`, `Authorization`/`Cookie` header values, and long high-entropy strings in `key=` positions. Each
-  match becomes `[REDACTED:kind]`.
-- **Known secret values**: the project's secret env values, matched as the pipeline masker does (D152), using hashed
-  n-gram prefilters so the control plane does not decrypt secrets on the hot path. S5 decides how.
-- Org regex rules, with a preview like the one for exclusion rules.
+- **Known secret values**: the org's secret env values with their base64, URL-encoded and per-line forms (the
+  pipeline masker's set, D152), held only as fingerprints: a keyed rolling hash of the first 8 characters as the
+  prefilter and a keyed HMAC-SHA256 of the whole value as the confirmation, under a key derived from the master key
+  with HKDF. The set is rebuilt when a secret changes, never per line, and nothing is decrypted on the hot path.
+- Built-in detectors: private key blocks, JWTs, AWS, GCP, GitHub, GitLab, Slack and Stripe tokens, Yoal's own
+  credentials (`yoal_`, `yoal_svc_`, `yoalp_`, `scim_`, node tokens by context, `SKF`/`SKR` storage key ids), URLs
+  with `user:password@`, `Authorization`/`Cookie`/`Set-Cookie` values, `Bearer` credentials, credential-named keys
+  (`password=`, `token=`, `api_key=`…), and long high-entropy strings in `key=` positions. UUIDs, git SHAs and
+  content hashes pass through.
+- Org `redact` rules (regex), with the rule preview.
+
+Each match becomes `[REDACTED:<kind>]`. S5 measured 1.25 µs a line at p50 with 50 secrets (§12).
 
 ### 10.5 Access
 
 | Permission | Covers |
 |---|---|
-| `logs:read` (existing) | records in the scopes the principal can read: project, environment and the new resource kinds (database, storage, broker, k8s, function) |
-| `logs:query` (new) | pipe stages and Why? (cost control for API keys); granted to developer and viewer by default |
-| `logQuery:*` (new resource) | saved queries |
-| platform admin | `platform` and `edge` scopes for the whole install, and the SQL tab |
+| `logs:read` | records in the scopes the principal can read. Bindable at org, project and environment, and now also at database, storage, broker, Kubernetes cluster and pipeline repository scope; function projects read as `function` scopes |
+| `logs:query` | pipe stages, Compare and Why? (cost control for API keys); granted with `logs:read` to deployer and viewer, and held by owner and admin |
+| `logs:configure` | retention, quotas, the archive, edge sampling and ingest rules (§10); owner and admin |
+| `logQuery:create/read/update/delete/manage` | saved queries; `manage` edits or deletes other people's org queries (owner and admin) |
+| platform admin | `platform` and `edge` scopes for the whole install, and the platform settings row |
 
-Reads of platform logs are written to the audit log as `logs.read_platform`. Tenant reads are not audited (too
-noisy), but MCP reads already are, as `mcp.<tool>`.
+`LogExplorerService` resolves a read boundary from the principal and intersects requested scopes with it; a scope
+the caller cannot read is dropped silently, so naming another org's scope returns nothing and never confirms it
+exists. Reads of platform and edge records are written to the audit log as `logs.read_platform`. Tenant reads are not
+audited (too noisy), but MCP reads already are, as `mcp.<tool>`. The Explorer has no SQL tab; platform admins keep
+the D101 SQL path in dashboards.
 
 ---
 
@@ -492,7 +577,7 @@ noisy), but MCP reads already are, as `mcp.<tool>`.
 
 | Phase | Delivers | Exit criteria |
 |---|---|---|
-| **L0** Spikes | S1–S5 (§12) | numbers recorded in this doc; LP2 and LP8 confirmed or changed |
+| **L0** Spikes | S1–S5 (§12) | numbers recorded in this doc; D244 and D250 confirmed or changed |
 | **L1** One model, one viewer | `LogRecord` + `log-query` grammar (parser, AST, JS predicate, SQLite compiler) in contracts; `LogStore` seam with a SQLite adapter over every existing table; `GET /api/v1/logs` (scope, time range, query, cursor) + `/api/v1/logs/stream` (SSE over the in-process bus); `LogExplorer` replaces `LogsPanel`, `ServiceLogs`, `PodLogs`, `JobLogs`; `/logs` nav entry; per-scope caps replace the global cap; `yoal logs [scope] -q --since --until -f --json`; MCP `query_logs` | every existing viewer's feature set is preserved (step grouping for pipelines); tail no longer polls SQLite; e2e on mac-dev and linux-box |
 | **L2** Search index | `yoal.logs` + indexer cursors; multiline at the agent; JSON/logfmt parse, severity, ids; facets, autocomplete from field stats; context; saved queries; histogram markers; lite-mode messaging | 24 h project query < 1 s and histogram < 1.5 s at 10 M rows under a 768 MiB cap; ClickHouse outage → tail unaffected, index catches up |
 | **L3** Every source | platform units (admin); edge request records + `X-Request-Id`; agent OTLP/HTTP logs receiver; function tails exploded; audit and email as read-only sources; `log_records` table | a request is traceable edge → app in one click; platform 5xx investigation without SSH |
@@ -501,41 +586,58 @@ noisy), but MCP reads already are, as `mcp.<tool>`.
 | **L6** Cost and safety | retention tiers + Parquet archive + rehydrate with estimate; quotas + drop counters; exclusion and sampling with preview; redaction rules; platform read audit | a noisy project cannot evict another's logs; secrets in a test app never reach storage |
 | **L7** Assistant and agents | NL → query; "explain this pattern" and "summarise errors in this window"; MCP `get_log_patterns`, `get_log_context`, `compare_logs`; the per-resource MCP log tools become thin wrappers | the assistant answers "why did api 500 at 14:02" with linked evidence |
 
-L1 is useful on its own and does not need ClickHouse. Each later phase is shippable behind a feature flag in the
-`YOAL_FEATURE_*` style.
+L1 is useful on its own and does not need ClickHouse. The kill switches are `LOG_INDEX`, `PLATFORM_LOGS`,
+`EDGE_REQUEST_LOGS` and `OTLP_LOGS` ([OPS.md](./OPS.md) §2.5).
+
+### 11.1 Implementation status (2026-11-26)
+
+| Phase | Built | Not built |
+|---|---|---|
+| **L0** Spikes | S1 (5 M rows), S3, S5 (§12) | S2 (SQLite and Litestream load) and S4 (OTLP protobuf decode) were not run; S1 at 10–50 M rows |
+| **L1** One model, one viewer | `LogRecord`, the grammar, parser, formatter, predicate and suggestions (D243, D245); `SqliteLogStore` over every table; `/api/v1/logs/*` and the SSE tail over the in-process bus (D246); `LogExplorer` everywhere and `/logs` (D253); per-scope caps; `yoal logs` with `-f`; MCP `query_logs` | e2e on mac-dev and linux-box |
+| **L2** Search index | `yoal.logs`, `yoal.log_patterns`, the cursor indexer (D244); multiline join in the agent; JSON/logfmt parse, severity and ids; facets with sparklines; autocomplete; context; saved queries; deploy and alert markers; lite-mode banner and `needs_clickhouse` | the "no timestamp within 50 ms" multiline rule; node-event markers; promoting hot attribute keys to typed columns |
+| **L3** Every source | platform units (D247); edge `X-Request-Id` and access records (D248); the OTLP/HTTP JSON logs receiver and `OTEL_*` injection (D249); `log_records` | OTLP protobuf (415); function tails exploded into records; audit log and email events as read-only sources; folding the sibling tables into `log_records`; drains of `log_records`, pipeline and Kubernetes lines (drains still read only `log_events`, `service_log_events` and `broker_log_events`, D141) |
+| **L4** Analysis | Drain patterns at index time with a snapshot file (D250); `\| stats`, `\| patterns` (first seen, sparklines), `\| dedup`; Patterns, Analytics and Compare tabs; deploy-aware Compare; Why? | — |
+| **L5** Act | `log_count` and `log_pattern_new` rules with templates (D254); `logs` dashboard dataset and Logs panel; pivots from traffic 5xx, app errors, alert instances, deployments and nodes | an external trace UI link |
+| **L6** Cost and safety | settings with inheritance; hot, search and archive tiers with rehydrate and estimate; quotas, drop counters and notices; exclude, sample, index-only and redact rules with preview; redaction at ingest; platform read audit (D251, D252) | "Purge lines matching…" across both stores; moving pipeline and Kubernetes retention under the settings |
+| **L7** Assistant and agents | the grammar summary in the assistant prompt; Ask AI (summarise errors, explain a line or pattern); MCP `query_logs`, `get_log_patterns`, `get_log_context`, `compare_logs`, `explain_log_spike`; `get_logs`, `get_database_logs`, `get_storage_logs` and `get_broker_logs` as thin wrappers; `yoal logs patterns`, `context` and `compare` | the Explorer's SQL tab (platform admins use dashboards SQL) |
+
+Migrations: 0142 (`log_records`, `log_index_cursors`, `log_saved_queries`, `log_rules`, `log_settings`,
+`log_drop_counts`) and 0143 (`log_ingest_daily`, `log_archive_days`).
 
 ---
 
 ## 12. Spikes
 
-| ID | Question | Pass criteria |
-|---|---|---|
-| S1 | Does ClickHouse 26.8's `text` index (GA 2026-03) work under the 768 MiB default cap with 10–50 M rows of realistic logs? `Map` vs `JSON` for attributes; `tokenbf_v1` fallback | token search on a 24 h project scope < 1 s; merges stay under the cap; on-disk bytes per line recorded |
-| S2 | SQLite and Litestream cost at sustained 500 and 2,000 lines/s through `/api/agent/logs` | p99 state-write latency unchanged within 10%; otherwise move log tables to an unstreamed `logs.db` |
-| S3 | Drain miner cost in Bun (TS) per line, and memory per 5,000 templates | < 20 µs per line p50; < 50 MB per 100 scopes |
-| S4 | OTLP/HTTP protobuf decode in Bun without a native addon (`protobufjs` or a generated decoder) | 10 k records/s per core; JSON path shipped first regardless |
-| S5 | Known-secret redaction without decrypting on the hot path | design that matches every secret value ≥ 8 chars with < 5 µs per line overhead |
+| ID | Question | Pass criteria | Result |
+|---|---|---|---|
+| S1 | Does ClickHouse 26.8's `text` index (GA 2026-03) work under the 768 MiB default cap with 10–50 M rows of realistic logs? `Map` vs `JSON` for attributes; `tokenbf_v1` fallback | token search on a 24 h project scope < 1 s; merges stay under the cap; on-disk bytes per line recorded | **Pass** at a 5 M-row scope (not 10–50 M): token search 17 ms, histogram 55–78 ms, 62.1 bytes a row on disk, peak RSS 747 MiB at the 768 MiB cap. Facets took 1.78 s, so the facet query needs sampling. `Map` kept. |
+| S2 | SQLite and Litestream cost at sustained 500 and 2,000 lines/s through `/api/agent/logs` | p99 state-write latency unchanged within 10%; otherwise move log tables to an unstreamed `logs.db` | **Not run.** The log tables stay in the state database (§4.1). |
+| S3 | Drain miner cost in Bun (TS) per line, and memory per 5,000 templates | < 20 µs per line p50; < 50 MB per 100 scopes | **Pass**: 2.38 µs a line at p50 (`spikes/logs-bench/s3-patterns.ts`); about 13 MB for 100 scopes. |
+| S4 | OTLP/HTTP protobuf decode in Bun without a native addon (`protobufjs` or a generated decoder) | 10 k records/s per core; JSON path shipped first regardless | **Not run.** JSON shipped; protobuf is a 415. |
+| S5 | Known-secret redaction without decrypting on the hot path | design that matches every secret value ≥ 8 chars with < 5 µs per line overhead | **Pass**: 1.25 µs a line at p50 for the full redactor with 50 secrets; the secret matcher adds about 0.3 µs at 50 or 500 (`spikes/logs-bench/s5-redaction.ts`). |
 
 ---
 
-## 13. Proposals
+## 13. Decisions
 
-Each becomes a D-number when built. Check the tail of DECISIONS.md for the next free ID (D243 on 2026-11-25).
+The proposals were built and recorded as D243–D254 in [DECISIONS.md](./DECISIONS.md), which states each one as built.
+The old LP numbers are kept here because code comments cite them.
 
-| ID | Proposal |
+| ID | Decision |
 |---|---|
-| LP1 | **One OTel-shaped `LogRecord` for every source**, with Yoal scope `{kind, id}`, stream, severity number, attributes, resource, and trace and request IDs. Existing tables map through adapters; new sources write `log_records`. |
-| LP2 | **SQLite stays the write path and hot tail; ClickHouse `yoal.logs` is a derived search index** fed by an idempotent cursor indexer. Logs never depend on ClickHouse being up. (Supersedes FEATURE-RESEARCH's "log warehouse: do not build" row.) |
-| LP3 | **One log-query grammar** (filters + Insights-style pipe stages) in `@yoal/contracts`, compiled on the server with tenancy ANDed in. Raw SQL is for platform admins only (as in D101). |
-| LP4 | **Live tail is an in-process bus with per-subscriber compiled predicates**, resumable by seq vector. No polling. |
-| LP5 | **Yoal's own service logs are the `platform` scope**, drained from a fixed unit allow-list. Platform admins only, and reads are audited. |
-| LP6 | **The edge injects `X-Request-Id` and ships access records**: all non-2xx plus a 2xx sample. Aggregates still use 100% of lines. |
-| LP7 | **The agent runs an OTLP/HTTP logs receiver on loopback**. Workloads get `OTEL_EXPORTER_OTLP_ENDPOINT`, and the node stamps tenancy. |
-| LP8 | **Patterns are mined at index time** (Drain) and stored as `pattern_id`, so patterns, compare and `log_pattern_new` alerts are plain GROUP BYs. |
-| LP9 | **Retention is three tiers per org and project** (hot tail, search, archive with rehydrate-on-query), and **quotas are per project**, replacing the global row cap. |
-| LP10 | **Redaction runs at ingest**, before storage, drains and the index: built-in detectors, known secret values and org rules. |
-| LP11 | **One `LogExplorer` component everywhere**, with all state in the URL. Bespoke log viewers are removed. |
-| LP12 | **Log alerts are alert-rule kinds** (`log_count`, `log_pattern_new`) on the D109 machinery and notifiers. |
+| D243 (LP1) | **One OTel-shaped `LogRecord` for every source**, with Yoal scope `{kind, id}`, stream, severity number, attributes, resource, and trace and request IDs, in epoch ms. Existing tables map through adapters; new sources write `log_records`; platform rows use the sentinel org `'platform'`. |
+| D244 (LP2) | **SQLite stays the write path and hot tail; ClickHouse `yoal.logs` is a derived search index** fed by an idempotent cursor indexer. Logs never depend on ClickHouse being up. (Replaced FEATURE-RESEARCH's "log warehouse: do not build" row.) |
+| D245 (LP3) | **One log-query grammar** (filters + Insights-style pipe stages) in `@yoal/contracts`, compiled on the server with tenancy ANDed in. A bare alphanumeric word is a whole-token match, anything else a substring. Raw SQL is for platform admins only (as in D101). |
+| D246 (LP4) | **Live tail is an in-process bus with per-subscriber compiled predicates**, resumable by seq vector. No polling. |
+| D247 (LP5) | **Yoal's own service logs are the `platform` scope**, drained from a fixed unit allow-list. Platform admins only, and reads are audited. |
+| D248 (LP6) | **The edge injects `X-Request-Id` and ships access records**: all non-2xx plus a 2xx sample. Aggregates still use 100% of lines. |
+| D249 (LP7) | **The agent runs an OTLP/HTTP logs receiver on loopback**, on a keyed path only. Workloads get `OTEL_EXPORTER_OTLP_ENDPOINT`, and the control plane resolves tenancy from the workload. |
+| D250 (LP8) | **Patterns are mined at index time** (Drain) and stored as `pattern_id`, so patterns, compare and `log_pattern_new` alerts are plain GROUP BYs. |
+| D251 (LP9) | **Retention is three tiers per org and project** (hot tail 3/7 days, search 14, archive off; rehydrate through `url()` over presigned GETs), and **quotas are per project** (1,000 lines/s, 20,000 burst, 5,120 MB/day), replacing the global row cap. Edge sampling defaults to 0.1. |
+| D252 (LP10) | **Redaction runs at ingest**, before storage, drains and the index: built-in detectors, known secret values and org rules. |
+| D253 (LP11) | **One `LogExplorer` component everywhere**, with all state in the URL. Bespoke log viewers are removed. |
+| D254 (LP12) | **Log alerts are alert-rule kinds** (`log_count`, `log_pattern_new`) on the D109 machinery and notifiers. |
 
 ---
 
@@ -562,29 +664,30 @@ Each becomes a D-number when built. Check the tail of DECISIONS.md for the next 
   `needs_clickhouse` errors, and contract tests that run the same query suite against both compilers.
 - **ClickHouse memory.** Merges on wide `Map` columns under 768 MiB (S1). Mitigation: promote hot keys, and lower
   `max_bytes_to_merge_at_max_space_in_pool` if needed. Settings → Telemetry already lets the owner raise the cap.
-- **State DB load** from log volume (S2). Mitigation: a `logs.db` split.
+- **State DB load** from log volume (S2, not yet run). Mitigation: a `logs.db` split.
 - **Redaction misses.** No detector is complete. Document it as defence in depth, never as a guarantee, and keep
   "Purge lines matching…" as an admin action across both stores.
-- **Cross-tenant leakage through new query features.** Every compiler path takes the principal. Contract tests
-  assert that a query naming another org's scope returns nothing and does not error in a way that leaks existence.
+- **Cross-tenant leakage through new query features.** Every compiler path takes the server-resolved boundary.
+  Tests assert that a query naming another org's scope returns nothing and does not error in a way that leaks
+  existence, and that only platform admins see sentinel-org records.
 
 **Decided (Kieran, 2026-11-25)**
 
 1. **ClickHouse stays optional.** Without it the Explorer runs in lite mode over SQLite, and `/logs` shows a banner
    linking to Settings → Telemetry. No install is nudged by node count.
-2. **Platform logs are for platform admins only** (LP5). Org owners do not see them, even for nodes that run only
+2. **Platform logs are for platform admins only** (D247). Org owners do not see them, even for nodes that run only
    their org's workloads.
-3. **Edge 2xx sampling defaults to 10%** (LP6). Every non-2xx response is always shipped, and 100% per site is a
+3. **Edge 2xx sampling defaults to 10%** (D248). Every non-2xx response is always shipped, and 100% per site is a
    toggle.
-4. **The archive tier is off by default** (LP9). An owner opts in.
-5. **Adapters first.** L1 reads the sibling tables through adapters. Folding them into `log_records` waits until
-   after L3.
+4. **The archive tier is off by default** (D251). An owner opts in.
+5. **Adapters first.** The Explorer reads the sibling tables through adapters. Folding them into `log_records`
+   waits until the adapters have run in production; it is not done.
 
 ---
 
 ## Appendix: research
 
-What other products contribute, and what this plan takes from each:
+What other products contribute, and what the design takes from each:
 
 | Product | Idea taken | Where |
 |---|---|---|
@@ -624,6 +727,6 @@ Sources:
 - [Drain paper](https://pinjiahe.github.io/files/pdf/research/ICWS17.pdf)
 - [Drain3](https://github.com/IBM/Drain3)
 
-Most vendor details above came from documentation search results rather than full reads. Before a proposal relies
+Most vendor details above came from documentation search results rather than full reads. Before a decision relies
 on a vendor behaviour (rather than only borrowing the idea), check it at its source. The ClickHouse text-index facts
-are re-verified in S1.
+were re-verified in S1.

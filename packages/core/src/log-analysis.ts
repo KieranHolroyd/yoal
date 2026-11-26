@@ -63,8 +63,8 @@ export interface LogAnalysisHost {
 	/** Parse, resolve the boundary (with `logs:read` + `logs:query`) and default the window. */
 	prepare(principal: Principal, input: { q: string; scopes: LogScopeRef[]; from?: number; to?: number }): AnalysisPrepared;
 	audit(principal: Principal, prepared: AnalysisPrepared, op: string): void;
-	/** The healthy ClickHouse store, or null in lite mode. */
-	clickhouse(): unknown;
+	/** The healthy ClickHouse store, or null in lite mode (health already awaited). */
+	clickhouse(): Promise<unknown>;
 }
 
 type Input<S extends z.ZodType> = z.input<S> | Record<string, unknown>;
@@ -195,7 +195,7 @@ function needsClickhouse(feature: 'compare' | 'why'): CoreError {
 }
 
 async function analysisStore(host: LogAnalysisHost, feature: 'compare' | 'why'): Promise<LogAnalysisStore> {
-	const store = host.clickhouse() as Partial<LogAnalysisStore> | null;
+	const store = (await host.clickhouse()) as Partial<LogAnalysisStore> | null;
 	if (!store || typeof store.analysis !== 'function') throw needsClickhouse(feature);
 	try {
 		if (typeof store.healthy === 'function' && !(await store.healthy())) throw needsClickhouse(feature);

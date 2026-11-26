@@ -111,7 +111,7 @@ Platform policies are settings that apply to the whole installation. Open **Poli
 |---|---|---|---|
 | Trash period | How long deleted apps, databases, storage and volumes can be restored. Applies to items deleted from now on. | 7 days | 1 to 90 |
 | Deployments kept per app | Unpinned deployments kept when neither the organisation nor the project quota sets one | 10 | 1 to 500 |
-| Log retention | Build and runtime log lines older than this are pruned | 7 days | 1 to 90 |
+| Log retention | How long the recent log store keeps lines when the ClickHouse search index is not installed (with it, 3 days unless **Settings → Logs** says otherwise; see [the Logs Explorer](/observe/logs#retention-quotas-and-rules)) | 7 days | 1 to 90 |
 | Deleted-history retention | Soft-deleted deployment records, revoked share links and expired redemptions | 30 days | 1 to 365 |
 | Operation history | Finished bulk operations and prunes shown under **Maintenance** | 90 days | 1 to 365 |
 | Backup schedule | Cron expression (UTC) for new managed databases | `0 3 * * *` | Five-field cron |

@@ -10,7 +10,7 @@ import { lookupLogScopeNames } from './log-store/sqlite-store.ts';
  *
  * - **Rate:** an in-memory token bucket, `ingestLinesPerSecond` refilled up to `ingestBurst`.
  * - **Daily bytes:** `ingestMbPerDay` per UTC day. The running total is in memory and seeded on
- *   first sight from `log_ingest_daily` (0144), so a restart does not reset a day's budget.
+ *   first sight from `log_ingest_daily` (0143), so a restart does not reset a day's budget.
  *
  * A batch keeps its earliest lines and drops the rest once a limit is hit. Drops are counted in
  * `log_drop_counts` (reason `quota`, also `exclude` and `sample` for rules) per scope per minute,

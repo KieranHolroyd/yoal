@@ -458,8 +458,8 @@ domains; `yoal logout --all` removes the file and every profile. `YOAL_URL`, `YO
   keep the base install light; an owner adds it from Settings → Telemetry or at the installer's prompt. The control plane reaches it with `fetch`,
   so no native addon can fail to load, and the zero-downtime standby shares it with the primary.
 - **OTel-conformant.** Agents emit OTLP with semantic conventions (`service.name` = project slug,
-  `deployment.id`, `host.name`, `http.*`). The control plane runs an **OTLP/HTTP receiver** that writes into ClickHouse.
-  The OTel Collector binary is not run.
+  `deployment.id`, `host.name`, `http.*`). Each agent runs an **OTLP/HTTP logs receiver** on loopback for its
+  workloads (D249); receiving OTLP metrics and traces is not built. The OTel Collector binary is not run.
 - **The agent sends pre-aggregated 1-minute buckets only.** Raw requests never reach the telemetry store; it stays
   small and its memory bounded.
 - **Tables** (database `yoal`): `traffic_1m/1h`, `db_metrics_1m/1h`, `storage_metrics_1m/1h` (ReplacingMergeTree,
@@ -477,13 +477,26 @@ domains; `yoal logout --all` removes the file and every profile. `YOAL_URL`, `YO
   - Per site: Caddy JSON access logs aggregated into 1-minute buckets (requests, status classes, bytes, p50/p95, top paths and referrers). IPs are hashed.
 - **Retention:** 1-minute buckets for 48 h, 1-hour for 90 days in ClickHouse (explicit prune, with table TTLs as a
   backstop), then **daily Parquet partitions to R2** (queryable with ClickHouse's `s3()` table function).
-- **Logs:**
-  - App logs go to journald. The agent reads new entries through the helper and ships them to the control plane, which
-    stores build, runtime and system lines in `log_events` (managed services in `service_log_events` and
-    `broker_log_events`) and tails them over SSE by `seq`.
-  - **Log drains** forward those stored lines to an HTTPS webhook (NDJSON or a JSON array, signed with
-    `X-Yoal-Signature` like the alert webhook, [ALERTS.md](./ALERTS.md) §3) or an OTLP/HTTP logs receiver (JSON
-    encoding). A drain is org-wide or one project, filtered by source and minimum level, and is three cursors over
+- **Logs** ([LOGS.md](./LOGS.md), D243–D254):
+  - **One record model.** Every line, from apps, builds, jobs, pipelines, managed services, Kubernetes, functions, the
+    edge and Yoal's own units, is an OTel-shaped `LogRecord` (scope, stream, severity number, body, attributes,
+    resource, trace and request ids; ms timestamps).
+  - **Capture.** Apps write to journald; the agent reads it through the helper and ships it every 2 s, joining
+    multiline stack traces first. The agent also ships edge access records (every non-2xx/3xx plus a 10% sample, with
+    an injected `X-Request-Id`), OTLP/HTTP JSON logs from apps on a keyed loopback path, and a fixed allow-list of
+    Yoal's own units as the admin-only `platform` scope.
+  - **Stores.** SQLite is the write path and hot tail (3 days with the search index, 7 without), read through
+    adapters over `log_events`, `service_log_events`, `broker_log_events`, the Kubernetes and pipeline tables and
+    `log_records`. Rules, quotas and redaction run at ingest. A cursor indexer copies the hot tail into the optional
+    ClickHouse `yoal.logs` search index (14 days) with Drain pattern ids; an optional daily Parquet archive is read
+    back on request.
+  - **Reads.** One log-query grammar in `@yoal/contracts`, compiled with tenancy ANDed in for ClickHouse, for SQLite
+    (lite mode) and as a JS predicate for the live tail, an in-process bus behind `/api/v1/logs/stream`. The
+    `LogExplorer` component serves `/logs` and every resource page; `yoal logs`, `/api/v1/logs/*`, MCP `query_logs`
+    and friends, log alert rules and the `logs` dashboard dataset use the same service.
+  - **Log drains** (D141) forward stored lines from `log_events`, `service_log_events` and `broker_log_events` to
+    an HTTPS webhook (NDJSON or a JSON array, signed with `X-Yoal-Signature` like the alert webhook,
+    [ALERTS.md](./ALERTS.md) §3) or an OTLP/HTTP logs receiver (JSON encoding). A drain is org-wide or one project, filtered by source and minimum level, and is three cursors over
     the tables' `seq`: the primary ships batches (up to 500 lines per table, about 1 MB) every 5 s, moves the cursors after a 2xx, backs
     off 5 s → 5 min on failure and drops (and counts) a batch after 8 attempts or a 400/413/415/422. Delivery is at
     least once; each line has a stable `id`. Header values and signing secrets are sealed with the org key. Drains
@@ -496,8 +509,10 @@ domains; `yoal logout --all` removes the file and every profile. `YOAL_URL`, `YO
   page, the same on REST (`nextCursor`), MCP `get_audit_log`, `yoal audit` and the dashboard.
 - **Export:** Prometheus `/metrics` on the control plane and agents, plus an optional outbound OTLP exporter.
   (Import from external Prometheus is a designed interface, not built.)
-- Tier-2 apps (v2) get `OTEL_EXPORTER_OTLP_ENDPOINT` injected, pointing at their local agent.
-- **Dashboard views:** fleet overview, per-project traffic, errors and resources with deploy markers, audit log, live logs.
+- Process, container and compose apps get `OTEL_EXPORTER_OTLP_ENDPOINT` and `OTEL_SERVICE_NAME` injected, pointing at
+  their local agent's keyed logs path, unless they set their own (D249).
+- **Dashboard views:** fleet overview, per-project traffic, errors and resources with deploy markers, audit log, and
+  the Logs Explorer (search, live tail, patterns, compare).
 - **Alerts:** `Notifier` interface, email (SES SMTP) + generic webhook (Home Assistant; Discord/Slack URLs are detected) + chat channels with native payloads (Discord, Slack, Telegram, ntfy). User-defined metric alert rules over the ClickHouse telemetry (D109, [ALERTS.md](./ALERTS.md)) use the same notifiers.
   Defaults:
   - node offline > 2 min

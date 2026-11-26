@@ -48,7 +48,7 @@ Scopes:
   platform:<node>        A node's platform services (platform admins)
 
 Options:
-  -q, --query <query>    Log query (docs: /observe/dashboards-and-logs), e.g.
+  -q, --query <query>    Log query (docs: /observe/logs), e.g.
                            level:error -@path:/health "timeout"
                            service:api | stats count() by bin(5m), level
       --since <time>     Start: 15m, 1h, 24h, 7d, epoch ms or an ISO time

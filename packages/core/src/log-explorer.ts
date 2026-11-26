@@ -84,7 +84,7 @@ export interface LogScopeEntry extends LogScopeRef {
  * `ctx.logIndexer`). Read structurally so this service does not depend on that lane's types.
  */
 interface ClickHouseLogHooks {
-	logStoreClickhouse?: (LogStore & { healthy?: () => boolean }) | null;
+	logStoreClickhouse?: (LogStore & { healthy?: () => boolean | Promise<boolean> }) | null;
 	logIndexer?: { lagMs?: () => number | null } | null;
 }
 
@@ -267,7 +267,7 @@ export class LogExplorerService {
 	async capabilities(principal: Principal): Promise<LogCapabilities> {
 		this.requireSomewhere(principal, 'logs:read');
 		const hooks = this.ctx as CoreContext & ClickHouseLogHooks;
-		const clickhouse = this.clickhouse();
+		const clickhouse = await this.clickhouse();
 		const installed = Boolean(hooks.logStoreClickhouse);
 		let indexLagMs: number | null = null;
 		try {
@@ -308,6 +308,8 @@ export class LogExplorerService {
 				422,
 			);
 		this.auditPlatform(principal, prepared, 'search');
+		// Taken before the read, so a tail resumed from it misses nothing the page could not show.
+		const tailCursor = value.cursor ? undefined : encodeTailCursor(this.sqliteStore.maxSeqVector());
 		let result = await this.run(prepared, (store) =>
 			store.search(prepared.read, { limit: value.limit, cursor: value.cursor, order: value.order }),
 		);
@@ -319,7 +321,7 @@ export class LogExplorerService {
 				return result;
 			});
 		this.name(result.records, prepared.names);
-		return result;
+		return tailCursor ? { ...result, tailCursor } : result;
 	}
 
 	/** Pipe-stage queries (`| stats`, `| patterns`…). Needs `logs:query` as well as `logs:read`. */
@@ -527,12 +529,17 @@ export class LogExplorerService {
 		};
 	}
 
-	/** ClickHouse when the context carries a healthy store, else null (lite mode). */
-	private clickhouse(): (LogStore & { healthy?: () => boolean }) | null {
+	/**
+	 * ClickHouse when the context carries a healthy store, else null (lite mode). `healthy()` is
+	 * async on the real store (it opens telemetry if needed; cheap once open, and throttled while
+	 * ClickHouse is down), so it must be awaited: a pending promise is truthy and would make an
+	 * unreachable ClickHouse look healthy.
+	 */
+	private async clickhouse(): Promise<(LogStore & { healthy?: () => boolean | Promise<boolean> }) | null> {
 		const store = (this.ctx as CoreContext & ClickHouseLogHooks).logStoreClickhouse;
 		if (!store) return null;
 		try {
-			if (typeof store.healthy === 'function' && !store.healthy()) return null;
+			if (typeof store.healthy === 'function' && !(await store.healthy())) return null;
 		} catch {
 			return null;
 		}
@@ -557,7 +564,7 @@ export class LogExplorerService {
 	}
 
 	private async runStore<T>(op: (store: LogStore) => Promise<T>): Promise<T> {
-		const clickhouse = this.clickhouse();
+		const clickhouse = await this.clickhouse();
 		if (clickhouse) {
 			try {
 				return await op(clickhouse);

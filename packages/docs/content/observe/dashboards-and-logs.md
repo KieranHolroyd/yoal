@@ -3,7 +3,7 @@ title: Dashboards, logs and audit
 description: Read traffic and errors, build dashboards over the telemetry store, tail and forward logs, and check who changed what in the audit log.
 ---
 
-Yoal keeps four kinds of operational history: request traffic and errors, dashboards built over that telemetry, project and service logs, and an audit log of changes made in your organisation. This page covers what each one records, how long it is kept and where to find it. Traffic and dashboards need the optional telemetry store. Logs and the audit log work without it.
+Yoal keeps four kinds of operational history: request traffic and errors, dashboards built over that telemetry, project and service logs, and an audit log of changes made in your organisation. This page covers what each one records, how long it is kept and where to find it, and how to forward logs elsewhere with log drains. Traffic and dashboards need the optional telemetry store. Logs and the audit log work without it; searching logs is covered in the [Logs Explorer](/observe/logs).
 
 ## Overview
 
@@ -33,7 +33,7 @@ flowchart LR
   Agent -->|"log lines, every 2 s"| CP
   CP -->|"buckets and samples"| CH["ClickHouse (optional)"]
   CH --> Views["Overview and dashboards"]
-  CP -->|"stored log lines"| Logs["Dashboard, yoal logs, API"]
+  CP -->|"stored log lines"| Logs["Logs Explorer, yoal logs, API"]
 ```
 
 The control plane keeps two resolutions:
@@ -71,9 +71,9 @@ Dashboards are versioned. If someone saves a dashboard while you are editing it,
 
 ### The query model
 
-Each panel runs one query and draws it with one visualisation: time series, bar, stat, gauge, bar gauge, table, pie, or text (Markdown). The **query builder** is the default and works for anyone with `metrics:read`. It has five parts:
+Each panel runs one query and draws it with one visualisation: time series, bar, stat, gauge, bar gauge, table, pie, text (Markdown), or logs (a log query's newest lines). The **query builder** is the default and works for anyone with `metrics:read`. It has five parts:
 
-- **Dataset**: `traffic` (per project), `traffic_paths` and `traffic_referrers` (the top paths and referrers per project), `databases`, `storage` and `brokers`.
+- **Dataset**: `traffic` (per project), `traffic_paths` and `traffic_referrers` (the top paths and referrers per project), `databases`, `storage`, `brokers`, and `logs` (log line counts from the [Logs Explorer](/observe/logs#alerts-and-dashboards-from-logs), filtered with a log query).
 - **Measures** with an aggregation: `sum`, `avg`, `min`, `max`, `last`, `value`, `count` (counts buckets) or `rate` (per second). Derived measures such as **Server error rate**, **Success rate** and p95 latency are built in.
 - **Group by** up to four dimensions, such as `host`, `project_id` or `database_id`. Ids show with their names.
 - **Filters** up to 20, with the operators `eq`, `neq`, `in`, `nin`, `contains`, `gt`, `gte`, `lt` and `lte`.
@@ -101,41 +101,18 @@ Variables take their values from a query's first column, from a comma-separated 
 
 ## Logs
 
-Yoal collects logs from three places:
+Every log line, from builds, apps, jobs, pipelines, managed services, Kubernetes, the edge and (for platform admins) Yoal's own services, is searched and tailed in the [Logs Explorer](/observe/logs): **Logs** in the sidebar, and the **Logs** tab on every project and service. The Explorer page covers the query language, live tail, patterns, compare, saved queries, alerts from logs and sending structured logs from your app.
 
-- **Builds**: git builds stream their output while they run.
-- **Workloads**: the agent reads each app's journal every few seconds, so runtime output appears within seconds.
-- **Managed services**: databases, object storage and brokers each have their own log view.
+In short:
 
-Lines are stored with a source, a stream (stdout or stderr), a level (debug, info, warn or error) and a deployment or build id. Yoal removes terminal colour codes and detects the level from common formats such as JSON, syslog and plain text. A line that has no recognisable level is `info`, or `warn` when it came from stderr during a build.
-
-### Viewing and tailing in the dashboard
-
-Open **Projects → my-site → Logs**. Choose the source, a deployment's runtime output or a build, then narrow the view with a text filter (a case-insensitive match) or a minimum level. Choosing `warn` includes errors.
-
-The view tails new lines live over a server-sent event stream. If the connection drops, it resumes from the last line it received, so you do not miss or repeat lines. **Pause** stops the view from moving while lines keep arriving, and **Download** and **Copy** act on the lines currently visible. Static sites have no runtime process, so only their build logs appear.
-
-### yoal logs
-
-`yoal logs` prints the newest lines for a project and exits. It does not follow the output, so use the dashboard for a live tail.
-
-```sh
-yoal logs my-site
-yoal logs my-site --lines 500
-yoal logs my-site --json
-```
-
-| Flag | Meaning |
-| --- | --- |
-| `-n, --lines <n>` | How many lines to show, from 1 to 10,000. Default `200`. |
-| `--json` | Print the raw API response instead of formatted lines. |
-| `-h, --help` | Show usage. |
-
-The REST API `GET /api/v1/projects/{slug}/logs` takes the same filters as the dashboard (`source`, `level`, `q`, `buildId`, `deploymentId`, `limit`) and an `after` cursor. Pass the `cursor` from one response as `after` on the next to read forward without duplicates. The MCP tool `get_logs` works the same way. See [the CLI](/clients/cli), [the REST API](/clients/rest-api) and [MCP](/clients/mcp).
+- Lines arrive within a few seconds. The agent reads each app's journal every couple of seconds and joins multi-line stack traces; builds and pipeline steps stream their own output.
+- Each line has a time, a scope (the project or service), a stream, a source, a severity (`trace` to `fatal`) and the message. JSON and `key=value` lines also get their fields as attributes. Terminal colours are kept and rendered.
+- `yoal logs` reads the same lines from the terminal, with the same query language, and `-f` follows them live. See [the CLI reference](/cli/deploying#logs).
+- The REST API is `/api/v1/logs/*`; the older per-project route `GET /api/v1/projects/{slug}/logs` and the MCP tool `get_logs` keep working. See [the REST API](/clients/rest-api) and [MCP](/clients/mcp).
 
 ### Retention
 
-Logs are kept for the number of days set in **Settings → Policies → Log retention**. The default is 7 days and the range is 1 to 90. Each log store also holds at most 500,000 lines; past that, the oldest lines are removed first. Expired lines are removed by the same periodic job that handles telemetry.
+Recent lines are kept in the control plane's own database. Without the ClickHouse telemetry store they are kept for the number of days set in **Settings → Policies → Log retention** (default 7, range 1 to 90). With it, recent lines are kept for 3 days and a search index holds 14 days. Organisation owners and admins can change both, add an archive, and set ingest quotas and rules in **Settings → Logs**. Each project or service keeps at most 100,000 recent lines per log store, so one noisy app cannot push out another's history. See [retention, quotas and rules](/observe/logs#retention-quotas-and-rules).
 
 Log drains (below) keep their own copy elsewhere if you need logs for longer.
 
@@ -227,7 +204,8 @@ Yoal does not delete audit entries automatically, and there is no setting that s
 | Setting | Where | Who can change it |
 | --- | --- | --- |
 | Install or remove ClickHouse | **Settings → Telemetry** | Platform owners |
-| Log retention, 1 to 90 days | **Settings → Policies** | Platform owners |
+| Log retention without ClickHouse, 1 to 90 days | **Settings → Policies** | Platform owners |
+| Log retention, archive, ingest quotas and rules | **Settings → Logs** | Organisation owners and admins; platform admins set the defaults |
 | Dashboard access | `metrics:read` on the role | Organisation owners and admins |
 | Log drains | **Settings → Log drains** | Organisation owners and admins; private-network drains need a platform admin |
 

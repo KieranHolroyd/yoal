@@ -143,8 +143,22 @@ New resources fill the gaps in §1:
 | environment | create, read, update, delete, approve |
 | pipeline | read, dispatch, cancel, manage, approve |
 | alert, logDrain, dashboard, volume | create, read, update, delete (plus `alert:acknowledge`) |
+| logs | read, query, configure |
+| logQuery | create, read, update, delete, manage |
 | userPool (Part B) | create, read, update, delete, credentials, manage-users, impersonate-user |
 | accessPolicy (Part B) | create, read, update, delete |
+
+**Logs** ([LOGS.md](./LOGS.md) §10.5, D243–D254). `logs:read` reads records in the scopes it is bound to.
+Besides `org`, `project` and `environment`, it can now be bound at `database`, `storage`, `broker`,
+`kubernetesCluster` and `pipelineRepository` scope, so a binding can grant one database's or one pipeline
+repository's logs without the project. `logs:query` (risk `read`) adds pipe stages, Compare and Why?; it exists so
+an API key can be narrowed to plain reads, and the built-in deployer and viewer roles hold it alongside
+`logs:read`. `logs:configure` (risk `write`) changes log retention, quotas, the archive, edge sampling and ingest
+rules; owner and admin hold it. The `logQuery` resource covers saved Explorer queries, bound at `org` only:
+deployer and viewer may create, read, update and delete their own, and `logQuery:manage` (owner and admin) edits or
+deletes other people's org-visible ones (risk of `logQuery:delete` is `write`). `system:alerts` holds `logs:read` and
+`logs:query` so log alert rules can evaluate. Platform and edge logs are not an IAM permission: they are for platform
+admins only, and each read is audited as `logs.read_platform`.
 
 `member:*` stays. `apiKey:*` becomes `accessKey:*` and is aliased for one release.
 

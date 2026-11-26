@@ -1,9 +1,4 @@
-import type {
-	PipelineLogLine,
-	PipelineRunSummary,
-	PipelineRunView,
-	PipelineTriggerView
-} from '@yoal/contracts';
+import type { PipelineRunSummary, PipelineRunView, PipelineTriggerView } from '@yoal/contracts';
 import { fetchJson } from '#lib/query.js';
 
 /** Client reads over `/api/v1/repositories` (docs/PIPELINES.md §8); writes go through form actions. */
@@ -48,27 +43,6 @@ export async function getRun(repo: string, run: string, signal?: AbortSignal): P
 		fallback: 'Could not load the run'
 	});
 	return body.run;
-}
-
-export interface LogPage {
-	lines: PipelineLogLine[];
-	next: number;
-	complete: boolean;
-}
-
-export const LOG_PAGE = 5000;
-
-export function jobLogs(
-	repo: string,
-	run: string,
-	job: string,
-	after: number,
-	signal?: AbortSignal
-): Promise<LogPage> {
-	return fetchJson<LogPage>(
-		`${base(repo)}/runs/${encodeURIComponent(run)}/jobs/${encodeURIComponent(job)}/logs?after=${after}&limit=${LOG_PAGE}`,
-		{ signal, fallback: 'Could not load logs' }
-	);
 }
 
 export function artifactHref(repo: string, run: string, artifact: string): string {

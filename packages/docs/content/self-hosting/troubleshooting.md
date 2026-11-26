@@ -326,9 +326,11 @@ See [MCP](/clients/mcp) for the tools and the connection steps.
 | `/opt/yoal/current` | The active release. `/opt/yoal/previous` is the last good one. |
 | `/var/lib/yoal-update/update.log` | The updater's log. Its status is in `status.json` beside it. |
 
-Service logs go to the systemd journal, so read them with `journalctl -u <unit>`. Workload stdout and
-stderr are kept in the dashboard's Logs tab for seven days, and `yoal logs <project>` reads the same
-events. Raw Caddy access logs stay on the node that served them.
+Service logs go to the systemd journal, so read them with `journalctl -u <unit>`; platform admins can also read
+Yoal's own units in **Logs** with a `platform:<node>` scope, without SSH. Workload stdout and stderr are kept in the
+[Logs Explorer](/observe/logs) (seven days by default without ClickHouse), and `yoal logs <project>` reads the same
+lines. Raw Caddy access logs stay on the node that served them; errors and a sample of requests also appear in the
+Explorer with `source:access`.
 
 The units you are most likely to need are `yoal-control-plane`, `yoal-agent`, `caddy`,
 `yoal-litestream`, `yoal-restore-drill`, `yoal-mail` and `yoal-studio`. `yoal-helper` runs on

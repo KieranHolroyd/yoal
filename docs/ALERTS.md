@@ -8,9 +8,11 @@ Discord, Slack, Telegram, ntfy and Web Push; see [OPS.md §7](./OPS.md)):
   budgets, quotas, and new or returning control-plane errors
   ([SERVER-ERRORS.md](./SERVER-ERRORS.md)). The maintenance loop raises them from heartbeats and SQLite state, so they
   work without the telemetry store.
-- **Metric alert rules** (D109) are user-defined outage and threshold alerts over the ClickHouse
-  telemetry store: "a site returns mostly 5xx", "a database stopped reporting", "p95 latency above
-  2 s". This document describes them.
+- **Alert rules** (D109) are user-defined outage and threshold alerts. Metric rules read the
+  ClickHouse telemetry store: "a site returns mostly 5xx", "a database stopped reporting", "p95
+  latency above 2 s". Log rules (D254) read logs through the Logs Explorer: "more than 50 error
+  lines in 5 minutes", "a new error pattern after a deploy" (§1, Log rules). This document
+  describes them.
 
 Both kinds appear on **Alerts** in the dashboard. System alerts show in the history for platform
 admins only.
@@ -81,6 +83,29 @@ The editor and `create_alert_rule` start from presets. After creation each one i
 | `broker_down` | brokers `min(up)` by broker, 2 min | < 1 for 2 min, no data = alerting, critical |
 | `broker_store_full` | brokers `store_utilization` by broker, 5 min | > 85% for 5 min |
 | `broker_backlog_stale` | brokers `min(oldest_age_seconds)` by broker, 10 min | > 15 min (a draining queue's oldest message) |
+| `log_errors` | `log_count` of `level:error` over the org's tenant scopes, 5 min | > 50, repeat hourly |
+| `log_new_pattern_after_deploy` | `log_pattern_new` of `level:error`, within 30 min of a deploy, 7-day lookback | ≥ 5 lines of a new pattern, notify once, no resolve message |
+
+### Log rules
+
+A rule's `kind` is `metric` (the default, everything above), `log_count` or `log_pattern_new`
+([LOGS.md](./LOGS.md) §9.1, D254). A log rule's `query` is a `logs` builder query:
+`{ mode: "builder", builder: { dataset: "logs", metrics: [{ field: "count", agg: "count" }], groupBy?, logs: { q, scopes } } }`,
+where `q` is a log-query filter (no pipes) and `scopes` are tenant scopes (`project`, `database`, `storage`,
+`broker`, `k8s`, `pipeline`, `function`; empty means every scope the org has). The rule loop evaluates it through the
+Logs Explorer as the org's `system:alerts` principal, which holds `logs:read` and `logs:query`, so the same boundary
+and store choice apply as for a person in the Explorer. Its author needs `logs:read` on the scopes (org-wide when
+`scopes` is empty), plus `logs:query` for a grouped count or a new-pattern rule, because notifications quote counts
+and templates.
+
+| Kind | Series | Store |
+|---|---|---|
+| `log_count` | `<q> \| stats count() [by …]` over the window: one series (0 when nothing matched), or one per `groupBy` field (at most 1,000 groups) | ClickHouse, or SQLite in lite mode, so it works without the telemetry store |
+| `log_pattern_new` | `<q> \| patterns` over the window; each pattern that meets the condition and was not seen in the scope during `pattern.lookbackDays` (default 7) before the window is a series, labelled with its id and template (at most 50 candidates an evaluation). With `pattern.afterDeployMinutes`, it looks only while a deploy in scope went live within that many minutes, and the window starts at the deploy | ClickHouse only; in lite mode the rule's health shows `needs_clickhouse` |
+
+Notifications, alert instances and history link to the Explorer with the rule's query, scopes and window (narrowed
+to the series' pattern or group value). The Explorer toolbar's **Create alert** prefills a `log_count` rule from
+the current query. `alert_rules` keeps the kind in `spec_json`, so log rules needed no migration.
 
 ## 2. States
 
@@ -141,9 +166,10 @@ The evaluator fails safe. It never resolves or fires anything because of its own
 - **A rule's query fails** (bad SQL, a removed field). Every series keeps its state, the rule
   shows `health: error` with the message, and after 10 minutes of failures the rule's channels
   get one "Alert rule failing" message per failure streak.
-- **ClickHouse is unavailable.** Rules are skipped and keep their states. After 10 minutes the
-  platform notifiers get one critical "Alert rules cannot evaluate" message, and one more when the
-  store is back.
+- **ClickHouse is unavailable.** Metric rules are skipped and keep their states. After 10 minutes
+  the platform notifiers get one critical "Alert rules cannot evaluate" message, and one more when
+  the store is back. `log_count` rules keep evaluating from the SQLite hot tail; `log_pattern_new`
+  rules report `needs_clickhouse` as a health error and keep their states.
 - **Concurrency.** Each rule is claimed with a conditional `UPDATE` on `next_eval_at`, so a
   standby or a second process never evaluates a rule twice. Standbys do not run the loop (see
   `YOAL_STANDBY`).
@@ -155,8 +181,9 @@ plus up to one interval. For `site_down` that is about 3–5 minutes.
 ## 5. Surfaces
 
 - **Dashboard.** Alerts has tabs for Active, Rules, Silences and History, plus a page per rule
-  with a chart and its threshold. Any builder panel on a dashboard has **Create alert…** in its
-  menu. Firing and no-data series have **Ask AI** when the assistant is configured: it opens the
+  with a chart and its threshold. The rule editor has a kind picker (metric, log count, new log
+  pattern). Any builder panel on a dashboard has **Create alert…** in its menu, and so does the
+  Logs Explorer toolbar. Firing and no-data series have **Ask AI** when the assistant is configured: it opens the
   panel with the rule, series, value and duration and asks it to explain the alert.
 - **REST.** `/api/v1/alerts/*` ([API.md](./API.md#alerts)).
 - **MCP and the assistant.** `list_alerts`, `get_alert_rule`, `create_alert_rule` (templates),
@@ -172,8 +199,9 @@ so Litestream replicates them, and the alert history survives a restore.
 
 ## 7. Limits and follow-ups
 
-- Metric rules cover what ClickHouse holds: traffic, database and storage samples. Node health is
-  heartbeat-based and stays a system alert.
+- Metric rules cover what ClickHouse holds: traffic, database and storage samples. Log rules cover
+  whatever the Logs Explorer can read in the org's tenant scopes (not platform or edge logs). Node
+  health is heartbeat-based and stays a system alert.
 - One threshold per rule. For warning and critical levels, make two rules.
 - No synthetic HTTP checks. Traffic rules only see requests that reach the edge, so for an
   outside-in view use `traffic_stopped` with `noData: alerting`.
