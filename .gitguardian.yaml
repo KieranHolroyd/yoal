@@ -1,0 +1,23 @@
+secret:
+  ignored_matches:
+  - match: 71014d7ea03fe220fc8383ec09be36b30be773375462c5bff2c11142b196304e
+    name: Bearer Token - commit://8e266c9d3ec3e132dd86cc8b7e7dae9656a70748/packages/core/src/log-ingest-guard.test.ts
+  - match: 3f8a45864ed4277bbea640049f4385bf2a57aacf4db4b5977cc10b3bbe4faacd
+    name: Generic High Entropy Secret - commit://e59f795b1d47b02c0d5cb22895163b4623069674/packages/core/src/log-redaction.test.ts
+  - match: e6aca10aa8d90014919c376abbc29f4b7ede0fab8de4ed536c393d83e3eca3b8
+    name: Generic High Entropy Secret - commit://e59f795b1d47b02c0d5cb22895163b4623069674/packages/core/src/log-redaction.test.ts
+  - match: b240990ceff62c251969657f217ee3422e9442e2d29e11586cc3d28050890eda
+    name: Generic High Entropy Secret - commit://e59f795b1d47b02c0d5cb22895163b4623069674/packages/core/src/log-redaction.test.ts
+  - match: 614b3c8fb1e7c89644a17326a3754a04ad5a67ecfe08beab06eae39191e7746f
+    name: Generic High Entropy Secret - commit://e59f795b1d47b02c0d5cb22895163b4623069674/packages/core/src/log-redaction.test.ts
+  - match: 1d97ccfab913e7bfd955e4b046050c32c6a8f9145c732e50552046f0914b60b7
+    name: JSON Web Token - commit://e59f795b1d47b02c0d5cb22895163b4623069674/packages/core/src/log-redaction.test.ts
+  - match: 020daa942e178ceec77ea79bbcebbd9aafb4046949094e84153a208c8668b0b0
+    name: JSON Web Token - commit://e59f795b1d47b02c0d5cb22895163b4623069674/packages/core/src/log-redaction.test.ts
+  - match: 6a08abb561afa70f914e03166aad4371184e91dcd0f6f1bea7f077edd21fa891
+    name: Bearer Token - commit://e59f795b1d47b02c0d5cb22895163b4623069674/packages/core/src/log-redaction.test.ts
+  - match: 2b287d7ae39f112d5f885575c4886ef841776bed499658920352a570f023107b
+    name: Google API Key - commit://e59f795b1d47b02c0d5cb22895163b4623069674/packages/core/src/log-redaction.test.ts
+  - match: 5fffc73aa0eca7e1a4673a2a499e9fba848de4776b47fc57088b78906f921690
+    name: Generic Password - commit://e59f795b1d47b02c0d5cb22895163b4623069674/packages/core/src/log-redaction.test.ts
+version: 2

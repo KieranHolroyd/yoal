@@ -388,35 +388,50 @@ describe('redactor behaviour', () => {
 describe('adversarial lines (timing guard)', () => {
 	test('every detector stays linear-ish on 16 KiB lines built against it', () => {
 		const r = createRedactor({ rules: [{ name: 'acct', pattern: 'acct_[0-9]{8}' }] });
-		const size = 16 * 1024;
-		const fill = (unit: string, tail = '') => unit.repeat(Math.ceil(size / unit.length)).slice(0, size - tail.length) + tail;
-		const lines = [
-			fill('a.', 'token'),
-			fill('a_', 'token'),
-			fill('a-', 'password'),
-			fill('api-key'),
-			fill('token='),
-			fill('secret'),
-			fill('authorization: '),
-			fill('cookie=a; '),
-			fill('bearer '),
-			fill('k=' + 'A1b2'.repeat(10) + ' '),
-			`a=${'A1b2'.repeat(4094)}A1b===`,
-			fill('yoal_'),
-			fill('eyJaaaaaaaaa.'),
-			fill('a://b:c'),
-			fill('pass:"\\'),
-			fill('acct_1234567'),
+		// Absolute budgets flake on loaded CI runners, so check the growth instead: quadrupling the line
+		// must not much more than quadruple the time (a quadratic pattern would be ~16x). The generous
+		// absolute cap still catches anything catastrophic.
+		const fill = (size: number, unit: string, tail = '') =>
+			unit.repeat(Math.ceil(size / unit.length)).slice(0, size - tail.length) + tail;
+		const shapes: Array<(size: number) => string> = [
+			(n) => fill(n, 'a.', 'token'),
+			(n) => fill(n, 'a_', 'token'),
+			(n) => fill(n, 'a-', 'password'),
+			(n) => fill(n, 'api-key'),
+			(n) => fill(n, 'token='),
+			(n) => fill(n, 'secret'),
+			(n) => fill(n, 'authorization: '),
+			(n) => fill(n, 'cookie=a; '),
+			(n) => fill(n, 'bearer '),
+			(n) => fill(n, 'k=' + 'A1b2'.repeat(10) + ' '),
+			(n) => `a=${'A1b2'.repeat((n - 8) / 4)}A1b===`,
+			(n) => fill(n, 'yoal_'),
+			(n) => fill(n, 'eyJaaaaaaaaa.'),
+			(n) => fill(n, 'a://b:c'),
+			(n) => fill(n, 'pass:"\\'),
+			(n) => fill(n, 'acct_1234567'),
 		];
-		for (const line of lines) {
-			expect(line.length).toBe(size);
-			let best = Infinity;
+		const best = (line: string) => {
+			let fastest = Infinity;
 			for (let run = 0; run < 3; run++) {
 				const started = performance.now();
 				r.redact(line);
-				best = Math.min(best, performance.now() - started);
+				fastest = Math.min(fastest, performance.now() - started);
 			}
-			expect({ line: line.slice(0, 24), slow: best > 5 }).toEqual({ line: line.slice(0, 24), slow: false });
+			return fastest;
+		};
+		const small = 16 * 1024;
+		const large = 4 * small;
+		for (const shape of shapes) {
+			const short = shape(small);
+			const long = shape(large);
+			expect([short.length, long.length]).toEqual([small, large]);
+			const tShort = best(short);
+			const tLong = best(long);
+			const label = short.slice(0, 24);
+			expect({ label, tooSlow: tShort > 100 }).toEqual({ label, tooSlow: false });
+			// Floor the baseline so sub-millisecond noise cannot fake a big ratio.
+			expect({ label, superlinear: tLong / Math.max(tShort, 0.5) > 8 }).toEqual({ label, superlinear: false });
 		}
 	});
 });

@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, test } from 'bun:test';
+import { writeFileSync } from 'node:fs';
 import { mkdtemp, mkdir, readdir, rm, stat, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -330,7 +331,7 @@ describe('AppVolumeData', () => {
 	});
 
 	test('a failed restore leaves the volume empty', async () => {
-		spawn.onSpawn = () => void writeFile(join(volumeDir(), 'partial'), 'x');
+		spawn.onSpawn = () => writeFileSync(join(volumeDir(), 'partial'), 'x');
 		spawn.code = 2;
 		await expect(data().restore(ref, new Response('bad').body!)).rejects.toThrow('tar exited 2');
 		expect(await readdir(volumeDir())).toEqual([]);
