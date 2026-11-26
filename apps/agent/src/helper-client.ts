@@ -23,6 +23,7 @@ import {
 	type WorkloadActivation,
 	type WorkloadDesired,
 	type WorkloadStatus,
+	type PlatformLogUnit,
 } from '@yoal/contracts';
 import type { HelperNodeUpdateApi, HelperNodeUpdateRollback } from './node-update.ts';
 import type { HelperMailApi } from './mail-bridge.ts';
@@ -956,6 +957,27 @@ export class HelperClient
 		const body = await this.request(
 			'GET',
 			`/v1/workloads/${encodeURIComponent(id)}/logs?${params.toString()}`,
+			undefined,
+			LOG_TIMEOUT_MS,
+		);
+		const record = asRecord(body);
+		const entries = Array.isArray(record.entries) ? record.entries : [];
+		return {
+			entries: entries.map((value) => parseLogEntry(value)),
+			nextCursor: typeof record.nextCursor === 'string' ? record.nextCursor : null,
+		};
+	}
+
+	/**
+	 * Journald for one of Yoal's own units, by allow-list key (docs/LOGS.md §5, LP5). The helper
+	 * maps the key to fixed unit matches; an older helper answers 404.
+	 */
+	async platformLogs(unit: PlatformLogUnit, options: LogReadOptions = {}): Promise<HelperLogResult> {
+		const params = new URLSearchParams({ lines: String(options.lines ?? 200) });
+		if (options.cursor) params.set('cursor', options.cursor);
+		const body = await this.request(
+			'GET',
+			`/v1/platform-logs/${encodeURIComponent(unit)}?${params.toString()}`,
 			undefined,
 			LOG_TIMEOUT_MS,
 		);

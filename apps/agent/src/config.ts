@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { FUNCTION_ANALYTICS_PORT } from '@yoal/contracts';
+import { FEATURE_FLAGS, featureEnvKey, FUNCTION_ANALYTICS_PORT, parseFeatureFlagValue } from '@yoal/contracts';
 import { BUILD_VERSION } from './build-version.ts';
 
 /**
@@ -93,6 +93,11 @@ export interface AgentConfig {
 	logDrain: boolean;
 	/** How often the agent asks the helper for new journal lines. */
 	logDrainIntervalMs: number;
+	/**
+	 * Drain Yoal's own units into the `platform` log scope (docs/LOGS.md §5, LP5). Off when
+	 * `YOAL_FEATURE_PLATFORM_LOGS=0` is set on the node; the control plane's flag also stops it.
+	 */
+	platformLogDrain: boolean;
 	/** Bounded on-disk telemetry spool (HA-PLAN H28): bucket count and bytes. */
 	telemetrySpoolBuckets: number;
 	telemetrySpoolBytes: number;
@@ -401,6 +406,7 @@ export function loadConfig(env: Env = process.env): AgentConfig {
 		functionAnalyticsPort: FUNCTION_ANALYTICS_PORT,
 		logDrain: parseBooleanValue(env.YOAL_LOG_DRAIN) ?? true,
 		logDrainIntervalMs: parseIntegerEnv(env, 'YOAL_LOG_DRAIN_INTERVAL_MS', 2_000, 500, 60_000),
+		platformLogDrain: parseFeatureFlagValue(env[featureEnvKey('PLATFORM_LOGS')]) ?? FEATURE_FLAGS.PLATFORM_LOGS.default,
 		// HA-PLAN H28: the disk spool replaces the in-memory 5,000-bucket cap. Both bounds apply.
 		telemetrySpoolBuckets: parseIntegerEnv(env, 'YOAL_TELEMETRY_SPOOL_BUCKETS', 5_000, 100, 1_000_000),
 		telemetrySpoolBytes: parseIntegerEnv(env, 'YOAL_TELEMETRY_SPOOL_BYTES', 32 * 1024 * 1024, 1_048_576, 4 * 1024 * 1024 * 1024),

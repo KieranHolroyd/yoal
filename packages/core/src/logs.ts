@@ -15,12 +15,15 @@ import {
 	type ServiceLogQuery,
 	type ServiceLogQueryResult,
 	type RuntimeLogBatch,
+	type NodeLogBatch,
 } from '@yoal/contracts';
 import type { CoreContext } from './context.ts';
 import { CoreError } from './errors.ts';
 import type { ProjectRow } from './projects.ts';
 import { JOB_LOG_LINES_MAX } from './jobs.ts';
 import { sqliteLogSource, type SqliteLogTag, type UnifiedLogRow } from './log-store/sqlite-sources.ts';
+import { insertNodeLogRecords, resolveNodeLogTarget } from './log-record-ingest.ts';
+import { featureEnabled } from './config.ts';
 
 const LOG_LIMIT = 2_000_000;
 const LOG_TAIL = 8_000;
@@ -629,6 +632,30 @@ export class LogService {
 			hasMore,
 		};
 	}
+
+	// --- Node-shipped records (docs/LOGS.md §5; Lane N1) -----------------------------------
+
+	/**
+	 * Store a `NodeLogBatch` from an authenticated node: platform unit journald, edge access
+	 * lines and OTLP records (LP5–LP7). The target resolves server-side (`resolveNodeLogTarget`):
+	 * a workload to its project with the runs-on-node check (403 otherwise), a site host to the
+	 * project that serves it, and a platform unit to `platform:<nodeId>` under the sentinel org
+	 * `PLATFORM_LOG_ORG_ID`. Rows go to `log_records`, the node's `dropped` count to
+	 * `log_drop_counts`, and the inserted rows to the `onAppend` listeners. A target that no
+	 * longer exists is an empty, successful drain; platform batches are discarded while
+	 * `PLATFORM_LOGS` is off, and the answer says so the agent backs off.
+	 */
+	appendRecords(nodeId: string, batch: NodeLogBatch): { stored: number; disabled?: true } {
+		if (batch.target.kind === 'platform' && !featureEnabled(this.ctx.config, 'PLATFORM_LOGS'))
+			return { stored: 0, disabled: true };
+		const resolved = resolveNodeLogTarget(this.ctx, nodeId, batch.target);
+		if (!resolved || (batch.records.length === 0 && batch.dropped === 0)) return { stored: 0 };
+		const { stored, rows } = insertNodeLogRecords(this.ctx, nodeId, resolved, batch);
+		if (rows.length > 0) this.emitAppended(rows);
+		return { stored };
+	}
+
+	// ------------------------------------------------------------------------------------------
 
 	/**
 	 * Delete hot-tail rows older than the retention window, then keep at most `cap` newest rows per

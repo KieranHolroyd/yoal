@@ -278,6 +278,29 @@ describe('helper HTTP surface', () => {
 		expect(runtime.logReads).toEqual([{ id: 'wld_abc123', cursor: 's=0', lines: 50 }]);
 	});
 
+	test('reads platform unit logs by allow-list key only', async () => {
+		const runtime = new FakeRuntime();
+		const reads: Array<{ unit: string; cursor?: string; lines?: number }> = [];
+		Object.assign(runtime, {
+			platformLogs: async (unit: string, options: { cursor?: string; lines?: number } = {}) => {
+				reads.push({ unit, ...options });
+				return { entries: [{ cursor: 's=2', ts: 1_700_000_000_000, priority: 6, message: 'agent up' }], nextCursor: 's=2' };
+			},
+		});
+		const ok = await handler(runtime)(new Request('http://localhost/v1/platform-logs/yoal-agent?cursor=s%3D1&lines=20'));
+		expect(ok.status).toBe(200);
+		expect(((await ok.json()) as { nextCursor: string }).nextCursor).toBe('s=2');
+		expect(reads).toEqual([{ unit: 'yoal-agent', cursor: 's=1', lines: 20 }]);
+
+		for (const path of ['/v1/platform-logs/sshd', '/v1/platform-logs/yoal-agent?lines=5000'])
+			expect((await handler(runtime)(new Request(`http://localhost${path}`))).status).toBe(400);
+		expect((await handler(runtime)(new Request('http://localhost/v1/platform-logs/yoal-agent.service'))).status).toBe(404);
+		expect((await handler(runtime)(new Request('http://localhost/v1/platform-logs/yoal-agent', { method: 'POST' }))).status).toBe(405);
+		expect(reads).toHaveLength(1);
+		// An older runtime without the verb answers 404.
+		expect((await handler()(new Request('http://localhost/v1/platform-logs/yoal-agent'))).status).toBe(404);
+	});
+
 	test('rejects an out-of-range log line count', async () => {
 		const response = await handler()(
 			new Request('http://localhost/v1/workloads/wld_abc123/logs?lines=5000'),
