@@ -24,6 +24,15 @@ const base = {
 };
 
 describe('loadConfig', () => {
+	test('docs/LOGS.md kill switches default on and read YOAL_FEATURE_* from the agent env', () => {
+		expect(loadConfig({ ...base })).toMatchObject({ edgeRequestLogs: true, otlpLogs: true });
+		expect(
+			loadConfig({ ...base, YOAL_FEATURE_EDGE_REQUEST_LOGS: '0', YOAL_FEATURE_OTLP_LOGS: 'off' }),
+		).toMatchObject({ edgeRequestLogs: false, otlpLogs: false });
+		// A typo keeps the default rather than switching the feature off.
+		expect(loadConfig({ ...base, YOAL_FEATURE_OTLP_LOGS: 'nope' }).otlpLogs).toBe(true);
+	});
+
 	test('applies production defaults and strips the control URL slash', () => {
 		const config = loadConfig({ ...base });
 		expect(config.controlUrl).toBe('https://cloud.example.com');

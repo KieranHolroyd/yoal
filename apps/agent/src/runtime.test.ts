@@ -222,7 +222,14 @@ interface Fixture {
 	errors: string[];
 }
 
-function fixture(options: { healthy?: boolean; now?: () => number; retryDelayMs?: number } = {}): Fixture {
+function fixture(
+	options: {
+		healthy?: boolean;
+		now?: () => number;
+		retryDelayMs?: number;
+		extraEnv?: (workload: WorkloadDesired, env: Readonly<Record<string, string>>) => Record<string, string>;
+	} = {},
+): Fixture {
 	const helper = new FakeHelper();
 	const releases = new FakeReleases();
 	const activations = new Map<string, WorkloadActivation>();
@@ -244,6 +251,7 @@ function fixture(options: { healthy?: boolean; now?: () => number; retryDelayMs?
 		sleep: async () => undefined,
 		...(options.now ? { now: options.now } : {}),
 		...(options.retryDelayMs !== undefined ? { retryDelayMs: options.retryDelayMs } : {}),
+		...(options.extraEnv ? { extraEnv: options.extraEnv } : {}),
 		log: (level, message) => {
 			if (level === 'error') errors.push(message);
 		},
@@ -261,6 +269,27 @@ function activationFor(workloadId: string, version = ACTIVATION): WorkloadActiva
 }
 
 describe('WorkloadRuntime.converge', () => {
+	test('docs/LOGS.md LP7: extra env is added to the activation, never replacing a name the workload sets', async () => {
+		const seen: Array<Record<string, string>> = [];
+		const f = fixture({
+			extraEnv: (_workload, env) => {
+				seen.push({ ...env });
+				return { OTEL_SERVICE_NAME: 'app', NODE_ENV: 'development', DATABASE_URL: 'x', OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:8085/otlp/app/k' };
+			},
+		});
+		const desired = workload('app', { env: { NODE_ENV: 'production', OTEL_SERVICE_NAME: 'mine' } });
+		f.activations.set('app', activationFor('app'));
+
+		await f.runtime.converge(state([desired]));
+
+		expect(seen[0]).toMatchObject({ NODE_ENV: 'production', OTEL_SERVICE_NAME: 'mine', DATABASE_URL: 'postgres://secret' });
+		expect(f.helper.applied.get('app')?.activation.env).toEqual({
+			NODE_ENV: 'production',
+			DATABASE_URL: 'postgres://secret',
+			OTEL_EXPORTER_OTLP_ENDPOINT: 'http://127.0.0.1:8085/otlp/app/k',
+		});
+	});
+
 	test('applies the slice, ensures releases and starts workloads', async () => {
 		const f = fixture();
 		const desired = workload('app');

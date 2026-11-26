@@ -50,9 +50,66 @@ export interface CompileAgentConfigOptions {
 	ingress?: IngressDesired;
 	/** Directory of state files the health routes stat (the agent writes them). */
 	ingressHealthDir?: string;
+	/**
+	 * docs/LOGS.md LP6 (flag `EDGE_REQUEST_LOGS`): every site route sets `X-Request-Id` upstream,
+	 * echoes it in the response and so carries it into the access log. Absent or false renders
+	 * site routes exactly as before.
+	 */
+	requestIds?: boolean;
 }
 
 const ACCESS_LOGGER = 'yoal_access';
+
+/** The request-id header Yoal sets at the edge and echoes back (docs/LOGS.md LP6). */
+export const REQUEST_ID_HEADER = 'X-Request-Id';
+
+/**
+ * The handler prepended to a site route for LP6. It is a non-terminal subroute, so the site's own
+ * handlers run after it unchanged:
+ *
+ * 1. Unless the request arrived from a trusted peer *and* already has an id, the id is set to
+ *    Caddy's per-request `{http.request.uuid}`. Anything a client sends is overwritten, so a
+ *    browser cannot plant an id that collides with another request's. Trusted peers are the
+ *    ingress's `trustedProxies` and the node overlay (another Yoal node's Caddy relaying the
+ *    request keeps one id across both hops).
+ * 2. The id is echoed in the response, deferred so it replaces any value the upstream sets. Caddy
+ *    logs response headers, which is how the access log carries it (`resp_headers`); the request
+ *    headers it logs are a copy taken before any handler runs.
+ *
+ * The upstream sees the header because `headers` edits the request in place before
+ * `reverse_proxy` copies it.
+ */
+export function compileRequestIdHandler(trustedRanges: readonly string[]): CaddyHandler {
+	const keepIncoming = trustedRanges.length > 0
+		? [{ remote_ip: { ranges: [...trustedRanges] }, header: { [REQUEST_ID_HEADER]: ['*'] } }]
+		: [];
+	return {
+		handler: 'subroute',
+		routes: [
+			{
+				...(keepIncoming.length > 0 ? { match: [{ not: keepIncoming }] } : {}),
+				handle: [{ handler: 'headers', request: { set: { [REQUEST_ID_HEADER]: ['{http.request.uuid}'] } } }],
+			},
+			{
+				handle: [
+					{
+						handler: 'headers',
+						response: { set: { [REQUEST_ID_HEADER]: [`{http.request.header.${REQUEST_ID_HEADER}}`] }, deferred: true },
+					},
+				],
+			},
+		],
+	};
+}
+
+/** Prepend the request-id handler to every site route (served, function and unavailable alike). */
+function addRequestIds(routes: CaddyRoute[], trustedRanges: readonly string[]): void {
+	for (const route of routes) {
+		const id = route['@id'];
+		if (typeof id !== 'string' || !(id.startsWith('site:') || id.startsWith('unavailable:'))) continue;
+		route.handle = [compileRequestIdHandler(trustedRanges), ...(route.handle ?? [])];
+	}
+}
 
 /**
  * Rewrite the compiled platform route's dial to an HTTPS relay. `upstream` is
@@ -731,6 +788,14 @@ export function buildCaddyConfig(options: CompileAgentConfigOptions): Record<str
 	// Kubernetes API and ingress hosts never collide with site routes (docs/KUBERNETES.md).
 	const kubernetesRoutes = (options.state.kubernetesRoutes ?? []).map(compileKubernetesRoute);
 	server.routes = [...kubernetesRoutes, ...storageRoutes, ...redirects, ...domainRedirects, ...placeholderRoutes, ...server.routes];
+
+	// docs/LOGS.md LP6: request ids on site routes, after every swap above so function and
+	// unavailable routes get them too.
+	if (options.requestIds) {
+		const overlay =
+			options.state.wireguard?.mode !== 'external' && options.state.wireguard?.cidr ? [options.state.wireguard.cidr] : [];
+		addRequestIds(server.routes, [...new Set([...(options.ingress?.trustedProxies ?? []), ...overlay])]);
+	}
 
 	// Yoal Access needs its two response headers copied from the auth response to the upstream.
 	const accessHosts = new Set(

@@ -100,6 +100,12 @@ export interface WorkloadRuntimeOptions {
 	 * recovers a missing identity token/file for a workload that already has one.
 	 */
 	ensureIdentity?: (workload: WorkloadDesired, signal: AbortSignal) => Promise<void>;
+	/**
+	 * Extra activation env the agent adds at apply time (docs/LOGS.md LP7: the OTEL_* variables).
+	 * It receives what the workload already gets (public env, then activation env) and returns only
+	 * names to add; a name already present is never replaced.
+	 */
+	extraEnv?: (workload: WorkloadDesired, env: Readonly<Record<string, string>>) => Record<string, string>;
 }
 
 interface AppliedWorkload {
@@ -156,6 +162,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 	private readonly runnerSettleMs: number;
 	private readonly onIdentity: WorkloadRuntimeOptions['onIdentity'];
 	private readonly ensureIdentity: WorkloadRuntimeOptions['ensureIdentity'];
+	private readonly extraEnv: WorkloadRuntimeOptions['extraEnv'];
 
 	private readonly applied = new Map<string, AppliedWorkload>();
 	private readonly reports = new Map<string, WorkloadRuntimeReport>();
@@ -224,6 +231,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 		this.runnerSettleMs = options.runnerSettleMs ?? RUNNER_SETTLE_MS;
 		this.onIdentity = options.onIdentity;
 		this.ensureIdentity = options.ensureIdentity;
+		this.extraEnv = options.extraEnv;
 	}
 
 	/** True when a previous converge left work behind and the retry window has passed. */
@@ -741,6 +749,26 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 		}
 	}
 
+	/** Add the agent's own env (`extraEnv`) without replacing anything the workload already sets. */
+	private withExtraEnv<T extends { env: Record<string, string> }>(workload: WorkloadDesired, activation: T): T {
+		if (!this.extraEnv) return activation;
+		let extra: Record<string, string>;
+		try {
+			extra = this.extraEnv(workload, { ...workload.env, ...activation.env });
+		} catch (error) {
+			this.log('warn', `Workload ${workload.id}: extra env skipped: ${errorText(error)}`);
+			return activation;
+		}
+		const env = { ...activation.env };
+		let added = false;
+		for (const [name, value] of Object.entries(extra)) {
+			if (name in env || name in workload.env) continue;
+			env[name] = value;
+			added = true;
+		}
+		return added ? { ...activation, env } : activation;
+	}
+
 	private async applyOne(
 		workload: WorkloadDesired,
 		releaseSpecs: Map<string, ReleaseSpec>,
@@ -812,7 +840,7 @@ export class WorkloadRuntime implements DatabaseTargetSource, StorageTargetSourc
 			const { monitor, databaseSetup, storageAdmin, ...helperActivation } = activation;
 			const applied = await this.helper.apply({
 				workload: withOptionalSpec(workload),
-				activation: helperActivation,
+				activation: this.withExtraEnv(workload, helperActivation),
 				// Only a function gets the rendered workerd config and shim (FN2); every other
 				// runtime keeps the original two-field body. The activation env is only used for
 				// bindings whose config must carry credentials (Hyperdrive).
