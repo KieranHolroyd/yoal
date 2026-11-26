@@ -42,7 +42,7 @@
 	import { formatBytes, formatDate, formatDateTime, formatRelative } from '../../_lib/format.js';
 	import { purgeCountdown } from '../../_lib/operations/copy.js';
 	import ClusterHeader from '../_lib/ClusterHeader.svelte';
-	import PodLogs from '../_lib/PodLogs.svelte';
+	import LogExplorer from '#lib/logs/LogExplorer.svelte';
 	import WriteConfig from '../_lib/WriteConfig.svelte';
 	import { clusterSubnavKey } from '../_lib/subnav.js';
 	import { useSubnavLocal } from '#lib/nav/subnav-local.svelte.js';
@@ -676,7 +676,23 @@
 				icon={LogsIcon}
 				description="Container output the cluster's log shipper sends to Yoal, kept {cluster.logRetentionDays} days."
 			>
-				<PodLogs endpoint="/api/v1/kubernetes/{encodeURIComponent(cluster.name)}/pod-logs" />
+				<!-- The Logs Explorer locked to this cluster's pod streams (docs/LOGS.md §7). -->
+				<LogExplorer
+					scopes={[{ kind: 'k8s', id: cluster.id }]}
+					locked
+					lockedLabel={cluster.name}
+					baseQuery="stream:pod:*"
+					baseLabel="Pod output"
+					urlPrefix="podlog_"
+					order="oldest-first"
+					defaultLive
+					defaultTime={{ kind: 'relative', value: '24h' }}
+					facets={false}
+					defaultColumns={['time', 'level', 'stream']}
+					filename="{cluster.name}-pods"
+					canRead={data.permissions.includes('logs:read')}
+					emptyHint="The shipper sends each pod's stdout and stderr about once a minute. Narrow to one pod with stream:pod:<namespace>/<pod>/*."
+				/>
 			</Panel>
 		{:else}
 			<EmptyState

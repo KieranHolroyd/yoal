@@ -1,5 +1,5 @@
 <script lang="ts">
-	import ServiceLogs from '../../../_lib/service/ServiceLogs.svelte';
+	import LogExplorer from '#lib/logs/LogExplorer.svelte';
 	import StorageHeader from '../../_lib/StorageHeader.svelte';
 	import type { PageProps } from './$types';
 
@@ -13,12 +13,18 @@
 <div class="space-y-6">
 	<StorageHeader st={data.storage} can={data.storageCan} />
 
-	<ServiceLogs
-		endpoint="/api/v1/storage/{encodeURIComponent(data.storage.name)}/logs"
-		filename="{data.storage.name}-rustfs.log"
+	<LogExplorer
+		scopes={[{ kind: 'storage', id: data.storage.id }]}
+		locked
+		lockedLabel={data.storage.name}
+		urlPrefix=""
+		order="oldest-first"
+		defaultLive
+		defaultTime={{ kind: 'relative', value: '7d' }}
+		facets={false}
+		defaultColumns={['time', 'level']}
+		filename="{data.storage.name}-rustfs"
 		canRead={data.canRead}
-		initial={data.initial}
-		loadError={data.logsError}
 		emptyHint="RustFS writes to the unit journal and the agent drains it every couple of seconds. A fresh instance may take a moment."
 	/>
 </div>

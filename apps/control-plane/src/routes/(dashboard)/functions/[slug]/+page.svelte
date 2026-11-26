@@ -66,7 +66,7 @@
 	import FunctionInvocations from '../_lib/FunctionInvocations.svelte';
 	import { invocationErrorRate } from '../_lib/invocations.js';
 	import DomainsPanel from '../../projects/[slug]/_components/DomainsPanel.svelte';
-	import LogsPanel from '../../projects/[slug]/_components/LogsPanel.svelte';
+	import ProjectLogs from '../../projects/[slug]/_components/ProjectLogs.svelte';
 	import FunctionDataCard from '../_lib/FunctionDataCard.svelte';
 	import FunctionHeader from '../_lib/FunctionHeader.svelte';
 	import { functionSubnavKey } from '../_lib/subnav.js';
@@ -689,7 +689,7 @@
 			}}
 		/>
 	{:else if tab === 'logs'}
-		<LogsPanel
+		<ProjectLogs
 			bind:source={logSource}
 			bind:buildId={logBuildId}
 			bind:deploymentId={logDeploymentId}

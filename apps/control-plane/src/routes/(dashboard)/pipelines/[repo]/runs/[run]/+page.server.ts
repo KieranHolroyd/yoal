@@ -9,15 +9,19 @@ import type { Actions, PageServerLoad } from './$types';
 export const load: PageServerLoad = async ({ locals, params }) => {
 	const principal = locals.principal!;
 	let run: RunDetail;
+	let repositoryId: string;
 	try {
 		// `getRun` spreads `runSummary`, which also carries the run-level `error` (invalid workflow).
 		run = await core.pipelines.getRun(principal, params.repo, params.run);
+		// Job logs are read through the Logs Explorer, scoped `pipeline:<repository id>`.
+		repositoryId = core.pipelines.getRepository(principal, params.repo).id;
 	} catch (caught) {
 		if (caught instanceof CoreError) error(caught.status, caught.message);
 		throw caught;
 	}
 	return {
 		repo: params.repo,
+		repositoryId,
 		run,
 		crumbLabel: `#${run.number}`,
 		can: pipelineCan(principal)

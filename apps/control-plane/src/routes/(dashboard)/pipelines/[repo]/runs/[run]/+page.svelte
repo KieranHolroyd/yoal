@@ -253,7 +253,7 @@
 			{/if}
 
 			{#if job.status === 'in_progress' || job.status === 'completed'}
-				<JobLogs repo={data.repo} runId={run.id} {job} />
+				<JobLogs repositoryId={data.repositoryId} repo={data.repo} {job} />
 			{/if}
 
 			{#each job.steps.filter((step) => step.summary) as step (step.index)}

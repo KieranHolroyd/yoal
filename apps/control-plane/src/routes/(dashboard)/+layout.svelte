@@ -22,6 +22,7 @@
 	import PackageIcon from '@lucide/svelte/icons/package';
 	import HardDriveIcon from '@lucide/svelte/icons/hard-drive';
 	import LogOutIcon from '@lucide/svelte/icons/log-out';
+	import LogsIcon from '@lucide/svelte/icons/logs';
 	import RocketIcon from '@lucide/svelte/icons/rocket';
 	import ScrollTextIcon from '@lucide/svelte/icons/scroll-text';
 	import ServerIcon from '@lucide/svelte/icons/server';
@@ -82,6 +83,7 @@
 			| '/(dashboard)/topology'
 			| '/(dashboard)/fleet'
 			| '/(dashboard)/dashboards'
+			| '/(dashboard)/logs'
 			| '/(dashboard)/alerts'
 			| '/(dashboard)/errors'
 			| '/(dashboard)/projects'
@@ -102,6 +104,8 @@
 		icon: typeof LayoutDashboardIcon;
 		/** Hidden unless this layout feature is on. */
 		feature?: keyof LayoutProps['data']['features'];
+		/** Hidden unless the viewer holds this permission. */
+		permission?: string;
 	};
 
 	/** Sidebar groups; the first is unlabelled so Overview sits on its own at the top. */
@@ -194,6 +198,13 @@
 					path: '/dashboards',
 					icon: ChartAreaIcon
 				},
+				{
+					label: 'Logs',
+					href: '/(dashboard)/logs',
+					path: '/logs',
+					icon: LogsIcon,
+					permission: 'logs:read'
+				},
 				{ label: 'Alerts', href: '/(dashboard)/alerts', path: '/alerts', icon: BellIcon },
 				{ label: 'Errors', href: '/(dashboard)/errors', path: '/errors', icon: CircleAlertIcon }
 			]
@@ -259,6 +270,8 @@
 	}
 
 	function visible(item: NavItem): boolean {
+		if (item.permission && !(data.permissions as readonly string[]).includes(item.permission))
+			return false;
 		return !item.feature || data.features[item.feature];
 	}
 

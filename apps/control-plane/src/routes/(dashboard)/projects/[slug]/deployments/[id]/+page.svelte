@@ -49,7 +49,7 @@
 		shortId,
 		shortSha
 	} from '../../../../_lib/format.js';
-	import LogsPanel from '../../_components/LogsPanel.svelte';
+	import ProjectLogs from '../../_components/ProjectLogs.svelte';
 	import SourcePanel from '../../_components/SourcePanel.svelte';
 	import {
 		DEPLOYMENT_DEFAULT_TAB,
@@ -577,7 +577,7 @@
 		{/if}
 	{:else if tab === 'logs'}
 		<!-- Logs ---------------------------------------------------------------------------------- -->
-		<LogsPanel
+		<ProjectLogs
 			project={data.project}
 			deployments={[deployment]}
 			builds={build ? [build] : []}
