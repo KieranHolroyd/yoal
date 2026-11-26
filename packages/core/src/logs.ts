@@ -1,5 +1,5 @@
 import { and, asc, desc, eq, gt, inArray, isNull, sql } from 'drizzle-orm';
-import { brokerLogEvents, brokers, builds, databases, logEvents, projects, serviceLogEvents, storageInstances, workloads } from '@yoal/db';
+import { brokerLogEvents, brokers, builds, databases, k8sMachines, logEvents, projects, serviceLogEvents, storageInstances, workloads } from '@yoal/db';
 import {
 	levelForBuildLine,
 	parseLogLine,
@@ -24,27 +24,55 @@ import { JOB_LOG_LINES_MAX } from './jobs.ts';
 import { sqliteLogSource, type SqliteLogTag, type UnifiedLogRow } from './log-store/sqlite-sources.ts';
 import { insertNodeLogRecords, resolveNodeLogTarget } from './log-record-ingest.ts';
 import { featureEnabled } from './config.ts';
+import { messageRowAccess, type GuardAccess, type GuardOptions } from './log-ingest-guard.ts';
+import type { LogIngestScope } from './log-quotas.ts';
+import { LOG_SCOPE_ROW_CAP } from './log-retention.ts';
 
 const LOG_LIMIT = 2_000_000;
 const LOG_TAIL = 8_000;
 const DEFAULT_LIMIT = 200;
 const MAX_LIMIT = 2_000;
 /**
- * Per-scope ceiling on hot-tail rows, per table (docs/LOGS.md §10.2, LP9). Age is the primary
- * policy; this bounds a chatty week without letting one noisy project evict everyone else's
- * history, which the old global 500,000-row cap did.
+ * Per-scope ceiling on hot-tail rows, per table (docs/LOGS.md §10.2, LP9); retention lives in
+ * `log-retention.ts`.
  */
-export const LOG_SCOPE_ROW_CAP = 100_000;
-/** Tables `prune` trims, with the columns that identify a scope in each. */
-const PRUNED_LOG_TABLES: ReadonlyArray<{ table: string; scope: readonly string[] }> = [
-	{ table: 'log_events', scope: ['project_id'] },
-	{ table: 'service_log_events', scope: ['kind', 'service_id'] },
-	{ table: 'broker_log_events', scope: ['broker_id'] },
-	{ table: 'log_records', scope: ['scope_kind', 'scope_id'] },
-];
+export { LOG_SCOPE_ROW_CAP } from './log-retention.ts';
 /** Most rows one append can publish to the live-tail bus in one read. */
 const PUBLISH_BATCH = 5_000;
 const LEVEL_ORDER: LogLevel[] = ['debug', 'info', 'warn', 'error'];
+
+interface LogEventLike {
+	message: string;
+	level?: LogLevel;
+	source?: string;
+	stream?: string;
+	ts?: number;
+	deploymentId?: string | null;
+	buildId?: string | null;
+	jobRunId?: string | null;
+	nodeId?: string | null;
+}
+
+/** `log_events` rows as the ingest guard sees them (stream and source as the adapter derives). */
+const logEventAccess = <T extends LogEventLike>() =>
+	messageRowAccess<T>('le', (row) => ({
+		source: row.jobRunId ? 'job' : (row.source ?? 'runtime'),
+		stream: row.jobRunId
+			? `job:${row.jobRunId}`
+			: row.buildId && row.source !== 'runtime'
+				? `build:${row.buildId}`
+				: row.deploymentId
+					? `deployment:${row.deploymentId}`
+					: null,
+		deployment_id: row.deploymentId ?? null,
+		build_id: row.buildId ?? null,
+		job_run_id: row.jobRunId ?? null,
+		node_id: row.nodeId ?? null,
+	}));
+const serviceEventAccess = <T extends LogEventLike>() => messageRowAccess<T>('sle', (row) => ({ node_id: row.nodeId ?? null }));
+
+const projectScope = (orgId: string, projectId: string): LogIngestScope => ({ orgId, scopeKind: 'project', scopeId: projectId, projectId });
+
 
 /**
  * The log drain (DESIGN §8). Builders and agents append small batches, the dashboard tails the
@@ -74,6 +102,15 @@ export class LogService {
 	readonly onAppend: Array<(rows: UnifiedLogRow[]) => void> = [];
 
 	constructor(private readonly ctx: CoreContext) {}
+
+	/**
+	 * Rules, quota and redaction for one batch (docs/LOGS.md §10.2–§10.4, `LogIngestGuard`): every
+	 * append path stores only what this returns.
+	 */
+	private guard<T>(scope: LogIngestScope, rows: T[], access: GuardAccess<T>, options?: GuardOptions): T[] {
+		const guard = this.ctx.logGuard;
+		return guard ? guard.admit(scope, rows, access, options) : rows;
+	}
 
 	/**
 	 * Publish the rows of one hot-tail table inserted after `afterSeq`. Append paths in other
@@ -143,9 +180,11 @@ export class LogService {
 		const lines = chunk.lines.map((line) => sanitize(line));
 		if (lines.length === 0) return true;
 		const now = this.ctx.now();
-		const text = `${lines.map((line) => (chunk.stream === 'stderr' ? `[stderr] ${line}` : line)).join('\n')}\n`;
+		// The build's text summary is redacted like the rows (§10.4); it keeps every line.
+		const redact = (line: string) => this.ctx.logGuard?.redact(build.orgId, build.projectId, line) ?? line;
+		const text = `${lines.map((line) => (chunk.stream === 'stderr' ? `[stderr] ${redact(line)}` : redact(line))).join('\n')}\n`;
 		const log = `${build.log ?? ''}${text}`.slice(-LOG_LIMIT);
-		const rows = lines.map((line) => {
+		const parsedRows = lines.map((line) => {
 			const parsed = parseLogLine(line);
 			return {
 				orgId: build.orgId,
@@ -160,9 +199,10 @@ export class LogService {
 				ts: parsed.ts ?? now,
 			};
 		});
+		const rows = this.guard(projectScope(build.orgId, build.projectId), parsedRows, logEventAccess());
 		this.tracked('le', () =>
 			this.ctx.db.transaction((tx) => {
-				tx.insert(logEvents).values(rows).run();
+				if (rows.length > 0) tx.insert(logEvents).values(rows).run();
 				tx.update(builds)
 					.set({ log, logTail: log.slice(-LOG_TAIL) })
 					.where(eq(builds.id, buildId))
@@ -212,7 +252,7 @@ export class LogService {
 		if (!project || project.deletedAt) return 0;
 		if (batch.lines.length === 0) return 0;
 		const now = this.ctx.now();
-		const rows = batch.lines.map((line) => {
+		const parsedRows = batch.lines.map((line) => {
 			const parsed = parseLogLine(line.message);
 			return {
 				orgId: workload.orgId,
@@ -229,7 +269,8 @@ export class LogService {
 				ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? now,
 			};
 		});
-		this.tracked('le', () => this.ctx.db.insert(logEvents).values(rows).run());
+		const rows = this.guard(projectScope(workload.orgId, workload.projectId), parsedRows, logEventAccess());
+		if (rows.length > 0) this.tracked('le', () => this.ctx.db.insert(logEvents).values(rows).run());
 		return rows.length;
 	}
 
@@ -251,7 +292,7 @@ export class LogService {
 		if (stored > JOB_LOG_LINES_MAX) return 0;
 		const now = this.ctx.now();
 		const room = JOB_LOG_LINES_MAX - stored;
-		const rows: Array<typeof logEvents.$inferInsert> = batch.lines.slice(0, Math.max(0, room)).map((line) => {
+		const parsedRows: Array<typeof logEvents.$inferInsert> = batch.lines.slice(0, Math.max(0, room)).map((line) => {
 			const parsed = parseLogLine(line.message);
 			return {
 				orgId: run.orgId,
@@ -267,6 +308,7 @@ export class LogService {
 				ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? now,
 			};
 		});
+		const rows = this.guard(projectScope(run.orgId, run.projectId), parsedRows, logEventAccess());
 		if (batch.lines.length > room)
 			rows.push({
 				orgId: run.orgId,
@@ -301,42 +343,49 @@ export class LogService {
 		const service = storage ?? database;
 		if (!service) {
 			// Kubernetes machines keep their own log table (0116); the service checks node ownership.
-			if (this.ctx.kubernetes.isMachineId(batch.workloadId))
-				return this.tracked('kle', () => this.ctx.kubernetes.appendRuntimeLogs(
-					nodeId,
-					batch.workloadId,
-					batch.lines.map((line) => {
-						const parsed = parseLogLine(line.message);
-						return {
-							stream: line.stream,
-							level: parsed.level ?? line.level,
-							message: sanitize(parsed.message),
-							ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? this.ctx.now(),
-						};
-					}),
-				));
+			const parse = (line: RuntimeLogBatch['lines'][number]) => {
+				const parsed = parseLogLine(line.message);
+				return {
+					stream: line.stream,
+					level: parsed.level ?? line.level,
+					message: sanitize(parsed.message),
+					ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? this.ctx.now(),
+				};
+			};
+			if (this.ctx.kubernetes.isMachineId(batch.workloadId)) {
+				// The guard needs the cluster scope; the service still checks node ownership.
+				const machine = this.ctx.db
+					.select({ orgId: k8sMachines.orgId, clusterId: k8sMachines.clusterId, nodeId: k8sMachines.nodeId })
+					.from(k8sMachines)
+					.where(eq(k8sMachines.id, batch.workloadId))
+					.get();
+				const lines = batch.lines.map(parse);
+				const kept = machine && machine.nodeId === nodeId
+					? this.guard({ orgId: machine.orgId, scopeKind: 'k8s', scopeId: machine.clusterId, projectId: null }, lines, messageRowAccess('kle'))
+					: lines;
+				if (machine && machine.nodeId === nodeId && kept.length === 0) return 0;
+				return this.tracked('kle', () => this.ctx.kubernetes.appendRuntimeLogs(nodeId, batch.workloadId, kept));
+			}
 			// Brokers keep their own log table (0048); the service checks node ownership.
 			if (!this.ctx.brokers.isBrokerId(batch.workloadId)) return 0;
-			return this.tracked('ble', () => this.ctx.brokers.appendRuntimeLogs(
-				nodeId,
-				batch.workloadId,
-				batch.lines.map((line) => {
-					const parsed = parseLogLine(line.message);
-					return {
-						stream: line.stream,
-						level: parsed.level ?? line.level,
-						message: sanitize(parsed.message),
-						ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? this.ctx.now(),
-					};
-				}),
-			));
+			const broker = this.ctx.db
+				.select({ orgId: brokers.orgId, nodeId: brokers.nodeId })
+				.from(brokers)
+				.where(eq(brokers.id, batch.workloadId))
+				.get();
+			const lines = batch.lines.map(parse);
+			const kept = broker && broker.nodeId === nodeId
+				? this.guard({ orgId: broker.orgId, scopeKind: 'broker', scopeId: batch.workloadId, projectId: null }, lines, messageRowAccess('ble'))
+				: lines;
+			if (broker && broker.nodeId === nodeId && kept.length === 0) return 0;
+			return this.tracked('ble', () => this.ctx.brokers.appendRuntimeLogs(nodeId, batch.workloadId, kept));
 		}
 		if (service.nodeId !== nodeId)
 			throw new CoreError('forbidden', 'This service is placed on another node.', 403);
 		if (batch.lines.length === 0) return 0;
 		const kind: ServiceLogKind = storage ? 'storage' : 'database';
 		const now = this.ctx.now();
-		const rows = batch.lines.map((line) => {
+		const parsedRows = batch.lines.map((line) => {
 			const parsed = parseLogLine(line.message);
 			return {
 				orgId: service.orgId,
@@ -350,7 +399,8 @@ export class LogService {
 				ts: Number.isFinite(line.ts) ? Math.max(0, Number(line.ts)) : parsed.ts ?? now,
 			};
 		});
-		this.tracked('sle', () => this.ctx.db.insert(serviceLogEvents).values(rows).run());
+		const rows = this.guard({ orgId: service.orgId, scopeKind: kind, scopeId: service.id, projectId: null }, parsedRows, serviceEventAccess());
+		if (rows.length > 0) this.tracked('sle', () => this.ctx.db.insert(serviceLogEvents).values(rows).run());
 		return rows.length;
 	}
 
@@ -363,6 +413,8 @@ export class LogService {
 		level?: LogLevel;
 		message: string;
 	}): void {
+		// Lifecycle notices skip rules and quotas but are redacted (§10.4).
+		const message = this.ctx.logGuard?.redact(input.orgId, null, sanitize(input.message)) ?? sanitize(input.message);
 		if (input.kind === 'broker') {
 			this.tracked('ble', () => this.ctx.db
 				.insert(brokerLogEvents)
@@ -373,7 +425,7 @@ export class LogService {
 					source: 'system',
 					stream: 'system',
 					level: input.level ?? 'info',
-					message: sanitize(input.message),
+					message,
 					ts: this.ctx.now(),
 				})
 				.run());
@@ -389,7 +441,7 @@ export class LogService {
 				source: 'system',
 				stream: 'system',
 				level: input.level ?? 'info',
-				message: sanitize(input.message),
+				message,
 				ts: this.ctx.now(),
 			})
 			.run());
@@ -546,6 +598,8 @@ export class LogService {
 		level?: LogLevel;
 		message: string;
 	}): void {
+		// Lifecycle notices skip rules and quotas but are redacted (§10.4).
+		const message = this.ctx.logGuard?.redact(input.orgId, input.projectId, sanitize(input.message)) ?? sanitize(input.message);
 		this.tracked('le', () => this.ctx.db
 			.insert(logEvents)
 			.values({
@@ -557,7 +611,7 @@ export class LogService {
 				source: 'system',
 				stream: 'system',
 				level: input.level ?? 'info',
-				message: sanitize(input.message),
+				message,
 				ts: this.ctx.now(),
 			})
 			.run());
@@ -658,34 +712,13 @@ export class LogService {
 	// ------------------------------------------------------------------------------------------
 
 	/**
-	 * Delete hot-tail rows older than the retention window, then keep at most `cap` newest rows per
-	 * scope in each table (docs/LOGS.md §10.2, LP9): a noisy project trims only its own history.
-	 * Kubernetes and pipeline lines keep their own retention.
+	 * Delete hot-tail rows past retention, then keep at most `cap` newest rows per scope in each
+	 * table (docs/LOGS.md §10.1–§10.2, LP9): a noisy project trims only its own history. Without
+	 * `retentionMs` each org uses its effective hot-tail days (`log-retention.ts`). Kubernetes and
+	 * pipeline lines keep their own retention.
 	 */
-	prune(now = this.ctx.now(), retentionMs = this.ctx.policies.logRetentionMs(), cap = LOG_SCOPE_ROW_CAP): number {
-		const cutoff = now - retentionMs;
-		const limit = Math.max(1, Math.floor(cap));
-		let removed = 0;
-		for (const { table, scope } of PRUNED_LOG_TABLES) {
-			removed += this.ctx.sqlite.run(`DELETE FROM ${table} WHERE ts < ?`, [cutoff]).changes;
-			const columns = scope.join(', ');
-			const match = scope.map((column) => `${column} = ?`).join(' AND ');
-			const over = this.ctx.sqlite
-				.query<Record<string, string>, [number]>(
-					`SELECT ${columns} FROM ${table} GROUP BY ${columns} HAVING COUNT(*) > ?`,
-				)
-				.all(limit);
-			for (const row of over) {
-				const values = scope.map((column) => row[column] ?? null);
-				removed += this.ctx.sqlite.run(
-					`DELETE FROM ${table} WHERE ${match} AND seq <= (
-					   SELECT seq FROM ${table} WHERE ${match} ORDER BY seq DESC LIMIT 1 OFFSET ?
-					 )`,
-					[...values, ...values, limit],
-				).changes;
-			}
-		}
-		return removed;
+	prune(now = this.ctx.now(), retentionMs?: number, cap = LOG_SCOPE_ROW_CAP): number {
+		return this.ctx.logRetention.pruneHotTail(now, retentionMs, cap);
 	}
 }
 

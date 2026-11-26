@@ -22,11 +22,19 @@ export const load: PageServerLoad = async ({ locals }) => {
 		core.usage.history(principal),
 		Promise.resolve(core.projects.list(principal))
 	]);
+	// Log ingest per project for showback (docs/LOGS.md §10.2): GB/day over the last 7 days.
+	let logs: ReturnType<typeof core.logQuotas.usage> | null = null;
+	try {
+		logs = core.logQuotas.usage(principal, { days: 7 });
+	} catch {
+		logs = null;
+	}
 	return {
 		view,
 		quotas,
 		history,
 		projects,
+		logs,
 		canSetQuotas: core.ctx.platformIam.can(principal, 'platform:quotas')
 	};
 };

@@ -81,6 +81,7 @@ export * from './log-record.ts';
 export * from './log-query-ast.ts';
 export * from './log-query.ts';
 export * from './log-query-suggest.ts';
+export * from './log-settings.ts';
 export * from './domain.ts';
 export * from './environment.ts';
 export * from './url.ts';

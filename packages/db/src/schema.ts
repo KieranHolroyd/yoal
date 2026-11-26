@@ -3759,3 +3759,35 @@ export const logDropCounts = sqliteTable(
 		index('log_drop_counts_org_minute_idx').on(t.orgId, t.minute),
 	],
 );
+
+/** Lines and bytes admitted per scope per UTC day (0144, §10.2 budget and showback). */
+export const logIngestDaily = sqliteTable(
+	'log_ingest_daily',
+	{
+		orgId: text('org_id').notNull(),
+		scopeKind: text('scope_kind').notNull(),
+		scopeId: text('scope_id').notNull(),
+		projectId: text('project_id'),
+		day: integer('day').notNull(),
+		lines: integer('lines').notNull().default(0),
+		bytes: integer('bytes').notNull().default(0),
+	},
+	(t) => [
+		primaryKey({ columns: [t.scopeKind, t.scopeId, t.day] }),
+		index('log_ingest_daily_org_day_idx').on(t.orgId, t.day),
+	],
+);
+
+/** Archived UTC days per org with their hourly Parquet files (0144, §10.1). */
+export const logArchiveDays = sqliteTable(
+	'log_archive_days',
+	{
+		orgId: text('org_id').notNull(),
+		day: text('day').notNull(),
+		files: text('files').notNull().default('[]'),
+		rows: integer('rows').notNull().default(0),
+		bytes: integer('bytes').notNull().default(0),
+		exportedAt: integer('exported_at').notNull(),
+	},
+	(t) => [primaryKey({ columns: [t.orgId, t.day] })],
+);

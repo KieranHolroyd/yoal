@@ -93,6 +93,7 @@ import {
 	type WorkloadStatus,
 } from '@yoal/contracts';
 import { featureEnabled } from './config.ts';
+import { messageRowAccess } from './log-ingest-guard.ts';
 import type { CoreContext } from './context.ts';
 import { ConflictError, CoreError, NotFoundError, ValidationError } from './errors.ts';
 import { resolvePlacement, type PlacementCandidate } from './placement.ts';
@@ -2088,25 +2089,27 @@ export class KubernetesService {
 		const lines = kubernetesLogIngestSchema.parse(raw);
 		if (lines.length === 0) return 0;
 		const now = this.ctx.now();
-		this.ctx.db
-			.insert(k8sPodLogs)
-			.values(
-				lines.map((line) => {
-					const ts = typeof line.ts === 'number' ? line.ts : typeof line.ts === 'string' ? Date.parse(line.ts) : now;
-					return {
-						orgId: cluster.orgId,
-						clusterId: cluster.id,
-						namespace: line.namespace,
-						pod: line.pod,
-						container: line.container,
-						stream: line.stream,
-						message: line.message,
-						ts: Number.isFinite(ts) ? ts : now,
-					};
-				}),
-			)
-			.run();
-		return lines.length;
+		// Rules, quota and redaction before storage (docs/LOGS.md §10.2–§10.4).
+		const rows = this.ctx.logGuard.admit(
+			{ orgId: cluster.orgId, scopeKind: 'k8s', scopeId: cluster.id, projectId: null },
+			lines.map((line) => {
+				const ts = typeof line.ts === 'number' ? line.ts : typeof line.ts === 'string' ? Date.parse(line.ts) : now;
+				return {
+					orgId: cluster.orgId,
+					clusterId: cluster.id,
+					namespace: line.namespace,
+					pod: line.pod,
+					container: line.container,
+					stream: line.stream,
+					message: line.message,
+					ts: Number.isFinite(ts) ? ts : now,
+				};
+			}),
+			messageRowAccess('kpl', (row) => ({ stream: `pod:${row.namespace}/${row.pod}/${row.container}`, channel: row.stream ?? null })),
+		);
+		if (rows.length === 0) return 0;
+		this.ctx.db.insert(k8sPodLogs).values(rows).run();
+		return rows.length;
 	}
 
 	podLogs(

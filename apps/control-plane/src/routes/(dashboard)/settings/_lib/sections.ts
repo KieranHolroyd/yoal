@@ -68,6 +68,7 @@ export type SectionId =
 	| 'export'
 	| 'backup-targets'
 	| 'log-drains'
+	| 'logs'
 	| 'registry'
 	| 'github'
 	| 'git'
@@ -344,6 +345,19 @@ export const SECTIONS: Section[] = [
 		path: '/settings/log-drains',
 		icon: LogsIcon,
 		anyPermission: ['logs:read']
+	},
+	{
+		// docs/LOGS.md §10: retention, archive, quotas, edge sampling and ingest rules.
+		id: 'logs',
+		group: 'observability',
+		label: 'Logs',
+		summary:
+			'How long logs are kept, the archive, ingest limits per project, edge sampling, and rules that drop, sample or mask lines.',
+		// See `SectionHref`: the route is real, but `resolve()` cannot infer past 25 members.
+		href: '/(dashboard)/settings/logs' as unknown as SectionHref,
+		path: '/settings/logs',
+		icon: LogsIcon,
+		anyPermission: ['logs:read', 'logs:configure']
 	},
 	{
 		id: 'telemetry',

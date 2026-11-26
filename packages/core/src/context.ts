@@ -38,6 +38,12 @@ import type { BuildService } from './builds.ts';
 import type { PipelineService } from './pipelines.ts';
 import type { LogService } from './logs.ts';
 import type { LogExplorerService } from './log-explorer.ts';
+import type { LogSettingsService } from './log-settings.ts';
+import type { LogQuotaService } from './log-quotas.ts';
+import type { LogRuleService } from './log-rules.ts';
+import type { LogIngestGuard } from './log-ingest-guard.ts';
+import type { LogRetentionService } from './log-retention.ts';
+import type { LogArchiveService } from './log-archive.ts';
 import type { EnvironmentService } from './environments.ts';
 import type { OperationService } from './operations/service.ts';
 import type { BlueprintService } from './blueprints.ts';
@@ -174,6 +180,14 @@ export interface CoreContext {
 	logs: LogService;
 	/** The Logs Explorer: boundaries, lite store, live tail, saved queries (docs/LOGS.md). */
 	logExplorer: LogExplorerService;
+	/** Logs cost and safety (docs/LOGS.md §10): settings with inheritance, quotas, rules, redaction, retention, archive. */
+	logSettings: LogSettingsService;
+	logQuotas: LogQuotaService;
+	logRules: LogRuleService;
+	/** Every append path's rules → quota → redaction step (§10.2–§10.4). */
+	logGuard: LogIngestGuard;
+	logRetention: LogRetentionService;
+	logArchive: LogArchiveService;
 	environments: EnvironmentService;
 	operations: OperationService;
 	/** Blueprint stacks: plan/apply of a declarative file (plan 11). */

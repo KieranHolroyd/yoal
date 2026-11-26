@@ -105,8 +105,9 @@ export const statements = {
 	email: ['read', 'send', 'update', 'delete', 'credentials'],
 	shareLink: ['create', 'read', 'revoke'],
 	// Logs Explorer (docs/LOGS.md §10.5): `read` covers records in readable scopes; `query` adds pipe
-	// stages and Why? (a cost control for API keys).
-	logs: ['read', 'query'],
+	// stages and Why? (a cost control for API keys); `configure` changes retention, quotas, the
+	// archive, edge sampling and ingest rules (§10).
+	logs: ['read', 'query', 'configure'],
 	// Saved log queries (docs/LOGS.md §7.2). `manage` edits and deletes other people's org queries.
 	logQuery: ['create', 'read', 'update', 'delete', 'manage'],
 	// Container console (D127): inspect a project's container, browse its files, open a shell.
@@ -239,6 +240,8 @@ const RISK_OVERRIDE: Partial<Record<Permission, Risk>> = {
 	'logQuery:delete': 'write',
 	// Pipe stages and Why? read logs; the separate permission only lets a key be narrowed (§10.5).
 	'logs:query': 'read',
+	// Retention, quotas, sampling and ingest rules change what is kept, not who can read it (§10).
+	'logs:configure': 'write',
 };
 
 /** Step-up level, when the risk default isn't right. Ownership changes are `always` (STEP-UP §4). */

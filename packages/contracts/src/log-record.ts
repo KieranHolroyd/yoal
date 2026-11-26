@@ -199,6 +199,11 @@ export const logSearchInputSchema = logReadInputSchema.extend({
 	cursor: z.string().max(2_048).optional(),
 	/** `desc` = newest first (the default view); `asc` reads forward from the cursor. */
 	order: z.enum(['desc', 'asc']).default('desc'),
+	/**
+	 * Include the Parquet archive for the part of the range older than the search window
+	 * (docs/LOGS.md §10.1). Without it such a read answers an `archive` warning with an estimate.
+	 */
+	archive: z.boolean().optional(),
 });
 export type LogSearchInput = z.infer<typeof logSearchInputSchema>;
 
