@@ -1,4 +1,11 @@
-import { formatLogScope, parseLogScope, type LogScopeRef } from '@yoal/contracts';
+import {
+	formatLogCompareBaseline,
+	formatLogScope,
+	parseLogCompareBaseline,
+	parseLogScope,
+	type LogCompareBaseline,
+	type LogScopeRef
+} from '@yoal/contracts';
 import { DEFAULT_LOG_TIME, isRelativeValue, type LogTime, type LogTimeZone } from './time.js';
 
 /**
@@ -22,6 +29,12 @@ export interface ExplorerUrlState {
 	row: string | null;
 	tz: LogTimeZone;
 	live: boolean;
+	/**
+	 * Compare baseline (`baseline=previous|offset:<ms>|deploy:<id>|range:<from>-<to>`, docs/LOGS.md
+	 * §8.2). Absent means the previous window; links such as "Compare with previous deploy" set it
+	 * with `mode=compare`.
+	 */
+	baseline?: LogCompareBaseline | null;
 }
 
 export interface ExplorerUrlOptions {
@@ -40,7 +53,8 @@ export const EXPLORER_URL_KEYS = [
 	'mode',
 	'row',
 	'tz',
-	'live'
+	'live',
+	'baseline'
 ] as const;
 
 type ParamsLike = { get(name: string): string | null; getAll(name: string): string[] };
@@ -121,6 +135,9 @@ export function decodeExplorerState(
 	if (live === '1' || live === 'true') state.live = true;
 	else if (live === '0' || live === 'false') state.live = false;
 
+	const baseline = parseLogCompareBaseline(params.get(key('baseline')));
+	if (baseline) state.baseline = baseline;
+
 	return state;
 }
 
@@ -165,5 +182,7 @@ export function encodeExplorerState(
 	if (state.row !== defaults.row) params.set(key('row'), state.row ?? '');
 	if (state.tz !== defaults.tz) params.set(key('tz'), state.tz);
 	if (state.live !== defaults.live) params.set(key('live'), state.live ? '1' : '0');
+	if (state.baseline && state.baseline.kind !== 'previous')
+		params.set(key('baseline'), formatLogCompareBaseline(state.baseline));
 	return params;
 }

@@ -223,6 +223,11 @@ export interface LogTableResult {
 	rows: Array<Array<string | number | null>>;
 	/** Set for `| patterns`: one sample record id per row, aligned with `rows`. */
 	sampleIds?: Array<string | null>;
+	/**
+	 * Set for `| patterns`: each pattern's line count per bucket, aligned with `rows`. Every array
+	 * has the same length N, and its buckets split the read's `from..to` into N equal slots (§8.1).
+	 */
+	sparklines?: number[][];
 	engine: LogEngine;
 	warnings: LogWarning[];
 	elapsedMs: number;

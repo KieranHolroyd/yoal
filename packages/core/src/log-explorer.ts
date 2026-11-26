@@ -9,7 +9,11 @@ import {
 	logSearchInputSchema,
 	parseLogQuery,
 	requiredLogFeatures,
+	type logCompareInputSchema,
+	type logWhyInputSchema,
 	type LogCapabilities,
+	type LogCompareResult,
+	type LogWhyResult,
 	type LogContextResult,
 	type LogEngine,
 	type LogFieldsResult,
@@ -28,6 +32,7 @@ import {
 import type * as z from 'zod';
 import type { CoreContext } from './context.ts';
 import { CoreError, ForbiddenError, ValidationError } from './errors.ts';
+import { compareLogs, whyLogs, type LogAnalysisHost } from './log-analysis.ts';
 import { LogSavedQueryService } from './log-saved-queries.ts';
 import { appendListener } from './logs.ts';
 import { LogStoreUnsupported, type LogReadBoundary, type LogStore, type LogStoreRead } from './log-store/types.ts';
@@ -346,6 +351,27 @@ export class LogExplorerService {
 			this.auditPlatform(principal, { ...resolved, q: '', platform: [record.scope] }, 'get');
 		this.name([record], resolved.names);
 		return record;
+	}
+
+	// ---------------------------------------------------------------- analysis (log-analysis.ts)
+
+	/** Patterns new/rising/falling/gone against a baseline window (§8.2). ClickHouse; `logs:query`. */
+	async compare(principal: Principal, input: ExplorerInput<typeof logCompareInputSchema>): Promise<LogCompareResult> {
+		return compareLogs(this.analysisHost(), principal, input);
+	}
+
+	/** Field values over-represented in a brushed selection (§8.3). ClickHouse; `logs:query`. */
+	async why(principal: Principal, input: ExplorerInput<typeof logWhyInputSchema>): Promise<LogWhyResult> {
+		return whyLogs(this.analysisHost(), principal, input);
+	}
+
+	private analysisHost(): LogAnalysisHost {
+		return {
+			ctx: this.ctx,
+			prepare: (principal, input) => this.prepare(principal, input, ['logs:read', 'logs:query']),
+			audit: (principal, prepared, op) => this.auditPlatform(principal, prepared, op),
+			clickhouse: () => this.clickhouse(),
+		};
 	}
 
 	// ---------------------------------------------------------------- live tail

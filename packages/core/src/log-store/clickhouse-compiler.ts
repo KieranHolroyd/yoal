@@ -63,7 +63,12 @@ export interface CompiledLogTableQuery extends CompiledLogQuery {
 	columns: Array<{ name: string; type: LogColumnType }>;
 	/** Set for `| patterns`: the SELECT position of the hidden sample record id. */
 	sampleIdColumn: number | null;
+	/** Set for `| patterns`: the SELECT position of the hidden per-bucket counts (sparkline). */
+	sparklineColumn?: number | null;
 }
+
+/** Buckets in every `| patterns` sparkline (§8.1). */
+export const PATTERN_SPARKLINE_BUCKETS = 24;
 
 /** Regexes are RE2 on the server; longer ones are refused before they get there. */
 export const MAX_REGEX_LENGTH = 512;
@@ -802,6 +807,7 @@ export function compileTable(read: LogStoreRead, options: ClickHouseCompileOptio
 	let groupBy: string[];
 	let defaultOrder: string;
 	let sampleAlias: string | null = null;
+	let sparkAlias: string | null = null;
 	let from = `(${relation})`;
 
 	if (aggregate.type === 'stats') {
@@ -829,7 +835,10 @@ export function compileTable(read: LogStoreRead, options: ClickHouseCompileOptio
 		defaultOrder = binAlias ? `${binAlias} ASC` : `${firstAggregation} DESC`;
 	} else {
 		// | patterns: group by template id, with the template from log_patterns (same boundary).
-		const patterns = `SELECT pattern_id, any(template) AS template FROM ${LOG_PATTERNS_TABLE} WHERE ${boundarySql(read.boundary, params)} GROUP BY pattern_id`;
+		// `first_seen` is the template's first sighting in the scope (from log_patterns), not just in
+		// this window; the sparkline splits the window into PATTERN_SPARKLINE_BUCKETS slots.
+		const patterns = `SELECT pattern_id, any(template) AS template, min(first_seen) AS first_seen FROM ${LOG_PATTERNS_TABLE} WHERE ${boundarySql(read.boundary, params)} GROUP BY pattern_id`;
+		const bucketMs = Math.max(1, Math.ceil((read.to - read.from + 1) / PATTERN_SPARKLINE_BUCKETS));
 		from = `(${relation}) AS l LEFT JOIN (${patterns}) AS p ON p.pattern_id = l.pattern_id`;
 		outputs = [
 			{ alias: 'c0', name: 'pattern', type: 'string' },
@@ -842,11 +851,13 @@ export function compileTable(read: LogStoreRead, options: ClickHouseCompileOptio
 			'l.pattern_id AS c0',
 			"if(any(p.template) = '', any(l.body), any(p.template)) AS c1",
 			'count() AS c2',
-			'toUnixTimestamp64Milli(min(l.ts)) AS c3',
+			"toUnixTimestamp64Milli(if(any(p.pattern_id) = '', min(l.ts), least(min(l.ts), any(p.first_seen)))) AS c3",
 			'toUnixTimestamp64Milli(max(l.ts)) AS c4',
 			'argMax(l.id, l.ts) AS c5',
+			`countResample(0, ${PATTERN_SPARKLINE_BUCKETS}, 1)(intDiv(toUnixTimestamp64Milli(l.ts) - ${params.int(read.from)}, ${params.int(bucketMs)})) AS c6`,
 		];
 		sampleAlias = 'c5';
+		sparkAlias = 'c6';
 		groupBy = ['c0'];
 		defaultOrder = 'c2 DESC';
 	}
@@ -878,11 +889,13 @@ export function compileTable(read: LogStoreRead, options: ClickHouseCompileOptio
 	let sql = `SELECT ${select.join(', ')}\nFROM ${from}\nGROUP BY ${groupBy.length ? groupBy.join(', ') : 'tuple()'}\nORDER BY ${postOrder ?? defaultOrder}\nLIMIT ${limit}`;
 	let columns = outputs;
 	let sampleIdColumn: number | null = sampleAlias ? outputs.length : null;
+	let sparklineColumn: number | null = sparkAlias ? outputs.length + (sampleAlias ? 1 : 0) : null;
 	if (chosen) {
-		const keep = [...chosen.map((column) => column.alias), ...(sampleAlias ? [sampleAlias] : [])];
+		const keep = [...chosen.map((column) => column.alias), ...(sampleAlias ? [sampleAlias] : []), ...(sparkAlias ? [sparkAlias] : [])];
 		sql = `SELECT ${keep.join(', ')} FROM (${sql})`;
 		columns = chosen;
 		sampleIdColumn = sampleAlias ? chosen.length : null;
+		sparklineColumn = sparkAlias ? chosen.length + (sampleAlias ? 1 : 0) : null;
 	}
-	return { sql, params: params.values, columns: columns.map(({ name, type }) => ({ name, type })), sampleIdColumn };
+	return { sql, params: params.values, columns: columns.map(({ name, type }) => ({ name, type })), sampleIdColumn, sparklineColumn };
 }

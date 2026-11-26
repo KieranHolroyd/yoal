@@ -1,8 +1,7 @@
 import { describe, expect, test } from 'bun:test';
-import type { LogRecord, LogTableResult } from '@yoal/contracts';
+import type { LogRecord } from '@yoal/contracts';
 import { logShortcutFor } from './keyboard';
 import { jsonBody, primaryField, recordFields, recordPivots } from './record';
-import { comparePatterns, tableToSeries, templateParts } from './table';
 
 const base: LogRecord = {
 	id: 'le:7',
@@ -95,77 +94,5 @@ describe('keyboard map', () => {
 		expect(logShortcutFor(key('Enter', { metaKey: true }), true)).toBe('run');
 		expect(logShortcutFor(key('k', { ctrlKey: true }), true)).toBe('palette');
 		expect(logShortcutFor(key('Escape'), true)).toBe('close');
-	});
-});
-
-describe('tables for the analysis tabs', () => {
-	const stats: LogTableResult = {
-		columns: [
-			{ name: 't', type: 'time' },
-			{ name: 'level', type: 'string' },
-			{ name: 'count', type: 'number' }
-		],
-		rows: [
-			[0, 'info', 5],
-			[0, 'error', 1],
-			[60_000, 'info', 3]
-		],
-		engine: 'clickhouse',
-		warnings: [],
-		elapsedMs: 1
-	};
-
-	test('a binned stats table becomes stacked series', () => {
-		const chart = tableToSeries(stats)!;
-		expect(chart.intervalMs).toBe(60_000);
-		expect(chart.series.map((item) => item.key)).toEqual(['info', 'error']);
-		expect(chart.buckets[0]).toEqual({ ts: 0, values: { info: 5, error: 1 }, total: 6 });
-		expect(chart.to).toBe(120_000);
-	});
-
-	test('a table without time has no chart', () => {
-		expect(
-			tableToSeries({ ...stats, columns: [{ name: 'x', type: 'string' }], rows: [['a']] })
-		).toBeNull();
-	});
-
-	test('compare classifies new, gone, rising and falling', () => {
-		const table = (rows: Array<[string, number]>): LogTableResult => ({
-			columns: [
-				{ name: 'template', type: 'string' },
-				{ name: 'count', type: 'number' }
-			],
-			rows,
-			engine: 'clickhouse',
-			warnings: [],
-			elapsedMs: 1
-		});
-		const rows = comparePatterns(
-			table([
-				['a', 10],
-				['b', 100],
-				['c', 10]
-			]),
-			table([
-				['b', 10],
-				['c', 100],
-				['d', 5]
-			])
-		);
-		expect(rows.map((row) => `${row.key}:${row.change}`)).toEqual([
-			'a:new',
-			'b:rising',
-			'd:gone',
-			'c:falling'
-		]);
-	});
-
-	test('template placeholders are split out', () => {
-		expect(templateParts('took <NUM>ms for <*>')).toEqual([
-			{ text: 'took ', placeholder: false },
-			{ text: '<NUM>', placeholder: true },
-			{ text: 'ms for ', placeholder: false },
-			{ text: '<*>', placeholder: true }
-		]);
 	});
 });

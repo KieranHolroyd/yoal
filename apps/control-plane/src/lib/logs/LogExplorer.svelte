@@ -30,6 +30,7 @@
 	import { toast } from 'svelte-sonner';
 	import {
 		parseLogQuery,
+		type LogCompareBaseline,
 		type LogEngine,
 		type LogRecord,
 		type LogSavedQuery,
@@ -48,9 +49,10 @@
 		getCapabilities,
 		histogramLogs,
 		logKeys,
-		searchLogs,
-		tableLogs
+		searchLogs
 	} from './api.js';
+	import AnalysisPane from './AnalysisPane.svelte';
+	import { whySelection } from './analysis.js';
 	import {
 		collectForExport,
 		downloadText,
@@ -75,21 +77,19 @@
 		hasPipes,
 		searchTerms,
 		splitPipes,
-		toggleFilterClause,
-		withPipes
+		toggleFilterClause
 	} from './query-text.js';
 	import { primaryField } from './record.js';
 	import RecordFlyout, { type FlyoutTab } from './RecordFlyout.svelte';
 	import SavedQueries from './SavedQueries.svelte';
 	import ScopeBar from './ScopeBar.svelte';
 	import ShortcutsHelp from './ShortcutsHelp.svelte';
-	import TableView from './TableView.svelte';
 	import { LogTail } from './tail.svelte.js';
 	import TimePicker from './TimePicker.svelte';
+	import WhyPanel from './WhyPanel.svelte';
 	import {
 		DEFAULT_LOG_TIME,
 		aroundLogTime,
-		binFor,
 		reachesNow,
 		resolveLogTime,
 		shiftLogTime,
@@ -199,6 +199,9 @@
 	let rowId = $state<string | null>(seeded.row);
 	let tz = $state<LogTimeZone>(seeded.tz);
 	let live = $state(seeded.live);
+	let baseline = $state<LogCompareBaseline>(seeded.baseline ?? { kind: 'previous' });
+	/** The histogram range "Why?" is explaining (§8.3), or null. */
+	let whySel = $state<{ from: number; to: number } | null>(null);
 	let runAt = $state(Date.now());
 	let tickAt = $state(Date.now());
 	let facetsOpen = $state(untrack(() => facets));
@@ -299,49 +302,6 @@
 		const timer = setInterval(() => (tickAt = Date.now()), 15_000);
 		return () => clearInterval(timer);
 	});
-
-	// --- tables (Patterns / Analytics / Compare) ---------------------------------------------
-
-	const userPipesAreStats = $derived(hasPipes(q) && !/\|\s*patterns\b/i.test(q));
-	const tableQueryText = $derived.by(() => {
-		if (mode === 'patterns' || mode === 'compare') return withPipes(streamQuery, '| patterns');
-		if (mode === 'analytics')
-			return userPipesAreStats
-				? combineQuery(baseQuery, q)
-				: withPipes(streamQuery, `| stats count() by bin(${binFor(span)}), level`);
-		return '';
-	});
-	const modeUnavailable = $derived.by(() => {
-		if (!caps) return null;
-		if (mode === 'patterns' && !features?.patterns) return LITE_REASON;
-		if (mode === 'compare' && !features?.compare) return LITE_REASON;
-		return null;
-	});
-	const tableInput = $derived({
-		q: tableQueryText,
-		scopes: effectiveScopes,
-		from: bounds.from,
-		to: bounds.to
-	});
-	const tableQuery = createQuery(() => ({
-		queryKey: logKeys.table(tableInput),
-		queryFn: ({ signal }) => tableLogs(tableInput, signal),
-		enabled: browser && canRead && mode !== 'stream' && !modeUnavailable && tableQueryText !== '',
-		placeholderData: keepPreviousData,
-		retry: false
-	}));
-	const previousInput = $derived({
-		q: tableQueryText,
-		scopes: effectiveScopes,
-		from: bounds.from - span,
-		to: bounds.from
-	});
-	const previousQuery = createQuery(() => ({
-		queryKey: logKeys.table(previousInput),
-		queryFn: ({ signal }) => tableLogs(previousInput, signal),
-		enabled: browser && canRead && mode === 'compare' && !modeUnavailable,
-		retry: false
-	}));
 
 	// --- the stream buffer --------------------------------------------------------------------
 
@@ -640,6 +600,7 @@
 	}
 
 	function setTime(next: LogTime) {
+		whySel = null;
 		time = next;
 		runAt = Date.now();
 		tickAt = runAt;
@@ -840,7 +801,8 @@
 			mode,
 			row: rowId,
 			tz,
-			live
+			live,
+			baseline
 		};
 		untrack(() => {
 			const current = page.shallow?.url ?? page.url;
@@ -880,7 +842,10 @@
 			value: 'compare',
 			label: 'Compare',
 			disabled: caps ? !features?.compare : false,
-			title: caps && !features?.compare ? LITE_REASON : 'Patterns now vs the previous window'
+			title:
+				caps && !features?.compare
+					? LITE_REASON
+					: 'Patterns now vs a baseline: the previous window, yesterday, a deploy'
 		}
 	]);
 	const phase = $derived.by(() => {
@@ -1100,13 +1065,33 @@
 								markers={histogramData?.markers ?? []}
 								{tz}
 								loading={histogramQuery.isFetching}
+								selection={whySel}
 								onzoom={(from, to) => {
 									live = false;
 									setTime(zoomLogTime(from, to));
 								}}
+								onwhy={features?.why
+									? (from, to) => {
+											live = false;
+											whySel = whySelection(from, to);
+										}
+									: undefined}
 							/>
 						{/if}
 					</div>
+				{/if}
+				{#if whySel && mode === 'stream'}
+					<WhyPanel
+						q={streamQuery}
+						scopes={effectiveScopes}
+						from={liveBounds.from}
+						to={liveBounds.to}
+						selection={whySel}
+						{tz}
+						onfilter={filterTo}
+						onzoom={(from, to) => setTime(zoomLogTime(from, to))}
+						onclose={() => (whySel = null)}
+					/>
 				{/if}
 
 				<div class="flex flex-wrap items-center gap-2 border-b px-3 py-1.5">
@@ -1285,20 +1270,21 @@
 						{/if}
 					</div>
 				{:else}
-					<TableView
+					<AnalysisPane
 						{mode}
-						result={tableQuery.data}
-						previous={previousQuery.data}
-						loading={tableQuery.isFetching || previousQuery.isFetching}
-						error={tableQuery.isError
-							? errorText(tableQuery.error, 'The query failed.')
-							: previousQuery.isError
-								? errorText(previousQuery.error, 'The query failed.')
-								: null}
-						unavailable={modeUnavailable}
+						{q}
+						{baseQuery}
+						{streamQuery}
+						scopes={effectiveScopes}
+						from={bounds.from}
+						to={bounds.to}
+						{features}
 						{tz}
-						query={tableQueryText}
+						bind:baseline
+						enabled={canRead}
 						onfilter={filterTo}
+						onsample={(id) => (rowId = id)}
+						onzoom={(from, to) => setTime(zoomLogTime(from, to))}
 					/>
 				{/if}
 			</div>
