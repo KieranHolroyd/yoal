@@ -429,18 +429,19 @@ describe('pipe stages', () => {
 		const compiled = compileTable(read(null, [{ type: 'patterns' }, { type: 'limit', count: 20 }]), TEXT);
 		expect(compiled.sql).toBe(
 			[
-				"SELECT l.pattern_id AS c0, if(any(p.template) = '', any(l.body), any(p.template)) AS c1, count() AS c2, toUnixTimestamp64Milli(min(l.ts)) AS c3, toUnixTimestamp64Milli(max(l.ts)) AS c4, argMax(l.id, l.ts) AS c5",
-				`FROM (SELECT * FROM logs WHERE ${TENANCY} AND ts >= fromUnixTimestamp64Milli({p3:Int64}, 'UTC') AND ts <= fromUnixTimestamp64Milli({p4:Int64}, 'UTC')) AS l LEFT JOIN (SELECT pattern_id, any(template) AS template FROM log_patterns WHERE (org_id = {p5:String} AND ((scope_kind = {p6:String} AND scope_id IN {p7:Array(String)}))) GROUP BY pattern_id) AS p ON p.pattern_id = l.pattern_id`,
+				"SELECT l.pattern_id AS c0, if(any(p.template) = '', any(l.body), any(p.template)) AS c1, count() AS c2, toUnixTimestamp64Milli(if(any(p.pattern_id) = '', min(l.ts), least(min(l.ts), any(p.first_seen)))) AS c3, toUnixTimestamp64Milli(max(l.ts)) AS c4, argMax(l.id, l.ts) AS c5, countResample(0, 24, 1)(intDiv(toUnixTimestamp64Milli(l.ts) - {p8:Int64}, {p9:Int64})) AS c6",
+				`FROM (SELECT * FROM logs WHERE ${TENANCY} AND ts >= fromUnixTimestamp64Milli({p3:Int64}, 'UTC') AND ts <= fromUnixTimestamp64Milli({p4:Int64}, 'UTC')) AS l LEFT JOIN (SELECT pattern_id, any(template) AS template, min(first_seen) AS first_seen FROM log_patterns WHERE (org_id = {p5:String} AND ((scope_kind = {p6:String} AND scope_id IN {p7:Array(String)}))) GROUP BY pattern_id) AS p ON p.pattern_id = l.pattern_id`,
 				'GROUP BY c0',
 				'ORDER BY c2 DESC',
-				'LIMIT {p8:Int64}',
+				'LIMIT {p10:Int64}',
 			].join('\n'),
 		);
 		expect(compiled.columns.map((column) => column.name)).toEqual(['pattern', 'template', 'count', 'first_seen', 'last_seen']);
 		expect(compiled.sampleIdColumn).toBe(5);
-		// Choosing columns after patterns keeps the sample id last.
+		expect(compiled.sparklineColumn).toBe(6);
+		// Choosing columns after patterns keeps the sample id and sparkline last.
 		const chosen = compileTable(read(null, [{ type: 'patterns' }, { type: 'fields', fields: [{ kind: 'builtin', name: 'pattern' }] }]), TEXT);
-		expect(chosen.sql.startsWith('SELECT c0, c5 FROM (SELECT')).toBe(true);
+		expect(chosen.sql.startsWith('SELECT c0, c5, c6 FROM (SELECT')).toBe(true);
 		expect(chosen.sampleIdColumn).toBe(1);
 	});
 

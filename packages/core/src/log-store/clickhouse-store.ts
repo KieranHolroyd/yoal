@@ -121,7 +121,15 @@ export class ClickHouseLogStore implements LogStore {
 		const started = this.#now();
 		const compiled = compileTable(read, this.#compileOptions());
 		if (read.boundary.scopes.length === 0)
-			return { columns: compiled.columns, rows: [], ...(compiled.sampleIdColumn !== null ? { sampleIds: [] } : {}), engine: 'clickhouse', warnings: [], elapsedMs: 0 };
+			return {
+				columns: compiled.columns,
+				rows: [],
+				...(compiled.sampleIdColumn !== null ? { sampleIds: [] } : {}),
+				...(compiled.sparklineColumn != null ? { sparklines: [] } : {}),
+				engine: 'clickhouse',
+				warnings: [],
+				elapsedMs: 0,
+			};
 		const result = await this.#run(compiled);
 		const width = compiled.columns.length;
 		const rows = result.data.map((row) => row.slice(0, width).map(cell));
@@ -129,6 +137,10 @@ export class ClickHouseLogStore implements LogStore {
 		if (compiled.sampleIdColumn !== null) {
 			const at = compiled.sampleIdColumn;
 			table.sampleIds = result.data.map((row) => (typeof row[at] === 'string' && row[at] ? (row[at] as string) : null));
+		}
+		if (compiled.sparklineColumn != null) {
+			const at = compiled.sparklineColumn;
+			table.sparklines = result.data.map((row) => (Array.isArray(row[at]) ? (row[at] as unknown[]).map((count) => Number(count) || 0) : []));
 		}
 		return table;
 	}
@@ -266,6 +278,19 @@ export class ClickHouseLogStore implements LogStore {
 		const result = await this.#run(compileGet(boundary, id));
 		const row = result.data[0];
 		return row ? recordFromRow(row) : null;
+	}
+
+	/**
+	 * Raw reads for Compare and Why? (`log-analysis.ts` compiles them with `clickhouse-analysis.ts`
+	 * and classifies the rows). Same runner, reader role and limits as every other read.
+	 */
+	async analysis(compile: (options: ClickHouseCompileOptions) => CompiledLogQuery): Promise<unknown[][]> {
+		return (await this.#run(compile(this.#compileOptions()))).data;
+	}
+
+	/** Index-lag warnings for an analysis read over `read`'s window. */
+	analysisWarnings(read: LogStoreRead): LogWarning[] {
+		return this.#warnings(read);
 	}
 
 	/** `index_behind` when the indexer lags and the read reaches lines it has not copied yet (§4.2). */

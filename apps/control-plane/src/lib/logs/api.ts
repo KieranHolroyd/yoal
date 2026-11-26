@@ -1,6 +1,8 @@
 import {
 	formatLogScope,
 	type LogCapabilities,
+	type LogCompareInput,
+	type LogCompareResult,
 	type LogContextInput,
 	type LogContextResult,
 	type LogFieldsInput,
@@ -13,7 +15,9 @@ import {
 	type LogScopeRef,
 	type LogSearchInput,
 	type LogSearchResult,
-	type LogTableResult
+	type LogTableResult,
+	type LogWhyInput,
+	type LogWhyResult
 } from '@yoal/contracts';
 import { fetchJson, HttpError } from '#lib/query.js';
 
@@ -33,7 +37,9 @@ export const LOGS_API = {
 	context: '/api/v1/logs/context',
 	capabilities: '/api/v1/logs/capabilities',
 	stream: '/api/v1/logs/stream',
-	saved: '/api/v1/logs/saved'
+	saved: '/api/v1/logs/saved',
+	compare: '/api/v1/logs/compare',
+	why: '/api/v1/logs/why'
 } as const;
 
 /** Query keys, so pages can invalidate the explorer's caches. */
@@ -45,7 +51,9 @@ export const logKeys = {
 	fields: (input: unknown) => ['logs', 'fields', input] as const,
 	table: (input: unknown) => ['logs', 'table', input] as const,
 	context: (id: string, before: number, after: number) =>
-		['logs', 'context', id, before, after] as const
+		['logs', 'context', id, before, after] as const,
+	compare: (input: unknown) => ['logs', 'compare', input] as const,
+	why: (input: unknown) => ['logs', 'why', input] as const
 };
 
 const post = (body: unknown): RequestInit => ({
@@ -118,6 +126,30 @@ export function contextLogs(
 		...post(input),
 		signal,
 		fallback: 'Could not read the surrounding lines'
+	});
+}
+
+/** Patterns new/rising/falling/gone against a baseline (docs/LOGS.md §8.2). */
+export function compareLogs(
+	input: Partial<LogCompareInput> & Pick<LogCompareInput, 'baseline'>,
+	signal?: AbortSignal
+): Promise<LogCompareResult> {
+	return fetchJson(LOGS_API.compare, {
+		...post(readBody(input)),
+		signal,
+		fallback: 'The comparison failed'
+	});
+}
+
+/** Field values over-represented in a histogram selection (docs/LOGS.md §8.3). */
+export function whyLogs(
+	input: Partial<LogWhyInput> & Pick<LogWhyInput, 'selection'>,
+	signal?: AbortSignal
+): Promise<LogWhyResult> {
+	return fetchJson(LOGS_API.why, {
+		...post(readBody(input)),
+		signal,
+		fallback: 'Could not explain the selection'
 	});
 }
 

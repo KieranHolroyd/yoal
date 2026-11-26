@@ -2,7 +2,8 @@
 	/**
 	 * Stacked time histogram (docs/LOGS.md §7.2): bars stacked by series (severity in the stream
 	 * view), deploy/alert/node markers that link out, hover counts, and brush-to-zoom (drag a
-	 * region; a plain click zooms to one bucket). Inline SVG, no chart dependency.
+	 * region; a plain click zooms to one bucket). Inline SVG, no chart dependency. With `onwhy`, a
+	 * drag instead leaves the region selected and offers "Zoom" or "Why?" (docs/LOGS.md §8.3).
 	 */
 	import type { LogHistogramMarker } from '@yoal/contracts';
 	import type { HistogramBucket, HistogramSeries } from './histogram.js';
@@ -18,7 +19,9 @@
 		tz,
 		height = 88,
 		loading = false,
-		onzoom
+		selection = null,
+		onzoom,
+		onwhy
 	}: {
 		buckets: HistogramBucket[];
 		/** Bottom of the stack first. */
@@ -30,7 +33,11 @@
 		tz: LogTimeZone;
 		height?: number;
 		loading?: boolean;
+		/** A region to keep shaded (the open Why? selection). */
+		selection?: { from: number; to: number } | null;
 		onzoom?: (from: number, to: number) => void;
+		/** Offer "Why?" for a dragged region (§8.3). */
+		onwhy?: (from: number, to: number) => void;
 	} = $props();
 
 	const PAD_LEFT = 34;
@@ -41,6 +48,8 @@
 	let brushStart = $state<number | null>(null);
 	let brushEnd = $state<number | null>(null);
 	let hoverX = $state<number | null>(null);
+	/** A finished drag waiting for "Zoom" or "Why?" (only with `onwhy`). */
+	let pending = $state<{ from: number; to: number } | null>(null);
 
 	const plotW = $derived(Math.max(1, width - PAD_LEFT - 4));
 	const plotH = $derived(Math.max(1, height - PAD_BOTTOM - PAD_TOP));
@@ -102,6 +111,7 @@
 
 	function down(event: PointerEvent) {
 		if (event.button !== 0 || !onzoom) return;
+		pending = null;
 		(event.currentTarget as Element).setPointerCapture(event.pointerId);
 		brushStart = point(event);
 		brushEnd = brushStart;
@@ -120,7 +130,8 @@
 		brushEnd = null;
 		(event.currentTarget as Element).releasePointerCapture?.(event.pointerId);
 		if (b - a > 4) {
-			onzoom(tsOf(a), tsOf(b));
+			if (onwhy) pending = { from: tsOf(a), to: tsOf(b) };
+			else onzoom(tsOf(a), tsOf(b));
 			return;
 		}
 		const ts = tsOf(a);
@@ -220,6 +231,17 @@
 				<!-- eslint-enable svelte/no-navigation-without-resolve -->
 			{/each}
 
+			{#if pending ?? selection}
+				{@const region = (pending ?? selection)!}
+				<rect
+					x={xOf(Math.max(from, region.from))}
+					y={PAD_TOP}
+					width={Math.max(1, xOf(Math.min(to, region.to)) - xOf(Math.max(from, region.from)))}
+					height={plotH}
+					class="pointer-events-none fill-primary/10 stroke-primary/40"
+					stroke-dasharray={pending ? undefined : '3 2'}
+				/>
+			{/if}
 			{#if brushStart !== null && brushEnd !== null}
 				<rect
 					x={Math.min(brushStart, brushEnd)}
@@ -248,7 +270,41 @@
 				>
 			{/each}
 		</svg>
-		{#if hovered && hoverX !== null}
+		{#if pending && onwhy && onzoom}
+			{@const region = pending}
+			{@const mid = (xOf(region.from) + xOf(region.to)) / 2}
+			<div
+				class="absolute top-1 z-20 flex -translate-x-1/2 items-center gap-0.5 rounded-md border bg-popover p-0.5 text-xs shadow-md"
+				style="left: {Math.min(Math.max(mid, 70), Math.max(70, width - 70))}px"
+				role="toolbar"
+				aria-label="Selected range"
+			>
+				<button
+					type="button"
+					class="rounded px-2 py-0.5 hover:bg-accent"
+					onclick={() => {
+						pending = null;
+						onzoom(region.from, region.to);
+					}}>Zoom</button
+				>
+				<button
+					type="button"
+					class="rounded px-2 py-0.5 font-medium text-primary hover:bg-accent"
+					title="What is different about this range?"
+					onclick={() => {
+						pending = null;
+						onwhy(region.from, region.to);
+					}}>Why?</button
+				>
+				<button
+					type="button"
+					class="rounded px-1.5 py-0.5 text-muted-foreground hover:bg-accent"
+					aria-label="Clear the selection"
+					onclick={() => (pending = null)}>×</button
+				>
+			</div>
+		{/if}
+		{#if hovered && hoverX !== null && !pending}
 			<div
 				class="pointer-events-none absolute top-1 z-10 rounded-md border bg-popover px-2 py-1 text-xs shadow-md"
 				style="left: {Math.min(Math.max(hoverX + 8, 0), Math.max(0, width - 170))}px"

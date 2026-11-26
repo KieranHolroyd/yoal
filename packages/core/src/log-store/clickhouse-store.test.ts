@@ -147,12 +147,13 @@ describe('ClickHouseLogStore', () => {
 		expect(histogram.total).toBe(8);
 	});
 
-	test('table drops the hidden sample id into sampleIds', async () => {
+	test('table drops the hidden sample id and sparkline into sampleIds and sparklines', async () => {
 		const runner = new FakeRunner();
-		runner.results.push([['a1', 'GET <PATH>', 9, 1, 2, 'le:7']]);
+		runner.results.push([['a1', 'GET <PATH>', 9, 1, 2, 'le:7', ['4', '0', '5']]]);
 		const table = await new ClickHouseLogStore(runner).table(read(null, [{ type: 'patterns' }]));
 		expect(table.rows).toEqual([['a1', 'GET <PATH>', 9, 1, 2]]);
 		expect(table.sampleIds).toEqual(['le:7']);
+		expect(table.sparklines).toEqual([[4, 0, 5]]);
 	});
 
 	test('context returns lines around the anchor in time order', async () => {
