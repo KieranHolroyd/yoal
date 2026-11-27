@@ -1096,17 +1096,21 @@
 		<!-- Body --------------------------------------------------------------------------------- -->
 		<div class="flex min-h-0 min-w-0">
 			{#if facetsOpen}
-				<div class="hidden w-56 shrink-0 border-r md:flex md:flex-col">
-					<FacetSidebar
-						fields={fieldsQuery.data?.fields}
-						loading={fieldsQuery.isFetching}
-						error={fieldsQuery.isError
-							? errorText(fieldsQuery.error, 'Could not read fields.')
-							: null}
-						query={q}
-						attributesAvailable={!lite}
-						onfilter={filterTo}
-					/>
+				<!-- Absolutely filled so the field list never sets the row height: the stream column does,
+				     and the list scrolls inside it instead of stretching the page. -->
+				<div class="relative hidden w-56 shrink-0 border-r md:block">
+					<div class="absolute inset-0 flex flex-col">
+						<FacetSidebar
+							fields={fieldsQuery.data?.fields}
+							loading={fieldsQuery.isFetching}
+							error={fieldsQuery.isError
+								? errorText(fieldsQuery.error, 'Could not read fields.')
+								: null}
+							query={q}
+							attributesAvailable={!lite}
+							onfilter={filterTo}
+						/>
+					</div>
 				</div>
 			{/if}
 			<div class="flex min-w-0 flex-1 flex-col">

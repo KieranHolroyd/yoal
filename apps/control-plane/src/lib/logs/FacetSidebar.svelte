@@ -75,7 +75,7 @@
 	}
 </script>
 
-<aside class="flex min-h-0 flex-col text-xs" aria-label="Fields">
+<aside class="flex min-h-0 flex-1 flex-col text-xs" aria-label="Fields">
 	<div class="flex items-center justify-between gap-2 border-b px-3 py-2">
 		<span class="font-medium text-muted-foreground">Fields</span>
 		<Popover bind:open={manageOpen} align="start" class="w-64 p-1.5">
@@ -151,7 +151,7 @@
 							{/if}
 							<button
 								type="button"
-								class="hidden size-5 shrink-0 place-items-center rounded text-muted-foreground group-hover:grid hover:bg-muted"
+								class="grid size-5 shrink-0 place-items-center rounded text-muted-foreground opacity-0 group-focus-within:opacity-100 group-hover:opacity-100 hover:bg-muted focus-visible:opacity-100"
 								aria-label="Hide {field.name}"
 								title="Hide this field"
 								onclick={() => setHidden(field.name, true)}

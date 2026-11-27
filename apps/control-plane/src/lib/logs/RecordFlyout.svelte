@@ -96,7 +96,7 @@
 </script>
 
 <Sheet.Root bind:open onOpenChange={(next) => onopenchange?.(next)}>
-	<Sheet.Content side="right" class="w-full gap-0 p-0 sm:max-w-2xl">
+	<Sheet.Content side="right" class="w-full gap-0 p-0 sm:max-w-2xl xl:max-w-4xl">
 		{#if record}
 			{@const tone = SEVERITY_TONES[record.severity]}
 			<Sheet.Header class="border-b px-5 py-4 pr-12">
